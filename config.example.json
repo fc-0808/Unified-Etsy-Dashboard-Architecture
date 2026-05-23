@@ -1,0 +1,78 @@
+{
+  "_comment": "Copy this file to config.json and fill in your real values. config.json is gitignored and NEVER committed.",
+
+  "vpn_local_port": 7897,
+  "sync_interval_minutes": 60,
+  "max_orders_per_sync": 100,
+  "db_path": "data/etsy_dashboard.db",
+
+  "_auth_note": "OAuth access tokens expire in 1 HOUR. Store the refresh_token here (valid 90 days). The TokenManager handles refreshing automatically. If refresh_token expires after 90 days, re-run oauth:setup for that shop.",
+
+  "groups": [
+    {
+      "group_id": "group_1_hk_passport",
+      "label": "HK Passport Group (Shops 1–5)",
+      "proxy": "socks5://USERNAME:PASSWORD@hk-static-1.ipfoxy.com:45001",
+      "shops": [
+        {
+          "shop_id": "12345678",
+          "shop_name": "My HK Shop 1",
+          "_note_api_key": "Find keystring in Etsy > Manage Apps. x-api-key header = keystring:shared_secret (both required per Etsy API docs)",
+          "api_key": "YOUR_KEYSTRING",
+          "shared_secret": "YOUR_SHARED_SECRET",
+          "_note_refresh_token": "Complete OAuth flow via 'npm run oauth:setup'. Paste the refresh_token returned here (format: 12345678.xxxxx). Access tokens expire in 1hr but are auto-refreshed from this.",
+          "refresh_token": "12345678.YOUR_REFRESH_TOKEN"
+        },
+        {
+          "shop_id": "12345679",
+          "shop_name": "My HK Shop 2",
+          "api_key": "YOUR_KEYSTRING",
+          "shared_secret": "YOUR_SHARED_SECRET",
+          "refresh_token": "12345679.YOUR_REFRESH_TOKEN"
+        }
+      ]
+    },
+    {
+      "group_id": "group_2_ca_passport",
+      "label": "Canada Passport Group (Shops 6–10)",
+      "proxy": "socks5://USERNAME:PASSWORD@hk-static-2.ipfoxy.com:45002",
+      "shops": [
+        {
+          "shop_id": "22345678",
+          "shop_name": "My CA Shop 1",
+          "api_key": "YOUR_KEYSTRING",
+          "shared_secret": "YOUR_SHARED_SECRET",
+          "refresh_token": "22345678.YOUR_REFRESH_TOKEN"
+        }
+      ]
+    },
+    {
+      "group_id": "group_3_hkid",
+      "label": "HKID Group (Shops 11–15)",
+      "proxy": "socks5://USERNAME:PASSWORD@hk-static-3.ipfoxy.com:45003",
+      "shops": [
+        {
+          "shop_id": "32345678",
+          "shop_name": "My HKID Shop 1",
+          "api_key": "YOUR_KEYSTRING",
+          "shared_secret": "YOUR_SHARED_SECRET",
+          "refresh_token": "32345678.YOUR_REFRESH_TOKEN"
+        }
+      ]
+    },
+    {
+      "group_id": "group_4_passport_b",
+      "label": "Passport B Group (Shops 16–20)",
+      "proxy": "socks5://USERNAME:PASSWORD@hk-static-4.ipfoxy.com:45004",
+      "shops": [
+        {
+          "shop_id": "42345678",
+          "shop_name": "My Shop 16",
+          "api_key": "YOUR_KEYSTRING",
+          "shared_secret": "YOUR_SHARED_SECRET",
+          "refresh_token": "42345678.YOUR_REFRESH_TOKEN"
+        }
+      ]
+    }
+  ]
+}

@@ -1,8 +1,26 @@
-# Secret credentials — NEVER commit this
+# Secret credentials — NEVER commit these
 config.json
+tokens.json
+.env
+.env.*
+
+# SQLite database files (contain live order data)
+data/
+*.db
+*.db-shm
+*.db-wal
 
 # Node dependencies
 node_modules/
+
+# Build output
+dist/
+build/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
 
 # OS junk
 .DS_Store
