@@ -48,6 +48,7 @@
  * DO NOT use 5-minute intervals: 25 × 288 = 7,200 calls/day — 44% over budget
  */
 
+const axios = require('axios');
 const { TokenExpiredError } = require('../auth/token-manager');
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -128,6 +129,44 @@ class RateLimiter {
 
 /** @type {Map<string, RateLimiter>} api_key → RateLimiter */
 const _rateLimiters = new Map();
+
+/**
+ * Memoized shop name → numeric shop_id cache.
+ * Etsy API path parameters require numeric IDs; config.json stores shop names.
+ * @type {Map<string, string>}
+ */
+const _shopIdCache = new Map();
+
+/**
+ * Resolve a shop identifier (name string or numeric ID) to a numeric shop_id string.
+ * If the value is already numeric it is returned as-is (no API call made).
+ * For name strings, calls GET /application/shops?shop_name={name} and caches the result.
+ *
+ * @param {import('axios').AxiosInstance} shopClient - Authenticated shop client
+ * @param {string|number} shopIdOrName
+ * @returns {Promise<string>} Numeric shop_id as a string
+ */
+async function resolveShopId(shopClient, shopIdOrName) {
+  const str = String(shopIdOrName);
+  if (/^\d+$/.test(str)) return str;                // already numeric — no lookup needed
+  if (_shopIdCache.has(str)) return _shopIdCache.get(str); // cached from a previous call
+
+  getRateLimiter(shopClient).check();
+  const { data } = await shopClient.get('/application/shops', {
+    params: { shop_name: str, limit: 1 },
+  });
+
+  if (!data.results || data.results.length === 0) {
+    throw new Error(
+      `Shop name "${str}" not found via Etsy API. ` +
+      `Verify the shop_name in config.json matches the Etsy shop URL exactly.`
+    );
+  }
+
+  const numericId = String(data.results[0].shop_id);
+  _shopIdCache.set(str, numericId);
+  return numericId;
+}
 
 function getRateLimiter(shopClient) {
   // Key the rate limiter to the keystring portion of x-api-key
@@ -216,20 +255,22 @@ async function withRetry(fn, maxRetries = 3) {
  * @returns {import('axios').AxiosInstance}
  */
 function buildShopClient(groupProxyClient, apiKey, sharedSecret, accessToken) {
-  const instance = Object.create(groupProxyClient);
-  instance.defaults = {
-    ...groupProxyClient.defaults,
+  // Use axios.create() — Object.create() on an axios instance does not propagate
+  // defaults into the actual request headers (axios merges from instance.defaults
+  // at request time, which requires a real instance, not a prototype clone).
+  const instance = axios.create({
+    baseURL:    groupProxyClient.defaults.baseURL,
+    httpsAgent: groupProxyClient.defaults.httpsAgent,
+    timeout:    groupProxyClient.defaults.timeout ?? 30_000,
     headers: {
-      ...groupProxyClient.defaults.headers,
-      common: {
-        ...(groupProxyClient.defaults.headers?.common ?? {}),
-        // CORRECT FORMAT: keystring:shared_secret (both required per Etsy API docs)
-        'x-api-key': `${apiKey}:${sharedSecret}`,
-        // CORRECT FORMAT: Bearer numeric_user_id.oauth_token
-        Authorization: `Bearer ${accessToken}`,
-      },
+      'Content-Type': 'application/json',
+      Accept:         'application/json',
+      // CORRECT FORMAT: keystring:shared_secret (both required per Etsy API docs)
+      'x-api-key':    `${apiKey}:${sharedSecret}`,
+      // CORRECT FORMAT: Bearer numeric_user_id.oauth_token
+      Authorization:  `Bearer ${accessToken}`,
     },
-  };
+  });
   attachRateLimitInterceptor(instance);
   return instance;
 }
@@ -246,9 +287,10 @@ function buildShopClient(groupProxyClient, apiKey, sharedSecret, accessToken) {
  * @param {string} shopId
  */
 async function getShop(shopClient, shopId) {
+  const numericId = await resolveShopId(shopClient, shopId);
   getRateLimiter(shopClient).check();
   return withRetry(async () => {
-    const { data } = await shopClient.get(`/application/shops/${shopId}`);
+    const { data } = await shopClient.get(`/application/shops/${numericId}`);
     return data;
   });
 }
@@ -274,6 +316,7 @@ async function getShop(shopClient, shopId) {
  * @returns {Promise<{ count: number, results: object[] }>}
  */
 async function getReceipts(shopClient, shopId, options = {}) {
+  const numericId = await resolveShopId(shopClient, shopId);
   getRateLimiter(shopClient).check();
 
   const params = {
@@ -287,7 +330,7 @@ async function getReceipts(shopClient, shopId, options = {}) {
   if (options.min_created) params.min_created = options.min_created;
 
   return withRetry(async () => {
-    const { data } = await shopClient.get(`/application/shops/${shopId}/receipts`, { params });
+    const { data } = await shopClient.get(`/application/shops/${numericId}/receipts`, { params });
     return data;
   });
 }
@@ -297,10 +340,129 @@ async function getReceipts(shopClient, shopId, options = {}) {
  * Scope: transactions_r
  */
 async function getReceipt(shopClient, shopId, receiptId) {
+  const numericId = await resolveShopId(shopClient, shopId);
   getRateLimiter(shopClient).check();
   return withRetry(async () => {
     const { data } = await shopClient.get(
-      `/application/shops/${shopId}/receipts/${receiptId}`
+      `/application/shops/${numericId}/receipts/${receiptId}`
+    );
+    return data;
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Listing endpoints
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /application/shops/{shop_id}/listings
+ * Scope: listings_r
+ *
+ * Returns all listings for a shop (any state). Paginates automatically.
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} shopId - numeric shop ID
+ * @param {object} [opts]
+ * @param {'active'|'inactive'|'draft'|'sold_out'|'expired'|'all'} [opts.state]
+ * @yields {object[]} batches of listing objects
+ */
+async function* paginateListings(shopClient, shopId, opts = {}) {
+  const { state = 'active' } = opts;
+  let offset = 0;
+  const limit = 100;
+  while (true) {
+    getRateLimiter(shopClient).check();
+    const { data } = await withRetry(() =>
+      shopClient.get(`/application/shops/${shopId}/listings`, {
+        params: { limit, offset, state, includes: 'Images', sort_on: 'updated', sort_order: 'desc' },
+      })
+    );
+    const listings = data.results ?? data.listings ?? [];
+    if (!listings.length) break;
+    yield listings;
+    if (listings.length < limit) break;
+    offset += limit;
+  }
+}
+
+/**
+ * PATCH /application/shops/{shop_id}/listings/{listing_id}
+ * Scope: listings_w
+ *
+ * Updates editable fields on a listing.
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} shopId
+ * @param {string|number} listingId
+ * @param {object} fields - { title, description, price, quantity, tags, state }
+ */
+async function updateListing(shopClient, shopId, listingId, fields) {
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const { data } = await shopClient.patch(
+      `/application/shops/${shopId}/listings/${listingId}`,
+      fields
+    );
+    return data;
+  });
+}
+
+/**
+ * POST /application/shops/{shop_id}/listings
+ * Scope: listings_w
+ *
+ * Creates a draft listing. All required fields must be provided.
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} shopId
+ * @param {object} body - { quantity, title, description, price, who_made, when_made, taxonomy_id, ... }
+ */
+async function createDraftListing(shopClient, shopId, body) {
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const { data } = await shopClient.post(`/application/shops/${shopId}/listings`, body);
+    return data;
+  });
+}
+
+/**
+ * DELETE /application/listings/{listing_id}
+ * Scope: listings_d
+ */
+async function deleteListing(shopClient, listingId) {
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    await shopClient.delete(`/application/listings/${listingId}`);
+  });
+}
+
+/**
+ * POST /application/shops/{shop_id}/receipts/{receipt_id}/tracking
+ * Scope: transactions_w
+ *
+ * Creates a shipment tracking entry and marks the receipt as shipped.
+ * Etsy sends a shipping confirmation email to the buyer.
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} shopId  - numeric shop ID
+ * @param {string|number} receiptId
+ * @param {object} opts
+ * @param {string}  opts.tracking_code  - required
+ * @param {string}  opts.carrier_name   - required (e.g. "4PX")
+ * @param {boolean} [opts.send_bcc]     - send a copy to the seller (default false)
+ * @param {string}  [opts.note_to_buyer]
+ * @param {number}  [opts.ship_date]    - Unix epoch seconds; defaults to today
+ */
+async function createReceiptShipment(shopClient, shopId, receiptId, opts = {}) {
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const body = {
+      tracking_code:  opts.tracking_code,
+      carrier_name:   opts.carrier_name || '4PX',
+      send_bcc:       opts.send_bcc ?? false,
+    };
+    if (opts.note_to_buyer) body.note_to_buyer = opts.note_to_buyer;
+    if (opts.ship_date)     body.ship_date     = opts.ship_date;
+    const { data } = await shopClient.post(
+      `/application/shops/${shopId}/receipts/${receiptId}/tracking`,
+      body
     );
     return data;
   });
@@ -322,6 +484,7 @@ async function getReceipt(shopClient, shopId, receiptId) {
  * @param {number} [options.min_created]      - Only fetch receipts after this Unix timestamp
  */
 async function* paginateReceipts(shopClient, shopId, options = {}) {
+  const numericId = await resolveShopId(shopClient, shopId);
   const pageSize = 100;
   const maxTotal = options.maxTotal ?? 200;
   let offset = 0;
@@ -329,7 +492,7 @@ async function* paginateReceipts(shopClient, shopId, options = {}) {
 
   while (fetched < maxTotal) {
     const limit = Math.min(pageSize, maxTotal - fetched);
-    const page = await getReceipts(shopClient, shopId, {
+    const page = await getReceipts(shopClient, numericId, {
       limit,
       offset,
       min_created: options.min_created,
@@ -355,10 +518,11 @@ async function* paginateReceipts(shopClient, shopId, options = {}) {
  * Scope: transactions_r
  */
 async function getReceiptTransactions(shopClient, shopId, receiptId) {
+  const numericId = await resolveShopId(shopClient, shopId);
   getRateLimiter(shopClient).check();
   return withRetry(async () => {
     const { data } = await shopClient.get(
-      `/application/shops/${shopId}/receipts/${receiptId}/transactions`
+      `/application/shops/${numericId}/receipts/${receiptId}/transactions`
     );
     return data;
   });
@@ -373,13 +537,69 @@ async function getReceiptTransactions(shopClient, shopId, receiptId) {
  * Scope: none (public listings only)
  */
 async function getActiveListings(shopClient, shopId, options = {}) {
+  const numericId = await resolveShopId(shopClient, shopId);
   getRateLimiter(shopClient).check();
   return withRetry(async () => {
-    const { data } = await shopClient.get(`/application/shops/${shopId}/listings/active`, {
+    const { data } = await shopClient.get(`/application/shops/${numericId}/listings/active`, {
       params: { limit: options.limit ?? 50, offset: options.offset ?? 0 },
     });
     return data;
   });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Listing images — batch fetch to minimise API calls
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Fetch the primary thumbnail URL for up to 100 listing IDs in one API call.
+ * Uses GET /application/listings/batch?listing_ids[]=…&includes[]=Images
+ *
+ * Returns a Map<number, string> of listing_id → image URL.
+ * Missing/inactive listings are silently omitted from the result.
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {number[]} listingIds
+ * @returns {Promise<Map<number, string>>}
+ */
+async function getListingImagesBatch(shopClient, listingIds) {
+  const unique = [...new Set(listingIds.map(Number))].filter(Boolean);
+  if (!unique.length) return new Map();
+
+  // Etsy batch endpoint accepts up to 100 IDs per request
+  const chunks = [];
+  for (let i = 0; i < unique.length; i += 100) chunks.push(unique.slice(i, i + 100));
+
+  const result = new Map();
+
+  for (const chunk of chunks) {
+    getRateLimiter(shopClient).check();
+    try {
+      await withRetry(async () => {
+        // Build URLSearchParams manually so repeated keys are serialised correctly:
+        // listing_ids[]=1&listing_ids[]=2&includes[]=Images
+        const params = new URLSearchParams();
+        chunk.forEach((id) => params.append('listing_ids[]', id));
+        params.append('includes[]', 'Images');
+
+        const { data } = await shopClient.get('/application/listings/batch', { params });
+        for (const listing of (data.results ?? [])) {
+          const img = listing.images?.[0];
+          if (img) {
+            const url = img.url_570xN ?? img.url_fullxfull ?? img.url_170x135 ?? null;
+            if (url) result.set(listing.listing_id, url);
+          }
+        }
+      });
+    } catch (err) {
+      // Non-fatal — images are cosmetic; log and continue
+      console.warn(`[etsy/client] getListingImagesBatch failed for chunk: ${err.message}`);
+    }
+
+    if (chunks.length > 1) await new Promise((r) => setTimeout(r, 300));
+  }
+
+  return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -408,7 +628,7 @@ async function ping(shopClient) {
  * @param {string} shopId
  */
 async function pingShop(shopClient, shopId) {
-  const shop = await getShop(shopClient, shopId);
+  const shop = await getShop(shopClient, shopId); // resolveShopId is called inside getShop
   return {
     shop_name: shop.shop_name,
     currency_code: shop.currency_code,
@@ -435,12 +655,19 @@ function getRemainingBudget(shopClient) {
 module.exports = {
   buildShopClient,
   attachRateLimitInterceptor,
+  resolveShopId,
   getShop,
   getReceipts,
   getReceipt,
+  createReceiptShipment,
   paginateReceipts,
   getReceiptTransactions,
+  getListingImagesBatch,
   getActiveListings,
+  paginateListings,
+  updateListing,
+  createDraftListing,
+  deleteListing,
   ping,
   pingShop,
   getRemainingBudget,

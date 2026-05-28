@@ -1,0 +1,2146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Etsy Dashboard</title>
+  <!-- Favicon: simple orange shop bag -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23f56400'/%3E%3Cpath d='M8 12h16l-2 12H10L8 12zM12 12V9a4 4 0 0 1 8 0v3' stroke='white' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0f1117;
+      --surface:  #1a1d27;
+      --border:   #2a2d3a;
+      --text:     #e8eaf0;
+      --muted:    #7b8099;
+      --accent:   #f56400;   /* Etsy orange */
+      --green:    #22c55e;
+      --red:      #ef4444;
+      --yellow:   #f59e0b;
+      --blue:     #3b82f6;
+      --radius:   10px;
+      --font:     'Inter', system-ui, -apple-system, sans-serif;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+
+    /* ── Layout ────────────────────────────────────────────── */
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 28px;
+      height: 56px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .topbar-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 16px;
+    }
+    .topbar-brand .dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+    .topbar-meta { color: var(--muted); font-size: 12px; }
+
+    .container { max-width: 1280px; margin: 0 auto; padding: 28px; }
+
+    /* ── Stat cards ────────────────────────────────────────── */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+    .stat-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+    }
+    .stat-card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px; }
+    .stat-card .value { font-size: 28px; font-weight: 700; }
+    .stat-card .sub   { color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+    /* ── Section heading ───────────────────────────────────── */
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin: 28px 0 14px;
+    }
+    .section-head h2 { font-size: 15px; font-weight: 600; }
+
+    /* ── Filters bar ───────────────────────────────────────── */
+    .filters {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+    .filters select, .filters input {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      outline: none;
+    }
+    .filters select:focus, .filters input:focus { border-color: var(--accent); }
+
+    /* ── Table ─────────────────────────────────────────────── */
+    .table-wrap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    th {
+      background: #13161f;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      padding: 10px 14px;
+      text-align: left;
+      font-weight: 500;
+    }
+    td {
+      padding: 10px 14px;
+      border-top: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    tr:hover td { background: rgba(255,255,255,.03); }
+    .mono { font-family: monospace; font-size: 12px; }
+
+    /* ── Badges ────────────────────────────────────────────── */
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .badge-green  { background: rgba(34,197,94,.15);  color: var(--green); }
+    .badge-red    { background: rgba(239,68,68,.15);   color: var(--red); }
+    .badge-yellow { background: rgba(245,158,11,.15);  color: var(--yellow); }
+    .badge-blue   { background: rgba(59,130,246,.15);  color: var(--blue); }
+    .badge-muted  { background: rgba(123,128,153,.15); color: var(--muted); }
+
+    /* ── Shops grid ────────────────────────────────────────── */
+    .shops-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 14px;
+      margin-bottom: 28px;
+    }
+    .shop-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+    }
+    .shop-card .shop-name { font-weight: 600; margin-bottom: 4px; }
+    .shop-card .shop-meta { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+    .shop-card .shop-stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .shop-stat { font-size: 12px; }
+    .shop-stat span { display: block; color: var(--muted); font-size: 11px; }
+
+    /* ── Pagination ────────────────────────────────────────── */
+    .pagination {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 16px;
+      justify-content: flex-end;
+    }
+    .pagination button {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 5px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .pagination button:disabled { opacity: .4; cursor: default; }
+    .pagination button:not(:disabled):hover { border-color: var(--accent); }
+    .pagination .page-info { color: var(--muted); font-size: 12px; }
+
+    /* ── Tabs ──────────────────────────────────────────────── */
+    .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+    .tab {
+      padding: 9px 18px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--muted);
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+    }
+    .tab.active { color: var(--text); border-color: var(--accent); }
+
+    /* ── Loading / error states ─────────────────────────────── */
+    .loading { color: var(--muted); padding: 40px; text-align: center; }
+    .empty   { color: var(--muted); padding: 40px; text-align: center; font-size: 13px; }
+
+    /* ── Orders table ──────────────────────────────────────── */
+    .order-row td { padding: 14px 16px; vertical-align: top; }
+
+    /* Product cell — stacks multiple items vertically */
+    .product-cell {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      min-width: 280px;
+    }
+    .product-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      padding: 10px 0;
+    }
+    .product-item:first-child { padding-top: 0; }
+    .product-item:last-child  { padding-bottom: 0; }
+    .product-item + .product-item { margin-top: 8px; }
+
+    .product-thumb {
+      width: 80px;
+      height: 80px;
+      border-radius: 8px;
+      background: var(--border);
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      text-decoration: none;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.06);
+    }
+    .product-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      border-radius: 8px;
+    }
+    .product-info { min-width: 0; flex: 1; }
+    .product-title {
+      font-size: 13px;
+      font-weight: 500;
+      line-height: 1.45;
+      color: var(--text);
+      margin-bottom: 8px;
+    }
+    .product-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .product-meta-row {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      font-size: 12px;
+    }
+    .product-meta-label {
+      color: var(--muted);
+      white-space: nowrap;
+      min-width: 72px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .product-meta-value {
+      color: var(--text);
+      font-weight: 500;
+    }
+    .product-shop {
+      display: inline-flex;
+      align-items: center;
+      margin-top: 10px;
+      padding: 2px 8px;
+      border-radius: 20px;
+      background: rgba(255,255,255,.05);
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--muted);
+      letter-spacing: .02em;
+      align-self: flex-start;
+    }
+
+    /* Ship by / status cell */
+    .ship-cell { min-width: 160px; }
+    .ship-by-date {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 6px;
+    }
+    .ship-by-date.urgent  { color: var(--yellow); }
+    .ship-by-date.overdue { color: var(--red); }
+    .ship-by-label {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      margin-bottom: 2px;
+    }
+    /* Live countdown */
+    .countdown {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+      margin-top: 5px;
+      padding: 3px 7px;
+      border-radius: 5px;
+      letter-spacing: .01em;
+    }
+    .countdown.urgent  { background: rgba(245,158,11,.12); color: var(--yellow); }
+    .countdown.overdue { background: rgba(239,68,68,.12);  color: var(--red); }
+    .countdown::before { content: '⏱ '; font-size: 10px; }
+
+    /* Address cell */
+    .address-cell { min-width: 180px; }
+    .address-name { font-weight: 600; font-size: 13px; margin-bottom: 3px; }
+    .address-lines { font-size: 12px; color: var(--muted); line-height: 1.6; }
+    /* Address — text is freely selectable; copy button floats in on hover */
+    .address-clickable {
+      position: relative;
+      border-radius: 6px;
+      padding: 6px 30px 6px 8px; /* right padding reserves space for the button */
+      margin: -6px -8px;
+    }
+    .address-clickable:hover { background: rgba(255,255,255,.04); }
+    .addr-copy-btn {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 11px;
+      line-height: 1;
+      padding: 3px 5px;
+      opacity: 0;
+      transition: opacity .15s, color .15s, border-color .15s;
+      pointer-events: none; /* invisible → not clickable; shown on hover */
+    }
+    .address-clickable:hover .addr-copy-btn {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .addr-copy-btn:hover { color: var(--text); border-color: var(--text); }
+    .addr-copy-btn.copied { color: var(--green); border-color: var(--green); }
+
+    /* ── Checkbox column ────────────────────────────────────── */
+    .col-check { width: 36px; padding-left: 14px !important; }
+    .order-cb { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
+    thead .order-cb { margin-top: 1px; }
+
+    /* ── Listings tab ───────────────────────────────────────── */
+    .listing-thumb {
+      width: 48px; height: 48px;
+      border-radius: 6px;
+      object-fit: cover;
+      background: var(--border);
+      display: block;
+    }
+    .listing-title { font-size: 13px; font-weight: 500; line-height: 1.4; }
+    .listing-title a { color: var(--text); text-decoration: none; }
+    .listing-title a:hover { color: var(--accent); }
+    .listing-tags { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px; }
+    .listing-tag {
+      font-size: 10px; padding: 1px 6px;
+      border-radius: 10px;
+      background: rgba(255,255,255,.06);
+      color: var(--muted);
+    }
+    .listing-actions { display: flex; gap: 6px; }
+    .btn-sm {
+      padding: 4px 10px;
+      border-radius: 5px;
+      border: 1px solid var(--border);
+      background: none;
+      color: var(--muted);
+      font-size: 11px;
+      cursor: pointer;
+      transition: color .15s, border-color .15s;
+    }
+    .btn-sm:hover { color: var(--text); border-color: rgba(255,255,255,.3); }
+    .btn-sm.danger:hover { color: var(--red); border-color: var(--red); }
+    .btn-sm.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .btn-sm.primary:hover { opacity: .85; }
+
+    /* ── IOSS / VAT notice ──────────────────────────────────── */
+    .ioss-notice {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border-radius: 7px;
+      background: rgba(245,158,11,.1);
+      border: 1px solid rgba(245,158,11,.25);
+      font-size: 11.5px;
+      line-height: 1.55;
+      color: var(--text);
+    }
+    .ioss-notice strong { color: var(--yellow); }
+    .ioss-notice .ioss-number {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: rgba(245,158,11,.15);
+      border: 1px solid rgba(245,158,11,.3);
+      border-radius: 4px;
+      padding: 1px 7px;
+      font-weight: 700;
+      font-size: 12px;
+      color: var(--yellow);
+      cursor: pointer;
+      margin: 3px 0;
+    }
+    .ioss-number:hover { background: rgba(245,158,11,.25); }
+
+    /* ── Order notes ────────────────────────────────────────── */
+    .note-section {
+      margin-top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .buyer-note {
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+      background: rgba(255,255,255,.03);
+      border-left: 2px solid var(--border);
+      border-radius: 0 5px 5px 0;
+      padding: 6px 8px;
+      line-height: 1.5;
+    }
+    .buyer-note-icon { flex-shrink: 0; opacity: .6; }
+    .team-note-wrap {
+      position: relative;
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
+    }
+    .team-note-area {
+      flex: 1;
+      min-height: 32px;
+      max-height: 120px;
+      padding: 5px 8px;
+      font-size: 12px;
+      font-family: var(--font);
+      line-height: 1.5;
+      color: var(--text);
+      background: rgba(255,255,255,.04);
+      border: 1px solid transparent;
+      border-radius: 6px;
+      resize: vertical;
+      outline: none;
+      transition: border-color .15s, background .15s;
+    }
+    .team-note-area::placeholder { color: var(--muted); opacity: .7; }
+    .team-note-area:focus {
+      border-color: rgba(255,255,255,.2);
+      background: rgba(255,255,255,.06);
+    }
+    .team-note-save {
+      display: none;
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 5px;
+      border: 1px solid var(--border);
+      background: none;
+      color: var(--muted);
+      cursor: pointer;
+      white-space: nowrap;
+      align-self: flex-start;
+      margin-top: 2px;
+      transition: color .15s, border-color .15s;
+    }
+    .team-note-wrap:focus-within .team-note-save { display: inline-flex; }
+    .team-note-save:hover { color: var(--green); border-color: var(--green); }
+    .team-note-saved { color: var(--green) !important; border-color: var(--green) !important; }
+
+    /* ── Bulk action bar ────────────────────────────────────── */
+    .bulk-bar {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(80px);
+      opacity: 0;
+      pointer-events: none;
+      transition: transform .25s ease, opacity .2s;
+      z-index: 200;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      background: #1c1e2a;
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 50px;
+      padding: 10px 20px 10px 16px;
+      box-shadow: 0 8px 32px rgba(0,0,0,.5);
+      white-space: nowrap;
+    }
+    .bulk-bar.visible {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .bulk-bar-count {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .bulk-bar-deselect {
+      font-size: 12px;
+      color: var(--muted);
+      cursor: pointer;
+      border: none;
+      background: none;
+      padding: 0;
+    }
+    .bulk-bar-deselect:hover { color: var(--text); }
+    .bulk-bar-submit {
+      padding: 7px 18px;
+      border-radius: 50px;
+      border: none;
+      background: var(--accent);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity .15s;
+    }
+    .bulk-bar-submit:hover { opacity: .85; }
+
+    /* ── Bulk ship modal ─────────────────────────────────────── */
+    .bulk-order-list {
+      max-height: 320px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 14px;
+    }
+    .bulk-order-row {
+      display: grid;
+      grid-template-columns: 1fr 180px;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .bulk-order-row:last-child { border-bottom: none; }
+    .bulk-order-info { min-width: 0; }
+    .bulk-order-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bulk-order-meta { font-size: 11px; color: var(--muted); }
+    .bulk-tracking-input {
+      width: 100%;
+      padding: 7px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,.05);
+      color: var(--text);
+      font-size: 12px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    .bulk-tracking-input:focus { border-color: rgba(255,255,255,.3); }
+    .bulk-progress {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 8px;
+      text-align: center;
+    }
+
+    /* ── Complete-order button ──────────────────────────────── */
+    .btn-complete {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      margin-top: 10px;
+      padding: 5px 11px;
+      border-radius: 6px;
+      border: 1px solid rgba(255,255,255,.15);
+      background: rgba(255,255,255,.06);
+      color: var(--text);
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+    .btn-complete:hover { background: rgba(255,255,255,.12); border-color: rgba(255,255,255,.3); }
+
+    /* ── Ship modal ─────────────────────────────────────────── */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.65);
+      backdrop-filter: blur(4px);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal-box {
+      background: #1c1e2a;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 28px 28px 22px;
+      width: 480px;
+      max-width: 95vw;
+      box-shadow: 0 24px 60px rgba(0,0,0,.6);
+    }
+    .modal-title { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+    .modal-subtitle { font-size: 12px; color: var(--muted); margin-bottom: 20px; line-height: 1.5; }
+    .modal-field { margin-bottom: 16px; }
+    .modal-label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .modal-input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 9px 12px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,.05);
+      color: var(--text);
+      font-size: 13px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    .modal-input:focus { border-color: rgba(255,255,255,.35); }
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 22px;
+    }
+    .modal-cancel {
+      padding: 8px 16px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: none;
+      color: var(--muted);
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .modal-cancel:hover { color: var(--text); border-color: rgba(255,255,255,.3); }
+    .modal-submit {
+      padding: 8px 18px;
+      border-radius: 7px;
+      border: none;
+      background: var(--text);
+      color: #0e1016;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity .15s;
+    }
+    .modal-submit:hover { opacity: .85; }
+    .modal-submit:disabled { opacity: .4; cursor: not-allowed; }
+    .modal-error {
+      margin-top: 10px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      background: rgba(239,68,68,.12);
+      color: var(--red);
+      font-size: 12px;
+      display: none;
+    }
+    .modal-error.show { display: block; }
+
+    /* ── Sync log ───────────────────────────────────────────── */
+    .log-entry {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 10px 16px;
+      border-top: 1px solid var(--border);
+      font-size: 13px;
+    }
+    .log-entry:first-child { border-top: none; }
+    .log-entry .log-shop { font-weight: 500; min-width: 180px; }
+    .log-entry .log-time { color: var(--muted); font-size: 12px; min-width: 160px; }
+    .log-entry .log-count { color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-brand">
+    <div class="dot"></div>
+    Etsy Unified Dashboard
+  </div>
+  <div class="topbar-meta" id="lastRefresh">Loading...</div>
+</div>
+
+<div class="container">
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <div class="tab" onclick="showTab('overview')">Overview</div>
+    <div class="tab active" onclick="showTab('orders')">Orders</div>
+    <div class="tab" onclick="showTab('listings')">Listings</div>
+    <div class="tab" onclick="showTab('shops')">Shops</div>
+    <div class="tab" onclick="showTab('sync-log')">Sync Log</div>
+  </div>
+
+  <!-- ── OVERVIEW tab ────────────────────────────────────────── -->
+  <div id="tab-overview" style="display:none">
+    <div class="stats-grid" id="statCards">
+      <div class="stat-card"><div class="label">Loading</div><div class="value">—</div></div>
+    </div>
+
+    <div class="section-head"><h2>Orders by Shop</h2></div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Shop</th>
+            <th>Group</th>
+            <th>Orders in DB</th>
+            <th>Last Synced</th>
+          </tr>
+        </thead>
+        <tbody id="overviewShopRows"><tr><td colspan="4" class="loading">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── ORDERS tab ──────────────────────────────────────────── -->
+  <div id="tab-orders">
+    <div class="filters">
+      <select id="filterShipped" onchange="loadOrders()">
+        <option value="false" selected>Needs shipping</option>
+        <option value="all">All orders</option>
+        <option value="true">Shipped only</option>
+      </select>
+      <select id="filterShop" onchange="loadOrders()">
+        <option value="">All shops</option>
+      </select>
+      <select id="filterGroup" onchange="loadOrders()">
+        <option value="">All groups</option>
+      </select>
+      <select id="filterSort" onchange="loadOrders()">
+        <option value="newest">Newest first</option>
+        <option value="oldest">Oldest first</option>
+      </select>
+      <select id="filterPageSize" onchange="loadOrders()">
+        <option value="25">25 per page</option>
+        <option value="50">50 per page</option>
+        <option value="100">100 per page</option>
+        <option value="200">200 per page</option>
+        <option value="0" selected>Show all</option>
+      </select>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="col-check"><input type="checkbox" class="order-cb" id="cbSelectAll" onclick="toggleSelectAll(this)"></th>
+            <th>Product</th>
+            <th>Ship To</th>
+            <th>Ship By</th>
+            <th>Ordered</th>
+          </tr>
+        </thead>
+        <tbody id="ordersBody"><tr><td colspan="5" class="loading">Loading...</td></tr></tbody>
+      </table>
+    </div>
+    <div class="pagination">
+      <button id="btnPrev" onclick="changePage(-1)" disabled>← Prev</button>
+      <span class="page-info" id="pageInfo">—</span>
+      <button id="btnNext" onclick="changePage(1)" disabled>Next →</button>
+    </div>
+  </div>
+
+  <!-- ── LISTINGS tab ────────────────────────────────────────── -->
+  <div id="tab-listings" style="display:none">
+    <div class="filters" id="listingsFilters">
+      <select id="listingsShop" onchange="loadListings()">
+        <option value="">All shops</option>
+      </select>
+      <select id="listingsState" onchange="loadListings()">
+        <option value="active" selected>Active</option>
+        <option value="inactive">Inactive</option>
+        <option value="draft">Drafts</option>
+        <option value="all">All states</option>
+      </select>
+      <input type="text" id="listingsSearch" placeholder="Search titles…"
+             oninput="debounceListings()" style="padding:7px 12px;border-radius:7px;border:1px solid var(--border);background:rgba(255,255,255,.05);color:var(--text);font-size:13px;outline:none;width:200px">
+      <button onclick="syncListings()" id="listingsSyncBtn"
+              style="padding:7px 14px;border-radius:7px;border:1px solid var(--border);background:rgba(255,255,255,.06);color:var(--text);font-size:12px;font-weight:600;cursor:pointer">
+        ↻ Sync from Etsy
+      </button>
+      <button onclick="openCreateListing()"
+              style="padding:7px 14px;border-radius:7px;border:none;background:var(--accent);color:#fff;font-size:12px;font-weight:700;cursor:pointer">
+        + New listing
+      </button>
+    </div>
+    <div class="table-wrap">
+      <table id="listingsTable">
+        <thead>
+          <tr>
+            <th style="width:60px"></th>
+            <th>Title</th>
+            <th>Shop</th>
+            <th>Status</th>
+            <th>Price</th>
+            <th>Qty</th>
+            <th>Views</th>
+            <th>Updated</th>
+            <th style="width:110px">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="listingsBody">
+          <tr><td colspan="9" class="empty">Select a shop and click "Sync from Etsy" to load listings.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="pagination" id="listingsPagination">
+      <button id="btnListPrev" onclick="changeListPage(-1)" disabled>← Prev</button>
+      <span class="page-info" id="listPageInfo">—</span>
+      <button id="btnListNext" onclick="changeListPage(1)" disabled>Next →</button>
+    </div>
+  </div>
+
+  <!-- ── SHOPS tab ───────────────────────────────────────────── -->
+  <div id="tab-shops" style="display:none">
+    <div class="shops-grid" id="shopsGrid">
+      <div class="loading">Loading...</div>
+    </div>
+  </div>
+
+  <!-- ── SYNC LOG tab ────────────────────────────────────────── -->
+  <div id="tab-sync-log" style="display:none">
+    <div class="table-wrap" id="syncLogWrap">
+      <div class="loading">Loading...</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const API = 'http://localhost:4000';
+
+// ── State ─────────────────────────────────────────────────────
+let ordersOffset = 0;
+let ordersLimit = 50;
+let ordersTotal   = 0;
+
+// ── Tabs ──────────────────────────────────────────────────────
+function showTab(name) {
+  ['overview','orders','listings','shops','sync-log'].forEach(t => {
+    document.getElementById('tab-' + t).style.display = t === name ? '' : 'none';
+  });
+  document.querySelectorAll('.tab').forEach((el, i) => {
+    el.classList.toggle('active', ['overview','orders','listings','shops','sync-log'][i] === name);
+  });
+  if (name === 'overview')  loadOverview();
+  if (name === 'orders')    loadOrders();
+  if (name === 'listings')  fetchListings();
+  if (name === 'shops')     loadShops();
+  if (name === 'sync-log')  loadSyncLog();
+}
+
+// ── Helpers ───────────────────────────────────────────────────
+function fmt(n) { return n == null ? '—' : Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 }); }
+function fmtDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+function badge(cond, t, f) {
+  return cond
+    ? `<span class="badge badge-green">${t}</span>`
+    : `<span class="badge badge-muted">${f}</span>`;
+}
+
+// ── Overview ──────────────────────────────────────────────────
+async function loadOverview() {
+  const [sumRes, shopsRes] = await Promise.all([
+    fetch(API + '/api/summary').then(r => r.json()),
+    fetch(API + '/api/shops').then(r => r.json()),
+  ]);
+
+  const t = sumRes.totals;
+
+  // Stat cards
+  document.getElementById('statCards').innerHTML = [
+    { label: 'Active Shops',     value: sumRes.shops_with_tokens, sub: `of ${sumRes.shops_total} configured` },
+    { label: 'Orders in DB',     value: fmt(t.total_receipts),    sub: 'receipts synced' },
+    { label: 'Needs Shipping',   value: fmt(t.paid_orders),       sub: 'awaiting fulfillment' },
+    { label: 'Shipped',          value: fmt(t.shipped_orders),    sub: 'completed orders' },
+  ].map(c => `
+    <div class="stat-card">
+      <div class="label">${c.label}</div>
+      <div class="value">${c.value ?? '—'}</div>
+      ${c.sub ? `<div class="sub">${c.sub}</div>` : ''}
+    </div>
+  `).join('');
+
+  // Shop rows
+  const shopMap = {};
+  sumRes.by_shop.forEach(s => shopMap[s.shop_id] = s);
+
+  const rows = shopsRes.shops.map(s => {
+    const lastSynced = s.last_synced_at_iso ? fmtDate(s.last_synced_at_iso) : '<span style="color:var(--muted)">Never</span>';
+    return `<tr>
+      <td><strong>${s.shop_name}</strong></td>
+      <td><span class="badge badge-blue">${s.group_id.replace('group_','')}</span></td>
+      <td>${fmt(s.receipts_in_db)}</td>
+      <td style="font-size:12px;color:var(--muted)">${lastSynced}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('overviewShopRows').innerHTML = rows || '<tr><td colspan="4" class="empty">No data yet — run the sync worker.</td></tr>';
+  document.getElementById('lastRefresh').textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+
+// ── International shipping compliance notices ─────────────────
+//
+// Etsy acts as the "marketplace facilitator" and collects / remits VAT/GST
+// on behalf of sellers for many international destinations.  For most of
+// these, the seller must still write a specific number and value on the
+// physical package so customs can verify VAT was already paid.
+//
+// Sources:
+//  • EU IOSS:  https://github.com/etsy/open-api/discussions/697
+//  • UK VAT:   Etsy Help / Seller Handbook (UK VAT Number 370 6004 28)
+//  • NO VOEC:  Etsy Help – Norway VAT (Etsy VOEC number)
+//  • AU GST:   Etsy Help – Australia GST (orders < AUD 1,000)
+//  • CH VAT:   Etsy Help – Switzerland VAT
+
+const ETSY_IOSS    = 'IM3720000224';  // Etsy's EU IOSS number (global, constant)
+const ETSY_UK_VAT  = '370 6004 28';   // Etsy's UK VAT registration number
+
+// EU: all 27 member states — IOSS applies to imports ≤ EUR 150
+const EU_IOSS = new Set([
+  'AT','BE','BG','CY','CZ','DE','DK','EE','ES','FI',
+  'FR','GR','HR','HU','IE','IT','LT','LU','LV','MT',
+  'NL','PL','PT','RO','SE','SI','SK'
+]);
+
+// Countries where Etsy handles VAT/GST and the seller must write the
+// customs-declared value in the destination currency on the package
+const CUSTOMS_CURRENCY = {
+  // EU countries → EUR, IOSS
+  AT:'EUR',BE:'EUR',BG:'EUR',CY:'EUR',CZ:'EUR',DE:'EUR',DK:'EUR',
+  EE:'EUR',ES:'EUR',FI:'EUR',FR:'EUR',GR:'EUR',HR:'EUR',HU:'EUR',
+  IE:'EUR',IT:'EUR',LT:'EUR',LU:'EUR',LV:'EUR',MT:'EUR',NL:'EUR',
+  PL:'EUR',PT:'EUR',RO:'EUR',SE:'EUR',SI:'EUR',SK:'EUR',
+  // UK → GBP
+  GB:'GBP',
+  // Norway → NOK (VOEC)
+  NO:'NOK',
+  // Australia → AUD (GST < AUD 1000)
+  AU:'AUD',
+  // Switzerland → CHF
+  CH:'CHF',
+};
+
+// Live exchange rates — fetched once at init, used for customs amount conversion.
+// Rates are EUR-based: rates['HKD'] = how many HKD per 1 EUR.
+let _liveRates = {};
+let _ratesAge  = 0;
+
+async function loadExchangeRates() {
+  try {
+    const res  = await fetch(`${API}/api/exchange-rates`);
+    const json = await res.json();
+    if (json.rates && Object.keys(json.rates).length) {
+      _liveRates = json.rates;
+      _ratesAge  = Date.now();
+    }
+  } catch (_) { /* offline — customs amounts won't display, everything else works */ }
+}
+
+/**
+ * Convert an amount from one currency to another using the EUR-base rate map.
+ * Returns a formatted string like "EUR 20.12" or null if rates unavailable.
+ */
+function toCustomsCurrency(amountInShop, shopCcy, targetCcy) {
+  if (!amountInShop || !shopCcy || !targetCcy) return null;
+  if (!_liveRates[shopCcy] || !_liveRates[targetCcy]) return null;
+  const eur    = amountInShop / _liveRates[shopCcy];
+  const target = eur * _liveRates[targetCcy];
+  return `${targetCcy} ${target.toFixed(2)}`;
+}
+
+function copyNumber(el, num) {
+  navigator.clipboard?.writeText(num);
+  const old = el.textContent;
+  el.textContent = '✓ Copied!';
+  setTimeout(() => el.textContent = old, 1500);
+}
+
+/**
+ * Build all applicable international shipping compliance notices for an order.
+ * Returns HTML string (empty if no notices apply).
+ *
+ * @param {string} countryIso  – shipping destination ISO-2 code (e.g. 'DE')
+ * @param {number} subtotal    – product subtotal in shop currency (excl. shipping & tax)
+ * @param {string} shopCcy     – shop currency code (e.g. 'HKD')
+ */
+function buildShippingNotices(countryIso, subtotal, shopCcy) {
+  if (!countryIso) return '';
+  const iso = countryIso.toUpperCase();
+
+  // ── EU: IOSS ─────────────────────────────────────────────
+  if (EU_IOSS.has(iso)) {
+    const customsAmt = toCustomsCurrency(subtotal, shopCcy, 'EUR');
+    const amtNote = customsAmt
+      ? `Write the product value <strong>${customsAmt}</strong>* on the package in euros.`
+      : 'Write the product value in euros on the package (check Etsy order page for exact EUR amount).';
+    return `<div class="ioss-notice">
+      <strong>⚠ EU Import — IOSS Required</strong><br>
+      Share Etsy's IOSS number with your courier (do not use for any other purpose):<br>
+      <span class="ioss-number" onclick="copyNumber(this,'${ETSY_IOSS}')" title="Click to copy">${ETSY_IOSS}</span><br>
+      ${amtNote} This ensures your buyer won't be charged VAT twice.
+      ${customsAmt ? '<br><span style="font-size:10.5px;color:var(--muted)">* Approximate — verify exact amount on your Etsy order page.</span>' : ''}
+    </div>`;
+  }
+
+  // ── UK: HMRC VAT ─────────────────────────────────────────
+  if (iso === 'GB') {
+    const customsAmt = toCustomsCurrency(subtotal, shopCcy, 'GBP');
+    const amtNote = customsAmt
+      ? `Write the product value <strong>${customsAmt}</strong>* on the package in GBP.`
+      : 'Write the product value in GBP on the package (check Etsy order page for exact GBP amount).';
+    return `<div class="ioss-notice">
+      <strong>⚠ UK Import — Etsy VAT Collected</strong><br>
+      Write Etsy's UK VAT number on the package:<br>
+      <span class="ioss-number" onclick="copyNumber(this,'${ETSY_UK_VAT}')" title="Click to copy">${ETSY_UK_VAT}</span><br>
+      ${amtNote} Your buyer won't be charged VAT again at customs.
+      ${customsAmt ? '<br><span style="font-size:10.5px;color:var(--muted)">* Approximate — verify exact amount on your Etsy order page.</span>' : ''}
+    </div>`;
+  }
+
+  // ── Norway: VOEC ─────────────────────────────────────────
+  if (iso === 'NO') {
+    const customsAmt = toCustomsCurrency(subtotal, shopCcy, 'NOK');
+    return `<div class="ioss-notice">
+      <strong>⚠ Norway Import — VOEC (Etsy Handles VAT)</strong><br>
+      Etsy has collected and will remit Norwegian VAT (MVA) for this order.
+      ${customsAmt ? `Declare the product value <strong>${customsAmt}</strong>* on the package.` : ''}
+      Mark the package with "VAT paid — VOEC scheme".
+      ${customsAmt ? '<br><span style="font-size:10.5px;color:var(--muted)">* Approximate — verify on your Etsy order page.</span>' : ''}
+    </div>`;
+  }
+
+  // ── Australia: GST ───────────────────────────────────────
+  if (iso === 'AU') {
+    const customsAmt = toCustomsCurrency(subtotal, shopCcy, 'AUD');
+    return `<div class="ioss-notice">
+      <strong>⚠ Australia Import — Etsy Handles GST</strong><br>
+      For orders under AUD 1,000: Etsy has collected and remitted Australian GST.
+      ${customsAmt ? `Estimated product value: <strong>${customsAmt}</strong>*.` : ''}
+      No additional action required — Etsy handles all GST compliance.
+      ${customsAmt ? '<br><span style="font-size:10.5px;color:var(--muted)">* Approximate.</span>' : ''}
+    </div>`;
+  }
+
+  // ── Switzerland: Swiss VAT ───────────────────────────────
+  if (iso === 'CH') {
+    const customsAmt = toCustomsCurrency(subtotal, shopCcy, 'CHF');
+    return `<div class="ioss-notice">
+      <strong>⚠ Switzerland Import — Etsy Handles VAT</strong><br>
+      Etsy has collected and will remit Swiss VAT for this order.
+      ${customsAmt ? `Declare the product value <strong>${customsAmt}</strong>* on the package.` : ''}
+      ${customsAmt ? '<br><span style="font-size:10.5px;color:var(--muted)">* Approximate — verify on your Etsy order page.</span>' : ''}
+    </div>`;
+  }
+
+  return '';
+}
+
+// ── Order status badge ────────────────────────────────────────
+function orderStatusBadge(status, isShipped) {
+  const s = (status || '').toLowerCase();
+  if (s === 'completed')          return '<span class="badge badge-green">Shipped</span>';
+  if (s === 'canceled' || s === 'cancelled')
+                                  return '<span class="badge badge-red">Cancelled</span>';
+  if (s === 'fully refunded')     return '<span class="badge badge-muted">Refunded</span>';
+  if (s === 'partially refunded') return '<span class="badge badge-yellow">Part. Refunded</span>';
+  if (isShipped)                  return '<span class="badge badge-green">Shipped</span>';
+  // "paid" and anything else that is unshipped
+  return '<span class="badge badge-yellow">Unshipped</span>';
+}
+
+// ── Orders ────────────────────────────────────────────────────
+async function loadOrders() {
+  ordersOffset = 0;
+  await fetchOrders();
+}
+
+async function fetchOrders() {
+  const shipped = document.getElementById('filterShipped').value;
+  // Show checkbox col only in "Needs shipping" mode
+  const showCb = shipped === 'false';
+  document.querySelectorAll('.col-check').forEach(el => { el.style.display = showCb ? '' : 'none'; });
+  const shop    = document.getElementById('filterShop').value;
+  const group   = document.getElementById('filterGroup').value;
+  const sort    = document.getElementById('filterSort').value;
+
+  const pageSizeEl = document.getElementById('filterPageSize');
+  const pageSize = pageSizeEl ? parseInt(pageSizeEl.value, 10) : ordersLimit;
+  // Reset to page 1 when page-size changes (ordersOffset may be out-of-range for new page size)
+  if (pageSize !== ordersLimit) ordersOffset = 0;
+  // When "Show all" (0) is selected, send limit=0; server interprets as no-cap
+  const effectiveLimit = pageSize === 0 ? 0 : pageSize;
+  ordersLimit = pageSize === 0 ? 5000 : pageSize;
+
+  const params = new URLSearchParams({ limit: effectiveLimit, offset: ordersOffset, sort });
+  if (shipped !== 'all') params.set('shipped', shipped);
+  if (shop)  params.set('shop_id',  shop);
+  if (group) params.set('group_id', group);
+
+  const data = await fetch(API + '/api/orders?' + params).then(r => r.json());
+  ordersTotal = data.total;
+
+  const tbody = document.getElementById('ordersBody');
+  if (!data.orders.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">No orders match the current filter.</td></tr>';
+    document.getElementById('pageInfo').textContent = '0 orders';
+    document.getElementById('btnPrev').disabled = true;
+    document.getElementById('btnNext').disabled = true;
+    return;
+  }
+
+  tbody.innerHTML = data.orders.map(o => {
+    // ── All product items ─────────────────────────────────────
+    const txs = Array.isArray(o.transactions) && o.transactions.length > 0
+      ? o.transactions
+      : [{ listing_id: o.first_listing_id, title: o.first_product_title,
+           quantity: o.first_quantity, variations: [], image_url: o.product_image_url }];
+
+    const itemsHtml = txs.map(tx => {
+      const listingUrl = tx.listing_id ? `https://www.etsy.com/listing/${tx.listing_id}` : null;
+      const imgTag = tx.image_url
+        ? `<img src="${tx.image_url}" alt="" loading="lazy" onerror="this.replaceWith(document.createTextNode('🛍️'))">`
+        : `🛍️`;
+      const thumb = listingUrl
+        ? `<a href="${listingUrl}" target="_blank" class="product-thumb" title="View on Etsy">${imgTag}</a>`
+        : `<div class="product-thumb">${imgTag}</div>`;
+
+      const metaRows = [];
+      if (tx.quantity) metaRows.push(`<div class="product-meta-row">
+        <span class="product-meta-label">Quantity</span>
+        <span class="product-meta-value">${tx.quantity}</span></div>`);
+      for (const v of (tx.variations || [])) {
+        if (v.formatted_name && v.formatted_value) {
+          metaRows.push(`<div class="product-meta-row">
+            <span class="product-meta-label">${v.formatted_name}</span>
+            <span class="product-meta-value">${v.formatted_value}</span></div>`);
+        }
+      }
+
+      return `<div class="product-item">
+        ${thumb}
+        <div class="product-info">
+          <div class="product-title">${tx.title || '—'}</div>
+          ${metaRows.length ? `<div class="product-meta">${metaRows.join('')}</div>` : ''}
+        </div>
+      </div>`;
+    }).join('');
+
+    // ── Ship by date ──────────────────────────────────────────
+    // Use the earliest expected_ship_date across all transactions (Unix seconds from Etsy API)
+    const shipTs = txs.map(t => t.expected_ship_date).filter(Boolean);
+    // earliestShipBy is a Unix epoch in SECONDS — exact to the second, straight from Etsy
+    const earliestShipBy = shipTs.length ? Math.min(...shipTs) : (o.first_ship_by || null);
+    const deadlineMs = earliestShipBy ? earliestShipBy * 1000 : null; // milliseconds for Date math
+
+    let shipByHtml;
+    if (deadlineMs) {
+      const now      = new Date();
+      const shipDate = new Date(deadlineMs);
+
+      // Compare calendar dates in the viewer's LOCAL timezone (same as Etsy does)
+      const todayMidnight    = new Date(now.getFullYear(),      now.getMonth(),      now.getDate());
+      const deadlineMidnight = new Date(shipDate.getFullYear(), shipDate.getMonth(), shipDate.getDate());
+      const diffDays = Math.round((deadlineMidnight - todayMidnight) / 86400000);
+
+      // Etsy-style relative label: relative only for today/tomorrow, else exact date
+      let shipLabel;
+      if      (diffDays < 0)   shipLabel = diffDays === -1 ? '1 day overdue' : `${Math.abs(diffDays)} days overdue`;
+      else if (diffDays === 0) shipLabel = 'Ship by today';
+      else if (diffDays === 1) shipLabel = 'Ship by tomorrow';
+      else                     shipLabel = `Ship by ${shipDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`;
+
+      const msLeft   = deadlineMs - Date.now();
+      let cls = '';
+      if (!o.is_shipped) {
+        if (diffDays < 0)       cls = 'overdue';
+        else if (diffDays <= 1) cls = 'urgent'; // today or tomorrow
+      }
+
+      // Live countdown only for unshipped urgent/overdue orders
+      const showCountdown = !o.is_shipped && cls !== '';
+      const countdownHtml = showCountdown
+        ? `<div class="countdown ${cls}" data-deadline="${deadlineMs}">calculating…</div>`
+        : '';
+      const completeBtn = !o.is_shipped
+        ? `<button class="btn-complete" onclick="openShipModal(${o.receipt_id},'${o.shop_name.replace(/'/g,"\\'")}','${(o.buyer_name||'').replace(/'/g,"\\'")}')">✓ Complete order</button>`
+        : '';
+      shipByHtml = `<div class="ship-cell">
+        <div class="ship-by-date ${cls}">${shipLabel}</div>
+        ${orderStatusBadge(o.status, o.is_shipped)}
+        ${countdownHtml}
+        ${completeBtn}
+      </div>`;
+    } else {
+      const completeBtn = !o.is_shipped
+        ? `<button class="btn-complete" onclick="openShipModal(${o.receipt_id},'${o.shop_name.replace(/'/g,"\\'")}','${(o.buyer_name||'').replace(/'/g,"\\'")}')">✓ Complete order</button>`
+        : '';
+      shipByHtml = `<div class="ship-cell">${orderStatusBadge(o.status, o.is_shipped)}${completeBtn ? '<br>' + completeBtn : ''}</div>`;
+    }
+
+    // ── Address — use Etsy's formatted_address for display + copy ─
+    // formatted_address already contains: Name\nStreet\nCity, ST ZIP\nCountry
+    const fmtAddr = o.formatted_address || '';
+    const addrLines = fmtAddr.split('\n').map(l => l.trim()).filter(Boolean);
+    // Skip the first line if it matches the buyer name (Etsy includes it)
+    const buyerName = o.buyer_name || o.buyer_email || '—';
+    const displayLines = addrLines.length > 1 && addrLines[0] === buyerName
+      ? addrLines.slice(1)
+      : addrLines;
+
+    // Copy text = full formatted_address (already has name + country correctly)
+    // Store in data-copy to avoid any escaping issues in onclick attributes
+    const copyText = fmtAddr || [buyerName, o.shipping_first_line, o.shipping_city].filter(Boolean).join('\n');
+
+    const addrHtml = displayLines.map(l => `<div>${l}</div>`).join('');
+    const escapedCopy = copyText.replace(/"/g,'&quot;');
+    const addrBlock = displayLines.length
+      ? `<div class="address-clickable">
+           <div class="address-name">${buyerName}</div>
+           <div class="address-lines">${addrHtml}</div>
+           <button class="addr-copy-btn" data-copy="${escapedCopy}"
+                   onclick="copyAddrBtn(this)" title="Copy full address">📋</button>
+         </div>`
+      : `<div><div class="address-name">${buyerName}</div>
+         <div class="address-lines" style="color:var(--muted)">No address</div></div>`;
+
+    // Checkbox only for unshipped orders — let employees tick what they've packed
+    const cbHtml = !o.is_shipped
+      ? `<input type="checkbox" class="order-cb order-select-cb"
+             data-receipt="${o.receipt_id}"
+             data-shop="${o.shop_name.replace(/"/g,'&quot;')}"
+             data-buyer="${(o.buyer_name||'').replace(/"/g,'&quot;')}"
+             onclick="onOrderCbChange()">`
+      : '';
+
+    // ── Notes section (buyer note read-only + team note editable) ─
+    // ── International shipping compliance notices ──────────────
+    const iossHtml = buildShippingNotices(
+      o.shipping_country_iso,
+      o.subtotal_amount,       // product price excl. shipping & tax (in shop currency)
+      o.grandtotal_currency    // shop currency, e.g. 'HKD'
+    );
+
+    // ── Notes ──────────────────────────────────────────────────
+    const buyerMsg = (o.message_from_buyer || '').trim();
+    const teamNote = (o.team_note || '').trim();
+    const buyerNoteHtml = buyerMsg
+      ? `<div class="buyer-note">
+           <span class="buyer-note-icon">💬</span>
+           <span>${buyerMsg.replace(/</g,'&lt;')}</span>
+         </div>`
+      : '';
+    const noteSection = `<div class="note-section">
+      ${buyerNoteHtml}
+      <div class="team-note-wrap">
+        <span style="font-size:14px;flex-shrink:0;margin-top:4px;opacity:.5">📝</span>
+        <textarea class="team-note-area"
+                  placeholder="Team note (private — not sent to buyer)…"
+                  data-receipt="${o.receipt_id}"
+                  oninput="onNoteInput(this)"
+                  onblur="saveNote(this)">${teamNote.replace(/</g,'&lt;')}</textarea>
+        <button class="team-note-save" onclick="saveNote(this.previousElementSibling)">Save</button>
+      </div>
+    </div>`;
+
+    return `<tr class="order-row" id="order-row-${o.receipt_id}">
+      <td class="col-check">${cbHtml}</td>
+      <td>
+        <div class="product-cell">
+          ${itemsHtml}
+          <div class="product-shop">${o.shop_name}</div>
+        </div>
+      </td>
+      <td>
+        <div class="address-cell">${addrBlock}</div>
+        ${iossHtml}
+        ${noteSection}
+      </td>
+      <td>${shipByHtml}</td>
+      <td style="font-size:12px;color:var(--muted);white-space:nowrap">${fmtDate(o.created_at_iso)}</td>
+    </tr>`;
+  }).join('');
+
+  // Reset checkboxes on every render
+  const selectAllCb = document.getElementById('cbSelectAll');
+  if (selectAllCb) { selectAllCb.checked = false; selectAllCb.indeterminate = false; }
+  document.getElementById('bulkBar')?.classList.remove('visible');
+
+  const pageSizeVal = parseInt((document.getElementById('filterPageSize') || {}).value ?? 50, 10);
+  if (pageSizeVal === 0) {
+    // "Show all" mode — single page, no pagination
+    document.getElementById('pageInfo').textContent = `All ${ordersTotal} orders`;
+    document.getElementById('btnPrev').disabled = true;
+    document.getElementById('btnNext').disabled = true;
+  } else {
+    document.getElementById('pageInfo').textContent =
+      `${ordersOffset + 1}–${Math.min(ordersOffset + ordersLimit, ordersTotal)} of ${ordersTotal}`;
+    document.getElementById('btnPrev').disabled = ordersOffset === 0;
+    document.getElementById('btnNext').disabled = ordersOffset + ordersLimit >= ordersTotal;
+  }
+}
+
+// ── Live countdown engine ─────────────────────────────────────
+// A single interval drives ALL .countdown elements on the page.
+// Each element carries data-deadline (Unix ms). Renders to seconds precision.
+function fmtCountdown(msLeft) {
+  if (msLeft <= 0) {
+    const s = Math.abs(Math.floor(msLeft / 1000));
+    const m = Math.floor(s / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
+    if (d > 0) return `${d}d ${h%24}h ${m%60}m ${s%60}s overdue`;
+    if (h > 0) return `${h}h ${m%60}m ${s%60}s overdue`;
+    return `${m}m ${s%60}s overdue`;
+  }
+  const s = Math.floor(msLeft / 1000);
+  const m = Math.floor(s / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
+  if (d > 0) return `${d}d ${h%24}h ${m%60}m ${s%60}s`;
+  if (h > 0) return `${h}h ${m%60}m ${s%60}s`;
+  if (m > 0) return `${m}m ${s%60}s`;
+  return `${s}s`;
+}
+(function startCountdownEngine() {
+  setInterval(() => {
+    const now = Date.now();
+    document.querySelectorAll('.countdown[data-deadline]').forEach(el => {
+      const deadline = parseInt(el.dataset.deadline, 10);
+      el.textContent = fmtCountdown(deadline - now);
+    });
+  }, 1000);
+})();
+
+// Copy button — copies full address; button is the target element
+function copyAddrBtn(btn) {
+  btn.blur(); // prevent focus ring from interfering with text selection elsewhere
+  const text = btn.dataset.copy || '';
+  const done = () => {
+    const orig = btn.textContent;
+    btn.textContent = '✓';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1800);
+  };
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+  } else {
+    fallbackCopy(text, done);
+  }
+}
+// Keep old name as alias in case any residual HTML references it
+function copyAddr(el) { copyAddrBtn(el.querySelector('.addr-copy-btn') || el); }
+
+function fallbackCopy(text, cb) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand('copy');
+  document.body.removeChild(ta);
+  cb();
+}
+
+function changePage(dir) {
+  ordersOffset = Math.max(0, ordersOffset + dir * ordersLimit);
+  fetchOrders();
+}
+
+// ── Complete Order Modal ──────────────────────────────────────
+let _shipReceiptId = null;
+
+function openShipModal(receiptId, shopName, buyerName) {
+  _shipReceiptId = receiptId;
+  document.getElementById('shipModalSubtitle').textContent =
+    `${shopName} — ${buyerName || 'Order #' + receiptId}`;
+  document.getElementById('shipTracking').value = '';
+  document.getElementById('shipNote').value = '';
+  document.getElementById('shipCarrier').value = '4PX';
+  document.getElementById('shipError').classList.remove('show');
+  document.getElementById('shipError').textContent = '';
+  document.getElementById('shipSubmitBtn').disabled = false;
+  document.getElementById('shipSubmitBtn').textContent = 'Complete order';
+  document.getElementById('shipModal').classList.add('open');
+  setTimeout(() => document.getElementById('shipTracking').focus(), 60);
+}
+
+function closeShipModal() {
+  document.getElementById('shipModal').classList.remove('open');
+  _shipReceiptId = null;
+}
+
+// Wire modal after DOM is fully parsed (modal HTML lives at end of body)
+document.addEventListener('DOMContentLoaded', () => {
+  const overlay = document.getElementById('shipModal');
+  if (overlay) {
+    overlay.addEventListener('click', e => {
+      if (e.target === overlay) closeShipModal();
+    });
+  }
+});
+
+// Close on Escape
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeShipModal();
+});
+
+async function submitShipModal() {
+  if (!_shipReceiptId) return;
+  const tracking = document.getElementById('shipTracking').value.trim();
+  const carrier  = document.getElementById('shipCarrier').value.trim() || '4PX';
+  const note     = document.getElementById('shipNote').value.trim();
+  const errEl    = document.getElementById('shipError');
+  const btn      = document.getElementById('shipSubmitBtn');
+
+  if (!tracking) {
+    errEl.textContent = 'Tracking number is required.';
+    errEl.classList.add('show');
+    document.getElementById('shipTracking').focus();
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Submitting…';
+  errEl.classList.remove('show');
+
+  try {
+    const resp = await fetch(`${API}/api/orders/${_shipReceiptId}/ship`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ tracking_code: tracking, carrier_name: carrier, note_to_buyer: note }),
+    });
+    const json = await resp.json();
+    if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`);
+
+    closeShipModal();
+    // Reload orders so this order disappears from "Needs shipping" view
+    await fetchOrders();
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.classList.add('show');
+    btn.disabled = false;
+    btn.textContent = 'Complete order';
+  }
+}
+
+// ── Listings ──────────────────────────────────────────────────
+let listOffset = 0, listLimit = 50, listTotal = 0;
+let _listDebounce = null;
+
+function debounceListings() {
+  clearTimeout(_listDebounce);
+  _listDebounce = setTimeout(loadListings, 350);
+}
+
+function listingStateBadge(state) {
+  const map = {
+    active:     '<span class="badge badge-green">Active</span>',
+    inactive:   '<span class="badge badge-muted">Inactive</span>',
+    draft:      '<span class="badge badge-yellow">Draft</span>',
+    sold_out:   '<span class="badge badge-red">Sold out</span>',
+    expired:    '<span class="badge badge-muted">Expired</span>',
+  };
+  return map[state] || `<span class="badge badge-muted">${state}</span>`;
+}
+
+async function loadListings() {
+  listOffset = 0;
+  await fetchListings();
+}
+
+async function fetchListings() {
+  const shop   = document.getElementById('listingsShop')?.value || '';
+  const state  = document.getElementById('listingsState')?.value || 'active';
+  const q      = document.getElementById('listingsSearch')?.value || '';
+
+  const params = new URLSearchParams({ limit: listLimit, offset: listOffset });
+  if (shop)             params.set('shop_id', shop);
+  if (state !== 'all')  params.set('state', state);
+  if (q)                params.set('q', q);
+
+  const data = await fetch(`${API}/api/listings?${params}`).then(r => r.json());
+  listTotal = data.total;
+
+  const tbody = document.getElementById('listingsBody');
+  if (!data.listings.length) {
+    tbody.innerHTML = `<tr><td colspan="9" class="empty">No listings found. Try "Sync from Etsy" first.</td></tr>`;
+    document.getElementById('listPageInfo').textContent = '0 listings';
+    document.getElementById('btnListPrev').disabled = true;
+    document.getElementById('btnListNext').disabled = true;
+    return;
+  }
+
+  tbody.innerHTML = data.listings.map(l => {
+    const img = l.primary_image_url
+      ? `<img class="listing-thumb" src="${l.primary_image_url}" loading="lazy" alt="">`
+      : `<div class="listing-thumb" style="display:flex;align-items:center;justify-content:center;font-size:20px">🛍️</div>`;
+    const tags = (l.tags || []).slice(0, 5).map(t => `<span class="listing-tag">${t}</span>`).join('');
+    const price = l.price_amount != null ? `${l.price_currency || ''} ${Number(l.price_amount).toFixed(2)}` : '—';
+    const updated = l.updated_timestamp ? fmtDate(new Date(l.updated_timestamp * 1000).toISOString()) : '—';
+    const listingLink = l.listing_url ? `<a href="${l.listing_url}" target="_blank" title="View on Etsy">${l.title || '(untitled)'}</a>` : (l.title || '(untitled)');
+    return `<tr>
+      <td>${img}</td>
+      <td>
+        <div class="listing-title">${listingLink}</div>
+        <div class="listing-tags">${tags}</div>
+      </td>
+      <td style="font-size:12px;color:var(--muted)">${l.shop_name}</td>
+      <td>${listingStateBadge(l.state)}</td>
+      <td style="font-size:13px;white-space:nowrap">${price}</td>
+      <td style="font-size:13px">${l.quantity ?? '—'}</td>
+      <td style="font-size:12px;color:var(--muted)">${(l.views || 0).toLocaleString()}</td>
+      <td style="font-size:11px;color:var(--muted)">${updated}</td>
+      <td>
+        <div class="listing-actions">
+          <button class="btn-sm primary" onclick="openEditListing(${l.listing_id},'${l.shop_name.replace(/'/g,"\\'")}')">Edit</button>
+          <button class="btn-sm danger" onclick="confirmDeleteListing(${l.listing_id},'${l.shop_name.replace(/'/g,"\\'")}','${(l.title||'').replace(/'/g,"\\'").slice(0,30)}')">Delete</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('listPageInfo').textContent =
+    `${listOffset + 1}–${Math.min(listOffset + listLimit, listTotal)} of ${listTotal}`;
+  document.getElementById('btnListPrev').disabled = listOffset === 0;
+  document.getElementById('btnListNext').disabled = listOffset + listLimit >= listTotal;
+}
+
+function changeListPage(dir) {
+  listOffset = Math.max(0, listOffset + dir * listLimit);
+  fetchListings();
+}
+
+async function syncListings() {
+  const shopSel  = document.getElementById('listingsShop');
+  const shopId   = shopSel?.value || '';
+  const state    = document.getElementById('listingsState')?.value || 'active';
+  const btn      = document.getElementById('listingsSyncBtn');
+  btn.disabled   = true;
+
+  // Collect shop names to sync
+  const shopNames = shopId
+    ? [shopSel.options[shopSel.selectedIndex]?.textContent.trim()]
+    : [...shopSel.querySelectorAll('option')].map(o => o.textContent.trim()).filter(Boolean);
+
+  for (const name of shopNames) {
+    btn.textContent = `Syncing ${name}…`;
+    const res = await fetch(`${API}/api/listings/sync/${encodeURIComponent(name)}?state=${state}`).then(r => r.json());
+    if (res.error) console.warn(`Sync error for ${name}:`, res.error);
+  }
+
+  btn.textContent = '↻ Sync from Etsy'; btn.disabled = false;
+  await fetchListings();
+}
+
+// ── Edit listing ────────────────────────────────────────────
+let _editListingId = null, _editShopName = null;
+const _listingCache = {};
+
+async function openEditListing(listingId, shopName) {
+  _editListingId = listingId; _editShopName = shopName;
+  // Pull from local cache if available
+  const listing = await fetch(`${API}/api/listings?shop_id=${encodeURIComponent(shopName)}&limit=1&offset=0`)
+    .then(r => r.json()).then(d => d.listings.find(l => l.listing_id === listingId));
+  if (listing) {
+    document.getElementById('editTitle').value  = listing.title || '';
+    document.getElementById('editPrice').value  = listing.price_amount != null ? listing.price_amount : '';
+    document.getElementById('editQty').value    = listing.quantity ?? '';
+    document.getElementById('editTags').value   = (listing.tags || []).join(', ');
+    document.getElementById('editState').value  = listing.state || 'active';
+    document.getElementById('editListingSubtitle').textContent = `#${listingId} — ${shopName}`;
+  }
+  document.getElementById('editListingError').textContent = '';
+  document.getElementById('editListingError').classList.remove('show');
+  document.getElementById('editListingSubmit').disabled = false;
+  document.getElementById('editListingModal').classList.add('open');
+}
+
+function closeEditListing() { document.getElementById('editListingModal').classList.remove('open'); }
+
+async function submitEditListing() {
+  const btn = document.getElementById('editListingSubmit');
+  const errEl = document.getElementById('editListingError');
+  const fields = {};
+  const title = document.getElementById('editTitle').value.trim();
+  const price = parseFloat(document.getElementById('editPrice').value);
+  const qty   = parseInt(document.getElementById('editQty').value, 10);
+  const tags  = document.getElementById('editTags').value.split(',').map(t => t.trim()).filter(Boolean).slice(0, 13);
+  const state = document.getElementById('editState').value;
+  if (title) fields.title = title;
+  if (!isNaN(price) && price > 0) fields.price = price;
+  if (!isNaN(qty)   && qty >= 0)  fields.quantity = qty;
+  if (tags.length)                fields.tags = tags;
+  if (state)                      fields.state = state;
+
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const resp = await fetch(`${API}/api/listings/${_editListingId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shop_name: _editShopName, fields }),
+    });
+    const json = await resp.json();
+    if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`);
+    closeEditListing();
+    await fetchListings();
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.classList.add('show');
+  }
+  btn.disabled = false; btn.textContent = 'Save changes';
+}
+
+// ── Create listing ──────────────────────────────────────────
+function openCreateListing() {
+  document.getElementById('createListingError').textContent = '';
+  document.getElementById('createListingError').classList.remove('show');
+  document.getElementById('createListingSubmit').disabled = false;
+  document.getElementById('createListingModal').classList.add('open');
+}
+function closeCreateListing() { document.getElementById('createListingModal').classList.remove('open'); }
+
+async function submitCreateListing() {
+  const btn   = document.getElementById('createListingSubmit');
+  const errEl = document.getElementById('createListingError');
+  const shopName = document.getElementById('createShop').value;
+  const title    = document.getElementById('createTitle').value.trim();
+  const desc     = document.getElementById('createDesc').value.trim();
+  const price    = parseFloat(document.getElementById('createPrice').value);
+  const qty      = parseInt(document.getElementById('createQty').value, 10);
+  const whoMade  = document.getElementById('createWhoMade').value;
+  const whenMade = document.getElementById('createWhenMade').value;
+  const tags     = document.getElementById('createTags').value.split(',').map(t => t.trim()).filter(Boolean).slice(0, 13);
+
+  if (!shopName || !title || !desc || isNaN(price) || isNaN(qty)) {
+    errEl.textContent = 'Please fill in all required fields.';
+    errEl.classList.add('show');
+    return;
+  }
+
+  btn.disabled = true; btn.textContent = 'Creating…';
+  try {
+    const resp = await fetch(`${API}/api/listings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        shop_name: shopName,
+        quantity: qty, title, description: desc, price,
+        who_made: whoMade, when_made: whenMade,
+        taxonomy_id: 1,  // placeholder — user must set correct one on Etsy.com
+        tags,
+      }),
+    });
+    const json = await resp.json();
+    if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`);
+    closeCreateListing();
+    document.getElementById('listingsState').value = 'draft';
+    await fetchListings();
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.classList.add('show');
+  }
+  btn.disabled = false; btn.textContent = 'Create draft';
+}
+
+// ── Delete listing ──────────────────────────────────────────
+async function confirmDeleteListing(listingId, shopName, title) {
+  if (!confirm(`Delete listing "${title}…"?\n\nThis is permanent and cannot be undone.`)) return;
+  try {
+    const resp = await fetch(`${API}/api/listings/${listingId}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shop_name: shopName }),
+    });
+    const json = await resp.json();
+    if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`);
+    await fetchListings();
+  } catch (err) {
+    alert('Delete failed: ' + err.message);
+  }
+}
+
+// ── Order notes ───────────────────────────────────────────────
+// Track pending saves to debounce onblur vs button click race
+const _noteSaveTimer = {};
+
+function onNoteInput(ta) {
+  // Mark note as dirty; the Save button is shown via CSS :focus-within
+  clearTimeout(_noteSaveTimer[ta.dataset.receipt]);
+}
+
+async function saveNote(ta) {
+  const receiptId = ta.dataset.receipt;
+  const note = ta.value;
+  // Debounce: if called twice quickly (blur + button click), only save once
+  clearTimeout(_noteSaveTimer[receiptId]);
+  _noteSaveTimer[receiptId] = setTimeout(async () => {
+    try {
+      const resp = await fetch(`${API}/api/orders/${receiptId}/note`, {
+        method:  'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ team_note: note }),
+      });
+      if (!resp.ok) throw new Error((await resp.json()).error);
+      // Brief "Saved" indicator on the save button
+      const btn = ta.nextElementSibling;
+      if (btn) {
+        const orig = btn.textContent;
+        btn.textContent = '✓ Saved';
+        btn.classList.add('team-note-saved');
+        setTimeout(() => { btn.textContent = orig; btn.classList.remove('team-note-saved'); }, 1500);
+      }
+    } catch (e) { /* silent fail — note is still in textarea */ }
+  }, 80);
+}
+
+// ── Bulk select ───────────────────────────────────────────────
+function getSelectedCbs() {
+  return [...document.querySelectorAll('.order-select-cb:checked')];
+}
+
+function onOrderCbChange() {
+  const checked = getSelectedCbs();
+  const all = [...document.querySelectorAll('.order-select-cb')];
+  const selectAllCb = document.getElementById('cbSelectAll');
+  if (selectAllCb) {
+    selectAllCb.checked = all.length > 0 && checked.length === all.length;
+    selectAllCb.indeterminate = checked.length > 0 && checked.length < all.length;
+  }
+  const bar = document.getElementById('bulkBar');
+  if (checked.length > 0) {
+    document.getElementById('bulkCount').textContent = `${checked.length} order${checked.length > 1 ? 's' : ''} selected`;
+    bar.classList.add('visible');
+  } else {
+    bar.classList.remove('visible');
+  }
+}
+
+function toggleSelectAll(cb) {
+  document.querySelectorAll('.order-select-cb').forEach(c => { c.checked = cb.checked; });
+  onOrderCbChange();
+}
+
+function clearSelection() {
+  document.querySelectorAll('.order-select-cb').forEach(c => { c.checked = false; });
+  const cb = document.getElementById('cbSelectAll');
+  if (cb) { cb.checked = false; cb.indeterminate = false; }
+  document.getElementById('bulkBar').classList.remove('visible');
+}
+
+// Reset selection state whenever orders are re-rendered
+const _origFetchOrders = fetchOrders;
+// (clearSelection is called inside fetchOrders below)
+
+// ── Bulk complete modal ───────────────────────────────────────
+function openBulkModal() {
+  const cbs = getSelectedCbs();
+  if (!cbs.length) return;
+
+  document.getElementById('bulkCarrier').value = '4PX';
+  document.getElementById('bulkCarrierLabel').textContent = '4PX';
+  document.getElementById('bulkError').textContent = '';
+  document.getElementById('bulkError').classList.remove('show');
+  document.getElementById('bulkProgress').textContent = '';
+  document.getElementById('bulkSubmitBtn').disabled = false;
+  document.getElementById('bulkSubmitBtn').textContent = `Complete ${cbs.length} order${cbs.length > 1 ? 's' : ''}`;
+
+  document.getElementById('bulkOrderList').innerHTML = cbs.map(cb => `
+    <div class="bulk-order-row">
+      <div class="bulk-order-info">
+        <div class="bulk-order-name">${cb.dataset.buyer || 'Order #' + cb.dataset.receipt}</div>
+        <div class="bulk-order-meta">${cb.dataset.shop} · #${cb.dataset.receipt}</div>
+      </div>
+      <input class="bulk-tracking-input" type="text"
+             placeholder="Tracking number"
+             id="bulk-track-${cb.dataset.receipt}"
+             autocomplete="off">
+    </div>
+  `).join('');
+
+  document.getElementById('bulkShipModal').classList.add('open');
+  // Focus first tracking input
+  setTimeout(() => {
+    const first = document.querySelector('.bulk-tracking-input');
+    if (first) first.focus();
+  }, 60);
+}
+
+function closeBulkModal() {
+  document.getElementById('bulkShipModal').classList.remove('open');
+}
+
+async function submitBulkModal() {
+  const cbs = getSelectedCbs();
+  const carrier = document.getElementById('bulkCarrier').value.trim() || '4PX';
+  const errEl   = document.getElementById('bulkError');
+  const progEl  = document.getElementById('bulkProgress');
+  const btn     = document.getElementById('bulkSubmitBtn');
+
+  // Collect orders with their tracking numbers
+  const orders = cbs.map(cb => ({
+    receipt_id:    cb.dataset.receipt,
+    shop_name:     cb.dataset.shop,
+    buyer:         cb.dataset.buyer,
+    tracking_code: (document.getElementById('bulk-track-' + cb.dataset.receipt)?.value || '').trim(),
+  }));
+
+  const missing = orders.filter(o => !o.tracking_code);
+  if (missing.length) {
+    errEl.textContent = `Please enter tracking numbers for: ${missing.map(o => o.buyer || '#' + o.receipt_id).join(', ')}`;
+    errEl.classList.add('show');
+    return;
+  }
+
+  btn.disabled = true;
+  errEl.classList.remove('show');
+
+  let done = 0, failed = [];
+  for (const o of orders) {
+    progEl.textContent = `Processing ${done + 1} of ${orders.length}…`;
+    try {
+      const resp = await fetch(`${API}/api/orders/${o.receipt_id}/ship`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ tracking_code: o.tracking_code, carrier_name: carrier }),
+      });
+      const json = await resp.json();
+      if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`);
+    } catch (err) {
+      failed.push(`${o.buyer || '#' + o.receipt_id}: ${err.message}`);
+    }
+    done++;
+  }
+
+  if (failed.length) {
+    errEl.textContent = `${done - failed.length} succeeded. Failed:\n${failed.join('\n')}`;
+    errEl.classList.add('show');
+    btn.disabled = false;
+    btn.textContent = 'Retry failed';
+    progEl.textContent = '';
+  } else {
+    progEl.textContent = `✓ All ${done} orders marked as shipped.`;
+    setTimeout(async () => {
+      closeBulkModal();
+      clearSelection();
+      await fetchOrders();
+    }, 900);
+  }
+}
+
+// Close bulk modal on overlay click or Escape
+document.addEventListener('DOMContentLoaded', () => {
+  const bModal = document.getElementById('bulkShipModal');
+  if (bModal) bModal.addEventListener('click', e => { if (e.target === bModal) closeBulkModal(); });
+});
+
+async function populateFilters() {
+  const data = await fetch(API + '/api/shops').then(r => r.json());
+  const shopSel  = document.getElementById('filterShop');
+  const groupSel = document.getElementById('filterGroup');
+
+  const groups = [...new Set(data.shops.map(s => s.group_id))];
+  groups.forEach(g => {
+    const opt = document.createElement('option');
+    opt.value = g; opt.textContent = g.replace('group_', '');
+    groupSel.appendChild(opt);
+  });
+
+  data.shops.forEach(s => {
+    const opt = document.createElement('option');
+    opt.value = s.shop_id; opt.textContent = s.shop_name;
+    shopSel.appendChild(opt);
+
+    // Also populate listings shop selectors (by shop_name, not ID)
+    ['listingsShop', 'createShop'].forEach(id => {
+      const sel = document.getElementById(id);
+      if (!sel) return;
+      if (sel.querySelector(`option[value="${s.shop_name}"]`)) return;
+      if (id === 'listingsShop') {
+        // listings filter uses shop_id
+        const o = document.createElement('option');
+        o.value = s.shop_id; o.textContent = s.shop_name;
+        sel.appendChild(o);
+      } else {
+        // createShop uses shop_name
+        const o = document.createElement('option');
+        o.value = s.shop_name; o.textContent = s.shop_name;
+        sel.appendChild(o);
+      }
+    });
+  });
+}
+
+// ── Shops ─────────────────────────────────────────────────────
+async function loadShops() {
+  const data = await fetch(API + '/api/shops').then(r => r.json());
+  const tokenBadge = (status) => {
+    const map = {
+      // access token currently valid (within the 1-hour window)
+      active:            '<span class="badge badge-green">Token active</span>',
+      // access token expired between syncs — TokenManager auto-refreshes at next sync, no action needed
+      needs_refresh:     '<span class="badge badge-green">Auto-refresh ✓</span>',
+      // 90-day refresh token expired — user must re-run oauth:setup for this shop
+      refresh_expired:   '<span class="badge badge-red">Re-auth needed</span>',
+      not_authenticated: '<span class="badge badge-muted">Not authorized</span>',
+    };
+    return map[status] || `<span class="badge badge-muted">${status}</span>`;
+  };
+
+  document.getElementById('shopsGrid').innerHTML = data.shops.map(s => `
+    <div class="shop-card">
+      <div class="shop-name">${s.shop_name}</div>
+      <div class="shop-meta">${s.group_label}</div>
+      <div style="margin-bottom:10px">${tokenBadge(s.token_status)}</div>
+      <div class="shop-stats">
+        <div class="shop-stat">${fmt(s.receipts_in_db)}<span>Orders in DB</span></div>
+        <div class="shop-stat">${s.refresh_token_days_remaining != null ? s.refresh_token_days_remaining + 'd' : '—'}<span>Token expiry</span></div>
+        <div class="shop-stat" style="grid-column:span 2;font-size:11px;color:var(--muted)">
+          Synced: ${s.last_synced_at_iso ? fmtDate(s.last_synced_at_iso) : 'Never'}
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ── Sync log ──────────────────────────────────────────────────
+async function loadSyncLog() {
+  const data = await fetch(API + '/api/sync-log?limit=100').then(r => r.json());
+  const wrap = document.getElementById('syncLogWrap');
+
+  if (!data.log.length) {
+    wrap.innerHTML = '<div class="empty">No sync history yet. Start the sync worker: npm run sync</div>';
+    return;
+  }
+
+  const statusBadge = (s) => {
+    if (s === 'success') return '<span class="badge badge-green">Success</span>';
+    if (s === 'error')   return '<span class="badge badge-red">Error</span>';
+    return '<span class="badge badge-yellow">' + s + '</span>';
+  };
+
+    wrap.innerHTML = data.log.map(e => `
+    <div class="log-entry">
+      ${statusBadge(e.status)}
+      <span class="log-shop">${e.shop_name}</span>
+      <span class="log-time">${fmtDate(e.started_at_iso)}</span>
+      <span class="log-count">${e.receipts_synced} receipts</span>
+      ${e.duration_seconds != null ? `<span style="color:var(--muted);font-size:12px">${e.duration_seconds}s</span>` : ''}
+      ${e.error_message ? `<span style="color:var(--red);font-size:12px">${e.error_message}</span>` : ''}
+    </div>
+  `).join('');
+}
+
+// ── Init ──────────────────────────────────────────────────────
+(async () => {
+  // Fetch exchange rates early so customs amounts show on first render
+  loadExchangeRates();
+  // Load orders first (default tab), then overview in background
+  await Promise.all([populateFilters(), fetchOrders()]);
+  loadOverview();
+  // Auto-refresh every 2 minutes
+  setInterval(loadOverview, 2 * 60 * 1000);
+  setInterval(fetchOrders,  2 * 60 * 1000);
+  // Refresh exchange rates every 6 hours
+  setInterval(loadExchangeRates, 6 * 60 * 60 * 1000);
+})();
+</script>
+
+<!-- ── Edit Listing Modal ────────────────────────────────────────────── -->
+<div class="modal-overlay" id="editListingModal">
+  <div class="modal-box" style="width:560px">
+    <div class="modal-title">Edit listing</div>
+    <div class="modal-subtitle" id="editListingSubtitle"></div>
+    <div class="modal-field"><label class="modal-label">Title</label>
+      <input class="modal-input" id="editTitle" type="text"></div>
+    <div class="modal-field"><label class="modal-label">Price</label>
+      <input class="modal-input" id="editPrice" type="number" step="0.01" min="0.01"></div>
+    <div class="modal-field"><label class="modal-label">Quantity</label>
+      <input class="modal-input" id="editQty" type="number" min="0"></div>
+    <div class="modal-field"><label class="modal-label">Tags (comma-separated, max 13)</label>
+      <input class="modal-input" id="editTags" type="text" placeholder="kawaii, iphone case, y2k"></div>
+    <div class="modal-field">
+      <label class="modal-label">State</label>
+      <select class="modal-input" id="editState">
+        <option value="active">Active</option>
+        <option value="inactive">Inactive (deactivate)</option>
+        <option value="draft">Draft</option>
+      </select>
+    </div>
+    <div class="modal-error" id="editListingError"></div>
+    <div class="modal-actions">
+      <button class="modal-cancel" onclick="closeEditListing()">Cancel</button>
+      <button class="modal-submit" id="editListingSubmit" onclick="submitEditListing()">Save changes</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Create Listing Modal ───────────────────────────────────────────── -->
+<div class="modal-overlay" id="createListingModal">
+  <div class="modal-box" style="width:600px;max-height:90vh;overflow-y:auto">
+    <div class="modal-title">Create draft listing</div>
+    <div class="modal-subtitle">Creates a draft on Etsy. Add images and publish from Etsy.com.</div>
+    <div class="modal-field"><label class="modal-label">Shop <span style="color:var(--red)">*</span></label>
+      <select class="modal-input" id="createShop"></select></div>
+    <div class="modal-field"><label class="modal-label">Title <span style="color:var(--red)">*</span></label>
+      <input class="modal-input" id="createTitle" type="text"></div>
+    <div class="modal-field"><label class="modal-label">Description <span style="color:var(--red)">*</span></label>
+      <textarea class="modal-input" id="createDesc" rows="4" style="resize:vertical"></textarea></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+      <div class="modal-field"><label class="modal-label">Price (in shop currency) <span style="color:var(--red)">*</span></label>
+        <input class="modal-input" id="createPrice" type="number" step="0.01" min="0.01"></div>
+      <div class="modal-field"><label class="modal-label">Quantity <span style="color:var(--red)">*</span></label>
+        <input class="modal-input" id="createQty" type="number" min="1" value="1"></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+      <div class="modal-field"><label class="modal-label">Who made it <span style="color:var(--red)">*</span></label>
+        <select class="modal-input" id="createWhoMade">
+          <option value="i_did">I did</option>
+          <option value="collective">A member of my shop</option>
+          <option value="someone_else">Someone else</option>
+        </select></div>
+      <div class="modal-field"><label class="modal-label">When was it made <span style="color:var(--red)">*</span></label>
+        <select class="modal-input" id="createWhenMade">
+          <option value="made_to_order">Made to order</option>
+          <option value="2020_2025">2020–2025</option>
+          <option value="2010_2019">2010–2019</option>
+          <option value="2000_2009">2000–2009</option>
+        </select></div>
+    </div>
+    <div class="modal-field"><label class="modal-label">Tags (comma-separated, max 13)</label>
+      <input class="modal-input" id="createTags" type="text" placeholder="kawaii, iphone case, y2k"></div>
+    <div class="modal-field" style="background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.2);border-radius:7px;padding:10px 12px;margin-top:4px">
+      <p style="font-size:12px;color:var(--muted);line-height:1.6">
+        ⓘ <strong style="color:var(--text)">Requires listing_w scope.</strong>
+        If this fails with 403, re-run <code style="background:rgba(255,255,255,.08);padding:1px 5px;border-radius:3px">npm run oauth:setup</code> for the shop and include <strong>listings_w</strong> scope.
+        After creating, upload images and set taxonomy on Etsy.com to publish.
+      </p>
+    </div>
+    <div class="modal-error" id="createListingError"></div>
+    <div class="modal-actions">
+      <button class="modal-cancel" onclick="closeCreateListing()">Cancel</button>
+      <button class="modal-submit" id="createListingSubmit" onclick="submitCreateListing()">Create draft</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Bulk action bar ─────────────────────────────────────────────────── -->
+<div class="bulk-bar" id="bulkBar">
+  <span class="bulk-bar-count" id="bulkCount">0 selected</span>
+  <button class="bulk-bar-deselect" onclick="clearSelection()">✕ Deselect all</button>
+  <button class="bulk-bar-submit" onclick="openBulkModal()">✓ Complete orders</button>
+</div>
+
+<!-- ── Complete Order Modal (must be inside <body> so getElementById works) ── -->
+<!-- ── Bulk Complete Modal ───────────────────────────────────────────── -->
+<div class="modal-overlay" id="bulkShipModal">
+  <div class="modal-box" style="width:580px">
+    <div class="modal-title">Complete orders</div>
+    <div class="modal-subtitle">
+      Carrier: <strong id="bulkCarrierLabel">4PX</strong> &nbsp;·&nbsp;
+      Enter a tracking number for each order below.
+    </div>
+
+    <div class="modal-field" style="margin-bottom:10px">
+      <label class="modal-label">Shipping carrier</label>
+      <input class="modal-input" id="bulkCarrier" type="text" value="4PX"
+             oninput="document.getElementById('bulkCarrierLabel').textContent=this.value||'4PX'">
+    </div>
+
+    <div class="bulk-order-list" id="bulkOrderList"></div>
+
+    <div class="modal-error" id="bulkError"></div>
+    <div class="bulk-progress" id="bulkProgress"></div>
+
+    <div class="modal-actions">
+      <button class="modal-cancel" onclick="closeBulkModal()">Cancel</button>
+      <button class="modal-submit" id="bulkSubmitBtn" onclick="submitBulkModal()">Complete all orders</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="shipModal">
+  <div class="modal-box">
+    <div class="modal-title">Complete order</div>
+    <div class="modal-subtitle" id="shipModalSubtitle">
+      Mark this order as shipped and notify the buyer.
+    </div>
+
+    <div class="modal-field">
+      <label class="modal-label">Shipping carrier</label>
+      <input class="modal-input" id="shipCarrier" type="text" value="4PX">
+    </div>
+
+    <div class="modal-field">
+      <label class="modal-label">Tracking number <span style="color:var(--red)">*</span></label>
+      <input class="modal-input" id="shipTracking" type="text" placeholder="Enter tracking number" autocomplete="off">
+    </div>
+
+    <div class="modal-field">
+      <label class="modal-label">Note to buyer <span style="color:var(--muted);font-weight:400">(optional)</span></label>
+      <input class="modal-input" id="shipNote" type="text" placeholder="e.g. Your order is on the way!">
+    </div>
+
+    <div class="modal-error" id="shipError"></div>
+
+    <div class="modal-actions">
+      <button class="modal-cancel" onclick="closeShipModal()">Cancel</button>
+      <button class="modal-submit" id="shipSubmitBtn" onclick="submitShipModal()">Complete order</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

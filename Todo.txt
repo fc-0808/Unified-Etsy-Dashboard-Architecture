@@ -1,0 +1,68 @@
+OAuth Setup:
+"For Group 1 shops (20–26):
+  1. Open AdsPower Profile 1 (has IPFoxy 61.18.209.10:45001 configured)
+  2. Run: npm run oauth:setup   ← in your normal Windows terminal
+  3. Script shows the OAuth URL
+  4. PASTE that URL into the AdsPower Profile 1 browser
+  5. Log into Etsy as the shop's owner email
+  6. Click Allow Access
+  7. Browser redirects to localhost:3003 — terminal captures the token
+  8. Repeat for next shop (same AdsPower profile stays open)
+
+For Group 2 shops (27–31):
+  1. Close Profile 1 browser, open AdsPower Profile 2
+  2. Same process with IPFoxy 61.18.209.118:45001"
+
+
+
+
+1) Add a group scheduler with jitter
+Each shop should get:
+
+base scheduled time
+fixed per-shop offset
+randomized jitter
+randomized retry delay
+This prevents same-second clustering.
+
+2) Bind every API client to a single shop context
+Each shop sync job should carry:
+
+shop ID
+group ID
+proxy URL
+credentials
+token state
+No shared mutable client across groups.
+
+3) Add a mandatory proxy verification gate
+Before any sync:
+
+check outbound IP through the expected proxy
+compare against expected proxy identity
+abort if mismatch
+4) Add “fail closed” network handling
+If a proxy disconnects:
+
+stop requests immediately
+never downgrade to direct IP
+mark the sync as invalid
+alert operator
+5) Separate OAuth from sync runtime
+Keep OAuth browser authorization in AdsPower, but ensure:
+
+the access token is stored per shop
+refresh token rotation is handled centrally
+token refresh requests also use the correct proxy context if needed
+6) Log network identity for audit
+Log for each sync:
+
+timestamp
+shop ID
+group ID
+expected proxy
+observed egress IP
+result of verification
+sync start/finish time
+This creates forensic traceability if Etsy behavior changes.
+

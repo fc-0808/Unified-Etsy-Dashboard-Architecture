@@ -1,0 +1,17 @@
+---
+description: Use Etsy Dev MCP for Open API v3 spec, scopes, and schema questions
+globs: src/etsy/**,src/auth/**,scripts/oauth-setup.js,src/workers/**,src/db/**
+alwaysApply: false
+---
+
+# Etsy Open API v3
+
+When implementing or debugging Etsy API integration in this project:
+
+1. **Prefer the `etsy` MCP server** (Etsy Dev MCP) for endpoint parameters, response schemas, required OAuth scopes, and rate-limit rules — it mirrors the live OpenAPI spec.
+2. **Do not guess** operationIds, field names, or scopes; call `search_etsy_api` or `get_endpoint` first.
+3. **This MCP does not call Etsy** — it is documentation only. Runtime calls go through `src/etsy/client.js` and the per-group proxy chain in `src/proxy/factory.js`.
+4. **Personal Access constraints** for this dashboard: 5 shops per app key, scopes `transactions_r`, `shops_r`, `listings_r`; respect 5 QPS / 5,000 QPD per key documented in `src/etsy/client.js`.
+5. **OpSec**: OAuth authorization must originate from the shop's AdsPower profile IP; sync/token refresh must use the matching group proxy — never bypass proxy for API traffic.
+
+Official docs: https://developers.etsy.com/documentation/mcp_server/devmcpserver/

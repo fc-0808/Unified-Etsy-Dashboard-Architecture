@@ -8,9 +8,12 @@
     "proxy:test": "node test_proxy.js",
     "proxy:verify": "node scripts/verify-proxies.js",
     "db:setup": "node scripts/setup-db.js",
+    "smoke-test": "node scripts/smoke-test.js",
     "dev": "node src/server/index.js",
     "sync": "node src/workers/sync.js",
-    "start": "node src/server/index.js"
+    "start": "node src/server/index.js",
+    "smoke": "node scripts/smoke-test.js",
+    "fetch-images": "node scripts/fetch-images.js"
   },
   "keywords": [],
   "author": "",
