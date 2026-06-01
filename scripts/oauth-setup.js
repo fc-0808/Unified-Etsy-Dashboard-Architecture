@@ -25,8 +25,12 @@
  *
  * Required scopes (what we request):
  *   transactions_r  — read orders and receipts
+ *   transactions_w  — create shipment tracking (mark orders as shipped)
  *   shops_r         — read shop info
+ *   shops_w         — update shop settings
  *   listings_r      — read all listings including inactive
+ *   listings_w      — create and edit listings
+ *   listings_d      — delete listings
  */
 
 const crypto = require('crypto');
@@ -34,7 +38,7 @@ const http = require('http');
 const path = require('path');
 const readline = require('readline');
 const axios = require('axios');
-const { loadConfig, getAllShops } = require('../src/config/schema');
+const { loadConfig, getAllShops, findShopContext, usesGroupProxy } = require('../src/config/schema');
 const { TokenManager } = require('../src/auth/token-manager');
 
 const REDIRECT_URI = 'http://localhost:3003/oauth/redirect';
@@ -42,8 +46,21 @@ const CALLBACK_PORT = 3003;
 const ETSY_TOKEN_URL = 'https://api.etsy.com/v3/public/oauth/token';
 const ETSY_OAUTH_URL = 'https://www.etsy.com/oauth/connect';
 
-// Scopes required for this dashboard
-const REQUIRED_SCOPES = ['transactions_r', 'shops_r', 'listings_r'].join(' ');
+// Scopes required for this dashboard.
+// NOTE: Etsy's public OAuth v3 does NOT expose conversation scopes.
+// The messaging feature uses existing tokens with the scopes below.
+// If the undocumented conversation endpoints are accessible, they work
+// with these scopes. If not, the UI degrades gracefully with an "Open on Etsy"
+// fallback link directly to the conversation thread.
+const REQUIRED_SCOPES = [
+  'transactions_r',
+  'transactions_w',
+  'shops_r',
+  'shops_w',
+  'listings_r',
+  'listings_w',
+  'listings_d',
+].join(' ');
 
 // ─── PKCE helpers ─────────────────────────────────────────────────────────────
 
@@ -177,6 +194,41 @@ function waitForAuthCode(expectedState) {
   });
 }
 
+// ─── API key preflight ─────────────────────────────────────────────────────────
+
+/**
+ * Verify the Etsy app keystring + shared secret are active before OAuth.
+ * Pending or mis-copied keys return 403 and produce "application not recognized" in the browser.
+ *
+ * @param {string} keystring
+ * @param {string} sharedSecret
+ * @returns {Promise<number>} application_id from openapi-ping
+ */
+async function verifyApiKeyActive(keystring, sharedSecret) {
+  try {
+    const { data } = await axios.get('https://api.etsy.com/v3/application/openapi-ping', {
+      headers: { 'x-api-key': `${keystring}:${sharedSecret}` },
+      timeout: 15_000,
+    });
+    return data.application_id;
+  } catch (err) {
+    const status = err.response?.status;
+    const detail = err.response?.data?.error ?? err.message;
+    if (status === 403 || status === 401) {
+      throw new Error(
+        `Etsy rejected this app's API credentials (HTTP ${status}: ${detail}).\n\n` +
+          `  This is why the browser shows "application is not recognized".\n\n` +
+          `  Check https://www.etsy.com/developers/your-apps for "cutecasesonly-inventory-sync":\n` +
+          `    1. Status must be Approved (not Pending Approval).\n` +
+          `    2. Re-copy keystring + shared secret (eye icon) into config.json.\n` +
+          `    3. Callback URL on THIS app must be exactly:\n` +
+          `       ${REDIRECT_URI}\n`
+      );
+    }
+    throw new Error(`Could not reach Etsy to verify API key: ${detail}`);
+  }
+}
+
 // ─── Token exchange ────────────────────────────────────────────────────────────
 
 async function exchangeCodeForTokens(keystring, authCode, codeVerifier) {
@@ -202,15 +254,13 @@ async function main() {
   console.log('═'.repeat(65));
 
   console.log(`
-  IMPORTANT — OpSec requirement:
+  OpSec — proxied groups (socks5:// in config.json):
   ─────────────────────────────────────────────────────────────
-  When the OAuth URL opens, you MUST visit it from within the
-  AdsPower browser profile assigned to this shop's group,
-  with that group's IPFoxy proxy active.
+  When the OAuth URL opens, visit it from the AdsPower profile
+  for that shop's group, with that group's IPFoxy proxy active.
 
-  DO NOT use your system browser or a different profile.
-  The OAuth authorization must come from the correct IP to
-  avoid linking your identity across shop groups.
+  Direct groups (proxy: "direct"): use a normal browser logged in
+  as the shop owner. No VPN or IPFoxy required for those shops.
   ─────────────────────────────────────────────────────────────
 `);
 
@@ -227,13 +277,28 @@ async function main() {
   const shop = await selectShop(config, tokenManager);
   if (!shop) process.exit(0);
 
+  const shopCtx = findShopContext(config, shop.shop_id);
+  const isDirect = shopCtx && !usesGroupProxy(shopCtx.group);
+
   console.log(`\n  Setting up OAuth for: ${shop.shop_name} (${shop.shop_id})`);
   console.log(`  Owner email:  ${shop.owner_email || 'not set in config'}`);
   console.log(`  Group:        ${shop.group_label}`);
+  console.log(`  Routing:      ${isDirect ? 'direct (no proxy)' : 'VPN → IPFoxy proxy'}`);
   console.log(`  API key:      ${shop.api_key.slice(0, 8)}...`);
+  console.log('\n  Verifying API key with Etsy (openapi-ping)...');
+  try {
+    const appId = await verifyApiKeyActive(shop.api_key, shop.shared_secret);
+    console.log(`  ✓ API key active — application_id ${appId}`);
+  } catch (err) {
+    console.error(`\n  ${err.message}\n`);
+    process.exit(1);
+  }
   console.log('');
   console.log('  ► Open a NEW INCOGNITO browser window NOW.');
   console.log(`  ► Log into Etsy.com as: ${shop.owner_email || 'the shop owner'}`);
+  if (!isDirect) {
+    console.log('  ► Use the AdsPower profile + IPFoxy IP for this group (see OpSec note above).');
+  }
   console.log('  ► Then open the OAuth URL below in that same incognito window.');
 
   // Generate PKCE values

@@ -6,7 +6,38 @@
   "max_orders_per_sync": 100,
   "db_path": "data/etsy_dashboard.db",
 
+  "_inventory_comment": "Auto-restock: order-triggered checks run on every receipt sync; periodic sweep uses inv_watch_interval_minutes. Set auto_restock_enabled to false for alert-only (ZERO_STOCK events, no Etsy PUT). Requires listings_w OAuth scope.",
+  "auto_restock_enabled": true,
+  "restock_quantity": 3,
+  "inv_watch_interval_minutes": 240,
+
+  "_pre_transit_comment": "pre_transit_days: upper bound (in days) for how long after label creation we query carrier tracking for an order. With the 4PX tracking integration active (Pass D in sync worker), this is NOT the primary pre-transit signal — carrier_confirmed_at IS NULL is. This value controls how far back we look for unconfirmed orders to check. 30 days is the default — it gives a generous window so even slow-moving packages are checked. Once carrier_confirmed_at is set (carrier physically picked up the package), the order immediately moves to In-transit regardless of this value.",
+  "pre_transit_days": 30,
+
+  "_fourpx_comment": "4PX Official Open Platform API credentials (https://open.4px.com). When set, the sync worker uses the authenticated tr.order.tracking.get endpoint to determine precise pre-transit/in-transit status for 4PX shipments. These credentials ALSO power the 'Create 4PX Shipment' feature in the Orders tab. Register at https://open.4px.com to obtain these values.",
+  "fourpx_app_key": "YOUR_4PX_APP_KEY",
+  "fourpx_app_secret": "YOUR_4PX_APP_SECRET",
+
+  "_fourpx_order_comment": "4PX shipping order creation settings. These three fields enable the 'Create 4PX Shipment' button on unshipped orders. fourpx_sender: your warehouse/shipper address in China. fourpx_warehouse_code: the 4PX warehouse code where you drop off packages (e.g. 'CNSZX01' for Shenzhen SZX, ask your 4PX account manager if unsure). fourpx_default_product: the default logistics product code used to pre-select the dropdown (e.g. 'BDS' for Business Direct Small — confirm with your 4PX account). Leave fourpx_sender null to disable the shipment creation feature.",
+  "fourpx_sender": {
+    "first_name": "Warehouse",
+    "company": "Your Company Name",
+    "phone": "+86-755-00000000",
+    "country": "CN",
+    "city": "Shenzhen",
+    "state": "Guangdong",
+    "street": "Your warehouse address"
+  },
+  "fourpx_warehouse_code": "CNSZX01",
+  "fourpx_default_product": "BDS",
+
+  "_osp_comment": "Shopping Route Generator integration. Set osp_project_dir to the absolute path of your Orders_sorting_program project. The dashboard Route tab will call the Python script directly to generate shopping_route.xlsx from the browser. osp_python defaults to 'python' — change to 'py' on Windows if that is your Python launcher, or set the full path to python.exe.",
+  "osp_project_dir": null,
+  "osp_python": "python",
+
   "_auth_note": "OAuth access tokens expire in 1 HOUR. Store the refresh_token here (valid 90 days). The TokenManager handles refreshing automatically. If refresh_token expires after 90 days, re-run oauth:setup for that shop.",
+
+  "_email_imap_comment": "OPTIONAL — per-shop email_imap block enables the Messages tab email sync feature. Etsy sends a notification email to the shop's linked Gmail/Outlook account whenever a buyer sends a message. This dashboard polls that inbox via IMAP, parses the emails, and displays the conversations here. GMAIL SETUP: (1) Enable 2-Step Verification on the Google account. (2) Go to Google Account → Security → App Passwords. (3) Choose 'Mail' and generate a 16-character app password. (4) Use that code as `password` — NOT your regular Gmail login. OUTLOOK: use your regular password or an app password if MFA is enabled. Leave out the email_imap block entirely to skip email sync for that shop.",
 
   "groups": [
     {
@@ -71,6 +102,28 @@
           "api_key": "YOUR_KEYSTRING",
           "shared_secret": "YOUR_SHARED_SECRET",
           "refresh_token": "42345678.YOUR_REFRESH_TOKEN"
+        }
+      ]
+    },
+    {
+      "_comment": "Use proxy \"direct\" when the shop does not use VPN/IPFoxy. Each shop still needs its own api_key + shared_secret from that Etsy developer app (max 5 shops per key).",
+      "group_id": "group_direct_local",
+      "label": "Direct connection (no proxy)",
+      "proxy": "direct",
+      "shops": [
+        {
+          "shop_id": "YourShopName",
+          "shop_name": "Your Shop Display Name",
+          "owner_email": "owner@example.com",
+          "api_key": "OTHER_APP_KEYSTRING",
+          "shared_secret": "OTHER_APP_SHARED_SECRET",
+          "_email_imap_note": "Add this block to enable the Messages tab for this shop. Etsy sends message notifications to the Gmail account linked to this shop. Use a Gmail App Password (not your real password).",
+          "email_imap": {
+            "host": "imap.gmail.com",
+            "port": 993,
+            "user": "yourshop@gmail.com",
+            "password": "xxxx xxxx xxxx xxxx"
+          }
         }
       ]
     }

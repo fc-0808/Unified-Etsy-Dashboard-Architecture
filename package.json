@@ -13,19 +13,36 @@
     "sync": "node src/workers/sync.js",
     "start": "node src/server/index.js",
     "smoke": "node scripts/smoke-test.js",
-    "fetch-images": "node scripts/fetch-images.js"
+    "fetch-images": "node scripts/fetch-images.js",
+    "backfill-images": "node scripts/backfill-images.js",
+    "auto:start": "pm2 start ecosystem.config.js && pm2 save",
+    "auto:stop": "pm2 stop etsy-dashboard",
+    "auto:restart": "pm2 restart etsy-dashboard",
+    "auto:status": "pm2 status",
+    "auto:logs": "pm2 logs etsy-dashboard --lines 100",
+    "auto:install": "powershell -ExecutionPolicy Bypass -File scripts/install-autostart.ps1",
+    "auto:uninstall": "powershell -ExecutionPolicy Bypass -File scripts/uninstall-autostart.ps1"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "archiver": "^8.0.0",
     "axios": "^1.16.1",
     "better-sqlite3": "^12.10.0",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "https-proxy-agent": "^9.0.0",
+    "imapflow": "^1.3.4",
+    "mailparser": "^3.9.9",
     "node-cron": "^4.2.1",
+    "playwright": "^1.60.0",
+    "playwright-core": "^1.60.0",
     "socks": "^2.8.9",
-    "socks-proxy-agent": "^10.0.0"
+    "socks-proxy-agent": "^10.0.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "pm2": "^7.0.1"
   }
 }

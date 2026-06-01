@@ -15,7 +15,7 @@
  */
 
 const axios = require('axios');
-const { loadConfig } = require('../src/config/schema');
+const { loadConfig, usesGroupProxy } = require('../src/config/schema');
 const { createGroupClient } = require('../src/proxy/factory');
 
 async function getHomeIp() {
@@ -28,6 +28,7 @@ async function getHomeIp() {
 }
 
 async function checkGroup(group, vpnPort, homeIp) {
+  const direct = !usesGroupProxy(group);
   const start = Date.now();
   try {
     const client = createGroupClient(group, vpnPort, true);
@@ -37,8 +38,8 @@ async function checkGroup(group, vpnPort, homeIp) {
     });
     const exitIp = data.ip;
     const elapsed = Date.now() - start;
-    const ok = exitIp !== homeIp;
-    return { group_id: group.group_id, label: group.label, exitIp, ok, elapsed, error: null };
+    const ok = direct ? Boolean(exitIp) : exitIp !== homeIp;
+    return { group_id: group.group_id, label: group.label, exitIp, ok, elapsed, error: null, direct };
   } catch (err) {
     const elapsed = Date.now() - start;
     return {
@@ -87,7 +88,13 @@ async function main() {
 
   let allPassed = true;
   for (const r of results) {
-    const status = r.ok ? '✓  ISOLATED' : r.error ? '✗  ERROR' : '✗  SAME IP';
+    const status = r.direct
+      ? (r.ok ? '✓  DIRECT' : '✗  ERROR')
+      : r.ok
+        ? '✓  ISOLATED'
+        : r.error
+          ? '✗  ERROR'
+          : '✗  SAME IP';
     const ip = r.exitIp ?? r.error?.slice(0, 30) ?? '—';
     const row = [
       r.group_id.padEnd(colW[0]),

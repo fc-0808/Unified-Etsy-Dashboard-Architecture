@@ -17,6 +17,7 @@ const https = require('https');
 const tls = require('tls');
 const axios = require('axios');
 const { SocksClient } = require('socks');
+const { usesGroupProxy } = require('../config/schema');
 
 /**
  * Parse "socks5://user:pass@host:port" into the object socks library expects.
@@ -117,7 +118,39 @@ const _instanceCache = new Map();
  * @param {boolean} [forceNew=false] - Bypass cache and create a fresh instance
  * @returns {import('axios').AxiosInstance}
  */
+/**
+ * Axios instance for groups with proxy: "direct" — no VPN/IPFoxy chain.
+ * @param {object} groupConfig
+ * @param {boolean} [forceNew=false]
+ * @returns {import('axios').AxiosInstance}
+ */
+function createDirectGroupClient(groupConfig, forceNew = false) {
+  if (!forceNew && _instanceCache.has(groupConfig.group_id)) {
+    return _instanceCache.get(groupConfig.group_id);
+  }
+
+  const instance = axios.create({
+    baseURL: 'https://openapi.etsy.com/v3',
+    timeout: 30_000,
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+  });
+
+  instance._groupId = groupConfig.group_id;
+  instance._direct = true;
+  instance._agent = null;
+
+  _instanceCache.set(groupConfig.group_id, instance);
+  return instance;
+}
+
 function createGroupClient(groupConfig, vpnPort, forceNew = false) {
+  if (!usesGroupProxy(groupConfig)) {
+    return createDirectGroupClient(groupConfig, forceNew);
+  }
+
   if (!forceNew && _instanceCache.has(groupConfig.group_id)) {
     return _instanceCache.get(groupConfig.group_id);
   }
@@ -183,6 +216,11 @@ async function verifyGroupProxy(groupConfig, vpnPort) {
   return response.data.ip;
 }
 
+/** @returns {boolean} */
+function groupUsesProxy(groupConfig) {
+  return usesGroupProxy(groupConfig);
+}
+
 /**
  * Flush the agent cache. Call after updating config.json at runtime.
  */
@@ -195,9 +233,11 @@ function clearClientCache() {
 
 module.exports = {
   TwoHopSocksAgent,
+  createDirectGroupClient,
   createGroupClient,
   createGroupProxyClient,
   verifyGroupProxy,
+  groupUsesProxy,
   clearClientCache,
   parseProxyUrl,
 };

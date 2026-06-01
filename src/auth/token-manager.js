@@ -116,7 +116,7 @@ class TokenManager {
         throw new TokenExpiredError(
           shopId,
           `Refresh token for shop ${shopId} has expired (90-day limit). ` +
-            `Re-run 'npm run oauth:setup' inside the correct AdsPower profile for this shop.`
+            `Re-run 'npm run oauth:setup' to re-authenticate this shop.`
         );
       }
     }
@@ -230,6 +230,20 @@ class TokenManager {
     if (this._store[shopId]) {
       this._store[shopId].access_token_expires_at = 0;
       this._save();
+    }
+  }
+
+  /**
+   * Hot-reload tokens from disk without restarting the server.
+   * Call this after running oauth:setup for any shop so the server
+   * immediately picks up the new tokens (including any new scopes).
+   */
+  reload() {
+    this._load();
+    // Force all in-memory tokens to appear expired so the next request
+    // triggers a refresh using the newly-stored refresh token.
+    for (const shopId of Object.keys(this._store)) {
+      this._store[shopId].access_token_expires_at = 0;
     }
   }
 }

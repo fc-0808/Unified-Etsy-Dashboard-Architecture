@@ -18,11 +18,11 @@
  */
 
 const path = require('path');
-const { loadConfig, getAllShops, findShopContext } = require('../src/config/schema');
+const { loadConfig, getAllShops, findShopContext, usesGroupProxy } = require('../src/config/schema');
 const { TokenManager } = require('../src/auth/token-manager');
 const { createGroupProxyClient, verifyGroupProxy } = require('../src/proxy/factory');
 const { buildShopClient, ping, getShop, getReceipts } = require('../src/etsy/client');
-const { initDb, upsertReceipt } = require('../src/db/setup');
+const { initDb, syncConfigToDb, upsertReceipt } = require('../src/db/setup');
 
 const TOKENS_PATH = path.resolve(__dirname, '../tokens.json');
 const RECEIPT_LIMIT  = 5; // fetch only 5 receipts per shop to stay well inside QPD budget
@@ -176,10 +176,11 @@ async function main() {
     console.log(`    ${i + 1}. ${s.shop_name.padEnd(28)} ${s.group_label}`)
   );
 
-  // Open SQLite DB
+  // Open SQLite DB and sync config → ensures every shop in config has a DB row
   let db;
   try {
     db = initDb(config.db_path);
+    syncConfigToDb(db, config);
   } catch (err) {
     console.error(`\n  DB error: ${err.message}\n`);
     process.exit(1);
@@ -197,10 +198,13 @@ async function main() {
       const exitIp = await verifyGroupProxy(group, config.vpn_local_port);
       proxyIPs.set(groupId, exitIp);
       proxyClients.set(groupId, createGroupProxyClient(group, config.vpn_local_port));
-      console.log(pass(`Proxy [${groupId}]  exit IP = ${exitIp}`));
+      const routeLabel = usesGroupProxy(group) ? 'Proxy' : 'Direct';
+      console.log(pass(`${routeLabel} [${groupId}]  exit IP = ${exitIp}`));
     } catch (err) {
-      console.log(fail(`Proxy [${groupId}]  FAILED: ${err.message}`));
-      console.log(info('  → Is your VPN connected? Is IPFoxy active?'));
+      console.log(fail(`Network [${groupId}]  FAILED: ${err.message}`));
+      if (usesGroupProxy(group)) {
+        console.log(info('  → Is your VPN connected? Is IPFoxy active?'));
+      }
       console.log('');
       // Still continue — we'll report failure per shop for this group
       proxyClients.set(groupId, null);

@@ -30,7 +30,7 @@ This is the OpSec requirement — the OAuth authorization must come from the cor
 Your professional top-tier world-level software engineer as well as ETSY expert working in Silicon Valley.
 Explain how I can achieve it since I think we are not building with adspower now? 
 
-Let's say i have 3 ETYS personal access keys registered, 
+Let's say i have 3 ETSY personal access keys registered, 
 one with waltercheung1388@gmail.com, 
 one with walterfung19950808@gmail.com 
 and one with walterfung0808@gmail.com. 

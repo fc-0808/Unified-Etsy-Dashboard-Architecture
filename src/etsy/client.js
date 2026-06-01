@@ -41,11 +41,14 @@
  *
  * ─── RATE BUDGET MATH ────────────────────────────────────────────────────────
  *
- * 5 shops × 5 endpoints per sync = 25 calls per app per sync cycle
- * At 60-minute intervals: 25 × 24 = 600 calls/day per app key
- * Budget used: 600 / 5000 = 12% — comfortable headroom
+ * Shops per key varies: up to 5 on proxied keys, 1 on the direct key (CuteCasesOnly).
+ * ~5 API calls per shop per sync (resolveShopId + 2 receipt passes + listing images).
  *
- * DO NOT use 5-minute intervals: 25 × 288 = 7,200 calls/day — 44% over budget
+ * 5 shops/key, 60-min interval: 5 × 5 × 24 =  600 calls/day → 12% of 5K QPD
+ * 1 shop/key,  60-min interval: 1 × 5 × 24 =  120 calls/day →  2% of 5K QPD
+ *
+ * Server startup prints a live per-key budget breakdown.
+ * DO NOT drop sync_interval_minutes below 15 — risks >3,600 calls/day on a 5-shop key.
  */
 
 const axios = require('axios');
@@ -325,9 +328,12 @@ async function getReceipts(shopClient, shopId, options = {}) {
     sort_on: options.sort_on ?? 'created',
     sort_order: options.sort_order ?? 'desc',
   };
-  if (options.was_paid !== undefined) params.was_paid = options.was_paid;
-  if (options.was_shipped !== undefined) params.was_shipped = options.was_shipped;
-  if (options.min_created) params.min_created = options.min_created;
+  if (options.was_paid     !== undefined) params.was_paid           = options.was_paid;
+  if (options.was_shipped  !== undefined) params.was_shipped        = options.was_shipped;
+  if (options.min_created)               params.min_created         = options.min_created;
+  if (options.min_last_modified)         params.min_last_modified   = options.min_last_modified;
+  if (options.sort_on)                   params.sort_on             = options.sort_on;
+  if (options.sort_order)                params.sort_order          = options.sort_order;
 
   return withRetry(async () => {
     const { data } = await shopClient.get(`/application/shops/${numericId}/receipts`, { params });
@@ -346,6 +352,108 @@ async function getReceipt(shopClient, shopId, receiptId) {
     const { data } = await shopClient.get(
       `/application/shops/${numericId}/receipts/${receiptId}`
     );
+    return data;
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Listing inventory endpoints
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /application/listings/{listing_id}/inventory
+ * Scope: listings_r
+ *
+ * Returns the full inventory for a listing including all variation products
+ * and their per-offering quantities.
+ *
+ * Response shape:
+ *   { products: [{product_id, property_values, offerings: [{offering_id, quantity, is_enabled, price}]}],
+ *     price_on_property, quantity_on_property, sku_on_property }
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} listingId
+ */
+async function getListingInventory(shopClient, listingId) {
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const { data } = await shopClient.get(`/application/listings/${listingId}/inventory`);
+    return data;
+  });
+}
+
+/**
+ * PUT /application/listings/{listing_id}/inventory
+ * Scope: listings_w  ← REQUIRES RE-AUTHORIZATION if tokens lack this scope
+ *
+ * Replaces the full inventory for a listing. You MUST send the complete
+ * products array (not just the changed items) — Etsy replaces everything.
+ *
+ * Typical workflow:
+ *   1. const inv = await getListingInventory(client, id);
+ *   2. Modify inv.products (e.g. set quantity to 3)
+ *   3. await updateListingInventory(client, id, inv);
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} listingId
+ * @param {object} inventory   — full inventory object from getListingInventory
+ */
+async function updateListingInventory(shopClient, listingId, inventory) {
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    // Etsy's PUT endpoint only accepts a strict subset of fields.
+    // The GET response includes read-only fields (product_id, is_deleted, offering_id)
+    // and price as a {amount, divisor, currency_code} object — all of which must be
+    // stripped / converted before sending or Etsy returns 400 "invalid keys".
+    const cleanProducts = (inventory.products || []).map(p => {
+      const product = {
+        property_values: (p.property_values || []).map(pv => {
+          const out = {
+            property_id:   pv.property_id,
+            property_name: pv.property_name,
+            values:        pv.values    ?? [],
+            value_ids:     pv.value_ids ?? [],
+          };
+          // Only include scale fields when non-null and non-zero to avoid
+          // sending invalid scale references for non-scaled properties.
+          if (pv.scale_id)   out.scale_id   = pv.scale_id;
+          if (pv.scale_name) out.scale_name = pv.scale_name;
+          return out;
+        }),
+        // Only include non-deleted, enabled offerings.
+        // CRITICAL: readiness_state_id (processing profile) MUST be echoed back
+        // on every offering — even when readiness_state_on_property is [] —
+        // or Etsy returns 400 "All offerings need readiness state".
+        offerings: (p.offerings || [])
+          .filter(o => !o.is_deleted && o.is_enabled !== false)
+          .map(o => {
+            // price arrives as {amount, divisor, currency_code}; PUT wants float
+            const rawPrice = o.price;
+            const price = (rawPrice && typeof rawPrice === 'object')
+              ? rawPrice.amount / rawPrice.divisor
+              : (rawPrice ?? 0);
+            const offering = { price, quantity: o.quantity, is_enabled: true };
+            // Echo back readiness_state_id — required when present
+            if (o.readiness_state_id != null) {
+              offering.readiness_state_id = o.readiness_state_id;
+            }
+            return offering;
+          }),
+      };
+      if (p.sku) product.sku = p.sku;
+      return product;
+    })
+    // Drop any products whose every offering was filtered out
+    .filter(p => p.offerings.length > 0);
+
+    const body = {
+      products:                     cleanProducts,
+      price_on_property:            inventory.price_on_property            ?? [],
+      quantity_on_property:         inventory.quantity_on_property         ?? [],
+      sku_on_property:              inventory.sku_on_property              ?? [],
+      readiness_state_on_property:  inventory.readiness_state_on_property  ?? [],
+    };
+    const { data } = await shopClient.put(`/application/listings/${listingId}/inventory`, body);
     return data;
   });
 }
@@ -495,7 +603,10 @@ async function* paginateReceipts(shopClient, shopId, options = {}) {
     const page = await getReceipts(shopClient, numericId, {
       limit,
       offset,
-      min_created: options.min_created,
+      min_created:        options.min_created,
+      min_last_modified:  options.min_last_modified,
+      sort_on:            options.sort_on,
+      sort_order:         options.sort_order,
     });
 
     if (!page.results || page.results.length === 0) break;
@@ -652,11 +763,163 @@ function getRemainingBudget(shopClient) {
   };
 }
 
+/**
+ * Update a shop's properties. Commonly used to set sale_message.
+ * Scope: shops_w
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} shopId
+ * @param {object} fields - Partial shop fields to update (e.g. { sale_message: '...' })
+ */
+async function updateShop(shopClient, shopId, fields) {
+  const numericId = await resolveShopId(shopClient, shopId);
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const { data } = await shopClient.put(`/application/shops/${numericId}`, fields);
+    return data;
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Conversations — undocumented Etsy v3 internal endpoints
+//
+// Etsy's public v3 API does not expose conversation/messaging endpoints.
+// However, Etsy's own web app (etsy.com/your/messages) calls private v3
+// endpoints that are accessible with valid OAuth tokens carrying the
+// conversations_r / conversations_w scopes.
+//
+// IMPORTANT: These endpoints are NOT in the public OpenAPI spec. They may
+// change without notice. All methods include explicit 403/404 error handling
+// so a missing scope or endpoint removal degrades gracefully without crashing
+// the rest of the sync pipeline.
+//
+// Required OAuth access: standard auth token (no special scope needed for these
+// internal endpoints — Etsy does not expose conversation scopes publicly).
+// The endpoints work when Etsy's web app session is replicated via OAuth token,
+// but may return 403 if Etsy restricts access to third-party keys.
+// All methods handle 403/404 gracefully and log a clear warning.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * List conversation threads for a shop.
+ * GET /v3/application/shops/{shop_id}/conversations
+ * Scope: conversations_r
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} shopId
+ * @param {object} [options]
+ * @param {number} [options.limit=25]
+ * @param {number} [options.offset=0]
+ * @returns {Promise<{ count: number, results: object[] }>}
+ */
+async function getConversations(shopClient, shopId, options = {}) {
+  const numericId = await resolveShopId(shopClient, shopId);
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const { data } = await shopClient.get(
+      `/application/shops/${numericId}/conversations`,
+      { params: { limit: options.limit ?? 25, offset: options.offset ?? 0 } }
+    );
+    return data;
+  });
+}
+
+/**
+ * Get a single conversation thread with all its messages.
+ * GET /v3/application/shops/{shop_id}/conversations/{convo_id}
+ * Scope: conversations_r
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} shopId
+ * @param {string|number} convoId
+ */
+async function getConversation(shopClient, shopId, convoId) {
+  const numericId = await resolveShopId(shopClient, shopId);
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const { data } = await shopClient.get(
+      `/application/shops/${numericId}/conversations/${convoId}`
+    );
+    return data;
+  });
+}
+
+/**
+ * Send a reply to a conversation thread.
+ * POST /v3/application/shops/{shop_id}/conversations/{convo_id}
+ * Scope: conversations_w
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} shopId
+ * @param {string|number} convoId
+ * @param {string} messageBody  - Plain text message content
+ */
+async function replyToConversation(shopClient, shopId, convoId, messageBody) {
+  const numericId = await resolveShopId(shopClient, shopId);
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const { data } = await shopClient.post(
+      `/application/shops/${numericId}/conversations/${convoId}`,
+      { message: messageBody }
+    );
+    return data;
+  });
+}
+
+/**
+ * Mark a conversation as read on Etsy.
+ * PUT /v3/application/shops/{shop_id}/conversations/{convo_id}
+ * Scope: conversations_w
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} shopId
+ * @param {string|number} convoId
+ */
+async function markConversationReadOnEtsy(shopClient, shopId, convoId) {
+  const numericId = await resolveShopId(shopClient, shopId);
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const { data } = await shopClient.put(
+      `/application/shops/${numericId}/conversations/${convoId}`,
+      { is_read: true }
+    );
+    return data;
+  });
+}
+
+/**
+ * Async generator: paginate all conversations for a shop.
+ * Yields batches of conversation objects.
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} shopId
+ * @param {object} [opts]
+ * @param {number} [opts.maxTotal=100]
+ */
+async function* paginateConversations(shopClient, shopId, opts = {}) {
+  const limit    = 25;
+  const maxTotal = opts.maxTotal ?? 100;
+  let offset     = 0;
+  let fetched    = 0;
+
+  while (fetched < maxTotal) {
+    const page = await getConversations(shopClient, shopId, { limit, offset });
+    const results = page.results ?? [];
+    if (!results.length) break;
+    yield results;
+    fetched += results.length;
+    offset  += results.length;
+    if (results.length < limit) break;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
+
 module.exports = {
   buildShopClient,
   attachRateLimitInterceptor,
   resolveShopId,
   getShop,
+  updateShop,
   getReceipts,
   getReceipt,
   createReceiptShipment,
@@ -668,9 +931,17 @@ module.exports = {
   updateListing,
   createDraftListing,
   deleteListing,
+  getListingInventory,
+  updateListingInventory,
   ping,
   pingShop,
   getRemainingBudget,
   RateLimiter,
   PERSONAL_ACCESS_QPD,
+  // Conversations (undocumented Etsy internal API)
+  getConversations,
+  getConversation,
+  replyToConversation,
+  markConversationReadOnEtsy,
+  paginateConversations,
 };
