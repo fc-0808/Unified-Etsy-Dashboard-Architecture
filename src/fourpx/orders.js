@@ -146,17 +146,39 @@ function splitName(fullName) {
  * @returns {Promise<Array>}
  */
 async function getLogisticsProducts(appKey, appSecret, filter = {}) {
-  const body = {};
-  if (filter.countryCode) body.receive_country = filter.countryCode.toUpperCase();
-  try {
-    const data = await callApi(appKey, appSecret, 'ds.xms.logistics_product.getlist', body);
-    return Array.isArray(data)
-      ? data
-      : (data.logisticsProductList ?? data.list ?? []);
-  } catch (err) {
-    console.warn(`[4px/orders] getLogisticsProducts failed: ${err.message}`);
-    return [];
-  }
+  // ds.xms.logistics_product.getlist REQUIRES transport_mode and returns a
+  // different product set per mode:
+  //   1 = Express / Commercial    2 = Priority air
+  //   3 = Postal / registered     4 = COD re-delivery
+  // To present the complete catalog we query every mode and merge by code.
+  const TRANSPORT_MODES = ['1', '2', '3', '4'];
+  const TRANSPORT_LABEL = { 1: 'express', 2: 'priority', 3: 'postal', 4: 'cod' };
+
+  const merged = new Map(); // code → product (first occurrence wins)
+
+  await Promise.all(TRANSPORT_MODES.map(async (mode) => {
+    const body = { transport_mode: mode };
+    if (filter.countryCode) body.receive_country = filter.countryCode.toUpperCase();
+    try {
+      const data = await callApi(appKey, appSecret, 'ds.xms.logistics_product.getlist', body);
+      const list = Array.isArray(data)
+        ? data
+        : (data.logisticsProductList ?? data.list ?? []);
+      for (const p of list) {
+        const code = p.logistics_product_code ?? p.logisticsProductCode ?? p.code;
+        if (!code || merged.has(code)) continue;
+        merged.set(code, {
+          ...p,
+          transport_mode:       mode,
+          transport_mode_label: TRANSPORT_LABEL[mode],
+        });
+      }
+    } catch (err) {
+      console.warn(`[4px/orders] getLogisticsProducts(transport_mode=${mode}) failed: ${err.message}`);
+    }
+  }));
+
+  return [...merged.values()];
 }
 
 /**
@@ -250,10 +272,19 @@ async function createShipOrder(appKey, appSecret, input) {
     };
   });
 
+  // ── business_type — REQUIRED by the API (DS000052 if empty). 4PX uses it for
+  //   internal scheduling. The official default is "BDS", which works across the
+  //   product families this dashboard ships (POSTLINK S5xxx, QC, PX, express…).
+  //   The actual carrier is selected by logistics_product_code, not this value.
+  const businessType = (input.business_type && String(input.business_type).trim()) || 'BDS';
+
   // ── Full payload ─────────────────────────────────────────────────────────────
+  // Structure matches the official 4PX ds.xms.order.create schema (Go SDK
+  // CreateOrderPost): logistics / recipient / deliver_type are NESTED wrapper
+  // objects, and return_info is required.
   const payload = {
     ref_no:          ref_no.trim(),
-    business_type:   'BDS',
+    business_type:   businessType,
     duty_type,
     is_insure:       'N',
     logistics_service_info: {

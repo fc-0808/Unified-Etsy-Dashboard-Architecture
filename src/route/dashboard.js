@@ -31,6 +31,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 
 const { getProductMapByNorm } = require('../db/setup');
+const enginePaths = require('./engine-paths');
 
 /** Valid component purchase statuses — mirror of OSP's STATUS_OPTIONS. */
 const STATUS_OPTIONS = ['Pending', 'Purchased', 'Out of Stock', 'Out of Production'];
@@ -60,12 +61,44 @@ function normalizeTitle(text) {
 }
 
 /**
- * The 50-char key OSP uses for status lookups and de-duplication.
+ * The 50-char normalised-title key OSP uses for status-cache lookups and
+ * de-duplication. This is a PRODUCT-TITLE key only — it is intentionally NOT
+ * unique per line-item, because OSP keys its status cache by title alone.
  * @param {string} title
  * @returns {string}
  */
 function itemKey(title) {
   return normalizeTitle(title).slice(0, 50);
+}
+
+/** Marker separating the title key from the listing id in a line-item key. */
+const LINE_KEY_MARKER = '#L';
+
+/**
+ * Per-line-item identity used to store charm / supplier / status assignments.
+ *
+ * The bare 50-char title key (`itemKey`) collides whenever two DIFFERENT
+ * products (listings) share the same first 50 title characters — a charm
+ * assigned to one then bleeds onto the other. We therefore scope the key by the
+ * Etsy listing id, which uniquely identifies the product on the order line.
+ * When the listing id is missing (legacy/edge data) we fall back to the bare
+ * title key so nothing breaks.
+ *
+ * Format: `${normalisedTitle[:50]}#L${listing_id}`  (e.g. "kawaii case#L4498110917")
+ *
+ * NOTE: This is *only* for our internal tables (route_assignments,
+ * product_assignments) and the dashboard UI. The OSP status cache and import
+ * payload keep using title-based keys (see writeStatusCache / rowsToImportOrders)
+ * so byte-for-byte parity with the Python generator is preserved.
+ *
+ * @param {string} title
+ * @param {string|number|null|undefined} listingId
+ * @returns {string}
+ */
+function lineItemKey(title, listingId) {
+  const base = itemKey(title);
+  const lid = listingId != null && String(listingId).trim() !== '' ? String(listingId).trim() : '';
+  return lid ? `${base}${LINE_KEY_MARKER}${lid}` : base;
 }
 
 /**
@@ -125,46 +158,65 @@ function parseVariations(variations) {
  * @returns {Array<object>} one row per order line-item
  */
 function buildRouteRows(db, config, filters = {}) {
-  const conditions = ['r.is_paid = 1'];
   const params = {};
+  let whereClause;
 
   // Single-receipt lookup (for "Add Order" feature — bypasses date filter).
   if (filters.receipt_id != null) {
-    conditions.push('r.receipt_id = @receipt_id');
     params.receipt_id = Number(filters.receipt_id);
+    whereClause = 'r.is_paid = 1 AND r.receipt_id = @receipt_id';
   } else if (Array.isArray(filters.receipt_ids) && filters.receipt_ids.length) {
-    // Explicit receipt set (e.g. orders pinned from the Orders tab). Bypasses the
-    // date + shipped filters so pre-transit (label-created) orders are included.
+    // Explicit receipt set. Bypasses the date + shipped filters so pre-transit
+    // (label-created) orders are included.
     const ids = filters.receipt_ids.map(Number).filter(Number.isInteger);
     if (ids.length) {
       const ph = ids.map((_, i) => `@rid${i}`).join(',');
       ids.forEach((id, i) => { params[`rid${i}`] = id; });
-      conditions.push(`r.receipt_id IN (${ph})`);
+      whereClause = `r.is_paid = 1 AND r.receipt_id IN (${ph})`;
     } else {
-      conditions.push('0');   // no valid ids → empty result
+      whereClause = '0';   // no valid ids → empty result
     }
   } else {
+    // Default date / shop / pending scope.
+    const scope = [];
     const nowSec = Math.floor(Date.now() / 1000);
     if (filters.date_from) {
       const ts = Math.floor(new Date(filters.date_from + 'T00:00:00Z').getTime() / 1000);
-      if (!Number.isNaN(ts)) { conditions.push('r.etsy_created_at >= @date_from'); params.date_from = ts; }
+      if (!Number.isNaN(ts)) { scope.push('r.etsy_created_at >= @date_from'); params.date_from = ts; }
     } else {
-      conditions.push('r.etsy_created_at >= @date_from');
+      scope.push('r.etsy_created_at >= @date_from');
       params.date_from = nowSec - 30 * 24 * 3600;
     }
     if (filters.date_to) {
       const ts = Math.floor(new Date(filters.date_to + 'T23:59:59Z').getTime() / 1000);
-      if (!Number.isNaN(ts)) { conditions.push('r.etsy_created_at <= @date_to'); params.date_to = ts; }
+      if (!Number.isNaN(ts)) { scope.push('r.etsy_created_at <= @date_to'); params.date_to = ts; }
     }
     if (filters.shop_id) {
-      conditions.push('r.shop_id = @shop_id');
+      scope.push('r.shop_id = @shop_id');
       params.shop_id = filters.shop_id;
     }
     if (!filters.include_shipped) {
-      conditions.push(
+      scope.push(
         "r.is_shipped = 0 AND r.status NOT IN ('Canceled','Cancelled','Fully Refunded','Fully refunded')"
       );
     }
+
+    let scopeClause = scope.length ? `(${scope.join(' AND ')})` : '1';
+
+    // Extra receipts (e.g. pre-transit orders the operator pulled in via the
+    // Orders tab "Send to Route") are UNIONed on TOP of the date/shop scope —
+    // they bypass the date + shipped filters so they always show up for
+    // purchasing, *in addition to* (never instead of) the pending orders.
+    const extra = Array.isArray(filters.extra_receipt_ids)
+      ? filters.extra_receipt_ids.map(Number).filter(Number.isInteger)
+      : [];
+    if (extra.length) {
+      const ph = extra.map((_, i) => `@xrid${i}`).join(',');
+      extra.forEach((id, i) => { params[`xrid${i}`] = id; });
+      scopeClause = `(${scopeClause} OR r.receipt_id IN (${ph}))`;
+    }
+
+    whereClause = `r.is_paid = 1 AND ${scopeClause}`;
   }
 
   const rows = db.prepare(`
@@ -174,7 +226,7 @@ function buildRouteRows(db, config, filters = {}) {
            s.shop_name
     FROM receipts r
     JOIN shops s ON s.shop_id = r.shop_id
-    WHERE ${conditions.join(' AND ')}
+    WHERE ${whereClause}
     ORDER BY r.etsy_created_at ASC
   `).all(params);
 
@@ -213,8 +265,9 @@ function buildRouteRows(db, config, filters = {}) {
   // Priority: route_assignments > product_assignments > excel_product_map > OSP catalog.
   const excelProductMap = getProductMapByNorm(db);
 
-  // Optional supplier-catalog enrichment (read-only from OSP's etsy_orders.db).
-  const cat = filters.enrich_supplier ? openOspCatalog(config.osp_project_dir) : null;
+  // Optional supplier-catalog enrichment (read-only from the engine's
+  // etsy_orders.db — vendored inside this dashboard, no external program).
+  const cat = filters.enrich_supplier ? openOspCatalog(enginePaths.engineDir(config)) : null;
   const supplierCache = new Map();   // item_key → match result (titles repeat across orders)
 
   const out = [];
@@ -229,7 +282,9 @@ function buildRouteRows(db, config, filters = {}) {
 
       const { phoneModel, style } = parseVariations(t.variations);
       const comps = styleComponents(style);
-      const key      = itemKey(title);
+      // Listing-scoped key uniquely identifies this line-item's product, so two
+      // different listings that share a 50-char title prefix never collide.
+      const key       = lineItemKey(title, t.listing_id);
       const titleNorm = normalizeTitle(title);
       const saved    = assignMap[`${r.receipt_id}\x00${key}`] || {};
       const product  = productMap[key] || {};
@@ -237,8 +292,10 @@ function buildRouteRows(db, config, filters = {}) {
 
       let supplier = null;
       if (cat) {
-        if (!supplierCache.has(key)) supplierCache.set(key, matchSupplier(cat, title));
-        supplier = supplierCache.get(key);
+        // Supplier match is purely a function of the title — cache by title key.
+        const catKey = titleNorm;
+        if (!supplierCache.has(catKey)) supplierCache.set(catKey, matchSupplier(cat, title));
+        supplier = supplierCache.get(catKey);
       }
 
       // Priority chain for supplier (highest → lowest):
@@ -265,9 +322,23 @@ function buildRouteRows(db, config, filters = {}) {
         };
       }
 
-      // Priority chain for charm (per-order > per-product > Excel Product Map > OSP catalog):
-      const effectiveCharmCode = saved.charm_code || product.charm_code || excelPM.charm_code || '';
-      const effectiveCharmShop = saved.charm_shop || product.charm_shop || excelPM.charm_shop || '';
+      // Priority chain for charm.
+      //
+      // CONFIRMED (user-set only) — these populate `charm_code` and are treated as
+      // "assigned".  The "Needs charm" filter and the summary's charms_assigned count
+      // rely on this field being empty when no human has made an explicit decision:
+      //   1. Per-order save      (route_assignments.charm_code)   highest priority
+      //   2. Per-product default (product_assignments.charm_code) user set this deliberately
+      //
+      // SUGGESTIONS ONLY — populated into `suggested_charm_code` so the operator sees
+      // a pre-filled hint and can accept or override without it silently counting as done:
+      //   3. Excel Product Map  (product_map.charm_code)   bulk-import; needs confirmation
+      //   4. OSP catalog match  (supplier.charm_code)      auto-matched; needs confirmation
+      //
+      // Keeping catalog data out of charm_code ensures "Needs charm" always surfaces
+      // every item that still requires a conscious operator decision.
+      const effectiveCharmCode = saved.charm_code || product.charm_code || '';
+      const effectiveCharmShop = saved.charm_shop || product.charm_shop || '';
 
       out.push({
         receipt_id:  r.receipt_id,
@@ -550,18 +621,24 @@ function resolveCharmImagePath(ospDir, code) {
  * component so an item reset to Pending in the UI reliably overrides any stale
  * "Purchased" value OSP may have read from a previous shopping_route.xlsx.
  *
- * @param {string} ospDir
+ * The Python generator reads this file from the SAME directory it writes the
+ * route Excel files to (`_load_ui_status_cache(output_path.parent)`), so the
+ * caller must pass the route OUTPUT directory — not the OSP project dir.
+ *
+ * @param {string} outputDir - directory the route files are generated into
  * @param {Array<object>} rows - output of buildRouteRows (already filtered)
  * @returns {{ path: string, count: number }}
  */
-function writeStatusCache(ospDir, rows) {
-  const outputDir = path.join(ospDir, 'output');
+function writeStatusCache(outputDir, rows) {
   fs.mkdirSync(outputDir, { recursive: true });
   const cachePath = path.join(outputDir, 'route_statuses_cache.json');
 
   const cache = {};
   for (const row of rows) {
-    const base = `${row.receipt_id}\x00${row.item_key}\x00`;
+    // OSP keys its status cache by the bare 50-char TITLE key (it has no concept
+    // of our listing-scoped line keys), so reconstruct that key from the title
+    // to stay byte-identical with the Python generator's `_load_ui_status_cache`.
+    const base = `${row.receipt_id}\x00${itemKey(row.title)}\x00`;
     if (row.has_case)  cache[`${base}case`]  = row.status_case  || DEFAULT_STATUS;
     if (row.has_grip)  cache[`${base}grip`]  = row.status_grip  || DEFAULT_STATUS;
     if (row.has_charm) cache[`${base}charm`] = row.status_charm || DEFAULT_STATUS;
@@ -604,11 +681,130 @@ function rowsToImportOrders(rows) {
       phone_model: row.phone_model,
       style:       row.style,
       image_url:   row.image_url,
+      // Internal UED key — used by the image-fetcher to look up cached bytes
+      // before writing the JSON payload. Stripped from the payload after image
+      // injection so the OSP never sees it.
+      _listing_id: row.listing_id || null,
       charm_code:  row.charm_code || '',
       charm_shop:  row.charm_shop || '',
+      // Supplier resolved by the dashboard (catalog enrichment + manual
+      // overrides). Passed so OSP places the item on the exact shop/stall the
+      // operator sees, instead of re-guessing from its own catalog.
+      supplier_shop:  row.supplier_shop  || '',
+      supplier_stall: row.supplier_stall || '',
     });
   }
   return [...byReceipt.values()].filter(o => o.items.length > 0);
+}
+
+/**
+ * Build a map of normalised product title → primary product image URL.
+ *
+ * The product_map catalog stores only the product title, so to show a thumbnail
+ * we resolve each title back to the Etsy listing it came from. Listing IDs and
+ * titles live in `receipts.all_transactions` (a JSON array per receipt), and the
+ * cached CDN thumbnail URL lives in `listing_images`. We index by the same
+ * `normalizeTitle` key used everywhere else so lookups are exact.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @returns {Map<string, string>} title_norm → image URL
+ */
+function buildProductImageMap(db) {
+  const urlByListing = new Map();
+  try {
+    db.prepare('SELECT listing_id, url FROM listing_images WHERE url IS NOT NULL AND url <> \'\'')
+      .all()
+      .forEach(r => urlByListing.set(String(r.listing_id), r.url));
+  } catch { /* table may not exist yet */ }
+
+  const out = new Map();
+  if (urlByListing.size === 0) return out;
+
+  let recs = [];
+  try {
+    recs = db.prepare(
+      "SELECT all_transactions FROM receipts WHERE all_transactions IS NOT NULL AND all_transactions <> ''"
+    ).all();
+  } catch { return out; }
+
+  for (const r of recs) {
+    let txs = [];
+    try { txs = JSON.parse(r.all_transactions || '[]'); } catch { continue; }
+    if (!Array.isArray(txs)) continue;
+    for (const t of txs) {
+      const tn = normalizeTitle(t.title || '');
+      if (!tn || out.has(tn)) continue;
+      const lid = t.listing_id ? String(t.listing_id) : '';
+      const url = lid ? urlByListing.get(lid) : null;
+      if (url) out.set(tn, url);
+    }
+  }
+  return out;
+}
+
+/**
+ * Backfill empty supplier / charm fields in `product_map` from the bundled
+ * route-engine catalog (etsy_orders.db), using *exact* normalised-title matches
+ * only. This reconciles the catalog the operator sees with the data the route
+ * generator actually uses, so a product never shows a blank supplier when the
+ * engine already knows it. Existing (non-empty) product_map values are never
+ * overwritten — manual/Excel data always wins.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {object} config
+ * @returns {{ ok: boolean, supplier_filled: number, charm_filled: number, reason?: string }}
+ */
+function reconcileProductMap(db, config) {
+  const cat = openOspCatalog(enginePaths.engineDir(config));
+  if (!cat) return { ok: false, supplier_filled: 0, charm_filled: 0, reason: 'route-engine catalog unavailable' };
+
+  const rows = db.prepare('SELECT id, title_norm, shop_name, stall, charm_shop, charm_code FROM product_map').all();
+  const now = Math.floor(Date.now() / 1000);
+  const upd = db.prepare(`
+    UPDATE product_map
+    SET shop_name = @shop_name, stall = @stall, charm_shop = @charm_shop,
+        charm_code = @charm_code, updated_at = @updated_at
+    WHERE id = @id
+  `);
+
+  let supplierFilled = 0, charmFilled = 0;
+  const tx = db.transaction(() => {
+    for (const r of rows) {
+      const entry = cat.byNorm.get(r.title_norm);
+      if (!entry) continue;
+
+      const supplierEmpty = !r.shop_name && !r.stall;
+      const charmEmpty     = !r.charm_shop && !r.charm_code;
+      if (!supplierEmpty && !charmEmpty) continue;
+
+      const next = {
+        id: r.id,
+        shop_name:  r.shop_name,
+        stall:      r.stall,
+        charm_shop: r.charm_shop,
+        charm_code: r.charm_code,
+        updated_at: now,
+      };
+      let changed = false;
+
+      if (supplierEmpty && (entry.shop_name || entry.stall)) {
+        next.shop_name = entry.shop_name || '';
+        next.stall     = entry.stall || '';
+        supplierFilled++;
+        changed = true;
+      }
+      if (charmEmpty && (entry.charm_shop || entry.charm_code)) {
+        next.charm_shop = entry.charm_shop || '';
+        next.charm_code = entry.charm_code || '';
+        charmFilled++;
+        changed = true;
+      }
+      if (changed) upd.run(next);
+    }
+  });
+  tx();
+
+  return { ok: true, supplier_filled: supplierFilled, charm_filled: charmFilled };
 }
 
 module.exports = {
@@ -617,9 +813,13 @@ module.exports = {
   MATCH_THRESHOLD,
   normalizeTitle,
   itemKey,
+  lineItemKey,
+  LINE_KEY_MARKER,
   styleComponents,
   parseVariations,
   buildRouteRows,
+  buildProductImageMap,
+  reconcileProductMap,
   loadCharmCatalog,
   resolveCharmImagePath,
   writeStatusCache,

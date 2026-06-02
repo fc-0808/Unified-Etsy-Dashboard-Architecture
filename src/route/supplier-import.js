@@ -3,8 +3,8 @@
 /**
  * Supplier-catalog importer.
  *
- * Reads the authoritative supplier directory from OSP's
- *   <osp_project_dir>/data/supplier_catalog.xlsx
+ * Reads the authoritative supplier directory from the bundled route engine's
+ *   <route_engine_dir>/data/supplier_catalog.xlsx   (see engine-paths.js)
  * and mirrors two of its sheets into the UED database so the dashboard can
  * drive its supplier / charm-shop pickers from the exact, real shop names and
  * stall locations — completely offline, with no per-request Excel parsing.
@@ -26,6 +26,7 @@ const {
   replaceCharmShopDirectory,
   replaceProductMap,
 } = require('../db/setup');
+const enginePaths = require('./engine-paths');
 
 /** Replicate dashboard.js normalizeTitle for product-map key generation. */
 function _normalizeTitle(text) {
@@ -41,8 +42,7 @@ let _lastMtimeMs = 0;
  * @returns {string|null}
  */
 function catalogPath(config) {
-  if (!config || !config.osp_project_dir) return null;
-  return path.join(config.osp_project_dir, 'data', 'supplier_catalog.xlsx');
+  return enginePaths.supplierCatalogPath(config);
 }
 
 /** Normalise a header cell to a lowercase key for tolerant column matching. */
@@ -145,7 +145,7 @@ function _readCharmShops(wb) {
  */
 function importSupplierCatalog(db, config, opts = {}) {
   const xlsxPath = catalogPath(config);
-  if (!xlsxPath) return { ok: false, reason: 'osp_project_dir not configured' };
+  if (!xlsxPath) return { ok: false, reason: 'route engine directory not resolved' };
   if (!fs.existsSync(xlsxPath)) return { ok: false, reason: 'supplier_catalog.xlsx not found', path: xlsxPath };
 
   const mtimeMs = fs.statSync(xlsxPath).mtimeMs;

@@ -1,5 +1,9 @@
 'use strict';
 
+// Load .env (OpenAI key + bulk-listing tuning) before anything else reads
+// process.env. Non-fatal if the file is absent — config.json still drives Etsy.
+require('dotenv').config();
+
 /**
  * Local dashboard server.
  *
@@ -48,8 +52,12 @@ const { upsertListing, upsertListingInventory,
         deleteCharmShopDirectoryRow,
         getCharmLibrary, getCharmByCode,
         insertCharmLibraryRow, updateCharmLibraryRow,
-        deleteCharmLibraryRow, reorderCharmLibrary } = require('../db/setup');
+        deleteCharmLibraryRow, reorderCharmLibrary,
+        getCharmPurchaseProgress, setCharmPurchaseProgress,
+        getProductMap, upsertProductMapRow, updateProductMapRowById, deleteProductMapRow } = require('../db/setup');
 const routeDashboard                               = require('../route/dashboard');
+const enginePaths                                  = require('../route/engine-paths');
+const { batchFetchRouteImages }                    = require('../route/image-fetcher');
 const unmatchedImages                              = require('../route/unmatched-images');
 const { logZeroStockIfNeeded, listingHasLiveZero,
         raiseOfferingsToTarget, getZeroStylesForListing } = require('../inventory/helpers');
@@ -64,8 +72,16 @@ const { getLogisticsProducts, createShipOrder,
         getShipLabel, cancelShipOrder,
         getShipOrder, splitName }                  = require('../fourpx/orders');
 const { getFullTrackingEvents }                    = require('../tracking/checker');
+const { scanInputRoot }                            = require('../listings/scanner');
+const { getShopListingSettings }                   = require('../listings/shop-settings');
+const { BulkJobManager }                           = require('../listings/bulk-runner');
 
 const TOKENS_PATH = path.resolve(__dirname, '../../tokens.json');
+
+// Absolute path to THIS dashboard's project root (src/server → ../../).
+// Used to keep generated artifacts (e.g. shopping-route Excel files) inside
+// our own program folder regardless of the process working directory.
+const UED_ROOT = path.resolve(__dirname, '../../');
 
 // ─── SSE sync-event bus ───────────────────────────────────────────────────────
 // All connected SSE clients receive real-time sync log events.
@@ -97,25 +113,193 @@ const _syncingShops = new Set();
 const _fpxProductsCache = new Map(); // key → { products, expiresAt }
 
 /**
- * Curated fallback list of standard 4PX XMS direct-shipping product codes.
+ * Comprehensive 4PX XMS logistics product catalogue — fallback for direct-customer
+ * API keys that cannot access ds.xms.logistics_product.getlist (returns error 000024).
  *
- * The ds.xms.logistics_product.getlist API is only available to software-service
- * provider accounts (ISV), NOT to direct-customer API keys. When that method
- * returns 404, the server returns this curated list instead so the dropdown
- * remains functional for direct customers.
+ * When the live API IS available (ISV / software-provider accounts), this list is
+ * never used — the API's country-filtered response takes precedence.
  *
- * Source: 4PX XMS product catalogue (b.4px.com) as of 2025.
- * Codes in parentheses are the canonical logistics_product_code values to pass
- * to ds.xms.order.create.
+ * Structure per entry:
+ *   code      — logistics_product_code passed verbatim to ds.xms.order.create
+ *   name      — short display label
+ *   desc      — one-line description with transit time estimate
+ *   tier      — 'economy' | 'standard' | 'express' | 'premium' | 'custom'
+ *   countries — ISO-2 destination codes where this product is offered.
+ *               Empty array [] means the product ships to ALL countries.
+ *
+ * Sources: b.4px.com portal, 4PX open-platform docs, partner reseller catalogs.
+ * Country arrays are best-effort; the live API is authoritative for your account.
  */
-const FOURPX_KNOWN_PRODUCTS = [
-  { code: 'S5058', name: 'POSTLINK-LW (S5058)',       desc: '邮政轻小件·普货 — US/CA/AU/EU' },
-  { code: 'S5062', name: 'POSTLINK-S (S5062)',         desc: '邮政小包·经济 — US/CA/AU/EU' },
-  { code: 'BDS',   name: 'BDS — Business Direct Small', desc: '4PX商业小件直邮' },
-  { code: 'FDYE',  name: 'FDYE — Yellow Express Direct', desc: '4PX直发黄速' },
-  { code: 'FXEC',  name: 'FXEC — Express via China Post', desc: '4PX中邮快递' },
-  { code: 'OTHER', name: 'Other / Custom…',            desc: 'Enter product code manually' },
+
+// Helper — ISO-2 codes for common destination regions
+const _EU27 = ['DE','FR','NL','IT','ES','PL','SE','BE','AT','PT','CZ','HU','RO',
+               'SK','FI','DK','IE','HR','SI','LT','LV','EE','BG','GR','LU','MT','CY'];
+const _EU_CORE = ['DE','FR','NL','IT','ES','PL','SE','BE','AT','PT'];
+const _ANGLOSPHERE = ['US','CA','AU','GB'];
+const _ASIA_EAST   = ['JP','KR','SG','MY','TH','PH','VN','TW','HK'];
+const _LATAM       = ['MX','BR','CL','AR','CO','PE'];
+
+const FOURPX_PRODUCT_CATALOG = [
+  // ── POSTLINK — Postal direct (邮政直连) ──────────────────────────────────────
+  {
+    code: 'S5058', name: 'POSTLINK-LW (S5058)',
+    desc: 'Postal Light Weight · ≤2 kg · no battery · 10–25 days',
+    tier: 'economy',
+    countries: [..._ANGLOSPHERE, ..._EU27, ..._ASIA_EAST, ..._LATAM, 'NO','CH','IS','NZ'],
+  },
+  {
+    code: 'S5118', name: 'US-ISLAND-PH (S5118)',
+    desc: 'Postal · US island territories (HI/AK/GU/PR/VI) + Philippines · 12–25 days',
+    tier: 'economy',
+    countries: ['US','PH'],
+  },
+  {
+    code: 'S5062', name: 'POSTLINK-S (S5062)',
+    desc: 'Postal Small Package · ≤2 kg · economy · 12–30 days',
+    tier: 'economy',
+    countries: [..._ANGLOSPHERE, ..._EU27, ..._ASIA_EAST, ..._LATAM, 'NO','CH','NZ'],
+  },
+  {
+    code: 'S5013', name: 'POSTLINK-R (S5013)',
+    desc: 'Postal Registered Airmail · global · 15–40 days',
+    tier: 'economy',
+    countries: [], // worldwide
+  },
+
+  // ── 4PX Direct Lines / Special Lines (特线产品) ───────────────────────────────
+  {
+    code: 'FDYE', name: 'Yellow Express Direct',
+    desc: '4PX Yellow Express · ePacket-grade · tracked · 8–18 days',
+    tier: 'standard',
+    countries: [..._ANGLOSPHERE, ..._EU_CORE, 'JP','KR','SG','MY','RU','BR','MX'],
+  },
+  {
+    code: 'FXEC', name: 'Express via China Post',
+    desc: 'China Post Express Registered · tracked · 10–20 days',
+    tier: 'standard',
+    countries: [], // worldwide
+  },
+  {
+    code: 'FXRM', name: 'Registered Airmail',
+    desc: 'China Post Registered Air · economy untracked · 15–30 days',
+    tier: 'economy',
+    countries: [], // worldwide
+  },
+  {
+    code: 'FLPS', name: 'Light Priority Small',
+    desc: '4PX Light Priority · ≤500 g · tracked · 8–16 days',
+    tier: 'standard',
+    countries: [..._ANGLOSPHERE, ..._EU_CORE],
+  },
+  {
+    code: 'FDBM', name: 'Blue Multi Direct',
+    desc: '4PX Blue Direct Multi-Piece · USPS last-mile · 8–15 days',
+    tier: 'standard',
+    countries: ['US'],
+  },
+  {
+    code: 'FDTM', name: 'Direct Tracked Mail',
+    desc: '4PX Direct Tracked Mail · USPS/Canada Post · 8–18 days',
+    tier: 'standard',
+    countries: ['US','CA'],
+  },
+
+  // ── 4PX Business Direct (商业小包) ───────────────────────────────────────────
+  {
+    code: 'BDS', name: 'Business Direct Small',
+    desc: '4PX Business Direct · tracked · global · 8–20 days',
+    tier: 'standard',
+    countries: [], // worldwide
+  },
+  {
+    code: 'BDSE', name: 'Business Direct Economy',
+    desc: '4PX Business Direct Economy · low-cost tracked · 10–25 days',
+    tier: 'economy',
+    countries: [..._ANGLOSPHERE, ..._EU_CORE, 'PL','SE','BE'],
+  },
+
+  // ── QC Series — Quality Controlled (质量保障专线) ─────────────────────────────
+  // Guaranteed scan events, dedicated sorters, low loss rate.
+  { code: 'QCUS', name: 'QC — United States',    desc: 'QC · USPS last-mile · 7–15 days',             tier: 'standard', countries: ['US'] },
+  { code: 'QCCA', name: 'QC — Canada',            desc: 'QC · Canada Post · 8–18 days',               tier: 'standard', countries: ['CA'] },
+  { code: 'QCAU', name: 'QC — Australia',         desc: 'QC · Australia Post · 8–18 days',            tier: 'standard', countries: ['AU'] },
+  { code: 'QCGB', name: 'QC — United Kingdom',    desc: 'QC · Royal Mail · 7–15 days',                tier: 'standard', countries: ['GB'] },
+  { code: 'QCDE', name: 'QC — Germany',           desc: 'QC · Deutsche Post/DHL · 8–16 days',         tier: 'standard', countries: ['DE'] },
+  { code: 'QCFR', name: 'QC — France',            desc: 'QC · La Poste Colissimo · 8–18 days',        tier: 'standard', countries: ['FR'] },
+  { code: 'QCNL', name: 'QC — Netherlands',       desc: 'QC · PostNL · 8–16 days',                    tier: 'standard', countries: ['NL'] },
+  { code: 'QCIT', name: 'QC — Italy',             desc: 'QC · Poste Italiane · 10–20 days',           tier: 'standard', countries: ['IT'] },
+  { code: 'QCES', name: 'QC — Spain',             desc: 'QC · Correos · 10–20 days',                  tier: 'standard', countries: ['ES'] },
+  { code: 'QCPL', name: 'QC — Poland',            desc: 'QC · InPost / Poczta Polska · 10–20 days',   tier: 'standard', countries: ['PL'] },
+  { code: 'QCSE', name: 'QC — Sweden',            desc: 'QC · PostNord · 10–20 days',                 tier: 'standard', countries: ['SE'] },
+  { code: 'QCNO', name: 'QC — Norway',            desc: 'QC · Posten Norge · 10–22 days',             tier: 'standard', countries: ['NO'] },
+  { code: 'QCDK', name: 'QC — Denmark',           desc: 'QC · PostNord DK · 10–20 days',              tier: 'standard', countries: ['DK'] },
+  { code: 'QCBE', name: 'QC — Belgium',           desc: 'QC · bpost · 10–18 days',                    tier: 'standard', countries: ['BE'] },
+  { code: 'QCAT', name: 'QC — Austria',           desc: 'QC · Österreichische Post · 10–20 days',     tier: 'standard', countries: ['AT'] },
+  { code: 'QCCH', name: 'QC — Switzerland',       desc: 'QC · Swiss Post · 10–20 days',               tier: 'standard', countries: ['CH'] },
+  { code: 'QCPT', name: 'QC — Portugal',          desc: 'QC · CTT · 10–22 days',                      tier: 'standard', countries: ['PT'] },
+  { code: 'QCJP', name: 'QC — Japan',             desc: 'QC · Japan Post · 8–16 days',                tier: 'standard', countries: ['JP'] },
+  { code: 'QCKR', name: 'QC — South Korea',       desc: 'QC · Korea Post · 8–16 days',               tier: 'standard', countries: ['KR'] },
+  { code: 'QCSG', name: 'QC — Singapore',         desc: 'QC · SingPost · 7–14 days',                  tier: 'standard', countries: ['SG'] },
+  { code: 'QCMY', name: 'QC — Malaysia',          desc: 'QC · Pos Malaysia · 10–20 days',             tier: 'standard', countries: ['MY'] },
+  { code: 'QCTH', name: 'QC — Thailand',          desc: 'QC · Thailand Post · 10–22 days',            tier: 'standard', countries: ['TH'] },
+  { code: 'QCMX', name: 'QC — Mexico',            desc: 'QC · Correos México · 15–30 days',           tier: 'standard', countries: ['MX'] },
+  { code: 'QCBR', name: 'QC — Brazil',            desc: 'QC · Correios · 20–45 days',                 tier: 'standard', countries: ['BR'] },
+  { code: 'QCNZ', name: 'QC — New Zealand',       desc: 'QC · NZ Post · 10–22 days',                  tier: 'standard', countries: ['NZ'] },
+  { code: 'QCSA', name: 'QC — Saudi Arabia',      desc: 'QC · Saudi Post · 12–25 days',               tier: 'standard', countries: ['SA'] },
+  { code: 'QCAE', name: 'QC — United Arab Emirates', desc: 'QC · Emirates Post · 10–20 days',         tier: 'standard', countries: ['AE'] },
+  { code: 'QCIL', name: 'QC — Israel',            desc: 'QC · Israel Post · 12–25 days',              tier: 'standard', countries: ['IL'] },
+  { code: 'QCTR', name: 'QC — Turkey',            desc: 'QC · PTT · 12–25 days',                      tier: 'standard', countries: ['TR'] },
+
+  // ── PX Series — Priority Express (优先快递) ───────────────────────────────────
+  // Faster transit, signature tracking, priority sort.
+  { code: 'PXUS', name: 'PX Priority — United States', desc: 'Priority Express · USPS Priority last-mile · 5–10 days',  tier: 'express', countries: ['US'] },
+  { code: 'PXCA', name: 'PX Priority — Canada',        desc: 'Priority Express · Canada Post Xpresspost · 6–12 days',  tier: 'express', countries: ['CA'] },
+  { code: 'PXAU', name: 'PX Priority — Australia',     desc: 'Priority Express · AusPost Express · 6–12 days',         tier: 'express', countries: ['AU'] },
+  { code: 'PXGB', name: 'PX Priority — United Kingdom',desc: 'Priority Express · Royal Mail Tracked 48 · 5–10 days',   tier: 'express', countries: ['GB'] },
+  { code: 'PXDE', name: 'PX Priority — Germany',       desc: 'Priority Express · DHL DE · 6–12 days',                 tier: 'express', countries: ['DE'] },
+  { code: 'PXFR', name: 'PX Priority — France',        desc: 'Priority Express · Colissimo Priority · 6–12 days',      tier: 'express', countries: ['FR'] },
+  { code: 'PXJP', name: 'PX Priority — Japan',         desc: 'Priority Express · Japan Post EMS · 5–10 days',          tier: 'express', countries: ['JP'] },
+  { code: 'PXSG', name: 'PX Priority — Singapore',     desc: 'Priority Express · SingPost Priority · 5–10 days',       tier: 'express', countries: ['SG'] },
+
+  // ── SFC (SF Express International / 顺丰国际) ─────────────────────────────────
+  {
+    code: 'SFCECO', name: 'SFC Economy',
+    desc: 'SF Express Economy · tracked · 8–18 days',
+    tier: 'standard',
+    countries: ['US','CA','AU','GB','DE','FR','NL','IT','ES','JP','KR','SG'],
+  },
+  {
+    code: 'SFCPRI', name: 'SFC Priority',
+    desc: 'SF Express Priority · 6–12 days',
+    tier: 'express',
+    countries: ['US','CA','AU','GB','DE','FR','NL','IT','ES','JP','KR','SG'],
+  },
+
+  // ── YunExpress (云途物流) ────────────────────────────────────────────────────
+  {
+    code: 'YUNTU', name: 'YunExpress Standard',
+    desc: 'Yun Express Standard · tracked · 8–20 days',
+    tier: 'standard',
+    countries: ['US','CA','AU','GB','DE','FR','NL','IT','ES','PL','SE','BE','AT','PT','CZ','HU'],
+  },
+  {
+    code: 'YUNTUP', name: 'YunExpress Priority',
+    desc: 'Yun Express Priority · 7–15 days',
+    tier: 'express',
+    countries: ['US','CA','AU','GB','DE','FR','NL','IT','ES','PL','SE','BE'],
+  },
+
+  // ── Manual / fallback ────────────────────────────────────────────────────────
+  {
+    code: 'OTHER', name: 'Other / Custom…',
+    desc: 'Enter a product code manually',
+    tier: 'custom',
+    countries: [],
+  },
 ];
+
+// Backwards-compat alias — some internal helpers reference FOURPX_KNOWN_PRODUCTS
+const FOURPX_KNOWN_PRODUCTS = FOURPX_PRODUCT_CATALOG;
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -157,6 +341,18 @@ try {
   }
 } catch (err) {
   console.warn(`[suppliers] Catalog import failed: ${err.message}`);
+}
+
+// Reconcile the product catalog with the bundled route-engine catalog so an
+// operator never sees a blank supplier for a product the engine already knows.
+// Fills empty supplier/charm fields only — manual + Excel data always wins.
+try {
+  const rc = routeDashboard.reconcileProductMap(db, config);
+  if (rc.ok && (rc.supplier_filled || rc.charm_filled)) {
+    console.log(`[product-map] Reconciled from catalog: filled ${rc.supplier_filled} supplier + ${rc.charm_filled} charm field(s).`);
+  }
+} catch (err) {
+  console.warn(`[product-map] Reconcile failed: ${err.message}`);
 }
 
 // Seed the charm library from charm_manifest.json (only when empty), so charm
@@ -948,7 +1144,8 @@ app.get('/api/4px/products', async (req, res) => {
     const cacheKey = `${appKey}:${country}`;
     const cached   = _fpxProductsCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
-      return res.json({ products: cached.products, source: cached.source, cached: true });
+      return res.json({ products: cached.products, source: cached.source,
+                        country: cached.country, cached: true });
     }
 
     let products = [];
@@ -960,19 +1157,65 @@ app.get('/api/4px/products', async (req, res) => {
       products = [];
     }
 
-    // Direct-customer API keys cannot access the logistics-product list method
-    // (returns error code 000024 / resource-not-found). Fall back to the curated list.
+    // Direct-customer API keys cannot access ds.xms.logistics_product.getlist
+    // (error 000024). Fall back to the curated catalogue with country filtering.
     if (!products.length) {
-      products = FOURPX_KNOWN_PRODUCTS.map(p => ({
+      source = 'fallback';
+
+      // Filter catalogue entries relevant to this destination country.
+      // products with countries:[] are global (available everywhere).
+      const filtered = FOURPX_PRODUCT_CATALOG.filter(p =>
+        !country || p.countries.length === 0 || p.countries.includes(country)
+      );
+
+      // Sort: (1) country-specific first, (2) then global, (3) custom last
+      const tierOrder = { economy: 0, standard: 1, express: 2, premium: 3, custom: 99 };
+      filtered.sort((a, b) => {
+        const aSpec = a.countries.length > 0 ? 0 : 1;
+        const bSpec = b.countries.length > 0 ? 0 : 1;
+        if (aSpec !== bSpec) return aSpec - bSpec;
+        return (tierOrder[a.tier] ?? 99) - (tierOrder[b.tier] ?? 99);
+      });
+
+      products = filtered.map(p => ({
         logistics_product_code: p.code,
         logistics_product_name: p.name,
         description:            p.desc,
+        tier:                   p.tier,
+        // Expose country scope so the frontend can show contextual info
+        country_specific:       p.countries.length > 0,
       }));
-      source = 'fallback';
+    } else {
+      // Live API response — normalise to the shape the frontend expects.
+      // The getlist API returns logistics_product_name_en / _cn (not _name),
+      // plus transport_mode_label which we map to a display tier for grouping.
+      const MODE_TIER = { express: 'express', priority: 'standard', postal: 'economy', cod: 'custom' };
+      const hasCjk = (s) => /[\u4e00-\u9fff]/.test(s || '');
+      products = products.map(p => {
+        const nameEn = p.logistics_product_name_en || p.logistics_product_name || '';
+        const nameCn = p.logistics_product_name_cn || '';
+        // Prefer a genuine English name. When 4PX only has a Chinese name (very
+        // common for internal product lines), show the product code instead so
+        // the English-language UI stays readable; keep the Chinese as a subtitle.
+        const displayName = (!nameEn || hasCjk(nameEn)) ? p.logistics_product_code : nameEn;
+        return {
+          logistics_product_code: p.logistics_product_code,
+          logistics_product_name: displayName,
+          name_cn:                nameCn || undefined,
+          description:            hasCjk(nameCn) && nameCn !== displayName ? nameCn : undefined,
+          tier:                   MODE_TIER[p.transport_mode_label] ?? 'standard',
+          transport_mode:         p.transport_mode,
+          trackable:              p.order_track === 'Y',
+          country_specific:       !!country,
+        };
+      });
+      // Stable, useful ordering: trackable first, then by code.
+      products.sort((a, b) => (Number(b.trackable) - Number(a.trackable)) ||
+                              String(a.logistics_product_code).localeCompare(String(b.logistics_product_code)));
     }
 
-    _fpxProductsCache.set(cacheKey, { products, source, expiresAt: Date.now() + 30 * 60 * 1000 });
-    res.json({ products, source, cached: false });
+    _fpxProductsCache.set(cacheKey, { products, source, country, expiresAt: Date.now() + 30 * 60 * 1000 });
+    res.json({ products, source, country, cached: false });
   } catch (err) {
     console.error('[4px] GET /api/4px/products:', err.message);
     res.status(err.status || 500).json({ error: err.message });
@@ -1091,8 +1334,17 @@ app.post('/api/4px/create-order', async (req, res) => {
     res.json({ success: true, receipt_id, ...result });
 
   } catch (err) {
-    console.error('[4px] POST /api/4px/create-order:', err.message);
-    res.status(err.status || 500).json({ error: err.message, code: err.code });
+    // Log the full API response body when available — crucial for diagnosing
+    // 4PX business errors (codes, messages) that don't surface in err.message alone.
+    if (err.apiBody) {
+      console.error('[4px] POST /api/4px/create-order API body:', JSON.stringify(err.apiBody));
+    }
+    console.error('[4px] POST /api/4px/create-order:', err.message, err.code ? `(code: ${err.code})` : '');
+    res.status(err.status || 500).json({
+      error: err.message,
+      code:  err.code,
+      ...(err.apiBody && { api_response: err.apiBody }),
+    });
   }
 });
 
@@ -1108,11 +1360,11 @@ app.get('/api/4px/label/:receipt_id', async (req, res) => {
     const format = (req.query.format || 'PDF').toUpperCase();
 
     const row = db.prepare(
-      'SELECT fourpx_consignment_no, fourpx_label_url FROM receipts WHERE receipt_id = ?'
+      'SELECT fourpx_consignment_no, fourpx_tracking_no, fourpx_label_url FROM receipts WHERE receipt_id = ?'
     ).get(receipt_id);
 
     if (!row) return res.status(404).json({ error: 'Receipt not found' });
-    if (!row.fourpx_consignment_no) {
+    if (!row.fourpx_consignment_no && !row.fourpx_tracking_no) {
       return res.status(404).json({ error: 'No 4PX order exists for this receipt' });
     }
 
@@ -1121,8 +1373,10 @@ app.get('/api/4px/label/:receipt_id', async (req, res) => {
       return res.json({ success: true, labelUrl: row.fourpx_label_url, cached: true });
     }
 
-    // Fetch from 4PX API
-    const label = await getShipLabel(appKey, appSecret, row.fourpx_consignment_no, { format });
+    // ds.xms.label.get resolves by the 4PX tracking number (4px_tracking_no).
+    // The ds_consignment_no (DS… prefix) returns "Can not find this order".
+    const requestNo = row.fourpx_tracking_no || row.fourpx_consignment_no;
+    const label = await getShipLabel(appKey, appSecret, requestNo, { format });
     const labelUrl = label.logisticsLabel ?? label.customLabel ?? null;
 
     if (labelUrl) {
@@ -1142,6 +1396,78 @@ app.get('/api/4px/label/:receipt_id', async (req, res) => {
 });
 
 /**
+ * GET /api/4px/label-download/:receipt_id
+ * Proxy-download the shipping label PDF so the browser shows a native
+ * "Save As" dialog.  The 4PX label URL is plain HTTP and is cross-origin,
+ * so the browser's <a download> attribute is ignored when pointing at it
+ * directly.  This endpoint fetches the bytes server-side and re-serves them
+ * with Content-Disposition: attachment plus a human-readable filename.
+ */
+app.get('/api/4px/label-download/:receipt_id', async (req, res) => {
+  try {
+    const { receipt_id } = req.params;
+
+    const row = db.prepare(
+      'SELECT fourpx_consignment_no, fourpx_tracking_no, fourpx_label_url FROM receipts WHERE receipt_id = ?'
+    ).get(receipt_id);
+
+    if (!row) return res.status(404).json({ error: 'Receipt not found' });
+    if (!row.fourpx_consignment_no && !row.fourpx_tracking_no) {
+      return res.status(404).json({ error: 'No 4PX order exists for this receipt' });
+    }
+
+    // Resolve label URL — prefer cached, otherwise fetch from API
+    let labelUrl = row.fourpx_label_url;
+    if (!labelUrl) {
+      const { appKey, appSecret } = get4pxCredentials();
+      const requestNo = row.fourpx_tracking_no || row.fourpx_consignment_no;
+      const label = await getShipLabel(appKey, appSecret, requestNo, { format: 'PDF' });
+      labelUrl = label.logisticsLabel ?? label.customLabel ?? null;
+      if (labelUrl) {
+        upsertFourpxShipment(db, receipt_id, {
+          consignmentNo: row.fourpx_consignment_no,
+          labelUrl,
+          status: 'label_fetched',
+        });
+      }
+    }
+
+    if (!labelUrl) {
+      return res.status(404).json({ error: 'Label not yet available — please try again in a few seconds.' });
+    }
+
+    // Build a meaningful filename: 4PX-Label-{tracking}-Order{receipt}.pdf
+    const trackingPart = (row.fourpx_tracking_no || row.fourpx_consignment_no || 'label').replace(/[^A-Za-z0-9_-]/g, '');
+    const filename = `4PX-Label-${trackingPart}-Order${receipt_id}.pdf`;
+
+    // Proxy the PDF from 4PX (may be plain HTTP, so must happen server-side)
+    const fetchFn  = labelUrl.startsWith('https') ? require('https') : require('http');
+    const proxyReq = fetchFn.get(labelUrl, (upstream) => {
+      if (upstream.statusCode !== 200) {
+        res.status(502).json({ error: `4PX label server returned ${upstream.statusCode}` });
+        upstream.resume();
+        return;
+      }
+      res.setHeader('Content-Type', upstream.headers['content-type'] || 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
+      if (upstream.headers['content-length']) {
+        res.setHeader('Content-Length', upstream.headers['content-length']);
+      }
+      // Stream directly — no buffering
+      upstream.pipe(res);
+    });
+    proxyReq.on('error', (err) => {
+      if (!res.headersSent) res.status(502).json({ error: `Failed to fetch label: ${err.message}` });
+    });
+    req.on('close', () => proxyReq.destroy());
+
+  } catch (err) {
+    console.error('[4px] GET /api/4px/label-download:', err.message);
+    if (!res.headersSent) res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/**
  * DELETE /api/4px/order/:receipt_id
  * Cancel the 4PX order associated with a receipt.
  * Body: { reason: string }
@@ -1153,18 +1479,21 @@ app.delete('/api/4px/order/:receipt_id', async (req, res) => {
     const reason = req.body?.reason || 'Customer request';
 
     const row = db.prepare(
-      'SELECT fourpx_consignment_no, fourpx_order_status FROM receipts WHERE receipt_id = ?'
+      'SELECT fourpx_consignment_no, fourpx_tracking_no, fourpx_order_status FROM receipts WHERE receipt_id = ?'
     ).get(receipt_id);
 
     if (!row) return res.status(404).json({ error: 'Receipt not found' });
-    if (!row.fourpx_consignment_no) {
+    if (!row.fourpx_consignment_no && !row.fourpx_tracking_no) {
       return res.status(404).json({ error: 'No 4PX order exists for this receipt' });
     }
     if (row.fourpx_order_status === 'cancelled') {
       return res.status(409).json({ error: '4PX order is already cancelled' });
     }
 
-    await cancelShipOrder(appKey, appSecret, row.fourpx_consignment_no, reason);
+    // ds.xms.order.cancel also resolves by the 4PX tracking number, not the
+    // ds_consignment_no (which returns "no such order").
+    const requestNo = row.fourpx_tracking_no || row.fourpx_consignment_no;
+    await cancelShipOrder(appKey, appSecret, requestNo, reason);
 
     upsertFourpxShipment(db, receipt_id, {
       consignmentNo: row.fourpx_consignment_no,
@@ -1454,6 +1783,157 @@ app.delete('/api/listings/:listing_id', async (req, res) => {
   } catch (err) {
     console.error('[listings] Delete error:', err.response?.data || err.message);
     res.status(err.status || err.response?.status || 500).json({ error: err.response?.data?.error || err.message });
+  }
+});
+
+// ─── Bulk Listing Creator ───────────────────────────────────────────────────
+// Ingests a folder-of-folders of product media, generates AI copy, prices each
+// variation from the 4-currency master sheet, auto-resolves shop settings, and
+// creates draft listings via the Etsy API. See src/listings/*.
+
+const bulkManager = new BulkJobManager({ db, resolveShopClient: getShopClientForShopName });
+
+/**
+ * GET /api/bulk/browse?path=<absolute-dir>
+ * Returns the sub-directories (and a summary of files) at the given path so
+ * the frontend can show a native-feeling folder-picker modal without ever
+ * exposing or typing the raw filesystem path. The server already has full
+ * filesystem access — this is purely a read-only listing.
+ *
+ * Defaults to the user's home directory when no path is supplied.
+ */
+app.get('/api/bulk/browse', (req, res) => {
+  const rawPath = req.query.path ? String(req.query.path) : os.homedir();
+  const dirPath = path.resolve(rawPath);
+  try {
+    if (!fs.existsSync(dirPath) || !fs.statSync(dirPath).isDirectory()) {
+      return res.status(400).json({ error: `Not a directory: ${dirPath}` });
+    }
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    const dirs = entries
+      .filter((e) => {
+        if (!e.isDirectory()) return false;
+        // Skip obviously system/hidden folders on Windows & Mac/Linux
+        const n = e.name;
+        if (n.startsWith('.')) return false;
+        if (['$RECYCLE.BIN', 'System Volume Information', 'node_modules', '__pycache__'].includes(n)) return false;
+        return true;
+      })
+      .map((e) => ({ name: e.name, path: path.join(dirPath, e.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+
+    const files = entries
+      .filter((e) => e.isFile())
+      .map((e) => ({ name: e.name, ext: path.extname(e.name).toLowerCase() }));
+
+    const parent = path.dirname(dirPath) !== dirPath ? path.dirname(dirPath) : null;
+    res.json({ path: dirPath, parent, dirs, file_count: files.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/bulk/scan  { input_path }
+ * Returns the products detected in the input root (folder = one product).
+ */
+app.post('/api/bulk/scan', (req, res) => {
+  try {
+    const { input_path } = req.body;
+    if (!input_path) return res.status(400).json({ error: 'input_path required' });
+    const { inputRoot, products, skipped } = scanInputRoot(input_path);
+    res.json({
+      input_root: inputRoot,
+      count: products.length,
+      products: products.map(p => ({
+        folder: p.folder, name: p.name, image_count: p.imageCount,
+        has_video: p.hasVideo, warnings: p.warnings,
+      })),
+      skipped: skipped.map(s => ({ folder: s.folder, name: s.name, warnings: s.warnings })),
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/bulk/shop-settings/:shop_name?force=1
+ * Live-fetches (and caches) the shop's shipping/return/partner/section/taxonomy
+ * plus currency, with auto-selected defaults for the override UI.
+ */
+app.get('/api/bulk/shop-settings/:shop_name', async (req, res) => {
+  try {
+    const { shopClient, numericShopId, shopCfg } = await getShopClientForShopName(req.params.shop_name);
+    const settings = await getShopListingSettings({
+      db, shopClient, shopId: numericShopId,
+      shopKey: req.params.shop_name, force: req.query.force === '1',
+    });
+    res.json({ shop_key: shopCfg.shop_id, ...settings });
+  } catch (err) {
+    console.error('[bulk] shop-settings error:', err.response?.data || err.message);
+    res.status(err.status || err.response?.status || 500).json({ error: err.response?.data?.error || err.message });
+  }
+});
+
+/**
+ * POST /api/bulk/run
+ * { shop_name, input_path, state, overrides, dry_run, brand_tags }
+ * Creates a job and starts processing in the background.
+ */
+app.post('/api/bulk/run', (req, res) => {
+  try {
+    const { shop_name, input_path, state, overrides, dry_run, brand_tags } = req.body;
+    if (!shop_name) return res.status(400).json({ error: 'shop_name required' });
+    if (!input_path) return res.status(400).json({ error: 'input_path required' });
+    const job = bulkManager.createAndStart({
+      shopName: shop_name,
+      inputPath: input_path,
+      targetState: state === 'published' ? 'published' : 'draft',
+      dryRun: Boolean(dry_run),
+      overrides: overrides || {},
+      brandTags: Array.isArray(brand_tags) ? brand_tags : undefined,
+    });
+    res.status(201).json({ success: true, job });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/** GET /api/bulk/jobs — recent jobs (newest first). */
+app.get('/api/bulk/jobs', (req, res) => {
+  const jobs = db.prepare('SELECT * FROM bulk_jobs ORDER BY created_at DESC LIMIT 50').all();
+  res.json({ jobs });
+});
+
+/** GET /api/bulk/jobs/:job_id — job + its items. */
+app.get('/api/bulk/jobs/:job_id', (req, res) => {
+  const job = bulkManager.getJob(req.params.job_id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  res.json({ job, items: bulkManager.getItems(req.params.job_id) });
+});
+
+/** GET /api/bulk/stream/:job_id — SSE live progress. */
+app.get('/api/bulk/stream/:job_id', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.write('\n');
+  const job = bulkManager.getJob(req.params.job_id);
+  if (job) {
+    res.write(`data: ${JSON.stringify({ type: 'snapshot', job, items: bulkManager.getItems(req.params.job_id) })}\n\n`);
+  }
+  bulkManager.subscribe(req.params.job_id, res);
+});
+
+/** POST /api/bulk/jobs/:job_id/retry — resume failed/incomplete items. */
+app.post('/api/bulk/jobs/:job_id/retry', (req, res) => {
+  try {
+    const job = bulkManager.retry(req.params.job_id, { overrides: req.body?.overrides });
+    res.json({ success: true, job });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 
@@ -2605,25 +3085,25 @@ app.post('/api/messages/email-sync', async (req, res) => {
 
 /**
  * GET /api/route/config
- * Returns OSP configuration status so the UI can show a setup callout when
- * osp_project_dir is not yet set in config.json.
+ * Returns the (self-contained) route-engine status so the UI can show a setup
+ * callout if the vendored engine is somehow missing.
  */
 app.get('/api/route/config', (req, res) => {
-  const ospDir    = config.osp_project_dir;
-  const ospScript = ospDir ? path.join(ospDir, 'src', 'generate_shopping_route.py') : null;
+  const engineRoot = enginePaths.engineDir(config);
+  const engineScript = enginePaths.engineScript(config);
   let scriptExists = false;
-  if (ospScript) {
-    try { fs.accessSync(ospScript, fs.constants.R_OK); scriptExists = true; } catch {}
+  if (engineScript) {
+    try { fs.accessSync(engineScript, fs.constants.R_OK); scriptExists = true; } catch {}
   }
   let charmCount = 0;
-  try { charmCount = routeDashboard.loadCharmCatalog(ospDir).charms.length; } catch {}
+  try { charmCount = routeDashboard.loadCharmCatalog(engineRoot).charms.length; } catch {}
 
   res.json({
-    configured:    !!(ospDir),
+    configured:    !!(engineRoot),
     script_exists: scriptExists,
-    osp_project_dir: ospDir,
-    osp_python:    config.osp_python,
-    script_path:   ospScript,
+    osp_project_dir: engineRoot,
+    osp_python:    enginePaths.enginePython(config),
+    script_path:   engineScript,
     charm_count:   charmCount,
     job:           _routeJob,
   });
@@ -2647,26 +3127,35 @@ app.get('/api/route/status', (req, res) => {
  */
 app.get('/api/route/dashboard', (req, res) => {
   try {
-    // Explicit receipt set (pinned orders) — comma-separated, bypasses the
-    // date/shipped filters so pre-transit orders can be pulled in.
+    // Explicit receipt set — comma-separated, bypasses the date/shipped filters
+    // so only those receipts are returned (used by the "Add Order" lookup).
     const receiptIds = (req.query.receipt_ids || '')
       .split(',').map(s => parseInt(s.trim(), 10)).filter(Number.isInteger);
 
+    // Extra receipts pulled in via the Orders tab "Send to Route" — merged on
+    // TOP of the date/shop scope so pre-transit orders show alongside pending.
+    const extraIds = (req.query.extra_receipt_ids || '')
+      .split(',').map(s => parseInt(s.trim(), 10)).filter(Number.isInteger);
+
     const rows = routeDashboard.buildRouteRows(db, config, {
-      date_from:       req.query.date_from,
-      date_to:         req.query.date_to,
-      shop_id:         req.query.shop_id,
-      include_shipped: req.query.include_shipped === 'true',
-      enrich_supplier: req.query.enrich_supplier !== 'false',
-      receipt_ids:     receiptIds.length ? receiptIds : undefined,
+      date_from:         req.query.date_from,
+      date_to:           req.query.date_to,
+      shop_id:           req.query.shop_id,
+      include_shipped:   req.query.include_shipped === 'true',
+      enrich_supplier:   req.query.enrich_supplier !== 'false',
+      receipt_ids:       receiptIds.length ? receiptIds : undefined,
+      extra_receipt_ids: extraIds.length ? extraIds : undefined,
     });
 
     // Headline counts for the dashboard summary bar.
+    // `charms_assigned` counts rows where the operator (or a per-product default) has
+    // explicitly confirmed a charm code.  Catalog/Excel suggestions intentionally do NOT
+    // count — r.charm_code is only populated from user-confirmed sources in buildRouteRows.
     const summary = {
       orders:    new Set(rows.map(r => r.receipt_id)).size,
       items:     rows.length,
       excluded:  rows.filter(r => r.excluded).length,
-      charms_needed: rows.filter(r => r.has_charm && !r.excluded).length,
+      charms_needed:   rows.filter(r => r.has_charm && !r.excluded).length,
       charms_assigned: rows.filter(r => r.has_charm && r.charm_code).length,
       supplier_matched: rows.filter(r => r.supplier_in_catalog).length,
       supplier_missing: rows.filter(r => !r.supplier_in_catalog).length,
@@ -2726,6 +3215,37 @@ app.post('/api/route/assign', express.json(), (req, res) => {
   } catch (err) {
     console.error('[route] assign error:', err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/route/charm-progress
+ * Returns { charm_code: purchased_qty } for the "Charms to Buy" list, so the UI
+ * can show purchased vs. still-to-buy quantities per charm code.
+ */
+app.get('/api/route/charm-progress', (req, res) => {
+  try {
+    res.json({ ok: true, progress: getCharmPurchaseProgress(db) });
+  } catch (err) {
+    console.error('[route] charm-progress GET error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/route/charm-progress
+ * Body: { charm_code, purchased_qty }
+ * Sets how many physical pieces of a charm have already been purchased / are in
+ * stock. Clamped to >= 0.
+ */
+app.post('/api/route/charm-progress', express.json(), (req, res) => {
+  const b = req.body ?? {};
+  if (!b.charm_code) return res.status(400).json({ error: 'charm_code is required.' });
+  try {
+    const saved = setCharmPurchaseProgress(db, b.charm_code, b.purchased_qty);
+    res.json({ ok: true, ...saved });
+  } catch (err) {
+    res.status(err.code === 'REQUIRED' ? 400 : 500).json({ error: err.message });
   }
 });
 
@@ -2877,9 +3397,121 @@ app.post('/api/route/import-suppliers', (req, res) => {
   try {
     const r = supplierImport.importSupplierCatalog(db, config, { force: true });
     if (!r.ok) return res.status(400).json(r);
+    // The import fully replaces product_map, so re-apply the catalog backfill to
+    // keep empty supplier/charm cells populated from the route-engine catalog.
+    try { routeDashboard.reconcileProductMap(db, config); } catch { /* non-fatal */ }
     res.json({ ...r, ..._supplierPayload() });
   } catch (err) {
     console.error('[route] import-suppliers error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Product Catalog (product_map) CRUD ────────────────────────────────────
+
+// Attach a resolved product thumbnail (title_norm → Etsy image URL) to each row.
+function _withProductImages(rows) {
+  let imgMap;
+  try { imgMap = routeDashboard.buildProductImageMap(db); } catch { imgMap = new Map(); }
+  return rows.map(r => ({ ...r, image_url: imgMap.get(r.title_norm) || null }));
+}
+
+/**
+ * GET /api/route/product-map?q=
+ * Returns all product_map rows (each enriched with a product image URL),
+ * optionally filtered by a search term.
+ */
+app.get('/api/route/product-map', (req, res) => {
+  try {
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    res.json({ ok: true, rows: _withProductImages(getProductMap(db, q || undefined)) });
+  } catch (err) {
+    console.error('[route] product-map GET error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/route/product-map/reconcile
+ * Backfill empty supplier/charm fields from the bundled route-engine catalog
+ * (exact title matches only; never overwrites existing values).
+ */
+app.post('/api/route/product-map/reconcile', (req, res) => {
+  try {
+    const r = routeDashboard.reconcileProductMap(db, config);
+    res.json({ ...r, rows: _withProductImages(getProductMap(db)) });
+  } catch (err) {
+    console.error('[route] product-map reconcile error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/route/product-map
+ * Create a new product→supplier/charm mapping.
+ * Body: { title, shop_name?, stall?, charm_shop?, charm_code? }
+ */
+app.post('/api/route/product-map', express.json(), (req, res) => {
+  try {
+    const result = upsertProductMapRow(db, req.body ?? {});
+    res.status(201).json({ ok: true, ...result, rows: _withProductImages(getProductMap(db)) });
+  } catch (err) {
+    res.status(_supplierErrStatus(err)).json({ error: err.message });
+  }
+});
+
+/**
+ * PUT /api/route/product-map
+ * Update an existing mapping by id (title can be changed safely).
+ * Body: { id, title, shop_name?, stall?, charm_shop?, charm_code? }
+ */
+app.put('/api/route/product-map', express.json(), (req, res) => {
+  const b = req.body ?? {};
+  if (!b.id) return res.status(400).json({ error: 'id is required.' });
+  try {
+    updateProductMapRowById(db, b);
+    res.json({ ok: true, rows: _withProductImages(getProductMap(db)) });
+  } catch (err) {
+    res.status(_supplierErrStatus(err)).json({ error: err.message });
+  }
+});
+
+/**
+ * DELETE /api/route/product-map
+ * Delete a mapping by id.
+ * Body: { id }
+ */
+app.delete('/api/route/product-map', express.json(), (req, res) => {
+  const b = req.body ?? {};
+  if (!b.id) return res.status(400).json({ error: 'id is required.' });
+  try {
+    const removed = deleteProductMapRow(db, b.id);
+    if (!removed) return res.status(404).json({ error: 'Entry not found.' });
+    res.json({ ok: true, rows: _withProductImages(getProductMap(db)) });
+  } catch (err) {
+    res.status(_supplierErrStatus(err)).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/route/product-map/export.csv
+ * Download the entire product catalog as a UTF-8 CSV file.
+ * Suitable for backup, spreadsheet editing, or re-import via the Excel import flow.
+ */
+app.get('/api/route/product-map/export.csv', (req, res) => {
+  try {
+    const rows = getProductMap(db);
+    const esc  = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const header = ['Product Title', 'Shop Name', 'Stall', 'Charm Shop', 'Charm Code'].map(esc).join(',');
+    const body   = rows.map(r =>
+      [r.title, r.shop_name, r.stall, r.charm_shop, r.charm_code].map(esc).join(','),
+    ).join('\r\n');
+    const csv = `\uFEFF${header}\r\n${body}`;  // BOM for Excel UTF-8 auto-detect
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="product_catalog_${new Date().toISOString().slice(0,10)}.csv"`);
+    res.send(csv);
+  } catch (err) {
+    console.error('[route] product-map export error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -3038,7 +3670,7 @@ app.post('/api/route/charms/reorder', express.json(), (req, res) => {
  * library's stored image_file, then falls back to <code>.<ext> resolution.
  */
 app.get('/api/route/charm-image', (req, res) => {
-  const ospDir = config.osp_project_dir;
+  const ospDir = enginePaths.engineDir(config);
   const code   = (req.query.code || '').trim();
   if (!code) return res.status(404).end();
 
@@ -3069,47 +3701,141 @@ app.get('/api/route/charm-image', (req, res) => {
  * file.  Returns immediately (202) while the child process runs in the
  * background.  Poll GET /api/route/status for progress.
  */
-app.post('/api/route/generate', express.json(), (req, res) => {
+app.post('/api/route/generate', express.json(), async (req, res) => {
   if (_routeJob.status === 'running') {
     return res.status(409).json({ error: 'A route generation is already in progress.' });
   }
 
-  const ospDir = config.osp_project_dir;
+  // Claim the lock synchronously — before any await — so a second concurrent
+  // request can't slip through the guard above during async image-fetching.
+  // Any early-exit error path below resets status to 'error' so the UI doesn't
+  // get stuck in a permanently-locked state.
+  _routeJob = { status: 'running', log: [], startedAt: new Date().toISOString(),
+                finishedAt: null, outputDir: null, files: [], error: null };
+
+  const ospDir = enginePaths.engineDir(config);
   if (!ospDir) {
-    return res.status(400).json({ error: 'osp_project_dir is not set in config.json.' });
+    _routeJob.status = 'error';
+    _routeJob.error  = 'Route engine directory could not be resolved.';
+    _routeJob.finishedAt = new Date().toISOString();
+    return res.status(400).json({ error: _routeJob.error });
   }
 
-  const ospScript = path.join(ospDir, 'src', 'generate_shopping_route.py');
+  const ospScript = enginePaths.engineScript(config);
   try { fs.accessSync(ospScript, fs.constants.R_OK); }
   catch {
-    return res.status(400).json({ error: `Script not found: ${ospScript}` });
+    _routeJob.status = 'error';
+    _routeJob.error  = `Route engine script not found: ${ospScript}`;
+    _routeJob.finishedAt = new Date().toISOString();
+    return res.status(400).json({ error: _routeJob.error });
   }
 
-  const { date_from, date_to, shop_id } = req.body ?? {};
+  const { date_from, date_to, shop_id, extra_receipt_ids: rawExtraIds } = req.body ?? {};
+
+  // Parse comma-separated or array of receipt IDs forwarded from the client.
+  // These are orders the operator pinned via "Send to Route" (pre-transit /
+  // shipped) or the "+ Add Order" modal — they live outside the default
+  // pending-only scope so they must be passed explicitly to ensure the
+  // generated Excel files match exactly what the Route dashboard displays.
+  const extraIds = Array.isArray(rawExtraIds)
+    ? rawExtraIds.map(Number).filter(Number.isInteger)
+    : typeof rawExtraIds === 'string' && rawExtraIds.trim()
+      ? rawExtraIds.split(',').map(s => parseInt(s.trim(), 10)).filter(Number.isInteger)
+      : [];
 
   // ── Build route rows (orders × their saved charm/status assignments) ───────
+  // enrich_supplier:true makes these rows IDENTICAL to what the operator sees
+  // in the Route dashboard (catalog match + manual overrides), so the generated
+  // Excel files carry the exact same supplier/stall placement — no divergence.
+  // Helper to fail fast: release the lock and send an error response.
+  const failEarly = (statusCode, message) => {
+    _routeJob.status     = 'error';
+    _routeJob.error      = message;
+    _routeJob.finishedAt = new Date().toISOString();
+    return res.status(statusCode).json({ error: message });
+  };
+
   let rows;
   try {
     rows = routeDashboard.buildRouteRows(db, config, {
       date_from, date_to, shop_id, include_shipped: false,
+      enrich_supplier: true,
+      ...(extraIds.length ? { extra_receipt_ids: extraIds } : {}),
     });
   } catch (err) {
-    return res.status(500).json({ error: `DB error: ${err.message}` });
+    return failEarly(500, `DB error: ${err.message}`);
   }
 
-  const includedRows  = rows.filter(r => !r.excluded);
+  const includedRows   = rows.filter(r => !r.excluded);
   const exportedOrders = routeDashboard.rowsToImportOrders(rows);
 
   if (exportedOrders.length === 0) {
-    return res.status(400).json({ error: 'No pending orders to generate a route for (after exclusions).' });
+    return failEarly(400, 'No pending orders to generate a route for (after exclusions).');
+  }
+
+  // Route files are generated INTO this dashboard's own folder (not the OSP's).
+  const outputDir  = _routeOutputDir();
+  const outputXlsx = path.join(outputDir, 'shopping_route.xlsx');
+  try {
+    fs.mkdirSync(outputDir, { recursive: true });
+  } catch (err) {
+    return failEarly(500, `Cannot create output directory: ${err.message}`);
+  }
+
+  // ── Embed product photos into the JSON payload ────────────────────────────
+  // OSP runs in --import-json mode and has no access to the Etsy CDN, so we
+  // must supply image bytes directly.  We gather each unique listing_id → URL
+  // from the route rows, fetch bytes in parallel (DB cache-first), encode as
+  // base64, and attach as `image_b64` on each item.  The OSP then decodes this
+  // into `photo_bytes`.  The canonical catalog-photo override step inside OSP
+  // still runs afterwards and takes priority for matched products — correct
+  // behaviour since catalog photos are the professionally curated versions.
+  try {
+    // Build a deduped Map<listing_id, image_url> from the full row set
+    // (rows, not exportedOrders, because rows carry listing_id + image_url).
+    const listingIdToUrl = new Map();
+    for (const row of rows) {
+      if (row.listing_id && row.image_url && !listingIdToUrl.has(row.listing_id)) {
+        listingIdToUrl.set(row.listing_id, row.image_url);
+      }
+    }
+
+    if (listingIdToUrl.size > 0) {
+      const imageDataMap = await batchFetchRouteImages(db, listingIdToUrl);
+
+      for (const order of exportedOrders) {
+        for (const item of order.items) {
+          const listingId = item._listing_id;
+          if (listingId) {
+            const buf = imageDataMap.get(listingId);
+            if (buf) item.image_b64 = buf.toString('base64');
+          }
+          // Strip internal UED key — OSP doesn't need it.
+          delete item._listing_id;
+        }
+      }
+    } else {
+      // No listing IDs — just strip the internal field.
+      for (const order of exportedOrders) {
+        for (const item of order.items) delete item._listing_id;
+      }
+    }
+  } catch (err) {
+    // Non-fatal: log and continue without images rather than blocking generation.
+    console.warn(`[route] Image fetch failed (route will have no photos): ${err.message}`);
+    for (const order of exportedOrders) {
+      for (const item of order.items) delete item._listing_id;
+    }
   }
 
   // ── Write OSP's status cache so it knows what's already Purchased / OOS ────
+  // The generator reads this from the SAME folder it writes the Excel files to,
+  // so it must live in our output dir alongside shopping_route.xlsx.
   let statusCacheInfo = { count: 0 };
   try {
-    statusCacheInfo = routeDashboard.writeStatusCache(ospDir, includedRows);
+    statusCacheInfo = routeDashboard.writeStatusCache(outputDir, includedRows);
   } catch (err) {
-    return res.status(500).json({ error: `Cannot write status cache: ${err.message}` });
+    return failEarly(500, `Cannot write status cache: ${err.message}`);
   }
 
   // ── Write temp JSON order payload, then spawn Python ───────────────────────
@@ -3120,32 +3846,48 @@ app.post('/api/route/generate', express.json(), (req, res) => {
       exported_at: new Date().toISOString(),
     }, null, 2));
   } catch (err) {
-    return res.status(500).json({ error: `Cannot write temp file: ${err.message}` });
+    return failEarly(500, `Cannot write temp file: ${err.message}`);
   }
 
   // Always produce all three Excel files, matching a standard OSP run:
   //   shopping_route.xlsx · shopping_route_simple.xlsx · shopping_route_zh.xlsx
   // (--chinese adds the _zh file; the full + simple files are always written.)
-  const pyArgs = [ospScript, '--import-json', tmpFile, '--chinese'];
+  //
+  // --project-dir is REQUIRED: it tells the generator to use the OSP's
+  // organized layout (data/supplier_catalog.xlsx, data/charm_images, cache/),
+  // which is where the catalog actually lives. Without it the script looks for
+  // "supplier_catalog.xlsx" in the cwd root and fails with "Catalog not found".
+  // --output redirects the three route files into THIS dashboard's folder.
+  //
+  // --reset makes the dashboard the SINGLE SOURCE OF TRUTH: the route is built
+  // purely from this export (images, supplier + charm overrides included) and
+  // is NOT merged with OSP's accumulating order cache. Without it, OSP merges
+  // these orders with its stale cache — inflating the order count (e.g. 130 vs
+  // 83) and discarding the fresh images/overrides because the orders "already
+  // exist" in the cache. Purchase statuses are preserved separately via the
+  // route_statuses_cache.json overlay, so --reset does not lose progress.
+  const pyArgs = [
+    ospScript,
+    '--project-dir', ospDir,
+    '--import-json', tmpFile,
+    '--output', outputXlsx,
+    '--reset',
+    '--chinese',
+  ];
 
+  // Populate the log now that we have all the details (pyArgs, counts, etc.).
+  // The job object was already created above to claim the lock; here we just
+  // append the initial log lines and send the 202 response.
   const lineItemCount = exportedOrders.reduce((s, o) => s + o.items.length, 0);
-  _routeJob = {
-    status:     'running',
-    log:        [
-      `[${new Date().toISOString()}] Starting route generation for ${exportedOrders.length} order(s), ${lineItemCount} line item(s)…`,
-      `[cache] Wrote ${statusCacheInfo.count} purchase-status entr${statusCacheInfo.count === 1 ? 'y' : 'ies'} to route_statuses_cache.json`,
-      `[cmd] ${config.osp_python} ${pyArgs.join(' ')}`,
-    ],
-    startedAt:  new Date().toISOString(),
-    finishedAt: null,
-    outputDir:  null,
-    files:      [],
-    error:      null,
-  };
+  _routeJob.log.push(
+    `[${new Date().toISOString()}] Starting route generation for ${exportedOrders.length} order(s), ${lineItemCount} line item(s)…`,
+    `[cache] Wrote ${statusCacheInfo.count} purchase-status entr${statusCacheInfo.count === 1 ? 'y' : 'ies'} to route_statuses_cache.json`,
+    `[cmd] ${enginePaths.enginePython(config)} ${pyArgs.join(' ')}`,
+  );
 
   res.status(202).json({ status: 'started', order_count: exportedOrders.length, item_count: lineItemCount });
 
-  const proc = spawn(config.osp_python, pyArgs, {
+  const proc = spawn(enginePaths.enginePython(config), pyArgs, {
     cwd: ospDir,
     env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
   });
@@ -3170,7 +3912,6 @@ app.post('/api/route/generate', express.json(), (req, res) => {
     try { fs.unlinkSync(tmpFile); } catch {}
 
     if (code === 0) {
-      const outputDir = path.join(ospDir, 'output');
       let files = [];
       try {
         files = fs.readdirSync(outputDir)
@@ -3207,8 +3948,19 @@ const ROUTE_OUTPUT_FILES = [
   { file: 'shopping_route_zh.xlsx',     label: 'Chinese route', desc: '中文 · simplified',            icon: '🇨🇳' },
 ];
 
+/**
+ * Directory the generated shopping-route files live in.
+ *
+ * The Python generator runs against the OSP project (catalog, charm images,
+ * caches) but we redirect its OUTPUT into THIS dashboard's own folder so the
+ * three Excel files belong to the dashboard, not the OSP.  Configurable via
+ * `osp_output_dir`; defaults to <dashboard root>/output.
+ */
 function _routeOutputDir() {
-  return config.osp_project_dir ? path.join(config.osp_project_dir, 'output') : null;
+  if (config.osp_output_dir && String(config.osp_output_dir).trim()) {
+    return path.resolve(String(config.osp_output_dir).trim());
+  }
+  return path.join(UED_ROOT, 'output');
 }
 function _isAllowedRouteFile(name) {
   return /^shopping_route(_simple|_zh)?\.(xlsx|html)$/i.test(name) && !/[/\\]/.test(name);
@@ -3241,7 +3993,7 @@ app.get('/api/route/output-files', (req, res) => {
 app.get('/api/route/open', (req, res) => {
   const dir  = _routeOutputDir();
   const file = (req.query.file ?? '').trim();
-  if (!dir) return res.status(400).json({ error: 'osp_project_dir is not set in config.json.' });
+  if (!dir) return res.status(400).json({ error: 'Route output directory could not be resolved.' });
   if (!_isAllowedRouteFile(file)) return res.status(400).json({ error: 'Invalid file name.' });
 
   const fp = path.join(dir, file);
@@ -3271,7 +4023,7 @@ app.get('/api/route/open', (req, res) => {
 app.get('/api/route/download', (req, res) => {
   const dir  = _routeOutputDir();
   const file = (req.query.file ?? '').trim();
-  if (!dir) return res.status(400).json({ error: 'osp_project_dir is not set in config.json.' });
+  if (!dir) return res.status(400).json({ error: 'Route output directory could not be resolved.' });
   if (!_isAllowedRouteFile(file)) return res.status(400).json({ error: 'Invalid file name.' });
 
   const fp = path.join(dir, file);
@@ -3298,14 +4050,17 @@ app.get('/api/route/download-unmatched-images', async (req, res) => {
   try {
     const receiptIds = (req.query.receipt_ids || '')
       .split(',').map(s => parseInt(s.trim(), 10)).filter(Number.isInteger);
+    const extraIds = (req.query.extra_receipt_ids || '')
+      .split(',').map(s => parseInt(s.trim(), 10)).filter(Number.isInteger);
 
     const rows = routeDashboard.buildRouteRows(db, config, {
-      date_from:       req.query.date_from,
-      date_to:         req.query.date_to,
-      shop_id:         req.query.shop_id,
-      include_shipped: req.query.include_shipped === 'true',
-      enrich_supplier: true,
-      receipt_ids:     receiptIds.length ? receiptIds : undefined,
+      date_from:         req.query.date_from,
+      date_to:           req.query.date_to,
+      shop_id:           req.query.shop_id,
+      include_shipped:   req.query.include_shipped === 'true',
+      enrich_supplier:   true,
+      receipt_ids:       receiptIds.length ? receiptIds : undefined,
+      extra_receipt_ids: extraIds.length ? extraIds : undefined,
     });
 
     const items = unmatchedImages.collectUnmatchedImageItems(rows);

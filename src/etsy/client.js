@@ -52,6 +52,7 @@
  */
 
 const axios = require('axios');
+const FormData = require('form-data');
 const { TokenExpiredError } = require('../auth/token-manager');
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -914,12 +915,292 @@ async function* paginateConversations(shopClient, shopId, opts = {}) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Bulk listing creation — form-encoded create, media upload, variation images
+//
+// createDraftListing (above) posts JSON, which works for the simple single-
+// variation create used by the dashboard's manual form. The Etsy spec, however,
+// declares the create body as application/x-www-form-urlencoded and the image/
+// video uploads as multipart/form-data. The bulk pipeline uses the dedicated
+// helpers below to exactly match the spec (array fields, binary uploads).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Listing fields that Etsy accepts as a single comma-separated string.
+const _COMMA_ARRAY_FIELDS = new Set(['tags', 'materials', 'styles']);
+
+/**
+ * Serialise a listing payload to application/x-www-form-urlencoded.
+ * - tags/materials/styles → comma-separated single value
+ * - other arrays (e.g. production_partner_ids) → repeated keys
+ * - booleans → "true"/"false"
+ */
+function _toFormUrlEncoded(body) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(body)) {
+    if (value === undefined || value === null) continue;
+    if (Array.isArray(value)) {
+      if (_COMMA_ARRAY_FIELDS.has(key)) {
+        if (value.length) params.append(key, value.join(','));
+      } else {
+        value.forEach((v) => { if (v !== undefined && v !== null) params.append(key, String(v)); });
+      }
+    } else if (typeof value === 'boolean') {
+      params.append(key, value ? 'true' : 'false');
+    } else {
+      params.append(key, String(value));
+    }
+  }
+  return params;
+}
+
+/**
+ * POST /application/shops/{shop_id}/listings  (form-urlencoded)
+ * Scope: listings_w
+ *
+ * Creates a physical draft listing using the spec-compliant encoding. Pass
+ * { legacy: true } in opts to enable processing-profile related fields.
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} shopId  numeric shop ID
+ * @param {object} body           createDraftListing fields
+ * @param {object} [opts]
+ * @param {boolean} [opts.legacy]
+ */
+async function createDraftListingForm(shopClient, shopId, body, opts = {}) {
+  getRateLimiter(shopClient).check();
+  const params = _toFormUrlEncoded(body);
+  const query = opts.legacy ? '?legacy=true' : '';
+  return withRetry(async () => {
+    const { data } = await shopClient.post(
+      `/application/shops/${shopId}/listings${query}`,
+      params.toString(),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+    return data;
+  });
+}
+
+/**
+ * POST /application/shops/{shop_id}/listings/{listing_id}/images  (multipart)
+ * Scope: listings_w
+ *
+ * Uploads a single image to a listing at a given rank.
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} shopId
+ * @param {string|number} listingId
+ * @param {object} opts
+ * @param {Buffer} opts.buffer        raw image bytes
+ * @param {string} opts.filename      original file name (used for content type)
+ * @param {number} [opts.rank=1]      1-based display position
+ * @param {string} [opts.altText]
+ * @param {boolean} [opts.overwrite]
+ */
+async function uploadListingImage(shopClient, shopId, listingId, opts = {}) {
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const form = new FormData();
+    form.append('image', opts.buffer, { filename: opts.filename || 'image.jpg' });
+    if (opts.rank != null) form.append('rank', String(opts.rank));
+    if (opts.altText) form.append('alt_text', String(opts.altText).slice(0, 500));
+    if (opts.overwrite) form.append('overwrite', 'true');
+    const { data } = await shopClient.post(
+      `/application/shops/${shopId}/listings/${listingId}/images`,
+      form,
+      {
+        headers: form.getHeaders(),
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+        timeout: 120_000,
+      }
+    );
+    return data;
+  });
+}
+
+/**
+ * POST /application/shops/{shop_id}/listings/{listing_id}/videos  (multipart)
+ * Scope: listings_w
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} shopId
+ * @param {string|number} listingId
+ * @param {object} opts
+ * @param {Buffer} opts.buffer    raw video bytes
+ * @param {string} opts.filename  video file name (Etsy requires the `name` field)
+ */
+async function uploadListingVideo(shopClient, shopId, listingId, opts = {}) {
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const form = new FormData();
+    const filename = opts.filename || 'video.mp4';
+    form.append('video', opts.buffer, { filename });
+    form.append('name', filename);
+    const { data } = await shopClient.post(
+      `/application/shops/${shopId}/listings/${listingId}/videos`,
+      form,
+      {
+        headers: form.getHeaders(),
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+        timeout: 300_000,
+      }
+    );
+    return data;
+  });
+}
+
+/**
+ * PUT /application/listings/{listing_id}/inventory  (raw body)
+ * Scope: listings_w
+ *
+ * Sends a pre-built inventory body verbatim (after light normalisation). Unlike
+ * updateListingInventory, this does NOT drop disabled offerings — required for
+ * the bulk variation matrix where some styles are intentionally hidden.
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} listingId
+ * @param {object} body  { products, price_on_property, quantity_on_property, sku_on_property }
+ */
+async function putListingInventory(shopClient, listingId, body) {
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const { data } = await shopClient.put(`/application/listings/${listingId}/inventory`, body);
+    return data;
+  });
+}
+
+/**
+ * POST /application/shops/{shop_id}/listings/{listing_id}/variation-images
+ * Scope: listings_w
+ *
+ * Links uploaded images to specific variation values. Overwrites all existing
+ * variation images on the listing.
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} shopId
+ * @param {string|number} listingId
+ * @param {Array<{property_id:number,value_id:number,image_id:number}>} variationImages
+ */
+async function updateVariationImages(shopClient, shopId, listingId, variationImages) {
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const { data } = await shopClient.post(
+      `/application/shops/${shopId}/listings/${listingId}/variation-images`,
+      { variation_images: variationImages }
+    );
+    return data;
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shop-level settings used to populate listing references (read-only fetches)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** GET /application/shops/{shop_id}/shipping-profiles — scope shops_r */
+async function getShopShippingProfiles(shopClient, shopId) {
+  const numericId = await resolveShopId(shopClient, shopId);
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const { data } = await shopClient.get(`/application/shops/${numericId}/shipping-profiles`);
+    return data;
+  });
+}
+
+/** GET /application/shops/{shop_id}/policies/return — scope none */
+async function getShopReturnPolicies(shopClient, shopId) {
+  const numericId = await resolveShopId(shopClient, shopId);
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const { data } = await shopClient.get(`/application/shops/${numericId}/policies/return`);
+    return data;
+  });
+}
+
+/** GET /application/shops/{shop_id}/production-partners — scope shops_r */
+async function getShopProductionPartners(shopClient, shopId) {
+  const numericId = await resolveShopId(shopClient, shopId);
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const { data } = await shopClient.get(`/application/shops/${numericId}/production-partners`);
+    return data;
+  });
+}
+
+/** GET /application/shops/{shop_id}/sections — scope none */
+async function getShopSections(shopClient, shopId) {
+  const numericId = await resolveShopId(shopClient, shopId);
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const { data } = await shopClient.get(`/application/shops/${numericId}/sections`);
+    return data;
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Seller taxonomy — resolve a numeric taxonomy_id for listing creation.
+// The full node tree rarely changes, so it is cached process-wide.
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _taxonomyNodesCache = null;
+
+/** GET /application/seller-taxonomy/nodes — scope none */
+async function getSellerTaxonomyNodes(shopClient) {
+  if (_taxonomyNodesCache) return _taxonomyNodesCache;
+  getRateLimiter(shopClient).check();
+  const data = await withRetry(async () => {
+    const res = await shopClient.get('/application/seller-taxonomy/nodes');
+    return res.data;
+  });
+  _taxonomyNodesCache = data;
+  return data;
+}
+
+/**
+ * Resolve the deepest taxonomy node whose full path matches all keywords.
+ * Returns the numeric taxonomy_id or null.
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string[]} keywords  lowercase substrings that must all appear in the node name/path
+ */
+async function findTaxonomyId(shopClient, keywords) {
+  const wanted = keywords.map((k) => k.toLowerCase());
+  const data = await getSellerTaxonomyNodes(shopClient);
+  let best = null;
+
+  const visit = (node, trail) => {
+    const name = (node.name || '').toLowerCase();
+    const path = `${trail} ${name}`.trim();
+    if (wanted.every((w) => path.includes(w))) {
+      // Prefer the deepest (most specific) match.
+      if (!best || path.length > best.path.length) {
+        best = { id: node.id, path };
+      }
+    }
+    for (const child of node.children || []) visit(child, path);
+  };
+
+  for (const root of data.results || []) visit(root, '');
+  return best ? best.id : null;
+}
+
 module.exports = {
   buildShopClient,
   attachRateLimitInterceptor,
   resolveShopId,
   getShop,
   updateShop,
+  createDraftListingForm,
+  uploadListingImage,
+  uploadListingVideo,
+  putListingInventory,
+  updateVariationImages,
+  getShopShippingProfiles,
+  getShopReturnPolicies,
+  getShopProductionPartners,
+  getShopSections,
+  getSellerTaxonomyNodes,
+  findTaxonomyId,
   getReceipts,
   getReceipt,
   createReceiptShipment,

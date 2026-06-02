@@ -1617,6 +1617,362 @@
 				border-color: var(--red);
 			}
 
+			/* ── Native select option fix (dark background) ──────────────── */
+			.fpx-select option {
+				background: #1a1d2a;
+				color: #e2e5f1;
+			}
+
+			/* ── Weight auto-fill pulse animation ────────────────────────── */
+			@keyframes fpx-weight-pulse {
+				0%   { box-shadow: 0 0 0 0 rgba(245, 100, 0, 0.55); border-color: rgba(245, 130, 0, 0.9); background: rgba(245,100,0,0.08); }
+				60%  { box-shadow: 0 0 0 7px rgba(245, 100, 0, 0); border-color: rgba(245, 100, 0, 0.4); }
+				100% { box-shadow: 0 0 0 0 rgba(245, 100, 0, 0); border-color: var(--border); background: rgba(255,255,255,0.04); }
+			}
+			.fpx-input.auto-filled {
+				animation: fpx-weight-pulse 0.85s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+			}
+			.fpx-weight-badge {
+				display: inline-flex;
+				align-items: center;
+				gap: 4px;
+				font-size: 10.5px;
+				font-weight: 600;
+				color: rgba(245, 130, 0, 0.9);
+				background: rgba(245, 100, 0, 0.1);
+				border: 1px solid rgba(245, 100, 0, 0.2);
+				border-radius: 4px;
+				padding: 1px 6px;
+				margin-left: 6px;
+				opacity: 0;
+				transform: translateY(2px);
+				transition: opacity 0.3s 0.1s, transform 0.3s 0.1s;
+			}
+			.fpx-weight-badge.show {
+				opacity: 1;
+				transform: translateY(0);
+			}
+
+			/* ── Custom logistics-product dropdown ───────────────────────── */
+			.fpx-csel {
+				position: relative;
+				width: 100%;
+			}
+			.fpx-csel-trigger {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				padding: 8px 11px;
+				border-radius: 7px;
+				border: 1px solid var(--border);
+				background: rgba(255, 255, 255, 0.04);
+				color: var(--text);
+				font-size: 13px;
+				font-family: var(--font);
+				cursor: pointer;
+				width: 100%;
+				text-align: left;
+				transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+				outline: none;
+				box-sizing: border-box;
+				min-height: 37px;
+			}
+			.fpx-csel-trigger:hover {
+				border-color: rgba(255, 255, 255, 0.22);
+				background: rgba(255, 255, 255, 0.07);
+			}
+			.fpx-csel-trigger:focus {
+				border-color: rgba(255, 255, 255, 0.3);
+				box-shadow: 0 0 0 3px rgba(245, 100, 0, 0.12);
+			}
+			.fpx-csel-trigger.open {
+				border-color: rgba(255, 255, 255, 0.28);
+				border-bottom-left-radius: 0;
+				border-bottom-right-radius: 0;
+				background: rgba(255, 255, 255, 0.06);
+			}
+			.fpx-csel-label {
+				flex: 1;
+				overflow: hidden;
+				white-space: nowrap;
+				text-overflow: ellipsis;
+				color: var(--text);
+				line-height: 1.4;
+			}
+			.fpx-csel-label.placeholder {
+				color: var(--muted);
+				opacity: 0.65;
+			}
+			.fpx-csel-chevron {
+				flex-shrink: 0;
+				width: 15px;
+				height: 15px;
+				color: var(--muted);
+				transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+			}
+			.fpx-csel-trigger.open .fpx-csel-chevron {
+				transform: rotate(180deg);
+				color: rgba(245, 130, 0, 0.85);
+			}
+
+			/* panel */
+			.fpx-csel-panel {
+				position: absolute;
+				top: 100%;
+				left: 0;
+				right: 0;
+				z-index: 9100;
+				background: #1a1d2a;
+				border: 1px solid rgba(255, 255, 255, 0.14);
+				border-top: none;
+				border-radius: 0 0 8px 8px;
+				box-shadow: 0 20px 60px rgba(0,0,0,0.7), 0 6px 20px rgba(0,0,0,0.45);
+				overflow: hidden;
+				opacity: 0;
+				transform: translateY(-5px) scaleY(0.97);
+				transform-origin: top center;
+				pointer-events: none;
+				transition: opacity 0.18s ease, transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+				will-change: opacity, transform;
+			}
+			.fpx-csel-panel.open {
+				opacity: 1;
+				transform: translateY(0) scaleY(1);
+				pointer-events: all;
+			}
+
+			/* search */
+			.fpx-csel-search-wrap {
+				padding: 8px 8px 6px;
+				border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+			}
+			.fpx-csel-search {
+				width: 100%;
+				box-sizing: border-box;
+				padding: 6px 10px 6px 30px;
+				border-radius: 5px;
+				border: 1px solid rgba(255, 255, 255, 0.1);
+				background: rgba(255, 255, 255, 0.05);
+				color: var(--text);
+				font-size: 12.5px;
+				font-family: var(--font);
+				outline: none;
+				transition: border-color 0.15s, background 0.15s;
+				background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='%23aaa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.35-4.35'/%3E%3C/svg%3E");
+				background-repeat: no-repeat;
+				background-position: 9px center;
+			}
+			.fpx-csel-search:focus {
+				border-color: rgba(245, 100, 0, 0.4);
+				background-color: rgba(255, 255, 255, 0.08);
+			}
+			.fpx-csel-search::placeholder {
+				color: var(--muted);
+				opacity: 0.6;
+			}
+
+			/* list */
+			.fpx-csel-list {
+				list-style: none;
+				margin: 0;
+				padding: 4px;
+				max-height: 248px;
+				overflow-y: auto;
+				scrollbar-width: thin;
+				scrollbar-color: rgba(255,255,255,0.12) transparent;
+			}
+			.fpx-csel-list::-webkit-scrollbar { width: 4px; }
+			.fpx-csel-list::-webkit-scrollbar-thumb {
+				background: rgba(255,255,255,0.14);
+				border-radius: 2px;
+			}
+
+			/* option items */
+			@keyframes fpx-opt-enter {
+				from { opacity: 0; transform: translateY(5px); }
+				to   { opacity: 1; transform: translateY(0); }
+			}
+			.fpx-csel-option {
+				padding: 8px 10px;
+				border-radius: 5px;
+				cursor: pointer;
+				color: var(--text);
+				display: flex;
+				flex-direction: column;
+				gap: 1px;
+				transition: background 0.12s;
+				opacity: 0;
+				animation: fpx-opt-enter 0.18s ease forwards;
+				user-select: none;
+			}
+			.fpx-csel-option:hover {
+				background: rgba(255, 255, 255, 0.07);
+			}
+			.fpx-csel-option.selected {
+				background: rgba(245, 100, 0, 0.15);
+			}
+			.fpx-csel-option.selected:hover {
+				background: rgba(245, 100, 0, 0.22);
+			}
+			.fpx-csel-option.hidden { display: none; }
+			.fpx-csel-option-name {
+				font-size: 13px;
+				font-weight: 500;
+				color: #e4e8f5;
+				line-height: 1.35;
+			}
+			.fpx-csel-option.selected .fpx-csel-option-name {
+				color: #ffa040;
+			}
+			.fpx-csel-option-meta {
+				font-size: 11px;
+				color: var(--muted);
+				opacity: 0.75;
+				line-height: 1.3;
+			}
+			.fpx-csel-group-label {
+				padding: 8px 10px 3px;
+				font-size: 10px;
+				font-weight: 700;
+				text-transform: uppercase;
+				letter-spacing: 0.1em;
+				color: var(--muted);
+				opacity: 0.55;
+				pointer-events: none;
+			}
+			.fpx-csel-empty {
+				padding: 16px 10px;
+				text-align: center;
+				color: var(--muted);
+				font-size: 12.5px;
+				font-style: italic;
+				opacity: 0.7;
+			}
+			.fpx-csel-loading-dots {
+				display: inline-flex;
+				gap: 4px;
+				align-items: center;
+			}
+			.fpx-csel-loading-dots span {
+				width: 5px;
+				height: 5px;
+				border-radius: 50%;
+				background: var(--muted);
+				animation: fpx-dot-bounce 1.2s ease-in-out infinite;
+				opacity: 0.5;
+			}
+			.fpx-csel-loading-dots span:nth-child(2) { animation-delay: 0.15s; }
+			.fpx-csel-loading-dots span:nth-child(3) { animation-delay: 0.3s; }
+			@keyframes fpx-dot-bounce {
+				0%, 80%, 100% { transform: scale(0.8); opacity: 0.4; }
+				40%           { transform: scale(1.2); opacity: 1; }
+			}
+
+			/* country badge on product options */
+			.fpx-csel-option-tags {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 3px;
+				margin-top: 2px;
+			}
+			.fpx-csel-tag {
+				font-size: 9.5px;
+				font-weight: 600;
+				letter-spacing: 0.04em;
+				padding: 1px 5px;
+				border-radius: 3px;
+				background: rgba(255,255,255,0.08);
+				color: var(--muted);
+				text-transform: uppercase;
+			}
+
+			/* ── Tier badges inside product options ──────────────────────── */
+			.fpx-tier-badge {
+				display: inline-flex;
+				align-items: center;
+				font-size: 9px;
+				font-weight: 700;
+				letter-spacing: 0.06em;
+				text-transform: uppercase;
+				padding: 1px 5px;
+				border-radius: 3px;
+				flex-shrink: 0;
+				line-height: 1.5;
+			}
+			.fpx-tier-badge.economy {
+				background: rgba(100,180,100,0.12);
+				color: #7ec87e;
+				border: 1px solid rgba(100,180,100,0.2);
+			}
+			.fpx-tier-badge.standard {
+				background: rgba(100,160,240,0.12);
+				color: #80b8f0;
+				border: 1px solid rgba(100,160,240,0.2);
+			}
+			.fpx-tier-badge.express {
+				background: rgba(245,150,50,0.14);
+				color: #f5a040;
+				border: 1px solid rgba(245,150,50,0.25);
+			}
+			.fpx-tier-badge.premium {
+				background: rgba(180,100,240,0.13);
+				color: #c080f0;
+				border: 1px solid rgba(180,100,240,0.22);
+			}
+			.fpx-csel-option-row {
+				display: flex;
+				align-items: center;
+				gap: 7px;
+			}
+
+			/* ── Group header inside dropdown list ───────────────────────── */
+			.fpx-csel-group {
+				padding: 10px 10px 3px;
+				font-size: 9.5px;
+				font-weight: 800;
+				text-transform: uppercase;
+				letter-spacing: 0.1em;
+				color: rgba(255,255,255,0.3);
+				pointer-events: none;
+				display: flex;
+				align-items: center;
+				gap: 7px;
+			}
+			.fpx-csel-group::after {
+				content: '';
+				flex: 1;
+				height: 1px;
+				background: rgba(255,255,255,0.06);
+			}
+			.fpx-csel-group:first-child { padding-top: 4px; }
+
+			/* ── Source/country indicator bar ────────────────────────────── */
+			.fpx-csel-source-bar {
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				padding: 5px 10px;
+				background: rgba(255,255,255,0.03);
+				border-top: 1px solid rgba(255,255,255,0.06);
+				font-size: 10.5px;
+				color: rgba(255,255,255,0.35);
+				gap: 8px;
+				flex-shrink: 0;
+			}
+			.fpx-csel-source-dot {
+				width: 6px;
+				height: 6px;
+				border-radius: 50%;
+				flex-shrink: 0;
+			}
+			.fpx-csel-source-dot.live    { background: #4ade80; box-shadow: 0 0 4px rgba(74,222,128,0.5); }
+			.fpx-csel-source-dot.fallback{ background: #facc15; box-shadow: 0 0 4px rgba(250,204,21,0.4); }
+			.fpx-csel-source-row {
+				display: flex;
+				align-items: center;
+				gap: 5px;
+			}
+
 			/* Items table inside drawer */
 			.fpx-items-table {
 				width: 100%;
@@ -1855,8 +2211,61 @@
 				background: rgba(245, 100, 0, 0.16);
 			}
 			.fpx-btn-label.loading {
-				opacity: 0.5;
+				opacity: 0.7;
 				cursor: wait;
+				pointer-events: none;
+			}
+			.fpx-btn-label.ready {
+				background: rgba(34, 197, 94, 0.1);
+				border-color: rgba(34, 197, 94, 0.6);
+				color: #4ade80;
+			}
+			.fpx-btn-label.ready:hover {
+				background: rgba(34, 197, 94, 0.18);
+			}
+
+			/* ── Label auto-fetch status bar ─────────────────────────────── */
+			.fpx-label-status {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				font-size: 11.5px;
+				color: var(--muted);
+				justify-content: center;
+				min-height: 20px;
+				transition: opacity 0.3s;
+			}
+			.fpx-label-status.hidden { opacity: 0; pointer-events: none; }
+
+			/* Inline spinner for the label button */
+			@keyframes fpx-spin {
+				to { transform: rotate(360deg); }
+			}
+			.fpx-spin {
+				display: inline-block;
+				width: 13px;
+				height: 13px;
+				border: 2px solid rgba(245, 100, 0, 0.3);
+				border-top-color: var(--accent);
+				border-radius: 50%;
+				animation: fpx-spin 0.65s linear infinite;
+				flex-shrink: 0;
+			}
+			.fpx-spin.green {
+				border-color: rgba(74, 222, 128, 0.3);
+				border-top-color: #4ade80;
+			}
+
+			/* Progress dots for label status text */
+			@keyframes fpx-ellipsis {
+				0%   { content: '.'; }
+				33%  { content: '..'; }
+				66%  { content: '...'; }
+				100% { content: ''; }
+			}
+			.fpx-label-status-text::after {
+				content: '';
+				animation: fpx-ellipsis 1.5s steps(1, end) infinite;
 			}
 			.fpx-btn-etsy {
 				display: flex;
@@ -3575,7 +3984,7 @@
 				z-index: 990;
 			}
 			.cpm-card {
-				width: min(920px, 94vw);
+				width: min(1000px, 95vw);
 				display: flex;
 				flex-direction: column;
 				max-height: 88vh;
@@ -3613,6 +4022,17 @@
 			.cpm-stat.is-warn b {
 				color: #fbbf24;
 			}
+			.cpm-stat.is-buy {
+				color: var(--accent);
+				border-color: rgba(245, 100, 0, 0.3);
+				background: rgba(245, 100, 0, 0.08);
+			}
+			.cpm-stat.is-buy b { color: var(--accent); }
+			.cpm-stat.is-done {
+				color: var(--green);
+				border-color: rgba(34, 197, 94, 0.3);
+				background: rgba(34, 197, 94, 0.08);
+			}
 			/* Scrollable body fills remaining card height */
 			.cpm-body {
 				overflow-y: auto;
@@ -3628,11 +4048,11 @@
 				table-layout: fixed;
 			}
 			.cpm-table col.col-thumb    { width: 66px; }
-			.cpm-table col.col-code     { width: 160px; }
+			.cpm-table col.col-code     { width: 150px; }
 			.cpm-table col.col-supplier { /* auto — takes remaining space */ }
-			.cpm-table col.col-qty      { width: 60px; }
-			.cpm-table col.col-status   { width: 152px; }
-			.cpm-table col.col-actions  { width: 96px; }
+			.cpm-table col.col-fulfill  { width: 184px; }
+			.cpm-table col.col-status   { width: 142px; }
+			.cpm-table col.col-actions  { width: 90px; }
 			/* Sticky thead uses box-shadow instead of border-bottom to
 			   eliminate the 1px gap browsers insert under sticky cells */
 			.cpm-table thead th {
@@ -3744,6 +4164,98 @@
 				font-weight: 500;
 				color: var(--muted);
 				text-align: center;
+				margin-top: 1px;
+			}
+			/* ── Fulfillment control (purchased / to-buy) ──────────────── */
+			.cpm-fulfill {
+				display: flex;
+				flex-direction: column;
+				gap: 6px;
+			}
+			.cpm-fulfill-top {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+			}
+			.cpm-stepper {
+				display: inline-flex;
+				align-items: center;
+				border: 1px solid var(--border);
+				border-radius: 8px;
+				overflow: hidden;
+				background: var(--bg, #0f1117);
+				flex-shrink: 0;
+			}
+			.cpm-step {
+				width: 26px;
+				height: 28px;
+				border: none;
+				background: transparent;
+				color: var(--text);
+				font-size: 16px;
+				line-height: 1;
+				cursor: pointer;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				transition: background 0.12s, color 0.12s;
+			}
+			.cpm-step:hover:not(:disabled) { background: rgba(255, 255, 255, 0.07); }
+			.cpm-step:disabled { opacity: 0.3; cursor: default; }
+			.cpm-step-input {
+				width: 38px;
+				height: 28px;
+				border: none;
+				border-left: 1px solid var(--border);
+				border-right: 1px solid var(--border);
+				background: var(--surface, #1a1d27);
+				color: var(--text);
+				text-align: center;
+				font-size: 13px;
+				font-weight: 700;
+				font-variant-numeric: tabular-nums;
+				outline: none;
+				-moz-appearance: textfield;
+			}
+			.cpm-step-input::-webkit-outer-spin-button,
+			.cpm-step-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+			.cpm-step-input:focus { background: rgba(245, 100, 0, 0.1); }
+			.cpm-need-of {
+				font-size: 12px;
+				color: var(--muted);
+				white-space: nowrap;
+				font-variant-numeric: tabular-nums;
+			}
+			.cpm-progress {
+				height: 5px;
+				border-radius: 3px;
+				background: rgba(255, 255, 255, 0.08);
+				overflow: hidden;
+			}
+			.cpm-progress > i {
+				display: block;
+				height: 100%;
+				background: var(--green);
+				border-radius: 3px;
+				transition: width 0.18s ease;
+			}
+			.cpm-tobuy {
+				font-size: 11px;
+				font-weight: 700;
+				color: var(--accent);
+				letter-spacing: 0.01em;
+			}
+			.cpm-tobuy.done { color: var(--green); }
+			.cpm-need-only {
+				font-size: 13px;
+				color: var(--text);
+				line-height: 1.3;
+			}
+			.cpm-need-only b { font-size: 16px; font-weight: 700; }
+			.cpm-need-hint {
+				display: block;
+				font-size: 9.5px;
+				color: var(--muted);
 				margin-top: 1px;
 			}
 			.cpm-shop-select,
@@ -3869,6 +4381,38 @@
 			.cpm-assign-btn:hover {
 				background: rgba(245, 100, 0, 0.18);
 				border-color: rgba(245, 100, 0, 0.5);
+			}
+			/* Suggestion wrapper in the unassigned section */
+			.cpm-suggested-wrap {
+				display: flex;
+				flex-direction: column;
+				gap: 4px;
+			}
+			.cpm-sug-code {
+				font-size: 12px;
+				font-weight: 700;
+				color: var(--text);
+			}
+			/* Accept button inside the modal — green-tinted to signal a positive action */
+			.cpm-sug-accept {
+				background: rgba(34, 197, 94, 0.12) !important;
+				border-color: rgba(34, 197, 94, 0.35) !important;
+				color: #4ade80 !important;
+			}
+			.cpm-sug-accept:hover {
+				background: rgba(34, 197, 94, 0.22) !important;
+				border-color: rgba(34, 197, 94, 0.55) !important;
+			}
+			/* "Change" link — muted, secondary action */
+			.cpm-suggested-wrap .cpm-assign-btn:not(.cpm-sug-accept) {
+				background: none;
+				border-color: rgba(255, 255, 255, 0.1);
+				color: var(--muted);
+				font-weight: 500;
+			}
+			.cpm-suggested-wrap .cpm-assign-btn:not(.cpm-sug-accept):hover {
+				background: rgba(255, 255, 255, 0.05);
+				color: var(--text);
 			}
 			.cpm-empty {
 				text-align: center;
@@ -4200,6 +4744,385 @@
 				cursor: pointer;
 				transform: scale(1.2);
 			}
+
+			/* ── Product Catalog modal ───────────────────────────────────── */
+			.pm-modal {
+				position: fixed;
+				inset: 0;
+				background: rgba(8, 10, 15, 0.66);
+				backdrop-filter: blur(3px);
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				z-index: 1200;
+				padding: 24px;
+			}
+			.pm-card {
+				background: var(--surface);
+				border: 1px solid var(--border);
+				border-radius: 16px;
+				box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+				display: flex;
+				flex-direction: column;
+				width: min(1040px, 100%);
+				max-height: 90vh;
+				overflow: hidden;
+			}
+
+			/* Header */
+			.pm-head {
+				display: flex;
+				align-items: flex-start;
+				gap: 16px;
+				padding: 18px 22px;
+				border-bottom: 1px solid var(--border);
+				flex-shrink: 0;
+			}
+			.pm-head-titles { flex: 1; min-width: 0; }
+			.pm-title {
+				font-size: 17px;
+				font-weight: 700;
+				margin: 0;
+				color: var(--text);
+				letter-spacing: -0.01em;
+			}
+			.pm-subtitle {
+				display: block;
+				font-size: 12.5px;
+				color: var(--muted);
+				margin-top: 3px;
+			}
+			.pm-head-actions {
+				display: flex;
+				gap: 10px;
+				align-items: center;
+				flex-shrink: 0;
+			}
+			.pm-tool-group {
+				display: flex;
+				gap: 2px;
+				background: var(--bg);
+				border: 1px solid var(--border);
+				border-radius: 9px;
+				padding: 2px;
+			}
+			.pm-tool {
+				background: none;
+				border: none;
+				cursor: pointer;
+				font-size: 14px;
+				color: var(--muted);
+				width: 30px;
+				height: 28px;
+				border-radius: 7px;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				text-decoration: none;
+				transition: background 0.12s, color 0.12s;
+			}
+			.pm-tool:hover { background: var(--surface); color: var(--text); }
+			.pm-close {
+				background: none;
+				border: none;
+				font-size: 17px;
+				cursor: pointer;
+				color: var(--muted);
+				width: 30px;
+				height: 30px;
+				border-radius: 8px;
+				line-height: 1;
+				transition: background 0.12s, color 0.12s;
+			}
+			.pm-close:hover { background: var(--bg); color: var(--text); }
+
+			/* Generic pill button used inside the modal */
+			.pm-btn {
+				display: inline-flex;
+				align-items: center;
+				gap: 6px;
+				border: 1px solid var(--border);
+				background: var(--bg);
+				color: var(--text);
+				font-family: var(--font);
+				font-size: 13px;
+				font-weight: 600;
+				padding: 7px 14px;
+				border-radius: 9px;
+				cursor: pointer;
+				transition: filter 0.12s, background 0.12s, border-color 0.12s;
+			}
+			.pm-btn:hover { border-color: var(--muted); }
+			.pm-btn.primary {
+				background: var(--accent);
+				border-color: var(--accent);
+				color: #fff;
+			}
+			.pm-btn.primary:hover { filter: brightness(1.08); }
+			.pm-btn.primary span { font-size: 15px; line-height: 1; }
+			.pm-btn.ghost { background: transparent; }
+
+			/* Search bar */
+			.pm-search-bar {
+				display: flex;
+				align-items: center;
+				gap: 12px;
+				padding: 14px 22px;
+				flex-shrink: 0;
+			}
+			.pm-search-wrap {
+				position: relative;
+				flex: 1;
+			}
+			.pm-search-icon {
+				position: absolute;
+				left: 12px;
+				top: 50%;
+				transform: translateY(-50%);
+				font-size: 12px;
+				opacity: 0.6;
+				pointer-events: none;
+			}
+			.pm-search {
+				width: 100%;
+				box-sizing: border-box;
+				border: 1px solid var(--border);
+				background: var(--bg);
+				color: var(--text);
+				border-radius: 9px;
+				padding: 9px 14px 9px 34px;
+				font-size: 13px;
+				font-family: var(--font);
+				outline: none;
+				transition: border-color 0.12s, box-shadow 0.12s;
+			}
+			.pm-search::placeholder { color: var(--muted); }
+			.pm-search:focus {
+				border-color: var(--accent);
+				box-shadow: 0 0 0 3px rgba(245, 100, 0, 0.16);
+			}
+			.pm-count {
+				font-size: 12px;
+				color: var(--muted);
+				white-space: nowrap;
+				font-variant-numeric: tabular-nums;
+			}
+
+			/* Inline editor */
+			.pm-editor {
+				margin: 0 22px 14px;
+				border: 1px solid var(--border);
+				border-radius: 12px;
+				background: var(--card);
+				flex-shrink: 0;
+				overflow: hidden;
+			}
+			.pm-editor-head {
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				font-size: 13px;
+				font-weight: 700;
+				color: var(--text);
+				padding: 12px 16px;
+				background: var(--bg);
+				border-bottom: 1px solid var(--border);
+			}
+			.pm-editor-close {
+				background: none;
+				border: none;
+				cursor: pointer;
+				color: var(--muted);
+				font-size: 15px;
+				line-height: 1;
+			}
+			.pm-editor-close:hover { color: var(--text); }
+			.pm-editor-body {
+				padding: 16px;
+				display: flex;
+				flex-direction: column;
+				gap: 14px;
+			}
+			.pm-fieldset {
+				border: 1px solid var(--border);
+				border-radius: 10px;
+				padding: 12px 14px 14px;
+			}
+			.pm-fieldset-legend {
+				font-size: 11px;
+				font-weight: 700;
+				text-transform: uppercase;
+				letter-spacing: 0.05em;
+				color: var(--accent);
+				margin-bottom: 10px;
+			}
+			.pm-field-row {
+				display: grid;
+				grid-template-columns: 1fr 1fr;
+				gap: 12px;
+			}
+			.pm-field { display: flex; flex-direction: column; gap: 5px; }
+			.pm-field-full { width: 100%; }
+			.pm-label {
+				font-size: 11.5px;
+				color: var(--muted);
+				font-weight: 600;
+			}
+			.pm-req { color: var(--accent); }
+			.pm-input {
+				border: 1px solid var(--border);
+				background: var(--bg);
+				color: var(--text);
+				border-radius: 8px;
+				padding: 8px 11px;
+				font-size: 13px;
+				font-family: var(--font);
+				outline: none;
+				width: 100%;
+				box-sizing: border-box;
+				transition: border-color 0.12s, box-shadow 0.12s;
+			}
+			.pm-input::placeholder { color: var(--muted); opacity: 0.7; }
+			.pm-input:focus {
+				border-color: var(--accent);
+				box-shadow: 0 0 0 3px rgba(245, 100, 0, 0.16);
+			}
+			.pm-editor-footer {
+				display: flex;
+				align-items: center;
+				gap: 10px;
+				padding: 0 16px 16px;
+			}
+			.pm-editor-footer .pm-btn:last-child { margin-left: 0; }
+			.pm-editor-err {
+				flex: 1;
+				font-size: 12px;
+				color: var(--red);
+				min-height: 16px;
+			}
+			@media (max-width: 620px) {
+				.pm-field-row { grid-template-columns: 1fr; }
+			}
+
+			/* Table */
+			.pm-table-wrap {
+				overflow-y: auto;
+				flex: 1;
+				padding: 0 22px 20px;
+			}
+			.pm-table {
+				width: 100%;
+				border-collapse: collapse;
+				font-size: 13px;
+			}
+			.pm-table thead th {
+				position: sticky;
+				top: 0;
+				background: var(--surface);
+				text-align: left;
+				padding: 9px 12px;
+				font-weight: 700;
+				font-size: 10.5px;
+				text-transform: uppercase;
+				letter-spacing: 0.05em;
+				color: var(--muted);
+				border-bottom: 1px solid var(--border);
+				z-index: 2;
+			}
+			.pm-table tbody tr {
+				transition: background 0.1s;
+			}
+			.pm-table tbody tr:hover { background: var(--bg); }
+			.pm-table td {
+				padding: 10px 12px;
+				border-bottom: 1px solid var(--border);
+				vertical-align: middle;
+			}
+			.pm-col-img { width: 56px; }
+			.pm-col-title { min-width: 240px; }
+			.pm-col-supplier { width: 180px; }
+			.pm-col-charm { width: 180px; }
+			.pm-col-actions { width: 76px; text-align: right; }
+
+			.pm-thumb {
+				width: 44px;
+				height: 44px;
+				border-radius: 8px;
+				object-fit: cover;
+				background: var(--bg);
+				border: 1px solid var(--border);
+				display: block;
+			}
+			.pm-thumb-ph {
+				width: 44px;
+				height: 44px;
+				border-radius: 8px;
+				background: var(--bg);
+				border: 1px solid var(--border);
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				font-size: 16px;
+				opacity: 0.5;
+			}
+			.pm-title-text {
+				word-break: break-word;
+				line-height: 1.4;
+				color: var(--text);
+				font-weight: 500;
+			}
+			.pm-cell-stack { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+			.pm-shop-name { color: var(--text); font-weight: 500; }
+			.pm-cell-empty {
+				color: var(--muted);
+				font-size: 12px;
+				opacity: 0.65;
+			}
+			.pm-tag {
+				display: inline-block;
+				background: var(--bg);
+				color: var(--text);
+				border: 1px solid var(--border);
+				border-radius: 6px;
+				padding: 1px 8px;
+				font-size: 11px;
+				font-weight: 600;
+				font-variant-numeric: tabular-nums;
+			}
+			.pm-tag.accent {
+				background: rgba(245, 100, 0, 0.12);
+				border-color: rgba(245, 100, 0, 0.3);
+				color: var(--accent);
+			}
+			.pm-row-actions { display: flex; gap: 4px; justify-content: flex-end; }
+			.pm-btn-icon {
+				background: none;
+				border: 1px solid transparent;
+				border-radius: 7px;
+				cursor: pointer;
+				width: 28px;
+				height: 28px;
+				font-size: 13px;
+				color: var(--muted);
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				transition: background 0.12s, color 0.12s, border-color 0.12s;
+			}
+			.pm-btn-icon:hover { background: var(--bg); border-color: var(--border); color: var(--text); }
+			.pm-btn-icon.danger:hover {
+				background: rgba(239, 68, 68, 0.12);
+				border-color: rgba(239, 68, 68, 0.35);
+				color: var(--red);
+			}
+			.pm-empty {
+				text-align: center;
+				padding: 56px 20px;
+				color: var(--muted);
+			}
+			.pm-empty-icon { font-size: 32px; opacity: 0.5; }
+			.pm-empty-title { font-size: 15px; font-weight: 600; color: var(--text); margin-top: 10px; }
+			.pm-empty-sub { font-size: 13px; margin-top: 4px; }
 
 			/* ── Charm picker modal ─────────────────────────────────────── */
 			.charm-modal {
@@ -4817,45 +5740,84 @@
 				opacity: 1;
 				color: var(--accent);
 			}
-			/* ── Pinned-orders indicator bar ──────────────────────────────── */
+			/* ── Added-orders indicator bar ───────────────────────────────── */
 			.route-pin-bar {
 				display: none;
 				align-items: center;
 				gap: 10px;
-				padding: 8px 14px;
-				border-radius: 8px;
+				padding: 9px 14px;
+				border-radius: 10px;
 				margin-bottom: 10px;
-				background: rgba(99, 102, 241, 0.1);
-				border: 1px solid rgba(99, 102, 241, 0.28);
+				background: linear-gradient(90deg, rgba(99, 102, 241, 0.16), rgba(99, 102, 241, 0.06));
+				border: 1px solid rgba(99, 102, 241, 0.3);
 				font-size: 13px;
 			}
 			.route-pin-bar.visible {
 				display: flex;
 			}
+			.route-pin-icon {
+				font-size: 14px;
+				line-height: 1;
+				filter: saturate(1.1);
+			}
 			.route-pin-label {
 				color: var(--accent);
 				font-weight: 600;
+				white-space: nowrap;
 			}
 			.route-pin-sub {
 				color: var(--muted);
 				font-size: 12px;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
 			}
 			.route-pin-clear {
 				margin-left: auto;
+				flex-shrink: 0;
 				background: none;
-				border: 1px solid rgba(255, 255, 255, 0.12);
+				border: 1px solid rgba(255, 255, 255, 0.14);
 				color: var(--muted);
-				border-radius: 5px;
-				padding: 3px 10px;
+				border-radius: 6px;
+				padding: 4px 11px;
 				font-size: 12px;
+				font-weight: 500;
 				cursor: pointer;
 				transition:
 					background 0.12s,
-					color 0.12s;
+					color 0.12s,
+					border-color 0.12s;
 			}
 			.route-pin-clear:hover {
 				background: rgba(255, 255, 255, 0.08);
+				border-color: rgba(255, 255, 255, 0.24);
 				color: var(--text);
+			}
+			/* ── Transient toast (Send to Route confirmation, etc.) ───────── */
+			.route-toast {
+				position: fixed;
+				left: 50%;
+				bottom: 28px;
+				transform: translate(-50%, 16px);
+				z-index: 4000;
+				max-width: 90vw;
+				padding: 11px 18px;
+				border-radius: 10px;
+				background: rgba(24, 26, 38, 0.96);
+				border: 1px solid rgba(99, 102, 241, 0.45);
+				color: var(--text);
+				font-size: 13px;
+				font-weight: 600;
+				box-shadow: 0 12px 34px rgba(0, 0, 0, 0.45);
+				opacity: 0;
+				pointer-events: none;
+				transition:
+					opacity 0.2s ease,
+					transform 0.2s ease;
+			}
+			.route-toast.show {
+				opacity: 1;
+				transform: translate(-50%, 0);
 			}
 			/* ── "Send to Route" button in bulk bar ───────────────────────── */
 			.bulk-bar-route {
@@ -5358,6 +6320,91 @@
 				color: #f87171;
 				background: rgba(239, 68, 68, 0.1);
 			}
+			/* ── Bulk Listings tab ─────────────────────────────────── */
+			#tab-bulk .btn {
+				background: var(--surface); border: 1px solid var(--border); color: var(--text);
+				padding: 7px 14px; border-radius: 8px; font-size: 12.5px; height: 34px;
+				cursor: pointer; font-family: var(--font); transition: border-color 0.15s, background 0.15s;
+			}
+			#tab-bulk .btn:hover { border-color: rgba(255,255,255,0.25); }
+			#tab-bulk .btn:disabled { opacity: 0.5; cursor: default; }
+			#tab-bulk .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+			#tab-bulk .btn-primary:hover { filter: brightness(1.08); }
+			.bulk-lbl { font-size: 12px; color: var(--muted); font-weight: 600; }
+			.bulk-muted { font-size: 12px; color: var(--muted); font-weight: 400; }
+			.bulk-card {
+				margin-top: 14px; padding: 14px 16px; border: 1px solid var(--border);
+				border-radius: 10px; background: var(--card, rgba(255,255,255,0.02));
+			}
+			.bulk-card-head { font-weight: 700; margin-bottom: 12px; font-size: 14px; }
+			.bulk-grid {
+				display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+				gap: 12px 16px;
+			}
+			.bulk-grid select, .bulk-grid input { width: 100%; margin-top: 4px; }
+			.bulk-warn { margin-top: 10px; color: #e0a106; font-size: 12px; }
+			.bulk-bar-wrap { height: 8px; background: var(--border); border-radius: 6px; overflow: hidden; }
+			.bulk-progress-fill { height: 100%; width: 0%; background: var(--accent, #f1641e); transition: width 0.3s; }
+			.bulk-st { font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+			.bulk-st-pending { background: var(--border); color: var(--muted); }
+			.bulk-st-running { background: #2b3a55; color: #7fb1ff; }
+			.bulk-st-ai_done, .bulk-st-created { background: #3a3320; color: #e0a106; }
+			.bulk-st-done { background: #1e3a24; color: #4ade80; }
+			.bulk-st-failed { background: #3a1e1e; color: #f87171; }
+			/* ── Folder browser modal ────────────────────────────────── */
+			.fbr-overlay {
+				position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+				z-index: 9000; display: flex; align-items: center; justify-content: center;
+			}
+			.fbr-modal {
+				background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+				width: min(780px, 95vw); max-height: 80vh;
+				display: flex; flex-direction: column; box-shadow: 0 24px 64px rgba(0,0,0,0.5);
+			}
+			.fbr-header {
+				display: flex; align-items: center; justify-content: space-between;
+				padding: 14px 18px 10px; border-bottom: 1px solid var(--border);
+			}
+			.fbr-title { font-weight: 700; font-size: 14px; }
+			.fbr-close {
+				background: none; border: none; color: var(--muted); font-size: 16px;
+				cursor: pointer; padding: 2px 6px; border-radius: 6px;
+			}
+			.fbr-close:hover { background: rgba(255,255,255,0.07); color: var(--text); }
+			.fbr-path-bar {
+				display: flex; align-items: center; gap: 10px;
+				padding: 8px 18px; border-bottom: 1px solid var(--border);
+				background: rgba(255,255,255,0.02);
+			}
+			.fbr-up-btn {
+				background: var(--surface); border: 1px solid var(--border); color: var(--text);
+				padding: 3px 10px; border-radius: 6px; cursor: pointer; font-size: 14px;
+				transition: border-color 0.15s;
+			}
+			.fbr-up-btn:hover { border-color: rgba(255,255,255,0.25); }
+			.fbr-up-btn:disabled { opacity: 0.35; cursor: default; }
+			.fbr-current-path {
+				font-size: 12px; color: var(--muted); font-family: monospace;
+				white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+			}
+			.fbr-body {
+				flex: 1; overflow-y: auto; padding: 8px 10px;
+				display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+				align-content: start; gap: 2px;
+			}
+			.fbr-dir-btn {
+				display: flex; align-items: center; gap: 8px;
+				padding: 7px 10px; border-radius: 7px; cursor: pointer;
+				background: none; border: none; color: var(--text); font-family: var(--font);
+				font-size: 12.5px; text-align: left; transition: background 0.1s;
+			}
+			.fbr-dir-btn:hover { background: rgba(255,255,255,0.06); }
+			.fbr-dir-icon { font-size: 15px; flex-shrink: 0; }
+			.fbr-dir-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+			.fbr-footer {
+				display: flex; align-items: center; justify-content: space-between;
+				padding: 12px 18px; border-top: 1px solid var(--border); gap: 12px; flex-wrap: wrap;
+			}
 		</style>
 	</head>
 	<body>
@@ -5375,6 +6422,7 @@
 				<div class="tab" onclick="showTab('overview')">Overview</div>
 				<div class="tab active" onclick="showTab('orders')">Orders</div>
 				<div class="tab" onclick="showTab('listings')">Listings</div>
+				<div class="tab" onclick="showTab('bulk')">Bulk Listings</div>
 				<div class="tab" id="tab-btn-events" onclick="showTab('events')">Events</div>
 				<div class="tab" onclick="showTab('discounts')">Discounts</div>
 				<div class="tab" id="tab-btn-messages" onclick="showTab('messages')">
@@ -5526,6 +6574,148 @@
 					<button id="btnListPrev" onclick="changeListPage(-1)" disabled>← Prev</button>
 					<span class="page-info" id="listPageInfo">—</span>
 					<button id="btnListNext" onclick="changeListPage(1)" disabled>Next →</button>
+				</div>
+			</div>
+
+			<!-- ── BULK LISTINGS tab ─────────────────────────────────────── -->
+			<div id="tab-bulk" style="display: none">
+				<div class="section-head">
+					<h2>Bulk Listing Creator</h2>
+				</div>
+				<p style="color: var(--muted); margin: 0 0 14px; font-size: 13px; max-width: 880px">
+					Point this at a folder of product subfolders (each subfolder = one iPhone case: several images + one video).
+					AI writes the title, description and 13 tags; prices come from the 4-currency master sheet (Etsy Anchor Price,
+					matched to the shop's currency); shipping profile, return policy, production partner and section are auto-detected
+					from the shop. Listings are created as <strong>drafts</strong> by default.
+				</p>
+
+				<!-- Step 1: shop + input -->
+				<div class="filters" style="flex-wrap: wrap; gap: 10px; align-items: flex-end">
+					<div>
+						<label class="bulk-lbl">Shop</label><br />
+						<select id="bulkShop" onchange="bulkLoadShopSettings()">
+							<option value="">Select a shop…</option>
+						</select>
+					</div>
+					<div style="flex: 1; min-width: 320px">
+						<label class="bulk-lbl">Input folder</label><br />
+						<div style="display:flex; gap:6px; align-items:center">
+							<input type="text" id="bulkInputPath" placeholder="Click Browse or paste a path…" style="flex:1; min-width:0" oninput="bulkClearScan()" />
+							<button class="btn" onclick="bulkOpenBrowser()" title="Browse for folder" style="white-space:nowrap; padding: 0 12px">Browse…</button>
+						</div>
+					</div>
+					<button class="btn" onclick="bulkScan()" style="align-self:flex-end">Scan folder</button>
+				</div>
+				<div id="bulkScanInfo" style="margin: 6px 2px 0; font-size: 12.5px; color: var(--muted)"></div>
+
+				<!-- Step 2: resolved shop settings (editable) -->
+				<div id="bulkSettingsCard" class="bulk-card" style="display: none">
+					<div class="bulk-card-head">Shop settings <span id="bulkSettingsMeta" class="bulk-muted"></span></div>
+					<div class="bulk-grid">
+						<div>
+							<label class="bulk-lbl">Currency (pricing table)</label>
+							<select id="bulkCurrency"></select>
+						</div>
+						<div>
+							<label class="bulk-lbl">Taxonomy ID</label>
+							<input type="number" id="bulkTaxonomy" />
+						</div>
+						<div>
+							<label class="bulk-lbl">Shipping profile</label>
+							<select id="bulkShipping"></select>
+						</div>
+						<div>
+							<label class="bulk-lbl">Return policy</label>
+							<select id="bulkReturn"></select>
+						</div>
+						<div>
+							<label class="bulk-lbl">Production partner</label>
+							<select id="bulkPartner"></select>
+						</div>
+						<div>
+							<label class="bulk-lbl">Shop section</label>
+							<select id="bulkSection"></select>
+						</div>
+						<div>
+							<label class="bulk-lbl">Who made it</label>
+							<select id="bulkWhoMade">
+								<option value="someone_else">Another company or person</option>
+								<option value="i_did">I did</option>
+								<option value="collective">A member of my shop</option>
+							</select>
+						</div>
+						<div>
+							<label class="bulk-lbl">When made</label>
+							<select id="bulkWhenMade">
+								<option value="made_to_order">Made to order</option>
+								<option value="2020_2026">2020–2026</option>
+							</select>
+						</div>
+					</div>
+					<div id="bulkSettingsWarn" class="bulk-warn"></div>
+				</div>
+
+				<!-- Step 3: run controls -->
+				<div id="bulkRunBar" class="filters" style="display: none; align-items: center; gap: 14px; margin-top: 12px">
+					<label class="bulk-lbl" style="display: flex; align-items: center; gap: 6px; margin: 0">
+						State:
+						<select id="bulkState">
+							<option value="draft" selected>Draft (review before publish)</option>
+							<option value="published">Published (incurs $0.20 each)</option>
+						</select>
+					</label>
+					<label class="bulk-lbl" style="display: flex; align-items: center; gap: 6px; margin: 0">
+						<input type="checkbox" id="bulkDryRun" /> Dry run (preview, no Etsy writes)
+					</label>
+					<button class="btn btn-primary" id="bulkRunBtn" onclick="bulkRun()">Create listings</button>
+					<span id="bulkRunHint" class="bulk-muted"></span>
+				</div>
+
+				<!-- Progress -->
+				<div id="bulkProgress" style="display: none; margin-top: 16px">
+					<div class="section-head" style="margin-bottom: 6px">
+						<h2 style="font-size: 15px" id="bulkProgressTitle">Progress</h2>
+						<button class="btn" id="bulkRetryBtn" onclick="bulkRetry()" style="display: none">Retry failed</button>
+					</div>
+					<div id="bulkProgressBarWrap" class="bulk-bar-wrap"><div id="bulkProgressBar" class="bulk-progress-fill"></div></div>
+					<div class="table-wrap" style="margin-top: 10px">
+						<table>
+							<thead>
+								<tr>
+									<th style="width: 26%">Product</th>
+									<th style="width: 18%">Status</th>
+									<th>Detail</th>
+								</tr>
+							</thead>
+							<tbody id="bulkItemsBody">
+								<tr><td colspan="3" class="empty">No run yet.</td></tr>
+							</tbody>
+						</table>
+					</div>
+				</div>
+			</div>
+
+			<!-- ── Folder browser modal (shared, used by Bulk Listings) ──── -->
+			<div id="folderBrowserOverlay" class="fbr-overlay" style="display:none" onclick="if(event.target===this)fbClose()">
+				<div class="fbr-modal">
+					<div class="fbr-header">
+						<span class="fbr-title">Select input folder</span>
+						<button class="fbr-close" onclick="fbClose()" title="Close">✕</button>
+					</div>
+					<div class="fbr-path-bar">
+						<button class="fbr-up-btn" id="fbrUpBtn" onclick="fbUp()" title="Parent folder">↑</button>
+						<span class="fbr-current-path" id="fbrCurrentPath"></span>
+					</div>
+					<div class="fbr-body" id="fbrBody">
+						<div class="loading">Loading…</div>
+					</div>
+					<div class="fbr-footer">
+						<span class="bulk-muted" id="fbrHint">Navigate into the folder that contains your product sub-folders, then click Select.</span>
+						<div style="display:flex;gap:8px">
+							<button class="btn" onclick="fbClose()">Cancel</button>
+							<button class="btn btn-primary" id="fbrSelectBtn" onclick="fbSelect()">Select this folder</button>
+						</div>
+					</div>
 				</div>
 			</div>
 
@@ -5757,12 +6947,12 @@
 
 			<!-- ── ROUTE tab ─────────────────────────────────────────────── -->
 			<div id="tab-route" style="display: none">
-				<!-- Shown when osp_project_dir is not configured -->
+				<!-- Shown only if the bundled route engine is missing/unreadable -->
 				<div id="routeConfigWarning" style="display: none">
 					<div class="route-callout-warn">
-						<strong>Shopping Route Generator not configured.</strong>
-						Add <code>osp_project_dir</code> to your <code>config.json</code> to enable this feature.<br />
-						Example: <code>"osp_project_dir": "C:\\Users\\...\\Orders_sorting_program"</code>
+						<strong>Route engine unavailable.</strong>
+						The bundled generator under <code>route-engine/</code> could not be found.
+						Reinstall the dashboard, or set <code>route_engine_dir</code> in <code>config.json</code> to a valid engine directory.
 					</div>
 				</div>
 
@@ -5813,22 +7003,24 @@
 					<div class="route-dash-controls">
 						<div class="route-filter-group">
 							<label class="route-filter-chip" title="Show only items with no supplier name/location yet — isolate them to fill in"> <input type="checkbox" id="routeOnlyUnmatched" onchange="renderRouteDashboard()" /> Unmatched only </label>
-							<label class="route-filter-chip" title="Show only items that need a charm assigned"> <input type="checkbox" id="routeOnlyCharm" onchange="renderRouteDashboard()" /> Needs charm </label>
+							<label class="route-filter-chip" title="Show only orders that include a charm product but haven't had a charm code confirmed yet — catalog suggestions count as unconfirmed"> <input type="checkbox" id="routeOnlyCharm" onchange="renderRouteDashboard()" /> Needs charm </label>
 							<label class="route-filter-chip" title="Hide items you've excluded from the route"> <input type="checkbox" id="routeHideExcluded" onchange="renderRouteDashboard()" /> Hide excluded </label>
 						</div>
 						<div class="route-dash-actions">
 							<button type="button" class="btn-sm" id="routeCharmBuyBtn" onclick="openCharmPurchaseModal()" title="Charm shopping list — every charm needed for these orders, grouped with totals, status and supplier">Charms to buy<span class="route-btn-badge" id="routeCharmBuyCount" style="display:none">0</span></button>
 							<button type="button" class="btn-sm route-download-images-btn" id="routeDownloadImagesBtn" onclick="downloadUnmatchedProductImages()" title="Download a ZIP of product photos for items not in the supplier catalog (uses current date range and shop filter)">Export images</button>
+							<button type="button" class="btn-sm" onclick="openProductCatalogModal()" title="View and edit the product-to-supplier/charm mapping catalog">📋 Product Catalog</button>
 							<button class="btn-sm" onclick="openAddOrderModal()" title="Add any order to this route session by receipt ID">＋ Add Order</button>
 							<button class="btn-sm" onclick="loadRouteDashboard()" title="Refresh">↻ Refresh</button>
 						</div>
 					</div>
 				</div>
-				<!-- Pinned-orders indicator (shown when orders were sent from the Orders tab) -->
+				<!-- Added-orders indicator (shown when orders were sent from the Orders tab) -->
 				<div class="route-pin-bar" id="routePinBar">
-					<span class="route-pin-label" id="routePinLabel">Showing 0 selected orders</span>
-					<span class="route-pin-sub">Pinned from the Orders tab — all other orders are hidden</span>
-					<button class="route-pin-clear" onclick="clearRoutePinnedOrders()">✕ Show all orders</button>
+					<span class="route-pin-icon" aria-hidden="true">📍</span>
+					<span class="route-pin-label" id="routePinLabel">0 orders pulled in from the Orders tab</span>
+					<span class="route-pin-sub">Shown alongside your pending orders so they’re on the shopping list too.</span>
+					<button class="route-pin-clear" onclick="clearRouteAddedOrders()" title="Remove the orders you pulled in from the Orders tab">✕ Remove added orders</button>
 				</div>
 				<div class="table-wrap">
 					<table class="route-dash-table">
@@ -5935,8 +7127,102 @@
 			</div>
 		</div>
 
-		<!-- ── Charm picker modal ─────────────────────────────────────────────── -->
-		<div id="charmModal" class="charm-modal" style="display: none" onclick="if (event.target === this) closeCharmModal()">
+	<!-- ── Product Catalog modal ──────────────────────────────────────────── -->
+	<div id="pmModal" class="pm-modal" style="display: none" onclick="if (event.target === this) closePmModal()">
+		<div class="pm-card">
+			<div class="pm-head">
+				<div class="pm-head-titles">
+					<h3 class="pm-title">Product Catalog</h3>
+					<span class="pm-subtitle">Maps each product to its supplier &amp; charm — the source of truth for route generation.</span>
+				</div>
+				<div class="pm-head-actions">
+					<button class="pm-btn primary" onclick="openPmEditor(null)" title="Add a new product → supplier/charm mapping"><span>＋</span> Add entry</button>
+					<div class="pm-tool-group">
+						<button class="pm-tool" onclick="pmReconcile()" title="Fill blank supplier/charm cells from the route-engine catalog (exact title matches only)">🔗</button>
+						<button class="pm-tool" onclick="pmImportFromExcel()" title="Re-import from supplier_catalog.xlsx — replaces the catalog with the Excel Product Map sheet">↻</button>
+						<a class="pm-tool" href="/api/route/product-map/export.csv" download title="Download the current catalog as a CSV file">⬇</a>
+					</div>
+					<button class="pm-close" onclick="closePmModal()" title="Close">✕</button>
+				</div>
+			</div>
+			<div class="pm-search-bar">
+				<div class="pm-search-wrap">
+					<span class="pm-search-icon">🔍</span>
+					<input id="pmSearch" type="search" class="pm-search" placeholder="Search product, shop, stall, or charm code…" oninput="renderPmTable()" />
+				</div>
+				<span class="pm-count" id="pmCount"></span>
+			</div>
+
+			<!-- Editor form (hidden until Add/Edit) -->
+			<div class="pm-editor" id="pmEditor" style="display: none">
+				<div class="pm-editor-head">
+					<span id="pmEditorTitle">Add entry</span>
+					<button class="pm-editor-close" onclick="closePmEditor()" title="Cancel">✕</button>
+				</div>
+				<div class="pm-editor-body">
+					<div class="pm-field pm-field-full">
+						<label class="pm-label" for="pmEditTitle">Product Title <span class="pm-req">*</span></label>
+						<input id="pmEditTitle" class="pm-input" type="text" placeholder="Full product title (matching is case-insensitive)" />
+					</div>
+					<div class="pm-fieldset">
+						<div class="pm-fieldset-legend">Supplier · Location</div>
+						<div class="pm-field-row">
+							<div class="pm-field">
+								<label class="pm-label" for="pmEditShop">Shop</label>
+								<input id="pmEditShop" class="pm-input" type="text" placeholder="e.g. 麦麦" />
+							</div>
+							<div class="pm-field">
+								<label class="pm-label" for="pmEditStall">Stall</label>
+								<input id="pmEditStall" class="pm-input" type="text" placeholder="e.g. A233" />
+							</div>
+						</div>
+					</div>
+					<div class="pm-fieldset">
+						<div class="pm-fieldset-legend">Charm</div>
+						<div class="pm-field-row">
+							<div class="pm-field">
+								<label class="pm-label" for="pmEditCharmShop">Charm Shop</label>
+								<input id="pmEditCharmShop" class="pm-input" type="text" placeholder="Charm shop name" />
+							</div>
+							<div class="pm-field">
+								<label class="pm-label" for="pmEditCharmCode">Charm Code</label>
+								<input id="pmEditCharmCode" class="pm-input" type="text" placeholder="e.g. CH-00001" />
+							</div>
+						</div>
+					</div>
+				</div>
+				<div class="pm-editor-footer">
+					<span class="pm-editor-err" id="pmEditorErr"></span>
+					<button class="pm-btn ghost" onclick="closePmEditor()">Cancel</button>
+					<button class="pm-btn primary" onclick="savePmEntry()">Save entry</button>
+				</div>
+			</div>
+
+			<!-- Catalog table -->
+			<div class="pm-table-wrap">
+				<table class="pm-table">
+					<thead>
+						<tr>
+							<th class="pm-col-img"></th>
+							<th class="pm-col-title">Product</th>
+							<th class="pm-col-supplier">Supplier · Location</th>
+							<th class="pm-col-charm">Charm</th>
+							<th class="pm-col-actions"></th>
+						</tr>
+					</thead>
+					<tbody id="pmTableBody"></tbody>
+				</table>
+				<div id="pmEmpty" class="pm-empty" style="display: none">
+					<div class="pm-empty-icon">📦</div>
+					<div class="pm-empty-title">No matching products</div>
+					<div class="pm-empty-sub">Try a different search, or add a new entry.</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<!-- ── Charm picker modal ─────────────────────────────────────────────── -->
+	<div id="charmModal" class="charm-modal" style="display: none" onclick="if (event.target === this) closeCharmModal()">
 			<div class="charm-modal-card">
 				<div class="charm-modal-head">
 					<div>
@@ -6064,7 +7350,7 @@
 
 			// ── Tabs ──────────────────────────────────────────────────────
 			function showTab(name) {
-				const tabs = ['overview', 'orders', 'listings', 'events', 'discounts', 'messages', 'shops', 'sync-log', 'route']
+				const tabs = ['overview', 'orders', 'listings', 'bulk', 'events', 'discounts', 'messages', 'shops', 'sync-log', 'route']
 				tabs.forEach((t) => {
 					document.getElementById('tab-' + t).style.display = t === name ? '' : 'none'
 				})
@@ -6077,6 +7363,7 @@
 					fetchListings()
 					loadWatchStatus()
 				}
+				if (name === 'bulk') initBulkTab()
 				if (name === 'events') loadEvents()
 				if (name === 'discounts') loadDiscounts()
 				if (name === 'messages') initMessages()
@@ -6751,6 +8038,7 @@
 					closeShipModal()
 					close4pxDrawer()
 					closeTrackModal()
+					fbClose()
 				}
 			})
 
@@ -6993,11 +8281,52 @@
 				document.getElementById('fpxRCountry').value = (o.shipping_country_iso || '').toUpperCase()
 				document.getElementById('fpxRPhone').value = ''
 
-				// Package defaults (phone case = ~100–200g)
-				document.getElementById('fpxWeight').value = ''
+				// Package defaults — auto-fill weight (kg) from order style variation
 				document.getElementById('fpxLength').value = ''
 				document.getElementById('fpxWidth').value = ''
 				document.getElementById('fpxHeight').value = ''
+
+				// Extract the style string from the order's transaction variations
+				const _fpxStyleRaw = (() => {
+					const txs = Array.isArray(o.transactions) && o.transactions.length > 0 ? o.transactions : []
+					for (const tx of txs) {
+						for (const v of tx.variations || []) {
+							if (/style/i.test(v.formatted_name || v.property_name || '')) {
+								return (v.formatted_value || v.value || '').toString().trim()
+							}
+						}
+					}
+					return ''
+				})()
+				// Use existing _matchKnown to normalise against the 6 canonical styles
+				const _fpxStyleMatch = _matchKnown(_fpxStyleRaw)
+				const _fpxStyleKey   = _fpxStyleMatch?.key || ''
+				// Weight lookup table (kg):
+				//   case+grip+charm  → 0.18 kg
+				//   case+grip / case+charm → 0.13 kg
+				//   case only / grip only / charm only → 0.05 kg
+				let _fpxAutoWeightKg = ''
+				if      (_fpxStyleKey === 'case+grip+charm') _fpxAutoWeightKg = '0.18'
+				else if (_fpxStyleKey === 'case+grip' || _fpxStyleKey === 'case+charm') _fpxAutoWeightKg = '0.13'
+				else if (_fpxStyleKey === 'case only' || _fpxStyleKey === 'grip only' || _fpxStyleKey === 'charm only') _fpxAutoWeightKg = '0.05'
+
+				const _fpxWEl    = document.getElementById('fpxWeight')
+				const _fpxWBadge = document.getElementById('fpxWeightBadge')
+				if (_fpxAutoWeightKg) {
+					_fpxWEl.value = _fpxAutoWeightKg
+					// Trigger CSS pulse animation (restart by removing then re-adding class)
+					_fpxWEl.classList.remove('auto-filled')
+					void _fpxWEl.offsetWidth
+					_fpxWEl.classList.add('auto-filled')
+					if (_fpxWBadge) {
+						_fpxWBadge.classList.remove('show')
+						void _fpxWBadge.offsetWidth
+						setTimeout(() => _fpxWBadge.classList.add('show'), 80)
+					}
+				} else {
+					_fpxWEl.value = ''
+					if (_fpxWBadge) _fpxWBadge.classList.remove('show')
+				}
 
 				// Battery toggle
 				document.querySelectorAll('[name="fpxBatt"]').forEach((r) => {
@@ -7009,14 +8338,10 @@
 					r.closest('.fpx-toggle')?.classList.toggle('active', r.checked)
 				})
 
-				// Currency (match order currency)
-				const currency = (o.grandtotal_currency || 'USD').toUpperCase()
-				const currSel = document.getElementById('fpxCurrency')
-				if ([...currSel.options].some((opt) => opt.value === currency)) {
-					currSel.value = currency
-				} else {
-					currSel.value = 'USD'
-				}
+				// Customs declared value currency — always USD per 4PX customs convention.
+				// Using the shop/order currency (CAD, GBP, etc.) causes customs
+				// mismatches; USD is the universal declared-value standard.
+				document.getElementById('fpxCurrency').value = 'USD'
 
 				// Customs items — always use the fixed declared values for iPhone cases
 				// (not the actual order value / product title from Etsy)
@@ -7073,51 +8398,259 @@
 						})
 					})
 				})
+				// Close product dropdown when clicking outside
+				document.addEventListener('mousedown', (e) => {
+					if (!e.target.closest('#fpxProductDropdown')) {
+						closeFpxProductDropdown()
+					}
+				})
+				// Keyboard navigation inside the custom dropdown
+				document.getElementById('fpxProductSearch')?.addEventListener('keydown', (e) => {
+					const list = document.getElementById('fpxProductList')
+					if (!list) return
+					const opts = [...list.querySelectorAll('.fpx-csel-option:not(.hidden)')]
+					if (!opts.length) return
+					if (e.key === 'ArrowDown') {
+						e.preventDefault()
+						const cur = list.querySelector('.fpx-csel-option.highlighted') || opts[0]
+						const idx = opts.indexOf(cur)
+						opts.forEach(o => o.classList.remove('highlighted'))
+						const next = opts[Math.min(idx + 1, opts.length - 1)]
+						next.classList.add('highlighted')
+						next.scrollIntoView({ block: 'nearest' })
+					} else if (e.key === 'ArrowUp') {
+						e.preventDefault()
+						const cur = list.querySelector('.fpx-csel-option.highlighted') || opts[0]
+						const idx = opts.indexOf(cur)
+						opts.forEach(o => o.classList.remove('highlighted'))
+						const prev = opts[Math.max(idx - 1, 0)]
+						prev.classList.add('highlighted')
+						prev.scrollIntoView({ block: 'nearest' })
+					} else if (e.key === 'Enter') {
+						e.preventDefault()
+						const hl = list.querySelector('.fpx-csel-option.highlighted')
+						if (hl) hl.click()
+					} else if (e.key === 'Escape') {
+						closeFpxProductDropdown()
+					}
+				})
 			})
+
+			// ── Custom product dropdown helpers ──────────────────────────────────────────
+
+			function toggleFpxProductDropdown() {
+				const panel = document.getElementById('fpxProductPanel')
+				if (panel?.classList.contains('open')) closeFpxProductDropdown()
+				else openFpxProductDropdown()
+			}
+
+			function openFpxProductDropdown() {
+				const trigger = document.getElementById('fpxProductTrigger')
+				const panel   = document.getElementById('fpxProductPanel')
+				const search  = document.getElementById('fpxProductSearch')
+				if (!panel) return
+				trigger?.classList.add('open')
+				trigger?.setAttribute('aria-expanded', 'true')
+				panel.classList.add('open')
+				// Clear search and reset list visibility
+				if (search) {
+					search.value = ''
+					filterFpxProducts('')
+				}
+				setTimeout(() => search?.focus(), 40)
+			}
+
+			function closeFpxProductDropdown() {
+				const trigger = document.getElementById('fpxProductTrigger')
+				const panel   = document.getElementById('fpxProductPanel')
+				trigger?.classList.remove('open')
+				trigger?.setAttribute('aria-expanded', 'false')
+				panel?.classList.remove('open')
+				// Clear highlighted state
+				document.querySelectorAll('.fpx-csel-option.highlighted').forEach(el => el.classList.remove('highlighted'))
+			}
+
+			function selectFpxProduct(code, name, optEl) {
+				const hidden = document.getElementById('fpxProduct')
+				const label  = document.getElementById('fpxProductLabel')
+				const list   = document.getElementById('fpxProductList')
+				if (hidden) hidden.value = code
+				if (label) {
+					label.textContent = name || code || 'Select logistics product…'
+					label.className   = code ? 'fpx-csel-label' : 'fpx-csel-label placeholder'
+				}
+				// Mark selection
+				list?.querySelectorAll('.fpx-csel-option').forEach(el => el.classList.remove('selected', 'highlighted'))
+				optEl?.classList.add('selected')
+				// Show/hide manual code input for OTHER
+				const customWrap = document.getElementById('fpxProductCustomWrap')
+				if (customWrap) customWrap.style.display = code === 'OTHER' ? '' : 'none'
+				// Animate trigger to signal change
+				const trigger = document.getElementById('fpxProductTrigger')
+				if (trigger) {
+					trigger.style.transition = 'background 0.12s, border-color 0.12s'
+					trigger.style.borderColor = 'rgba(245,100,0,0.5)'
+					setTimeout(() => { trigger.style.borderColor = ''; trigger.style.transition = '' }, 600)
+				}
+				closeFpxProductDropdown()
+			}
+
+			function filterFpxProducts(query) {
+				const q    = (query || '').toLowerCase().trim()
+				const list = document.getElementById('fpxProductList')
+				if (!list) return
+
+				const opts   = list.querySelectorAll('.fpx-csel-option')
+				const groups = list.querySelectorAll('.fpx-csel-group')
+				let anyVisible = false
+
+				// Filter option items
+				opts.forEach(opt => {
+					const match = !q || opt.textContent.toLowerCase().includes(q)
+					opt.classList.toggle('hidden', !match)
+					if (match) anyVisible = true
+					opt.classList.remove('highlighted')
+				})
+
+				// Hide group headers when all their options are hidden
+				groups.forEach(grp => {
+					// Collect all option siblings following this group until the next group
+					let sibling = grp.nextElementSibling
+					let hasVisible = false
+					while (sibling && !sibling.classList.contains('fpx-csel-group')) {
+						if (!sibling.classList.contains('hidden') && sibling.classList.contains('fpx-csel-option')) {
+							hasVisible = true
+							break
+						}
+						sibling = sibling.nextElementSibling
+					}
+					grp.style.display = hasVisible ? '' : 'none'
+				})
+
+				// Empty state
+				let emptyEl = list.querySelector('.fpx-csel-empty')
+				if (!anyVisible) {
+					if (!emptyEl) {
+						emptyEl = document.createElement('li')
+						emptyEl.className = 'fpx-csel-empty'
+						list.appendChild(emptyEl)
+					}
+					emptyEl.textContent = `No products match "${q}"`
+					emptyEl.style.display = ''
+				} else if (emptyEl) {
+					emptyEl.style.display = 'none'
+				}
+			}
 
 			// ── Load logistics products ───────────────────────────────────────────────────
 			async function load4pxProducts(countryCode) {
-				const sel = document.getElementById('fpxProduct')
-				if (!sel) return
-				sel.innerHTML = '<option value="">Loading…</option>'
+				const listEl  = document.getElementById('fpxProductList')
+				const label   = document.getElementById('fpxProductLabel')
+				const hidden  = document.getElementById('fpxProduct')
+				const panel   = document.getElementById('fpxProductPanel')
+				if (!listEl) return
+
+				// Remove any previous source bar
+				panel?.querySelector('.fpx-csel-source-bar')?.remove()
+
+				// Loading state
+				if (label) { label.textContent = 'Loading…'; label.className = 'fpx-csel-label placeholder' }
+				if (hidden) hidden.value = ''
+				listEl.innerHTML = `<li class="fpx-csel-empty">
+					<span class="fpx-csel-loading-dots"><span></span><span></span><span></span></span>
+				</li>`
 
 				try {
 					const url = `${API}/api/4px/products${countryCode ? '?country=' + encodeURIComponent(countryCode) : ''}`
 					const data = await fetch(url).then((r) => r.json())
 					_fpxProducts = data.products || []
 
-					sel.innerHTML =
-						'<option value="">Select logistics product…</option>' +
-						_fpxProducts
-							.map((p) => {
-								const code = p.logistics_product_code ?? p.code ?? ''
-								const name = p.logistics_product_name ?? p.name ?? code
-								return `<option value="${escHtml(code)}">${escHtml(name)}</option>`
-							})
-							.join('')
+					if (!_fpxProducts.length) {
+						listEl.innerHTML = '<li class="fpx-csel-empty">No products available for this destination</li>'
+						if (label) label.textContent = 'Select logistics product…'
+						return
+					}
 
-					// If "Other / Custom…" is in the list, wire up a custom-code input
-					sel.addEventListener('change', function () {
-						const customWrap = document.getElementById('fpxProductCustomWrap')
-						if (!customWrap) return
-						customWrap.style.display = this.value === 'OTHER' ? '' : 'none'
+					// ── Group products by service tier ──────────────────────────────
+					const TIER_META = {
+						economy:  { label: 'Economy',  order: 0 },
+						standard: { label: 'Standard', order: 1 },
+						express:  { label: 'Express',  order: 2 },
+						premium:  { label: 'Premium',  order: 3 },
+						custom:   { label: 'Other',    order: 99 },
+					}
+					// Collect tiers in the order they appear, preserving server sort
+					const grouped = new Map() // tier → products[]
+					_fpxProducts.forEach((p) => {
+						const tier = p.tier ?? 'standard'
+						if (!grouped.has(tier)) grouped.set(tier, [])
+						grouped.get(tier).push(p)
+					})
+					// Sort tier groups by predefined order
+					const sortedTiers = [...grouped.entries()].sort(
+						([a], [b]) => (TIER_META[a]?.order ?? 50) - (TIER_META[b]?.order ?? 50)
+					)
+
+					// ── Build HTML ──────────────────────────────────────────────────
+					let itemIdx = 0
+					const html = sortedTiers.flatMap(([tier, prods]) => {
+						const tierLabel = TIER_META[tier]?.label ?? tier
+						const groupHtml = `<li class="fpx-csel-group" aria-hidden="true">${escHtml(tierLabel)}</li>`
+						const itemHtmls = prods.map((p) => {
+							const code  = p.logistics_product_code ?? p.code ?? ''
+							const name  = p.logistics_product_name ?? p.name ?? code
+							const desc  = p.description ?? p.desc ?? ''
+							const delay = Math.min(itemIdx++ * 22, 350)
+							const badge = tier !== 'custom'
+								? `<span class="fpx-tier-badge ${escHtml(tier)}">${escHtml(tierLabel)}</span>`
+								: ''
+							return `<li class="fpx-csel-option" role="option" data-value="${escHtml(code)}" data-tier="${escHtml(tier)}"
+									style="animation-delay:${delay}ms"
+									onclick="selectFpxProduct(${JSON.stringify(escHtml(code))}, ${JSON.stringify(escHtml(name))}, this)">
+									<div class="fpx-csel-option-row">
+										<span class="fpx-csel-option-name">${escHtml(name)}</span>
+										${badge}
+									</div>
+									${desc ? `<span class="fpx-csel-option-meta">${escHtml(desc)}</span>` : ''}
+								</li>`
+						})
+						return [groupHtml, ...itemHtmls]
 					})
 
-					// Pre-select default if configured
+					listEl.innerHTML = html.join('')
+
+					// ── Source indicator bar ────────────────────────────────────────
+					const isLive     = data.source === 'api'
+					const countryTag = (data.country || countryCode || '').toUpperCase()
+					const sourceDot  = `<span class="fpx-csel-source-dot ${isLive ? 'live' : 'fallback'}"></span>`
+					const sourceText = isLive
+						? `Live API${countryTag ? ` · ${countryTag}` : ''}`
+						: `Curated catalog${countryTag ? ` · filtered for ${countryTag}` : ' · all destinations'} · ${_fpxProducts.length} products`
+					const sourceBar  = document.createElement('div')
+					sourceBar.className = 'fpx-csel-source-bar'
+					sourceBar.innerHTML = `<span class="fpx-csel-source-row">${sourceDot}<span>${escHtml(sourceText)}</span></span>`
+					panel?.appendChild(sourceBar)
+
+					// ── Reset label ─────────────────────────────────────────────────
+					if (label && !hidden?.value) {
+						label.textContent = 'Select logistics product…'
+						label.className   = 'fpx-csel-label placeholder'
+					}
+
+					// ── Pre-select configured default ───────────────────────────────
 					if (_fpxDefaultProduct) {
-						sel.value = _fpxDefaultProduct
-						if (!sel.value) sel.value = '' // if code not in list, reset
+						const defaultOpt = listEl.querySelector(`[data-value="${CSS.escape(_fpxDefaultProduct)}"]`)
+						if (defaultOpt) {
+							const defaultName = defaultOpt.querySelector('.fpx-csel-option-name')?.textContent || _fpxDefaultProduct
+							selectFpxProduct(_fpxDefaultProduct, defaultName, defaultOpt)
+						}
 					}
 				} catch (err) {
 					console.warn('[4px] Could not fetch products:', err.message)
-					// Last-resort: plain text input
-					const field = sel.closest?.('.fpx-field')
-					if (field) {
-						field.innerHTML = `<label class="fpx-label">Logistics Product <span class="req">*</span></label>
-        <input class="fpx-input" id="fpxProduct" type="text"
-               placeholder="Enter code, e.g. S5058"
-               value="${escHtml(_fpxDefaultProduct || '')}">`
-					}
+					listEl.innerHTML = `<li class="fpx-csel-empty">Failed to load — enter code manually below</li>`
+					if (label) { label.textContent = 'Enter product code…'; label.className = 'fpx-csel-label placeholder' }
+					const customWrap = document.getElementById('fpxProductCustomWrap')
+					if (customWrap) customWrap.style.display = ''
 				}
 			}
 
@@ -7139,14 +8672,16 @@
 				const zip = document.getElementById('fpxRZip').value.trim()
 				const country = document.getElementById('fpxRCountry').value.trim().toUpperCase()
 				const phone = document.getElementById('fpxRPhone').value.trim()
-				const weightG = parseFloat(document.getElementById('fpxWeight').value)
+				const weightKg = parseFloat(document.getElementById('fpxWeight').value)
 				const lengthCm = parseFloat(document.getElementById('fpxLength').value) || undefined
 				const widthCm = parseFloat(document.getElementById('fpxWidth').value) || undefined
 				const heightCm = parseFloat(document.getElementById('fpxHeight').value) || undefined
 				const battery = document.querySelector('[name="fpxBatt"]:checked')?.value ?? 'N'
-				const productSel = document.getElementById('fpxProduct')
-				const isCustom = productSel?.tagName === 'SELECT' && productSel.value === 'OTHER'
-				const productCode = isCustom ? document.getElementById('fpxProductCustom')?.value.trim() || '' : (productSel?.value || (productSel?.tagName === 'INPUT' ? productSel.value : '')).trim()
+				// Read from hidden input (set by custom dropdown) — fall back to custom code input
+				const fpxHidden = document.getElementById('fpxProduct')
+				const rawProductCode = (fpxHidden?.value || '').trim()
+				const isCustom = rawProductCode === 'OTHER'
+				const productCode = isCustom ? (document.getElementById('fpxProductCustom')?.value.trim() || '') : rawProductCode
 				const dutyType = document.getElementById('fpxDutyType').value
 				const currency = document.getElementById('fpxCurrency').value
 				const declaredV = parseFloat(document.getElementById('fpxDeclaredValue').value)
@@ -7168,7 +8703,7 @@
 				if (!street) errors.push('Street address is required')
 				if (!city) errors.push('City is required')
 				if (!country || country.length !== 2) errors.push('Country must be a 2-letter ISO code (e.g. US)')
-				if (!weightG || weightG <= 0) errors.push('Weight (grams) is required')
+				if (!weightKg || weightKg <= 0) errors.push('Weight (kg) is required')
 				if (!productCode) errors.push('Logistics product code is required')
 				if (items.some((it) => !it.name_en || it.unit_price <= 0)) errors.push('Each customs item needs a name and a unit value greater than 0')
 
@@ -7197,7 +8732,7 @@
 						...(zip && { post_code: zip }),
 					},
 					parcel: {
-						weight_g: weightG,
+						weight_g: Math.round(weightKg * 1000),
 						...(lengthCm && { length_cm: lengthCm }),
 						...(widthCm && { width_cm: widthCm }),
 						...(heightCm && { height_cm: heightCm }),
@@ -7215,7 +8750,12 @@
 						body: JSON.stringify(payload),
 					})
 					const json = await resp.json()
-					if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`)
+					if (!resp.ok) {
+						// Include the 4PX error code in the thrown message when available
+						const base = json.error || `HTTP ${resp.status}`
+						const code = json.code ? ` (code: ${json.code})` : ''
+						throw new Error(base + code)
+					}
 
 					_fpxResult = json
 
@@ -7232,10 +8772,19 @@
 					document.getElementById('fpxFooter').style.display = 'none'
 					showFpxSuccess(json, o)
 				} catch (err) {
-					errEl.textContent = err.message
+					// Try to surface the 4PX API error code alongside the message so it's
+					// visible in the UI for quick diagnostics (e.g. "code: SENDERADDRESS_INVALID")
+					let displayMsg = err.message || 'Unknown error'
+					try {
+						// If the thrown error message itself is a JSON blob (from fetch failure)
+						const parsed = JSON.parse(err.message)
+						if (parsed?.error) displayMsg = parsed.code ? `${parsed.error} (${parsed.code})` : parsed.error
+					} catch { /* not JSON — use as-is */ }
+					errEl.textContent = displayMsg
 					errEl.classList.add('show')
 					btn.disabled = false
 					btn.textContent = '📦 Create Shipment'
+					console.error('[4px] create-order failed:', err.message)
 				}
 			}
 
@@ -7244,47 +8793,143 @@
 				document.getElementById('fpxSuccessTracking').textContent = result.trackingNo || result.dsConsignmentNo || '—'
 				document.getElementById('fpxSuccessConsignment').textContent = result.dsConsignmentNo ? `Consignment: ${result.dsConsignmentNo}` : ''
 				document.getElementById('fpxOdaBadge').style.display = result.odaResultSign === 'Y' ? '' : 'none'
+
+				// Reset label button and status to loading state before auto-fetch
+				const _lblBtn = document.getElementById('fpxLabelBtn')
+				const _lblSts = document.getElementById('fpxLabelStatus')
+				if (_lblBtn) { _lblBtn.className = 'fpx-btn-label loading'; _lblBtn.disabled = true; _lblBtn.innerHTML = '<span class="fpx-spin"></span> Preparing label…' }
+				if (_lblSts) { _lblSts.innerHTML = ''; _lblSts.classList.add('hidden') }
+
 				document.getElementById('fpxSuccess').classList.add('show')
 
 				// Store tracking on "also ship Etsy" button
 				const etsyBtn = document.getElementById('fpxAlsoEtsyBtn')
 				etsyBtn.dataset.receiptId = order.receipt_id
-				etsyBtn.dataset.shopName = order.shop_name || ''
+				etsyBtn.dataset.shopName  = order.shop_name  || ''
 				etsyBtn.dataset.buyerName = order.buyer_name || ''
-				etsyBtn.dataset.tracking = result.trackingNo || result.dsConsignmentNo || ''
-				// Hide if already shipped on Etsy
-				etsyBtn.style.display = order.is_shipped ? 'none' : ''
+				etsyBtn.dataset.tracking  = result.trackingNo || result.dsConsignmentNo || ''
+				etsyBtn.style.display     = order.is_shipped ? 'none' : ''
+
+				// Auto-fetch the shipping label — 4PX may need 1–3 s to generate it
+				// after order creation, so we retry with exponential back-off.
+				const rid = result.receipt_id ?? order.receipt_id
+				if (rid) {
+					const cached = _ordersMap.get(rid)
+					if (cached?.fourpx_label_url) {
+						// Label URL already cached — mark ready immediately (no API call needed)
+						_setLabelReady(rid)
+					} else {
+						_autoFetchLabel(rid, 1)
+					}
+				}
 			}
 
-			// ── Fetch and open label PDF ──────────────────────────────────────────────────
+			// Label button SVG (reused in multiple states)
+			const _LABEL_SVG = '<svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 16l-4-4m4 4l4-4m-4 4V3M4 20h16"/></svg>'
+
+			/**
+			 * Trigger a native "Save As" file-picker by routing through the server-side
+			 * proxy endpoint (/api/4px/label-download/:id).  This approach:
+			 *   1. Works for plain-HTTP 4PX URLs (mixed-content is blocked by browsers
+			 *      when using window.open() from an HTTPS page).
+			 *   2. Gives the file a human-readable name (4PX-Label-<tracking>-Order<id>.pdf).
+			 *   3. Shows the browser's native Save-As dialog via Content-Disposition:attachment.
+			 *   4. Keeps the PDF in-tab if the user wants to just preview it first.
+			 */
+			function _triggerLabelDownload(receiptId) {
+				const a = document.createElement('a')
+				a.href     = `${API}/api/4px/label-download/${receiptId}`
+				a.download = '' // hint to browser: treat as download (filename from server header)
+				a.rel      = 'noopener noreferrer'
+				document.body.appendChild(a)
+				a.click()
+				// Remove after a tick so it doesn't pollute the DOM
+				setTimeout(() => a.remove(), 200)
+			}
+
+			// Mark label button as ready and trigger the download
+			function _setLabelReady(receiptId) {
+				const btn    = document.getElementById('fpxLabelBtn')
+				const status = document.getElementById('fpxLabelStatus')
+				if (btn) {
+					btn.className = 'fpx-btn-label ready'
+					btn.disabled  = false
+					btn.innerHTML = `${_LABEL_SVG} Download Shipping Label (PDF)`
+					btn.onclick   = () => _triggerLabelDownload(receiptId)
+				}
+				if (status) {
+					status.innerHTML = `<span style="color:#4ade80">✓</span> Label ready — your Save-As dialog will open`
+					status.classList.remove('hidden')
+				}
+				// Auto-trigger download immediately
+				_triggerLabelDownload(receiptId)
+			}
+
+			// Retry schedule (ms): 2 s → 4 s → 7 s → 12 s → 20 s
+			const _LABEL_RETRY_DELAYS = [2000, 4000, 7000, 12000, 20000]
+
+			async function _autoFetchLabel(receiptId, attempt) {
+				const btn    = document.getElementById('fpxLabelBtn')
+				const status = document.getElementById('fpxLabelStatus')
+				const MAX    = _LABEL_RETRY_DELAYS.length + 1
+
+				if (btn) {
+					btn.className = 'fpx-btn-label loading'
+					btn.disabled  = true
+					btn.innerHTML = `<span class="fpx-spin"></span> Preparing label…`
+				}
+				if (status) {
+					const dots = attempt > 1 ? ` (attempt ${attempt}/${MAX})` : ''
+					status.innerHTML = `<span class="fpx-spin"></span> <span class="fpx-label-status-text">4PX is generating your label${dots}</span>`
+					status.classList.remove('hidden')
+				}
+
+				try {
+					const data = await fetch(`${API}/api/4px/label/${receiptId}`).then((r) => r.json())
+					if (data.labelUrl) {
+						// Persist label URL in memory cache for instant re-downloads
+						const cached = _ordersMap.get(receiptId)
+						if (cached) cached.fourpx_label_url = data.labelUrl
+						_setLabelReady(receiptId)
+						return
+					}
+				} catch {
+					// Network error — fall through to retry
+				}
+
+				// Not ready yet — retry if attempts remain
+				if (attempt <= _LABEL_RETRY_DELAYS.length) {
+					const delay = _LABEL_RETRY_DELAYS[attempt - 1]
+					if (status) status.innerHTML = `<span class="fpx-spin"></span> <span class="fpx-label-status-text">Waiting for 4PX to confirm label</span>`
+					setTimeout(() => _autoFetchLabel(receiptId, attempt + 1), delay)
+				} else {
+					// All retries exhausted — let user retry manually
+					if (btn) {
+						btn.className = 'fpx-btn-label'
+						btn.disabled  = false
+						btn.innerHTML = `${_LABEL_SVG} Download Shipping Label (PDF)`
+						btn.onclick   = fetchAndOpenLabel
+					}
+					if (status) {
+						status.innerHTML = `<span style="color:var(--red)">⚠</span> Label delayed — click to retry`
+					}
+				}
+			}
+
+			// ── Manual label fetch / re-download (button click) ──────────────────────────
 			async function fetchAndOpenLabel() {
-				const btn = document.getElementById('fpxLabelBtn')
 				const rid = _fpxResult?.receipt_id ?? _fpxReceipt?.receipt_id
 				if (!rid) return
 
-				// Try cached label URL from the receipt object first
+				// If the label URL is already cached, skip the API call and download directly
 				const cached = _ordersMap.get(rid)
 				if (cached?.fourpx_label_url) {
-					window.open(cached.fourpx_label_url, '_blank')
+					_triggerLabelDownload(rid)
 					return
 				}
 
-				btn.classList.add('loading')
-				btn.textContent = 'Fetching label…'
-				try {
-					const data = await fetch(`${API}/api/4px/label/${rid}`).then((r) => r.json())
-					if (data.labelUrl) {
-						if (cached) cached.fourpx_label_url = data.labelUrl
-						window.open(data.labelUrl, '_blank')
-					} else {
-						alert('Label URL not yet available — please try again in a few seconds.')
-					}
-				} catch (err) {
-					alert(`Could not fetch label: ${err.message}`)
-				} finally {
-					btn.classList.remove('loading')
-					btn.innerHTML = '<svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 16l-4-4m4 4l4-4m-4 4V3M4 20h16"/></svg> Download Shipping Label (PDF)'
-				}
+				// Re-use the auto-fetch path so retry/status logic is consistent
+				_autoFetchLabel(rid, 1)
 			}
 
 			// ── Also mark as shipped on Etsy ─────────────────────────────────────────────
@@ -8266,7 +9911,7 @@
 					shopSel.appendChild(opt)
 
 					// Also populate listings/events shop selectors
-					;['listingsShop', 'createShop', 'eventsShop'].forEach((id) => {
+					;['listingsShop', 'createShop', 'eventsShop', 'bulkShop'].forEach((id) => {
 						const sel = document.getElementById(id)
 						if (!sel) return
 						if (sel.querySelector(`option[value="${s.shop_name}"]`)) return
@@ -8285,6 +9930,342 @@
 					})
 				})
 			}
+
+			// ── Folder browser modal ─────────────────────────────────────
+			let _fbrCurrentPath = null
+			let _fbrCallback = null   // function(selectedPath) called on Select
+
+			async function fbrNavigate(dirPath) {
+				const body = document.getElementById('fbrBody')
+				const pathEl = document.getElementById('fbrCurrentPath')
+				const upBtn = document.getElementById('fbrUpBtn')
+				body.innerHTML = '<div class="loading" style="grid-column:1/-1;padding:18px">Loading…</div>'
+				try {
+					const res = await fetch(API + '/api/bulk/browse' + (dirPath ? '?path=' + encodeURIComponent(dirPath) : ''))
+					const json = await res.json()
+					if (!res.ok) throw new Error(json.error || 'Browse failed')
+					_fbrCurrentPath = json.path
+					pathEl.textContent = json.path
+					upBtn.disabled = !json.parent
+					upBtn._parentPath = json.parent
+
+					if (!json.dirs.length) {
+						body.innerHTML = '<div class="bulk-muted" style="grid-column:1/-1;padding:12px 10px">No sub-folders here. Click "Select this folder" if this is the one you want.</div>'
+						return
+					}
+					body.innerHTML = json.dirs.map((d) => `
+						<button class="fbr-dir-btn" onclick="fbrNavigate(${JSON.stringify(d.path)})" title="${d.path}">
+							<span class="fbr-dir-icon">📁</span>
+							<span class="fbr-dir-name">${d.name}</span>
+						</button>`).join('')
+				} catch (err) {
+					body.innerHTML = `<div class="bulk-muted" style="grid-column:1/-1;padding:12px 10px;color:#f87171">${err.message}</div>`
+				}
+			}
+
+			function fbUp() {
+				const btn = document.getElementById('fbrUpBtn')
+				if (btn._parentPath) fbrNavigate(btn._parentPath)
+			}
+
+			function bulkOpenBrowser(callback) {
+				_fbrCallback = callback || null
+				_fbrCurrentPath = null
+				document.getElementById('folderBrowserOverlay').style.display = 'flex'
+				// Start from the current path value, the input folder if set, or home
+				const existing = document.getElementById('bulkInputPath').value.trim()
+				fbrNavigate(existing || null)
+			}
+
+			function fbClose() {
+				document.getElementById('folderBrowserOverlay').style.display = 'none'
+			}
+
+			function fbSelect() {
+				if (!_fbrCurrentPath) return
+				document.getElementById('bulkInputPath').value = _fbrCurrentPath
+				bulkClearScan()
+				fbClose()
+				if (_fbrCallback) _fbrCallback(_fbrCurrentPath)
+			}
+
+			// Clear scan result info when path changes
+			function bulkClearScan() {
+				document.getElementById('bulkScanInfo').textContent = ''
+			}
+
+			// ── Bulk Listing Creator ──────────────────────────────────────
+			let _bulkJobId = null
+			let _bulkSettings = null
+			let _bulkEventSource = null
+			const _bulkItems = new Map() // folder → item state
+
+			function initBulkTab() {
+				// Shop dropdown is filled by populateFilters() at startup.
+			}
+
+			async function bulkScan() {
+				const inputPath = document.getElementById('bulkInputPath').value.trim()
+				const info = document.getElementById('bulkScanInfo')
+				if (!inputPath) {
+					info.innerHTML = '<span style="color:#f87171">Enter the input folder path first.</span>'
+					return
+				}
+				info.textContent = 'Scanning…'
+				try {
+					const res = await fetch(API + '/api/bulk/scan', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ input_path: inputPath }),
+					})
+					const json = await res.json()
+					if (!res.ok) throw new Error(json.error || 'Scan failed')
+					const withVid = json.products.filter((p) => p.has_video).length
+					info.innerHTML =
+						`<strong>${json.count}</strong> product folder(s) detected · ${withVid} with video` +
+						(json.skipped.length ? ` · ${json.skipped.length} skipped (no images)` : '') +
+						`<br><span class="bulk-muted">${json.products.slice(0, 12).map((p) => `${p.name} (${p.image_count}🖼${p.has_video ? ' 🎬' : ''})`).join(' · ')}${json.count > 12 ? ' …' : ''}</span>`
+					bulkUpdateRunHint()
+				} catch (err) {
+					info.innerHTML = `<span style="color:#f87171">${err.message}</span>`
+				}
+			}
+
+			function fillSelect(sel, items, valueKey, labelFn, selected) {
+				sel.innerHTML = ''
+				if (!items.length) {
+					const o = document.createElement('option')
+					o.value = ''
+					o.textContent = '(none found)'
+					sel.appendChild(o)
+					return
+				}
+				items.forEach((it) => {
+					const o = document.createElement('option')
+					o.value = it[valueKey]
+					o.textContent = labelFn(it)
+					if (selected != null && String(it[valueKey]) === String(selected)) o.selected = true
+					sel.appendChild(o)
+				})
+			}
+
+			async function bulkLoadShopSettings() {
+				const shop = document.getElementById('bulkShop').value
+				const card = document.getElementById('bulkSettingsCard')
+				const runBar = document.getElementById('bulkRunBar')
+				if (!shop) {
+					card.style.display = 'none'
+					runBar.style.display = 'none'
+					return
+				}
+				document.getElementById('bulkSettingsMeta').textContent = ' · loading…'
+				card.style.display = ''
+				try {
+					const res = await fetch(API + '/api/bulk/shop-settings/' + encodeURIComponent(shop))
+					const s = await res.json()
+					if (!res.ok) throw new Error(s.error || 'Failed to load shop settings')
+					_bulkSettings = s
+					const d = s.defaults || {}
+
+					// Currency
+					const curSel = document.getElementById('bulkCurrency')
+					curSel.innerHTML = ''
+					;['USD', 'CAD', 'HKD', 'CNY', 'EUR', 'GBP', 'AUD'].forEach((c) => {
+						const o = document.createElement('option')
+						o.value = c
+						o.textContent = c
+						if (c === (s.currency_code || 'USD')) o.selected = true
+						curSel.appendChild(o)
+					})
+
+					document.getElementById('bulkTaxonomy').value = d.taxonomy_id || ''
+					fillSelect(document.getElementById('bulkShipping'), s.shipping_profiles || [], 'shipping_profile_id', (p) => p.title || p.shipping_profile_id, d.shipping_profile_id)
+					fillSelect(document.getElementById('bulkReturn'), s.return_policies || [], 'return_policy_id', (p) => `#${p.return_policy_id}${p.return_deadline ? ' · ' + p.return_deadline + 'd' : ''}`, d.return_policy_id)
+					fillSelect(document.getElementById('bulkPartner'), s.production_partners || [], 'production_partner_id', (p) => p.partner_name || `#${p.production_partner_id}`, (d.production_partner_ids || [])[0])
+					fillSelect(document.getElementById('bulkSection'), s.shop_sections || [], 'shop_section_id', (p) => p.title || `#${p.shop_section_id}`, d.shop_section_id)
+					document.getElementById('bulkWhoMade').value = d.who_made || 'someone_else'
+					document.getElementById('bulkWhenMade').value = d.when_made || 'made_to_order'
+
+					const warn = document.getElementById('bulkSettingsWarn')
+					const warnings = []
+					if (!d.taxonomy_id) warnings.push('Taxonomy could not be auto-resolved — set it manually.')
+					if (!(s.shipping_profiles || []).length) warnings.push('No shipping profiles found — create one in Etsy first (required to publish).')
+					if (s.warnings && s.warnings.length) warnings.push(...s.warnings)
+					warn.innerHTML = warnings.length ? '⚠ ' + warnings.join(' ') : ''
+
+					document.getElementById('bulkSettingsMeta').textContent =
+						` · ${s.shop_name || shop} · currency ${s.currency_code || '?'}` + (s._cached ? ' (cached)' : '')
+					runBar.style.display = ''
+					bulkUpdateRunHint()
+				} catch (err) {
+					document.getElementById('bulkSettingsMeta').textContent = ''
+					document.getElementById('bulkSettingsWarn').innerHTML = `<span style="color:#f87171">${err.message}</span>`
+				}
+			}
+
+			function bulkUpdateRunHint() {
+				const hint = document.getElementById('bulkRunHint')
+				if (!hint) return
+				const dry = document.getElementById('bulkDryRun').checked
+				hint.textContent = dry ? 'Dry run: generates AI copy + previews payloads, no Etsy writes.' : 'Creates real listings on Etsy.'
+			}
+
+			function bulkGatherOverrides() {
+				const partnerVal = document.getElementById('bulkPartner').value
+				return {
+					currency_code: document.getElementById('bulkCurrency').value,
+					taxonomy_id: parseInt(document.getElementById('bulkTaxonomy').value, 10) || null,
+					shipping_profile_id: parseInt(document.getElementById('bulkShipping').value, 10) || null,
+					return_policy_id: parseInt(document.getElementById('bulkReturn').value, 10) || null,
+					production_partner_ids: partnerVal ? [parseInt(partnerVal, 10)] : [],
+					shop_section_id: parseInt(document.getElementById('bulkSection').value, 10) || null,
+					who_made: document.getElementById('bulkWhoMade').value,
+					when_made: document.getElementById('bulkWhenMade').value,
+				}
+			}
+
+			async function bulkRun() {
+				const shop = document.getElementById('bulkShop').value
+				const inputPath = document.getElementById('bulkInputPath').value.trim()
+				if (!shop || !inputPath) {
+					alert('Select a shop and enter the input folder path.')
+					return
+				}
+				const dryRun = document.getElementById('bulkDryRun').checked
+				const state = document.getElementById('bulkState').value
+				if (!dryRun && state === 'published' && !confirm('Publish listings immediately? This incurs a $0.20 Etsy fee per listing.')) return
+
+				const btn = document.getElementById('bulkRunBtn')
+				btn.disabled = true
+				btn.textContent = 'Starting…'
+				try {
+					const res = await fetch(API + '/api/bulk/run', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ shop_name: shop, input_path: inputPath, state, dry_run: dryRun, overrides: bulkGatherOverrides() }),
+					})
+					const json = await res.json()
+					if (!res.ok) throw new Error(json.error || 'Run failed')
+					_bulkJobId = json.job.job_id
+					document.getElementById('bulkProgress').style.display = ''
+					document.getElementById('bulkProgressTitle').textContent =
+						`Progress — ${dryRun ? 'dry run' : state} · ${json.job.total} product(s)`
+					_bulkItems.clear()
+					document.getElementById('bulkItemsBody').innerHTML = '<tr><td colspan="3" class="empty">Starting…</td></tr>'
+					bulkStream(_bulkJobId)
+				} catch (err) {
+					alert(err.message)
+				} finally {
+					btn.disabled = false
+					btn.textContent = 'Create listings'
+				}
+			}
+
+			function bulkStream(jobId) {
+				if (_bulkEventSource) _bulkEventSource.close()
+				_bulkEventSource = new EventSource(API + '/api/bulk/stream/' + jobId)
+				_bulkEventSource.onmessage = (e) => {
+					let ev
+					try { ev = JSON.parse(e.data) } catch { return }
+					bulkHandleEvent(ev)
+				}
+				_bulkEventSource.onerror = () => { /* auto-reconnects; final state polled below */ }
+			}
+
+			function bulkHandleEvent(ev) {
+				if (ev.type === 'snapshot') {
+					;(ev.items || []).forEach((it) => _bulkItems.set(it.product_folder, {
+						name: it.product_name, status: it.status, title: it.title,
+						url: it.listing_url, listing_id: it.listing_id, error: it.error,
+					}))
+					if (ev.job) bulkUpdateJobState(ev.job)
+					bulkRenderItems()
+					return
+				}
+				if (ev.type === 'item') {
+					const cur = _bulkItems.get(ev.folder) || { name: ev.name }
+					cur.name = ev.name || cur.name
+					cur.status = ev.status || cur.status
+					if (ev.title) cur.title = ev.title
+					if (ev.url) cur.url = ev.url
+					if (ev.listing_id) cur.listing_id = ev.listing_id
+					if (ev.error) cur.error = ev.error
+					_bulkItems.set(ev.folder, cur)
+					bulkRenderItems()
+				} else if (ev.type === 'step') {
+					const cur = _bulkItems.get(ev.folder)
+					if (cur) {
+						cur.detail = ev.step + (ev.rank ? ' #' + ev.rank : '') + (ev.linked ? ' (' + ev.linked + ')' : '')
+						_bulkItems.set(ev.folder, cur)
+						bulkRenderItems()
+					}
+				} else if (ev.type === 'job') {
+					bulkUpdateJobState({ state: ev.state, completed: ev.completed, failed: ev.failed })
+					if (ev.state === 'done' || ev.state === 'error') {
+						if (_bulkEventSource) { _bulkEventSource.close(); _bulkEventSource = null }
+						const failed = [..._bulkItems.values()].some((i) => i.status === 'failed')
+						document.getElementById('bulkRetryBtn').style.display = failed ? '' : 'none'
+					}
+				}
+			}
+
+			function bulkUpdateJobState(job) {
+				const total = _bulkItems.size || job.total || 0
+				const done = [..._bulkItems.values()].filter((i) => i.status === 'done').length
+				const failed = [..._bulkItems.values()].filter((i) => i.status === 'failed').length
+				const pct = total ? Math.round(((done + failed) / total) * 100) : 0
+				document.getElementById('bulkProgressBar').style.width = pct + '%'
+			}
+
+			function bulkRenderItems() {
+				const body = document.getElementById('bulkItemsBody')
+				const rows = [..._bulkItems.entries()]
+				if (!rows.length) {
+					body.innerHTML = '<tr><td colspan="3" class="empty">No items.</td></tr>'
+					return
+				}
+				body.innerHTML = rows
+					.map(([folder, it]) => {
+						const st = it.status || 'pending'
+						let detail = ''
+						if (it.status === 'failed') detail = `<span style="color:#f87171">${it.error || 'failed'}</span>`
+						else if (it.url) detail = `<a href="${it.url}" target="_blank" rel="noreferrer">Open listing #${it.listing_id}</a>`
+						else if (it.title) detail = `<span class="bulk-muted">${(it.title || '').slice(0, 90)}</span>`
+						else if (it.detail) detail = `<span class="bulk-muted">${it.detail}</span>`
+						return `<tr>
+							<td>${it.name || folder}</td>
+							<td><span class="bulk-st bulk-st-${st}">${st.replace('_', ' ')}</span></td>
+							<td>${detail}</td>
+						</tr>`
+					})
+					.join('')
+				bulkUpdateJobState({})
+			}
+
+			async function bulkRetry() {
+				if (!_bulkJobId) return
+				const btn = document.getElementById('bulkRetryBtn')
+				btn.disabled = true
+				try {
+					const res = await fetch(API + '/api/bulk/jobs/' + _bulkJobId + '/retry', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ overrides: bulkGatherOverrides() }),
+					})
+					const json = await res.json()
+					if (!res.ok) throw new Error(json.error || 'Retry failed')
+					btn.style.display = 'none'
+					bulkStream(_bulkJobId)
+				} catch (err) {
+					alert(err.message)
+				} finally {
+					btn.disabled = false
+				}
+			}
+
+			document.addEventListener('change', (e) => {
+				if (e.target && e.target.id === 'bulkDryRun') bulkUpdateRunHint()
+			})
 
 			// ── Discounts ─────────────────────────────────────────────────
 			let _discCache = null // { shops: [] }
@@ -10182,6 +12163,14 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 					date_from: document.getElementById('routeDateFrom').value || null,
 					date_to: document.getElementById('routeDateTo').value || null,
 					shop_id: document.getElementById('routeShopFilter').value || null,
+					// Include every receipt the operator has pinned via "Send to Route"
+					// or the "+ Add Order" modal so generation produces the exact same
+					// order set the Route dashboard is showing — pre-transit and
+					// manually-added orders are intentionally outside the default
+					// date/shipped scope and must be forwarded explicitly.
+					extra_receipt_ids: _routeAddedReceipts.size > 0
+						? [..._routeAddedReceipts].join(',')
+						: undefined,
 				}
 
 				try {
@@ -10348,43 +12337,101 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 				})
 			}
 
-			// ── Pinned orders (from Orders tab "Send to Route") ─────────────────────────
-			let _routePinnedReceipts = new Set() // receipt_id numbers
+			// ── Added orders (pre-transit orders pulled in via "Send to Route") ─────────
+			// These receipts are MERGED ON TOP of the normal pending route list — never
+			// used as a filter. They're typically pre-transit (already-shipped) orders
+			// the default pending query excludes, but that the operator still needs to
+			// physically purchase. The set persists across reloads (localStorage) so a
+			// page refresh never silently drops orders from the shopping list.
+			let _routeAddedReceipts = new Set() // receipt_id numbers
+
+			const ROUTE_ADDED_KEY = 'route.addedReceipts'
+
+			function _loadRouteAddedReceipts() {
+				try {
+					const raw = JSON.parse(localStorage.getItem(ROUTE_ADDED_KEY) || '[]')
+					if (Array.isArray(raw)) _routeAddedReceipts = new Set(raw.map(Number).filter(Number.isInteger))
+				} catch {
+					_routeAddedReceipts = new Set()
+				}
+			}
+
+			function _persistRouteAddedReceipts() {
+				try {
+					localStorage.setItem(ROUTE_ADDED_KEY, JSON.stringify([..._routeAddedReceipts]))
+				} catch {
+					/* storage unavailable — keep in-memory only */
+				}
+			}
+
+			_loadRouteAddedReceipts()
 
 			/**
 			 * Called by the "Send to Route" button in the Orders tab bulk bar.
-			 * Saves the currently selected receipt IDs, clears the selection,
-			 * and switches to the Route tab where only those orders will show.
+			 * ADDS the selected receipts on top of whatever is already in the Route
+			 * dashboard (it never replaces the list), clears the selection, then
+			 * opens the Route tab where the orders are merged into the purchasing list.
 			 */
 			function sendSelectionToRoute() {
 				const cbs = getSelectedCbs()
 				if (!cbs.length) return
-				_routePinnedReceipts = new Set(cbs.map((cb) => Number(cb.dataset.receipt)))
+				const before = _routeAddedReceipts.size
+				cbs.forEach((cb) => _routeAddedReceipts.add(Number(cb.dataset.receipt)))
+				const added = _routeAddedReceipts.size - before
+				const dupes = cbs.length - added
+				_persistRouteAddedReceipts()
 				clearSelection()
 				showTab('route')
-				// showTab calls loadRouteTab() → loadRouteDashboard() → renderRouteDashboard()
-				// which applies _routePinnedReceipts automatically.
+				// showTab → loadRouteTab() → loadRouteDashboard() merges these in.
+
+				let msg
+				if (added > 0) {
+					msg = `📍 Added ${added} order${added !== 1 ? 's' : ''} to the route`
+					if (dupes > 0) msg += ` · ${dupes} already there`
+				} else {
+					msg = `Those ${cbs.length === 1 ? 'order is' : 'orders are'} already in the route`
+				}
+				showRouteToast(msg)
 			}
 
-			/** Clear the pinned filter and reload the full pending route list. */
-			function clearRoutePinnedOrders() {
-				_routePinnedReceipts = new Set()
+			/** Clear all added orders and reload the plain pending route list. */
+			function clearRouteAddedOrders() {
+				_routeAddedReceipts = new Set()
+				_persistRouteAddedReceipts()
 				_applyRoutePinBar()
 				loadRouteDashboard() // reload so any merged pre-transit-only rows drop off
 			}
 
-			/** Sync the visual pinned-orders bar with the current pin state. */
+			/** Sync the visual added-orders bar with the current state. */
 			function _applyRoutePinBar() {
 				const bar = document.getElementById('routePinBar')
 				const label = document.getElementById('routePinLabel')
 				if (!bar) return
-				const n = _routePinnedReceipts.size
+				const n = _routeAddedReceipts.size
 				if (n > 0) {
 					bar.classList.add('visible')
-					label.textContent = `Showing ${n} pinned order${n !== 1 ? 's' : ''}`
+					label.textContent = `${n} order${n !== 1 ? 's' : ''} pulled in from the Orders tab`
 				} else {
 					bar.classList.remove('visible')
 				}
+			}
+
+			/** Lightweight transient toast, anchored bottom-center. */
+			let _routeToastTimer = null
+			function showRouteToast(message) {
+				let el = document.getElementById('routeToast')
+				if (!el) {
+					el = document.createElement('div')
+					el.id = 'routeToast'
+					el.className = 'route-toast'
+					document.body.appendChild(el)
+				}
+				el.textContent = message
+				// Force reflow so re-triggering the animation works on repeat calls.
+				void el.offsetWidth
+				el.classList.add('show')
+				clearTimeout(_routeToastTimer)
+				_routeToastTimer = setTimeout(() => el.classList.remove('show'), 2600)
 			}
 
 			/** Load the OSP charm catalog once per tab open. */
@@ -10413,6 +12460,9 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 				if (from) qs.set('date_from', from)
 				if (to) qs.set('date_to', to)
 				if (shop) qs.set('shop_id', shop)
+				// Pre-transit orders pulled in via "Send to Route" are merged on top of
+				// the date/shop scope server-side, so the summary counts include them.
+				if (_routeAddedReceipts.size > 0) qs.set('extra_receipt_ids', [..._routeAddedReceipts].join(','))
 
 				const tbody = document.getElementById('routeDashBody')
 				if (tbody) tbody.innerHTML = '<tr><td colspan="7" class="loading">Loading…</td></tr>'
@@ -10420,26 +12470,7 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 				try {
 					const res = await fetch(`${API}/api/route/dashboard?${qs}`)
 					const data = await res.json()
-					let rows = data.rows || []
-
-					// Pinned orders may include pre-transit (shipped) orders that the default
-					// pending query excludes — fetch any missing pinned receipts and merge them
-					// so they appear in the Route dashboard for purchasing.
-					if (_routePinnedReceipts.size > 0) {
-						const present = new Set(rows.map((r) => r.receipt_id))
-						const missing = [..._routePinnedReceipts].filter((id) => !present.has(id))
-						if (missing.length) {
-							try {
-								const r2 = await fetch(`${API}/api/route/dashboard?receipt_ids=${missing.join(',')}`)
-								const d2 = await r2.json()
-								rows = rows.concat(d2.rows || [])
-							} catch {
-								/* non-fatal — show what we have */
-							}
-						}
-					}
-
-					_routeRows = rows
+					_routeRows = data.rows || []
 					_renderRouteSummary(data.summary)
 					renderRouteDashboard()
 				} catch (err) {
@@ -10836,11 +12867,11 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 
 				let rows = _routeRows
 
-				// 1. Pinned-receipt filter: only show orders sent from the Orders tab
-				if (_routePinnedReceipts.size > 0) rows = rows.filter((r) => _routePinnedReceipts.has(r.receipt_id))
+				// Added (pre-transit) orders are already merged into _routeRows by the
+				// server — they show alongside the pending orders, never replacing them.
 				_applyRoutePinBar()
 
-				// 2. Checkbox filters
+				// Checkbox filters
 				if (onlyUnmatched) rows = rows.filter((r) => !r.supplier_in_catalog && !r.supplier_is_override)
 				if (onlyCharm) rows = rows.filter((r) => r.has_charm && !r.charm_code)
 				if (hideExcluded) rows = rows.filter((r) => !r.excluded)
@@ -10991,8 +13022,8 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 				if (from) qs.set('date_from', from)
 				if (to) qs.set('date_to', to)
 				if (shop) qs.set('shop_id', shop)
-				if (_routePinnedReceipts.size > 0) {
-					qs.set('receipt_ids', [..._routePinnedReceipts].join(','))
+				if (_routeAddedReceipts.size > 0) {
+					qs.set('extra_receipt_ids', [..._routeAddedReceipts].join(','))
 				}
 
 				const label = 'Export images'
@@ -11245,6 +13276,7 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 			}
 
 			function _addRowsToRoute(rows) {
+				let didPin = false
 				for (const r of rows) {
 					// Avoid duplicate (receipt_id + item_key)
 					const idx = _routeRows.findIndex((e) => e.receipt_id === r.receipt_id && e.item_key === r.item_key)
@@ -11253,7 +13285,15 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 					} else {
 						_routeRows[idx] = r // refresh if already there
 					}
+					// Pin the receipt so it survives a page reload and is included
+					// in Excel generation (pre-transit / shipped orders bypass the
+					// default pending-only scope and must be tracked explicitly).
+					if (r.receipt_id && !_routeAddedReceipts.has(Number(r.receipt_id))) {
+						_routeAddedReceipts.add(Number(r.receipt_id))
+						didPin = true
+					}
 				}
+				if (didPin) _persistRouteAddedReceipts()
 				renderRouteDashboard()
 			}
 
@@ -11278,6 +13318,195 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 				const prev = document.getElementById('charmHoverPreview')
 				if (prev) prev.style.display = 'none'
 			}
+
+			// ── Product Catalog modal ────────────────────────────────────────────
+
+			let _pmRows = []         // all rows from the server
+			let _pmEditId = null     // id of the row being edited (null = new)
+
+			async function openProductCatalogModal() {
+				document.getElementById('pmModal').style.display = 'flex'
+				document.getElementById('pmSearch').value = ''
+				closePmEditor()
+				await _pmLoad()
+			}
+
+			function closePmModal() {
+				document.getElementById('pmModal').style.display = 'none'
+				closePmEditor()
+			}
+
+			async function _pmLoad() {
+				try {
+					const r = await fetch('/api/route/product-map')
+					const d = await r.json()
+					if (!d.ok) throw new Error(d.error || 'Failed to load catalog')
+					_pmRows = d.rows || []
+					renderPmTable()
+				} catch (err) {
+					console.error('[pm] load error:', err)
+				}
+			}
+
+			function renderPmTable() {
+				const q = (document.getElementById('pmSearch')?.value || '').toLowerCase().trim()
+				const filtered = q
+					? _pmRows.filter(r =>
+						(r.title      || '').toLowerCase().includes(q) ||
+						(r.shop_name  || '').toLowerCase().includes(q) ||
+						(r.stall      || '').toLowerCase().includes(q) ||
+						(r.charm_shop || '').toLowerCase().includes(q) ||
+						(r.charm_code || '').toLowerCase().includes(q))
+					: _pmRows
+
+				const tbody = document.getElementById('pmTableBody')
+				const empty = document.getElementById('pmEmpty')
+				const count = document.getElementById('pmCount')
+				if (!tbody) return
+
+				count.textContent = `${filtered.length} of ${_pmRows.length} entr${_pmRows.length === 1 ? 'y' : 'ies'}`
+
+				if (!filtered.length) {
+					tbody.innerHTML = ''
+					if (empty) empty.style.display = 'block'
+					return
+				}
+				if (empty) empty.style.display = 'none'
+
+				const esc = s => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+				const escA = s => esc(s).replace(/'/g, '&#39;')
+
+				const supplierCell = r => {
+					if (!r.shop_name && !r.stall) return '<span class="pm-cell-empty">Not set</span>'
+					const shop  = r.shop_name ? `<span class="pm-shop-name">${esc(r.shop_name)}</span>` : ''
+					const stall = r.stall ? `<span class="pm-tag">${esc(r.stall)}</span>` : ''
+					return `<div class="pm-cell-stack">${shop}${stall}</div>`
+				}
+				const charmCell = r => {
+					if (!r.charm_shop && !r.charm_code) return '<span class="pm-cell-empty">—</span>'
+					const shop = r.charm_shop ? `<span class="pm-shop-name">${esc(r.charm_shop)}</span>` : ''
+					const code = r.charm_code ? `<span class="pm-tag accent">${esc(r.charm_code)}</span>` : ''
+					return `<div class="pm-cell-stack">${shop}${code}</div>`
+				}
+				const thumb = r => r.image_url
+					? `<img class="pm-thumb" src="${escA(r.image_url)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'pm-thumb-ph',textContent:'📦'}))">`
+					: `<div class="pm-thumb-ph">📦</div>`
+
+				tbody.innerHTML = filtered.map(r => `
+					<tr>
+						<td class="pm-col-img">${thumb(r)}</td>
+						<td class="pm-col-title"><span class="pm-title-text">${esc(r.title)}</span></td>
+						<td class="pm-col-supplier">${supplierCell(r)}</td>
+						<td class="pm-col-charm">${charmCell(r)}</td>
+						<td class="pm-col-actions">
+							<div class="pm-row-actions">
+								<button class="pm-btn-icon" onclick="openPmEditor(${r.id})" title="Edit">✎</button>
+								<button class="pm-btn-icon danger" onclick="deletePmEntry(${r.id}, '${escA(r.title)}')" title="Delete">✕</button>
+							</div>
+						</td>
+					</tr>`).join('')
+			}
+
+			function openPmEditor(id) {
+				_pmEditId = id
+				const row = id ? _pmRows.find(r => r.id === id) : null
+
+				document.getElementById('pmEditorTitle').textContent = id ? 'Edit entry' : 'Add entry'
+				document.getElementById('pmEditTitle').value     = row?.title      || ''
+				document.getElementById('pmEditShop').value      = row?.shop_name  || ''
+				document.getElementById('pmEditStall').value     = row?.stall      || ''
+				document.getElementById('pmEditCharmShop').value = row?.charm_shop || ''
+				document.getElementById('pmEditCharmCode').value = row?.charm_code || ''
+				document.getElementById('pmEditorErr').textContent = ''
+
+				document.getElementById('pmEditor').style.display = 'block'
+				document.getElementById('pmEditTitle').focus()
+			}
+
+			function closePmEditor() {
+				_pmEditId = null
+				const el = document.getElementById('pmEditor')
+				if (el) el.style.display = 'none'
+			}
+
+			async function savePmEntry() {
+				const title = document.getElementById('pmEditTitle').value.trim()
+				if (!title) {
+					document.getElementById('pmEditorErr').textContent = 'Product title is required.'
+					document.getElementById('pmEditTitle').focus()
+					return
+				}
+				const body = {
+					title,
+					shop_name:  document.getElementById('pmEditShop').value.trim(),
+					stall:      document.getElementById('pmEditStall').value.trim(),
+					charm_shop: document.getElementById('pmEditCharmShop').value.trim(),
+					charm_code: document.getElementById('pmEditCharmCode').value.trim(),
+				}
+				if (_pmEditId) body.id = _pmEditId
+
+				const method = _pmEditId ? 'PUT' : 'POST'
+				try {
+					const r = await fetch('/api/route/product-map', {
+						method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+					})
+					const d = await r.json()
+					if (!d.ok) { document.getElementById('pmEditorErr').textContent = d.error || 'Save failed.'; return }
+					_pmRows = d.rows || []
+					renderPmTable()
+					closePmEditor()
+				} catch (err) {
+					document.getElementById('pmEditorErr').textContent = 'Network error: ' + err.message
+				}
+			}
+
+			async function deletePmEntry(id, title) {
+				if (!confirm(`Delete catalog entry for:\n"${title}"?`)) return
+				try {
+					const r = await fetch('/api/route/product-map', {
+						method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ id }),
+					})
+					const d = await r.json()
+					if (!d.ok) { alert('Delete failed: ' + (d.error || 'unknown error')); return }
+					_pmRows = d.rows || []
+					renderPmTable()
+					if (_pmEditId === id) closePmEditor()
+				} catch (err) {
+					alert('Network error: ' + err.message)
+				}
+			}
+
+			async function pmImportFromExcel() {
+				if (!confirm('This will replace the entire Product Catalog with the data from supplier_catalog.xlsx.\n\nContinue?')) return
+				try {
+					const r = await fetch('/api/route/import-suppliers', { method: 'POST' })
+					const d = await r.json()
+					if (!d.ok) { alert('Import failed: ' + (d.error || 'unknown')); return }
+					await _pmLoad()
+					alert(`Imported ${_pmRows.length} entries from Excel.`)
+				} catch (err) {
+					alert('Network error: ' + err.message)
+				}
+			}
+
+			async function pmReconcile() {
+				try {
+					const r = await fetch('/api/route/product-map/reconcile', { method: 'POST' })
+					const d = await r.json()
+					if (!d.ok) { alert('Fill from catalog failed: ' + (d.error || 'route-engine catalog unavailable')); return }
+					_pmRows = d.rows || []
+					renderPmTable()
+					const filled = (d.supplier_filled || 0) + (d.charm_filled || 0)
+					alert(filled
+						? `Filled ${d.supplier_filled || 0} supplier and ${d.charm_filled || 0} charm field(s) from the route-engine catalog.`
+						: 'Nothing to fill — every product already has its supplier/charm set.')
+				} catch (err) {
+					alert('Network error: ' + err.message)
+				}
+			}
+
+			// ── (end Product Catalog) ────────────────────────────────────────────
 
 			function openCharmModal(receiptId, itemKey) {
 				_charmModalApplyAll = false // single line-item by default
@@ -11395,12 +13624,27 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 			// plus a section for charm orders that still need a code assigned.
 
 			let _cpmExpanded = new Set() // expanded group keys ("c:<code>" / "u:<item_key>")
+			let _charmProgress = {} // charm_code → purchased/in-stock qty (loaded from /api/route/charm-progress)
+
+			/** Clamp-and-resolve how many pieces of an assigned charm are already purchased. */
+			function _cpmPurchased(g) {
+				const stored = _charmProgress[g.code]
+				if (stored != null) return Math.max(0, Math.min(g.qty, stored))
+				// No explicit value yet: derive from per-line status (all purchased → full).
+				if (g.statuses.size === 1 && g.statuses.has('Purchased')) return g.qty
+				return 0
+			}
+
+			/** Fresh assigned-charm group for a code in the current scope. */
+			function _cpmAssignedGroup(code) {
+				return _aggregateCharms(_charmPurchaseScopeRows()).assigned.find((g) => g.code === code) || null
+			}
 
 			/** Charm-bearing rows in the current scope (pinned set aware, excludes dropped lines). */
 			function _charmPurchaseScopeRows() {
-				let rows = _routeRows
-				if (_routePinnedReceipts.size > 0) rows = rows.filter((r) => _routePinnedReceipts.has(r.receipt_id))
-				return rows.filter((r) => r.has_charm && !r.excluded)
+				// _routeRows already includes any added (pre-transit) orders merged in
+				// by the server, so the charm scope is simply the full dashboard set.
+				return _routeRows.filter((r) => r.has_charm && !r.excluded)
 			}
 
 			/** Group charm rows → assigned (by code) and unassigned (by product). */
@@ -11448,9 +13692,14 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 				}
 			}
 
-			function openCharmPurchaseModal() {
-				renderCharmPurchaseModal()
+			async function openCharmPurchaseModal() {
 				document.getElementById('charmPurchaseModal').style.display = 'flex'
+				renderCharmPurchaseModal()
+				try {
+					const r = await fetch(`${API}/api/route/charm-progress`)
+					const d = await r.json()
+					if (d.ok) { _charmProgress = d.progress || {}; renderCharmPurchaseModal() }
+				} catch { /* non-fatal — falls back to status-derived counts */ }
 			}
 
 			function closeCharmPurchaseModal() {
@@ -11497,6 +13746,76 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 			}
 
 			/**
+			 * Build the fulfillment cell: a quantity stepper for how many pieces are
+			 * already purchased / in stock, a progress bar, and a "to buy" pill.
+			 */
+			function _cpmFulfillCell(code, needed) {
+				const purchased = _cpmPurchased({ code, qty: needed, statuses: new Set() })
+				const stored = _charmProgress[code]
+				const cur = stored != null ? Math.max(0, Math.min(needed, stored)) : purchased
+				const toBuy = Math.max(0, needed - cur)
+				const pct = needed > 0 ? Math.round((cur / needed) * 100) : 0
+				const done = toBuy === 0
+				const jc = jsAttr(code)
+				return (
+					`<div class="cpm-fulfill">` +
+						`<div class="cpm-fulfill-top">` +
+							`<div class="cpm-stepper">` +
+								`<button class="cpm-step" title="One fewer purchased" onclick="stepCharmPurchased('${jc}',-1)"${cur <= 0 ? ' disabled' : ''}>−</button>` +
+								`<input class="cpm-step-input" type="number" min="0" max="${needed}" value="${cur}" onchange="setCharmPurchased('${jc}',this.value)" onfocus="this.select()" aria-label="Pieces purchased">` +
+								`<button class="cpm-step" title="One more purchased" onclick="stepCharmPurchased('${jc}',1)"${cur >= needed ? ' disabled' : ''}>+</button>` +
+							`</div>` +
+							`<span class="cpm-need-of">of ${needed}</span>` +
+						`</div>` +
+						`<div class="cpm-progress" title="${cur} of ${needed} purchased"><i style="width:${pct}%"></i></div>` +
+						`<div class="cpm-tobuy ${done ? 'done' : ''}">${done ? '✓ All purchased' : `${toBuy} still to buy`}</div>` +
+					`</div>`
+				)
+			}
+
+			/** Set how many pieces of a charm code are purchased; clamps, persists, syncs status. */
+			async function setCharmPurchased(code, val) {
+				const g = _cpmAssignedGroup(code)
+				if (!g) return
+				const q = Math.max(0, Math.min(g.qty, Math.floor(Number(val) || 0)))
+				_charmProgress[code] = q
+				renderCharmPurchaseModal()
+				// Persist the inventory count.
+				try {
+					await fetch(`${API}/api/route/charm-progress`, {
+						method: 'POST', headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ charm_code: code, purchased_qty: q }),
+					})
+				} catch { /* keep optimistic UI */ }
+				// Keep per-line charm status coherent (Pending ⇄ Purchased), never
+				// clobbering Out of Stock / Out of Production flags.
+				await _syncCharmStatusFromQty(code, q >= g.qty)
+			}
+
+			/** Increment/decrement the purchased count by delta. */
+			function stepCharmPurchased(code, delta) {
+				const g = _cpmAssignedGroup(code)
+				if (!g) return
+				const cur = _charmProgress[code] != null ? _charmProgress[code] : _cpmPurchased(g)
+				setCharmPurchased(code, cur + delta)
+			}
+
+			/** Reconcile per-line status_charm with the purchased quantity. */
+			async function _syncCharmStatusFromQty(code, full) {
+				const rows = _charmPurchaseScopeRows().filter((r) => r.charm_code === code)
+				const changed = []
+				for (const r of rows) {
+					const st = r.status_charm || 'Pending'
+					if (full && st === 'Pending') { r.status_charm = 'Purchased'; changed.push(r) }
+					else if (!full && st === 'Purchased') { r.status_charm = 'Pending'; changed.push(r) }
+				}
+				if (changed.length) {
+					renderRouteDashboard()
+					for (const r of changed) await _saveRouteAssign(r.receipt_id, r.item_key, { status_charm: r.status_charm })
+				}
+			}
+
+			/**
 			 * Unified table for both assigned and unassigned charms.
 			 * A single <thead> pins at the top of the scroll container via
 			 * sticky + box-shadow (no gap). Section dividers live inside <tbody>
@@ -11506,14 +13825,14 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 				const colgroup =
 					`<colgroup>` +
 					`<col class="col-thumb"><col class="col-code"><col class="col-supplier">` +
-					`<col class="col-qty"><col class="col-status"><col class="col-actions">` +
+					`<col class="col-fulfill"><col class="col-status"><col class="col-actions">` +
 					`</colgroup>`
 				const thead =
 					`<thead><tr>` +
 					`<th></th>` +
 					`<th>Charm</th>` +
 					`<th>Supplier · Location</th>` +
-					`<th style="text-align:center">Qty</th>` +
+					`<th>Purchased · To buy</th>` +
 					`<th>Status</th>` +
 					`<th></th>` +
 					`</tr></thead>`
@@ -11548,6 +13867,8 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 						const stCls = statusMixed ? '' : 'st-' + statusVal.replace(/\s+/g, '-')
 						const statusSel = `<select class="cpm-status-select ${stCls}" onchange="setCharmGroupStatus('${jsAttr(code)}',this.value)">${_cpmStatusOptions(statusVal, statusMixed)}</select>`
 
+						const fulfill = _cpmFulfillCell(code, g.qty)
+
 						const expanded = _cpmExpanded.has('c:' + code)
 						const orderN = g.orders.size
 						const detailBtn = `<button class="cpm-detail-btn" onclick="toggleCpmDetail('c:${jsAttr(code)}')">${expanded ? '↑ Hide' : `${orderN} order${orderN !== 1 ? 's' : ''}`}</button>`
@@ -11557,7 +13878,7 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 							`<td>${img}</td>` +
 							`<td><div class="cpm-code">${escHtml(code)}</div>${sku}</td>` +
 							`<td>${shopSel}</td>` +
-							`<td><div class="cpm-qty">${g.qty}</div><div class="cpm-qty-sub">pcs</div></td>` +
+							`<td>${fulfill}</td>` +
 							`<td>${statusSel}</td>` +
 							`<td>${detailBtn}</td>` +
 							`</tr>`
@@ -11578,9 +13899,27 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 						const imgTag = g.image_url
 							? `<img class="cpm-thumb" src="${escAttr(g.image_url)}" referrerpolicy="no-referrer">`
 							: `<div class="cpm-thumb-ph">📦</div>`
-						const sug = g.suggested ? `<div class="cpm-code-sku">Suggested: ${escHtml(g.suggested)}</div>` : ''
 						const first = g.lines[0]
-						const assignBtn = `<button class="cpm-assign-btn" onclick="openCharmPickerForProduct('${first.receipt_id}','${jsAttr(g.item_key)}')">Assign charm</button>`
+
+						// Suggested charm from the catalog — show code + a one-click Accept button
+						// so the user can confirm directly from this modal without going back to
+						// the main table.
+						let charmCol
+						if (g.suggested) {
+							const sugShop = _charmByCode[g.suggested]?.default_charm_shop || ''
+							charmCol =
+								`<div class="cpm-suggested-wrap">` +
+								`<span class="cpm-sug-code">${escHtml(g.suggested)}</span>` +
+								`<span class="charm-suggest-tag">suggested</span>` +
+								`<button class="charm-assign-btn cpm-sug-accept" ` +
+								`onclick="acceptSuggestedCharmForGroup('${jsAttr(g.item_key)}','${jsAttr(g.suggested)}','${jsAttr(sugShop)}')" ` +
+								`title="Confirm this suggested charm for all ${g.orders.size} order${g.orders.size !== 1 ? 's' : ''} of this product">` +
+								`✓ Accept</button>` +
+								`<button class="cpm-assign-btn" onclick="openCharmPickerForProduct('${first.receipt_id}','${jsAttr(g.item_key)}')" title="Choose a different charm">✎ Change</button>` +
+								`</div>`
+						} else {
+							charmCol = `<button class="cpm-assign-btn" onclick="openCharmPickerForProduct('${first.receipt_id}','${jsAttr(g.item_key)}')">Assign charm</button>`
+						}
 
 						const statusMixed = g.statuses.size > 1
 						const statusVal = statusMixed ? '' : [...g.statuses][0] || 'Pending'
@@ -11594,9 +13933,9 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 						tbody +=
 							`<tr class="cpm-row">` +
 							`<td>${imgTag}</td>` +
-							`<td><div class="cpm-prodtitle">${escHtml(g.title)}</div>${sug}</td>` +
-							`<td>${assignBtn}</td>` +
-							`<td><div class="cpm-qty">${g.qty}</div><div class="cpm-qty-sub">pcs</div></td>` +
+							`<td><div class="cpm-prodtitle">${escHtml(g.title)}</div></td>` +
+							`<td>${charmCol}</td>` +
+							`<td><div class="cpm-need-only"><b>${g.qty}</b> needed<span class="cpm-need-hint">assign a code to track</span></div></td>` +
 							`<td>${statusSel}</td>` +
 							`<td>${detailBtn}</td>` +
 							`</tr>`
@@ -11613,14 +13952,17 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 			function renderCharmPurchaseModal() {
 				const { assigned, unassigned } = _aggregateCharms(_charmPurchaseScopeRows())
 				const totalUnits = [...assigned, ...unassigned].reduce((s, g) => s + g.qty, 0)
-				const purchased = assigned.filter((g) => g.statuses.size === 1 && g.statuses.has('Purchased')).length
+				const purchasedPcs = assigned.reduce((s, g) => s + _cpmPurchased(g), 0)
+				const toBuyPcs = totalUnits - purchasedPcs
 
 				const totals = document.getElementById('cpmTotals')
 				if (totals) {
+					const allDone = toBuyPcs === 0 && totalUnits > 0
 					totals.innerHTML =
 						`<span class="cpm-stat"><b>${assigned.length + unassigned.length}</b> charms</span>` +
 						`<span class="cpm-stat"><b>${totalUnits}</b> pcs total</span>` +
-						(assigned.length ? `<span class="cpm-stat" title="${purchased} of ${assigned.length} fully purchased"><b>${purchased}/${assigned.length}</b> purchased</span>` : '') +
+						`<span class="cpm-stat" title="${purchasedPcs} of ${totalUnits} pieces purchased"><b>${purchasedPcs}/${totalUnits}</b> purchased</span>` +
+						(toBuyPcs > 0 ? `<span class="cpm-stat is-buy"><b>${toBuyPcs}</b> pcs to buy</span>` : (allDone ? `<span class="cpm-stat is-done">✓ all purchased</span>` : '')) +
 						(unassigned.length ? `<span class="cpm-stat is-warn">⚠ <b>${unassigned.length}</b> need a code</span>` : '')
 				}
 
@@ -11651,6 +13993,19 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 				rows.forEach((r) => {
 					r.status_charm = status
 				})
+				// Keep the purchased quantity coherent with the status:
+				//   Purchased → all pieces; Pending → none. Special states leave it untouched.
+				const g = _cpmAssignedGroup(code)
+				if (g && (status === 'Purchased' || status === 'Pending')) {
+					const q = status === 'Purchased' ? g.qty : 0
+					_charmProgress[code] = q
+					try {
+						await fetch(`${API}/api/route/charm-progress`, {
+							method: 'POST', headers: { 'Content-Type': 'application/json' },
+							body: JSON.stringify({ charm_code: code, purchased_qty: q }),
+						})
+					} catch { /* keep optimistic UI */ }
+				}
 				renderCharmPurchaseModal()
 				renderRouteDashboard()
 				for (const r of rows) await _saveRouteAssign(r.receipt_id, r.item_key, { status_charm: status })
@@ -11671,12 +14026,13 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 			/** Copy the charm shopping list as tab-separated text for sharing. */
 			function copyCharmPurchaseList() {
 				const { assigned, unassigned } = _aggregateCharms(_charmPurchaseScopeRows())
-				const lines = ['Charm\tQty\tSupplier / Location\tStatus']
+				const lines = ['Charm\tNeeded\tPurchased\tTo buy\tSupplier / Location']
 				assigned.forEach((g) => {
 					const shop = g.shops.size === 1 ? [...g.shops][0] || '' : 'Mixed'
 					const stall = shop && shop !== 'Mixed' ? _charmShopStall(shop) : ''
-					const status = g.statuses.size === 1 ? [...g.statuses][0] : 'Mixed'
-					lines.push(`${g.code}\t${g.qty}\t${shop || '-'}${stall ? ' / ' + stall : ''}\t${status}`)
+					const purchased = _cpmPurchased(g)
+					const toBuy = Math.max(0, g.qty - purchased)
+					lines.push(`${g.code}\t${g.qty}\t${purchased}\t${toBuy}\t${shop || '-'}${stall ? ' / ' + stall : ''}`)
 				})
 				if (unassigned.length) {
 					lines.push('')
@@ -12190,6 +14546,24 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 				renderRouteDashboard()
 			}
 
+			/**
+			 * Accept the catalog suggestion for EVERY line in an unassigned charm group
+			 * (used in the "Charms to buy" modal). Saves each line individually so the
+			 * per-order assignment is persisted, then re-renders both the main table and
+			 * the modal to reflect the confirmation.
+			 */
+			async function acceptSuggestedCharmForGroup(itemKey, code, shop) {
+				const targets = _routeRows.filter((r) => r.item_key === itemKey && r.has_charm && !r.charm_code)
+				if (!targets.length) return
+				for (const r of targets) {
+					r.charm_code = code
+					r.charm_shop = shop || ''
+					await _saveRouteAssign(r.receipt_id, r.item_key, { charm_code: code, charm_shop: r.charm_shop })
+				}
+				renderRouteDashboard()
+				renderCharmPurchaseModal()
+			}
+
 			function clearRouteDates() {
 				document.getElementById('routeDateFrom').value = ''
 				document.getElementById('routeDateTo').value = ''
@@ -12359,7 +14733,7 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 		<div class="bulk-bar" id="bulkBar">
 			<span class="bulk-bar-count" id="bulkCount">0 selected</span>
 			<button class="bulk-bar-deselect" onclick="clearSelection()">✕ Deselect all</button>
-			<button class="bulk-bar-route" onclick="sendSelectionToRoute()" title="Pin these orders to the Route tab and open it">📍 Send to Route</button>
+			<button class="bulk-bar-route" onclick="sendSelectionToRoute()" title="Add these orders to the Route tab’s shopping list (kept on top of the orders already there)">📍 Send to Route</button>
 			<button class="bulk-bar-submit" onclick="openBulkModal()">✓ Complete orders</button>
 		</div>
 
@@ -12444,13 +14818,14 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 						<div class="fpx-consignment" id="fpxSuccessConsignment"></div>
 						<div id="fpxOdaBadge" style="display: none" class="fpx-oda-badge">⚠ Remote Area Surcharge (ODA)</div>
 					</div>
-					<div class="fpx-success-actions">
-						<button class="fpx-btn-label" id="fpxLabelBtn" onclick="fetchAndOpenLabel()">
-							<svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 16l-4-4m4 4l4-4m-4 4V3M4 20h16" /></svg>
-							Download Shipping Label (PDF)
-						</button>
-						<button class="fpx-btn-etsy" id="fpxAlsoEtsyBtn" onclick="alsoShipOnEtsy()"><span>📬</span> Also mark as shipped on Etsy</button>
-					</div>
+				<div class="fpx-success-actions">
+					<button class="fpx-btn-label loading" id="fpxLabelBtn" disabled>
+						<span class="fpx-spin"></span>
+						Preparing label…
+					</button>
+					<div class="fpx-label-status hidden" id="fpxLabelStatus"></div>
+					<button class="fpx-btn-etsy" id="fpxAlsoEtsyBtn" onclick="alsoShipOnEtsy()"><span>📬</span> Also mark as shipped on Etsy</button>
+				</div>
 				</div>
 
 				<!-- Form state (hidden after order is created) -->
@@ -12515,10 +14890,13 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 					<div class="fpx-section">
 						<div class="fpx-section-title">Package</div>
 						<div class="fpx-row cols2">
-							<div class="fpx-field">
-								<label class="fpx-label">Weight (grams) <span class="req">*</span></label>
-								<input class="fpx-input" id="fpxWeight" type="number" min="1" step="1" placeholder="e.g. 150" />
-							</div>
+						<div class="fpx-field">
+							<label class="fpx-label" style="display:flex;align-items:center;gap:2px">
+								Weight (kg) <span class="req">*</span>
+								<span class="fpx-weight-badge" id="fpxWeightBadge">✦ Auto-filled</span>
+							</label>
+							<input class="fpx-input" id="fpxWeight" type="number" min="0.001" step="0.001" placeholder="e.g. 0.13" />
+						</div>
 							<div class="fpx-field">
 								<label class="fpx-label">Contains Battery?</label>
 								<div class="fpx-toggle-row" style="margin-top: 2px">
@@ -12584,16 +14962,40 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 					<div class="fpx-section">
 						<div class="fpx-section-title">Shipping Options</div>
 						<div class="fpx-row cols2">
-							<div class="fpx-field">
-								<label class="fpx-label">Logistics Product <span class="req">*</span></label>
-								<select class="fpx-select" id="fpxProduct">
-									<option value="">Loading products…</option>
-								</select>
-								<!-- Shown only when "Other / Custom…" is selected -->
-								<div id="fpxProductCustomWrap" style="display: none; margin-top: 8px">
-									<input class="fpx-input" id="fpxProductCustom" type="text" placeholder="Enter product code, e.g. S5058" />
+						<div class="fpx-field">
+							<label class="fpx-label">Logistics Product <span class="req">*</span></label>
+							<!-- Custom animated dropdown — replaces native <select> for cross-platform dark theme -->
+							<div class="fpx-csel" id="fpxProductDropdown">
+								<button type="button" class="fpx-csel-trigger" id="fpxProductTrigger"
+									aria-haspopup="listbox" aria-expanded="false"
+									onclick="toggleFpxProductDropdown()">
+									<span class="fpx-csel-label placeholder" id="fpxProductLabel">Loading products…</span>
+									<svg class="fpx-csel-chevron" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+										<path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+									</svg>
+								</button>
+								<div class="fpx-csel-panel" id="fpxProductPanel" role="listbox" aria-labelledby="fpxProductTrigger">
+									<div class="fpx-csel-search-wrap">
+										<input type="text" class="fpx-csel-search" id="fpxProductSearch"
+											placeholder="Search products…" autocomplete="off"
+											oninput="filterFpxProducts(this.value)" />
+									</div>
+									<ul class="fpx-csel-list" id="fpxProductList">
+										<li class="fpx-csel-empty">
+											<span class="fpx-csel-loading-dots">
+												<span></span><span></span><span></span>
+											</span>
+										</li>
+									</ul>
 								</div>
+								<!-- Hidden input holds the selected value — read by submit4pxOrder -->
+								<input type="hidden" id="fpxProduct" value="" />
 							</div>
+							<!-- Shown only when "Other / Custom…" is selected -->
+							<div id="fpxProductCustomWrap" style="display: none; margin-top: 8px">
+								<input class="fpx-input" id="fpxProductCustom" type="text" placeholder="Enter product code, e.g. S5058" />
+							</div>
+						</div>
 							<div class="fpx-field">
 								<label class="fpx-label">Duty Type</label>
 								<select class="fpx-select" id="fpxDutyType">

@@ -1,15 +1,15 @@
 'use strict';
 
 /**
- * Charm-library helpers: seeding from OSP's charm_manifest.json, charm-code
- * allocation, and image-file management on the shared charm_images folder.
+ * Charm-library helpers: seeding from the route engine's charm_manifest.json,
+ * charm-code allocation, and image-file management on the charm_images folder.
  *
- * Design: the UED `charm_library` SQLite table is authoritative for in-app
- * CRUD. It is SEEDED once from OSP's read-only charm_manifest.json (seed when
- * empty), after which add/edit/delete operate on the table + the image folder.
- * Charm images are stored as <code>.<ext> under <osp>/data/charm_images/, the
- * same folder OSP reads from on disk, so new/updated images are visible to both
- * programs without touching supplier_catalog.xlsx (which would lose embeds).
+ * Design: the dashboard `charm_library` SQLite table is authoritative for
+ * in-app CRUD. It is SEEDED once from the bundled charm_manifest.json (seed
+ * when empty), after which add/edit/delete operate on the table + image folder.
+ * Charm images are stored as <code>.<ext> under the route engine's
+ * data/charm_images/ folder (see engine-paths.js), which the generator reads
+ * when building the route. All paths resolve inside this dashboard.
  */
 
 const fs   = require('fs');
@@ -17,27 +17,30 @@ const path = require('path');
 
 const { getCharmLibrary, replaceCharmLibrary } = require('../db/setup');
 const routeDashboard = require('./dashboard');
+const enginePaths    = require('./engine-paths');
 
 const ALLOWED_EXT = ['png', 'jpg', 'jpeg', 'webp', 'gif'];
 const CODE_RE = /^[A-Za-z0-9_-]+$/;
 
 /** Absolute path to the charm_images directory, or null when unconfigured. */
 function charmImagesDir(config) {
-  if (!config || !config.osp_project_dir) return null;
+  const engineDir = enginePaths.engineDir(config);
+  if (!engineDir) return null;
   // Prefer the manifest's declared dir; fall back to the conventional location.
   try {
-    const cat = routeDashboard.loadCharmCatalog(config.osp_project_dir);
+    const cat = routeDashboard.loadCharmCatalog(engineDir);
     if (cat.images_dir) return cat.images_dir;
   } catch {}
-  return path.join(config.osp_project_dir, 'data', 'charm_images');
+  return enginePaths.charmImagesDir(config);
 }
 
 /** Seed the charm_library table from the manifest when the table is empty. */
 function seedCharmLibraryIfEmpty(db, config) {
-  if (!config || !config.osp_project_dir) return { ok: false, reason: 'osp_project_dir not configured' };
+  const engineDir = enginePaths.engineDir(config);
+  if (!engineDir) return { ok: false, reason: 'route engine directory not resolved' };
   if (getCharmLibrary(db).length > 0) return { ok: true, reason: 'preserved', seeded: 0 };
   try {
-    const { charms } = routeDashboard.loadCharmCatalog(config.osp_project_dir);
+    const { charms } = routeDashboard.loadCharmCatalog(engineDir);
     const rows = charms.map((c, idx) => ({
       code:               c.code,
       sku:                c.sku || '',
@@ -55,9 +58,10 @@ function seedCharmLibraryIfEmpty(db, config) {
 
 /** Force re-seed the charm_library from the manifest (discards in-app edits). */
 function resyncCharmLibrary(db, config) {
-  if (!config || !config.osp_project_dir) return { ok: false, reason: 'osp_project_dir not configured' };
+  const engineDir = enginePaths.engineDir(config);
+  if (!engineDir) return { ok: false, reason: 'route engine directory not resolved' };
   try {
-    const { charms } = routeDashboard.loadCharmCatalog(config.osp_project_dir);
+    const { charms } = routeDashboard.loadCharmCatalog(engineDir);
     const rows = charms.map((c, idx) => ({
       code:               c.code,
       sku:                c.sku || '',

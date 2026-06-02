@@ -6,6 +6,8 @@
 #    2. Starts the dashboard under PM2 and saves the process list
 #    3. Registers login auto-start (Startup folder; Scheduled Task if admin)
 #    4. Prevents the PC from sleeping on AC power (so overnight syncs run)
+#    5. Creates Desktop + Start Menu shortcuts (double-click to open dashboard)
+#    6. Installs the system tray icon into the Startup folder (orange E in tray)
 #
 #  Run from the project root:   npm run auto:install
 #  Undo with:                   npm run auto:uninstall
@@ -19,7 +21,7 @@ $TaskName    = 'EtsyDashboardAutostart'
 
 Write-Host ''
 Write-Host '============================================================'
-Write-Host '  Etsy Dashboard - Always-On Setup'
+Write-Host '  Etsy Dashboard - Always-On Setup  (v2)'
 Write-Host '============================================================'
 Write-Host "  Project: $ProjectRoot"
 Write-Host ''
@@ -29,14 +31,14 @@ Set-Location $ProjectRoot
 # -- 1. Ensure PM2 is installed locally -----------------------------------------
 $pm2Cmd = Join-Path $ProjectRoot 'node_modules\.bin\pm2.cmd'
 if (-not (Test-Path $pm2Cmd)) {
-  Write-Host '  [1/4] Installing PM2 (one-time)...'
+  Write-Host '  [1/6] Installing PM2 (one-time)...'
   npm install pm2 --save-dev --no-audit --no-fund
 } else {
-  Write-Host '  [1/4] PM2 already installed.'
+  Write-Host '  [1/6] PM2 already installed.'
 }
 
 # -- 2. Start (or cleanly restart) under PM2 ------------------------------------
-Write-Host '  [2/4] Starting dashboard under PM2...'
+Write-Host '  [2/6] Starting dashboard under PM2...'
 
 # Remove any stale PM2 entry first so re-running this installer is idempotent.
 & $pm2Cmd delete etsy-dashboard 2>$null | Out-Null
@@ -51,7 +53,7 @@ Start-Sleep -Milliseconds 800
 Write-Host '        Dashboard is running under PM2.'
 
 # -- 3. Register login auto-start (Startup folder, no admin needed) -------------
-Write-Host '  [3/4] Registering login auto-start...'
+Write-Host '  [3/6] Registering login auto-start...'
 
 $startupDir = [Environment]::GetFolderPath('Startup')
 $cmdPath    = Join-Path $startupDir 'EtsyDashboard-resurrect.cmd'
@@ -84,7 +86,7 @@ if ($taskOk) {
 }
 
 # -- 4. Keep the PC awake on AC power so overnight syncs run --------------------
-Write-Host '  [4/4] Disabling sleep on AC power...'
+Write-Host '  [4/6] Disabling sleep on AC power...'
 try {
   powercfg /change standby-timeout-ac 0 | Out-Null
   powercfg /change hibernate-timeout-ac 0 | Out-Null
@@ -93,17 +95,88 @@ try {
   Write-Host '        Could not change power settings (non-fatal).'
 }
 
+# -- 5. Desktop + Start Menu shortcuts ----------------------------------------
+Write-Host '  [5/6] Creating Desktop and Start Menu shortcuts...'
+
+$desktopDir   = [Environment]::GetFolderPath('Desktop')
+$startMenuDir = [Environment]::GetFolderPath('StartMenu') + '\Programs'
+$startupDir2  = [Environment]::GetFolderPath('Startup')
+$psLaunch     = Join-Path $ProjectRoot 'scripts\start-dashboard.ps1'
+$psTray       = Join-Path $ProjectRoot 'scripts\tray.ps1'
+$psExe        = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+# shell32.dll icon index 13 = Internet/Globe — clean, no external .ico needed.
+$iconSpec = 'C:\Windows\System32\shell32.dll,13'
+
+# VBScript is deprecated in Windows 11 24H2+.  Target powershell.exe directly.
+# WindowStyle 7 (minimised) on the .lnk suppresses any brief console flash.
+function New-PsShortcut2 {
+  param([string]$DestLnk, [string]$Ps1, [string]$WorkDir, [string]$Desc, [string]$Icon)
+  $ws  = New-Object -ComObject WScript.Shell
+  $lnk = $ws.CreateShortcut($DestLnk)
+  $lnk.TargetPath       = $psExe
+  $lnk.Arguments        = "-WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File `"$Ps1`""
+  $lnk.WorkingDirectory = $WorkDir
+  $lnk.Description      = $Desc
+  $lnk.IconLocation     = $Icon
+  $lnk.WindowStyle      = 7
+  $lnk.Save()
+  [System.Runtime.InteropServices.Marshal]::ReleaseComObject($ws) | Out-Null
+}
+
+# Remove any legacy .vbs entries left from older installs
+Remove-Item (Join-Path $startupDir2 'EtsyDashboard-tray.vbs')     -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $startupDir2 'EtsyDashboard.vbs')           -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $startupDir2 'EtsyDashboard-resurrect.cmd') -ErrorAction SilentlyContinue
+
+New-PsShortcut2 `
+  -DestLnk (Join-Path $desktopDir   'Etsy Dashboard.lnk') `
+  -Ps1     $psLaunch `
+  -WorkDir $ProjectRoot `
+  -Desc    'Open Unified Etsy Dashboard (starts server if needed)' `
+  -Icon    $iconSpec
+
+New-PsShortcut2 `
+  -DestLnk (Join-Path $startMenuDir 'Etsy Dashboard.lnk') `
+  -Ps1     $psLaunch `
+  -WorkDir $ProjectRoot `
+  -Desc    'Open Unified Etsy Dashboard (starts server if needed)' `
+  -Icon    $iconSpec
+
+Write-Host '        Desktop shortcut and Start Menu entry created.'
+
+# -- 6. Install system tray icon into Startup folder --------------------------
+Write-Host '  [6/6] Installing system tray icon (orange E in notification area)...'
+
+New-PsShortcut2 `
+  -DestLnk (Join-Path $startupDir2 'EtsyDashboard-tray.lnk') `
+  -Ps1     $psTray `
+  -WorkDir $ProjectRoot `
+  -Desc    'Etsy Dashboard system tray icon' `
+  -Icon    $iconSpec
+
+# Also launch the tray icon right now (without waiting for next login).
+Start-Process $psExe `
+  -ArgumentList "-WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File `"$psTray`"" `
+  -WindowStyle Hidden
+
+Write-Host '        Tray icon started and registered for auto-start on login.'
+
 Write-Host ''
 Write-Host '------------------------------------------------------------'
-Write-Host '  DONE. The dashboard now runs automatically.'
+Write-Host '  DONE. The dashboard now runs fully automatically.'
 Write-Host ''
-Write-Host '  Open:        http://localhost:4000'
-Write-Host '  Status:      npm run auto:status'
-Write-Host '  Live logs:   npm run auto:logs'
-Write-Host '  Stop:        npm run auto:stop'
-Write-Host '  Remove:      npm run auto:uninstall'
+Write-Host '  Open:          Double-click "Etsy Dashboard" on your Desktop'
+Write-Host '                 -OR-  http://localhost:4000'
+Write-Host '  Tray icon:     Orange "E" in the notification area (bottom-right)'
+Write-Host '                 Double-click it to open the dashboard at any time.'
 Write-Host ''
-Write-Host '  It resurrects on every login and restarts itself if it crashes.'
+Write-Host '  Status:        npm run auto:status'
+Write-Host '  Live logs:     npm run auto:logs'
+Write-Host '  Stop:          npm run auto:stop'
+Write-Host '  Remove:        npm run auto:uninstall'
+Write-Host ''
+Write-Host '  The server resurrects on every login and restarts itself on crash.'
 Write-Host '  For PROXIED shops keep VPN + IPFoxy connected; the direct shop'
 Write-Host '  always works. Keep the PC powered on for overnight syncing.'
 Write-Host '------------------------------------------------------------'

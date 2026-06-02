@@ -144,6 +144,18 @@ function initDb(dbPath) {
     );
 
     -- ─────────────────────────────────────────────
+    -- Listing image data cache: listing_id → raw JPEG bytes
+    -- Populated on first route generation; never re-fetched unless the row is
+    -- deleted.  Stores the full 570px image bytes so the shopping-route Excel
+    -- files get real product photos without hitting the CDN on every run.
+    -- ─────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS listing_image_data (
+      listing_id INTEGER PRIMARY KEY,
+      data       BLOB    NOT NULL,
+      cached_at  INTEGER DEFAULT (strftime('%s', 'now'))
+    );
+
+    -- ─────────────────────────────────────────────
     -- Listings cache — synced on-demand from the Listings tab
     -- ─────────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS listings (
@@ -352,6 +364,66 @@ function initDb(dbPath) {
       sort_order         INTEGER DEFAULT 0,
       updated_at         INTEGER DEFAULT (strftime('%s','now'))
     );
+
+    -- ─────────────────────────────────────────────────────────────────
+    -- charm_purchase_progress: how many physical pieces of a given charm
+    --   code the operator has already bought / has in stock. Used by the
+    --   "Charms to Buy" list to show purchased vs. still-to-buy quantities
+    --   independent of how many orders need it. Keyed by charm code.
+    -- ─────────────────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS charm_purchase_progress (
+      charm_code    TEXT PRIMARY KEY,
+      purchased_qty INTEGER NOT NULL DEFAULT 0,
+      updated_at    INTEGER DEFAULT (strftime('%s','now'))
+    );
+
+    -- ─────────────────────────────────────────────────────────────────
+    -- Bulk Listing Creator
+    -- ─────────────────────────────────────────────────────────────────
+
+    -- Cache of per-shop Etsy listing settings (shipping/return/partner/
+    --   section/taxonomy + resolved defaults). Refreshed on a TTL.
+    CREATE TABLE IF NOT EXISTS shop_listing_settings (
+      shop_key   TEXT PRIMARY KEY,
+      data_json  TEXT NOT NULL,
+      fetched_at INTEGER NOT NULL
+    );
+
+    -- One row per bulk-create job (a run over one shop's input folder).
+    CREATE TABLE IF NOT EXISTS bulk_jobs (
+      job_id       TEXT PRIMARY KEY,
+      shop_key     TEXT NOT NULL,
+      shop_name    TEXT,
+      input_path   TEXT NOT NULL,
+      state        TEXT NOT NULL DEFAULT 'queued',  -- queued|running|done|error|cancelled
+      target_state TEXT NOT NULL DEFAULT 'draft',   -- draft|published
+      dry_run      INTEGER NOT NULL DEFAULT 0,
+      total        INTEGER NOT NULL DEFAULT 0,
+      completed    INTEGER NOT NULL DEFAULT 0,
+      failed       INTEGER NOT NULL DEFAULT 0,
+      options_json TEXT,
+      error        TEXT,
+      created_at   INTEGER DEFAULT (strftime('%s','now')),
+      started_at   INTEGER,
+      finished_at  INTEGER
+    );
+
+    -- One row per product (folder) within a bulk job. Enables idempotent
+    --   resume: AI/upload/inventory steps are checkpointed in checkpoint_json.
+    CREATE TABLE IF NOT EXISTS bulk_job_items (
+      job_id          TEXT NOT NULL,
+      product_folder  TEXT NOT NULL,
+      product_name    TEXT,
+      status          TEXT NOT NULL DEFAULT 'pending', -- pending|ai_done|created|images_done|inventory_done|done|failed
+      listing_id      INTEGER,
+      listing_url     TEXT,
+      title           TEXT,
+      error           TEXT,
+      ai_json         TEXT,
+      checkpoint_json TEXT,
+      updated_at      INTEGER DEFAULT (strftime('%s','now')),
+      PRIMARY KEY (job_id, product_folder)
+    );
   `);
 
   // ── Migrations ────────────────────────────────────────────────────────────
@@ -559,8 +631,155 @@ function initDb(dbPath) {
     db.exec('ALTER TABLE charm_shop_directory ADD COLUMN sort_order INTEGER DEFAULT 0');
   }
 
+  // One-time remap of title-prefix keys → listing-scoped keys (fixes charm
+  // assignments bleeding across different products that share a title prefix).
+  migrateRouteKeysToListingScope(db);
+
   _db = db;
   return db;
+}
+
+// Local copies of the dashboard's key helpers. Duplicated here (instead of
+// importing src/route/dashboard.js) to avoid a require cycle — dashboard.js
+// already depends on this module.
+function _normTitleForKey(text) {
+  return String(text ?? '').replace(/\|/g, ',').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+function _baseTitleKey(title) {
+  return _normTitleForKey(title).slice(0, 50);
+}
+
+/**
+ * Migrate `route_assignments` and `product_assignments` from the legacy
+ * 50-char title key to the listing-scoped key `${titleKey}#L${listing_id}`.
+ *
+ * Two different products (listings) that share the same first 50 title
+ * characters previously collided onto one key, so a charm assigned to one bled
+ * onto the other. We rewrite each saved assignment to be scoped by the listing
+ * id resolved from the orders. When a legacy key maps to MORE than one listing
+ * (the collision case) the assignment is fanned out to every matching listing,
+ * so the current values are preserved and the line-items become independently
+ * editable. Rows whose product can no longer be found in any order are left
+ * untouched (harmless fallback).
+ *
+ * Idempotent: guarded by PRAGMA user_version and a per-row marker check.
+ *
+ * @param {Database.Database} db
+ */
+function migrateRouteKeysToListingScope(db) {
+  const MARKER = '#L';
+  try {
+    if (db.pragma('user_version', { simple: true }) >= 1) return;
+  } catch { /* fall through and attempt the migration */ }
+
+  // Build resolvers from every order's line-items:
+  //   perReceipt: receipt_id → (baseKey → Set<listing_id>)
+  //   global:     baseKey → Set<listing_id>   (across all orders)
+  const perReceipt = new Map();
+  const global = new Map();
+  let recs = [];
+  try {
+    recs = db.prepare(
+      "SELECT receipt_id, all_transactions FROM receipts WHERE all_transactions IS NOT NULL AND all_transactions <> ''"
+    ).all();
+  } catch { recs = []; }
+
+  for (const r of recs) {
+    let txs = [];
+    try { txs = JSON.parse(r.all_transactions || '[]'); } catch { continue; }
+    if (!Array.isArray(txs)) continue;
+    for (const t of txs) {
+      const bk = _baseTitleKey(t.title || '');
+      const lid = t.listing_id != null ? String(t.listing_id).trim() : '';
+      if (!bk || !lid) continue;
+      if (!perReceipt.has(r.receipt_id)) perReceipt.set(r.receipt_id, new Map());
+      const m = perReceipt.get(r.receipt_id);
+      if (!m.has(bk)) m.set(bk, new Set());
+      m.get(bk).add(lid);
+      if (!global.has(bk)) global.set(bk, new Set());
+      global.get(bk).add(lid);
+    }
+  }
+
+  const scoped = (base, lid) => `${base}${MARKER}${lid}`;
+
+  const tx = db.transaction(() => {
+    // ── route_assignments ──────────────────────────────────────────────────
+    let raRows = [];
+    try { raRows = db.prepare('SELECT * FROM route_assignments').all(); } catch { raRows = []; }
+
+    const insRA = db.prepare(`
+      INSERT OR IGNORE INTO route_assignments
+        (receipt_id, item_key, title, charm_code, charm_shop,
+         status_case, status_grip, status_charm, excluded,
+         supplier_shop_override, supplier_stall_override, updated_at)
+      VALUES
+        (@receipt_id, @item_key, @title, @charm_code, @charm_shop,
+         @status_case, @status_grip, @status_charm, @excluded,
+         @supplier_shop_override, @supplier_stall_override, @updated_at)
+    `);
+    const delRA = db.prepare('DELETE FROM route_assignments WHERE receipt_id = ? AND item_key = ?');
+
+    for (const a of raRows) {
+      if (typeof a.item_key === 'string' && a.item_key.includes(MARKER)) continue; // already scoped
+      const listings = perReceipt.get(a.receipt_id)?.get(a.item_key);
+      if (!listings || listings.size === 0) continue;                              // unresolved → leave as-is
+      for (const lid of listings) {
+        insRA.run({
+          receipt_id:              a.receipt_id,
+          item_key:                scoped(a.item_key, lid),
+          title:                   a.title ?? '',
+          charm_code:              a.charm_code ?? '',
+          charm_shop:              a.charm_shop ?? '',
+          status_case:             a.status_case ?? 'Pending',
+          status_grip:             a.status_grip ?? 'Pending',
+          status_charm:            a.status_charm ?? 'Pending',
+          excluded:                a.excluded ?? 0,
+          supplier_shop_override:  a.supplier_shop_override ?? '',
+          supplier_stall_override: a.supplier_stall_override ?? '',
+          updated_at:              a.updated_at ?? Math.floor(Date.now() / 1000),
+        });
+      }
+      delRA.run(a.receipt_id, a.item_key);
+    }
+
+    // ── product_assignments ────────────────────────────────────────────────
+    let paRows = [];
+    try { paRows = db.prepare('SELECT * FROM product_assignments').all(); } catch { paRows = []; }
+
+    const insPA = db.prepare(`
+      INSERT OR IGNORE INTO product_assignments
+        (item_key, title, supplier_shop, supplier_stall, charm_code, charm_shop, updated_at)
+      VALUES
+        (@item_key, @title, @supplier_shop, @supplier_stall, @charm_code, @charm_shop, @updated_at)
+    `);
+    const delPA = db.prepare('DELETE FROM product_assignments WHERE item_key = ?');
+
+    for (const a of paRows) {
+      if (typeof a.item_key === 'string' && a.item_key.includes(MARKER)) continue;
+      const listings = global.get(a.item_key);
+      if (!listings || listings.size === 0) continue;
+      for (const lid of listings) {
+        insPA.run({
+          item_key:       scoped(a.item_key, lid),
+          title:          a.title ?? '',
+          supplier_shop:  a.supplier_shop ?? '',
+          supplier_stall: a.supplier_stall ?? '',
+          charm_code:     a.charm_code ?? '',
+          charm_shop:     a.charm_shop ?? '',
+          updated_at:     a.updated_at ?? Math.floor(Date.now() / 1000),
+        });
+      }
+      delPA.run(a.item_key);
+    }
+  });
+
+  try {
+    tx();
+    db.pragma('user_version = 1');
+  } catch (err) {
+    console.error('[db] listing-scope key migration failed (left data untouched):', err.message);
+  }
 }
 
 /**
@@ -870,6 +1089,36 @@ function upsertListingImage(db, listingId, url) {
     VALUES (?, ?, strftime('%s', 'now'))
     ON CONFLICT(listing_id) DO UPDATE SET url = excluded.url, cached_at = excluded.cached_at
   `).run(listingId, url);
+}
+
+/**
+ * Return cached image bytes for a listing, or null if not yet fetched.
+ * @param {Database.Database} db
+ * @param {number} listingId
+ * @returns {Buffer|null}
+ */
+function getListingImageData(db, listingId) {
+  try {
+    const row = db.prepare('SELECT data FROM listing_image_data WHERE listing_id = ?').get(listingId);
+    if (row && row.data && row.data.length > 0) return row.data;
+  } catch { /* table not yet initialized on very first start */ }
+  return null;
+}
+
+/**
+ * Persist raw image bytes for a listing to the local cache.
+ * Upserts so repeated calls are idempotent.
+ * @param {Database.Database} db
+ * @param {number} listingId
+ * @param {Buffer} data
+ */
+function upsertListingImageData(db, listingId, data) {
+  db.prepare(`
+    INSERT INTO listing_image_data (listing_id, data, cached_at)
+    VALUES (?, ?, strftime('%s', 'now'))
+    ON CONFLICT(listing_id) DO UPDATE
+      SET data = excluded.data, cached_at = excluded.cached_at
+  `).run(listingId, data);
 }
 
 /**
@@ -1701,6 +1950,42 @@ function reorderCharmLibrary(db, newOrder) {
   return { renameMap, renames };
 }
 
+// ─── Charm purchase progress (purchased / in-stock quantity per charm) ────────
+
+/**
+ * Return all charm purchase-progress rows as a { charm_code: purchased_qty } map.
+ * @param {import('better-sqlite3').Database} db
+ * @returns {Record<string, number>}
+ */
+function getCharmPurchaseProgress(db) {
+  const out = {};
+  try {
+    db.prepare('SELECT charm_code, purchased_qty FROM charm_purchase_progress').all()
+      .forEach(r => { out[r.charm_code] = r.purchased_qty; });
+  } catch { /* table may not exist before first migration */ }
+  return out;
+}
+
+/**
+ * Set the purchased / in-stock quantity for a charm code. A quantity of 0 is
+ * stored explicitly (a deliberate "none purchased yet" state).
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} charmCode
+ * @param {number} qty  Clamped to >= 0.
+ * @returns {{ charm_code: string, purchased_qty: number }}
+ */
+function setCharmPurchaseProgress(db, charmCode, qty) {
+  const code = String(charmCode || '').trim();
+  if (!code) { const e = new Error('charm_code is required.'); e.code = 'REQUIRED'; throw e; }
+  const n = Math.max(0, Math.floor(Number(qty) || 0));
+  db.prepare(`
+    INSERT INTO charm_purchase_progress (charm_code, purchased_qty, updated_at)
+    VALUES (@code, @qty, @now)
+    ON CONFLICT(charm_code) DO UPDATE SET purchased_qty = excluded.purchased_qty, updated_at = excluded.updated_at
+  `).run({ code, qty: n, now: Math.floor(Date.now() / 1000) });
+  return { charm_code: code, purchased_qty: n };
+}
+
 /** Return the supplier directory in Excel row order. */
 function getSupplierDirectory(db) {
   try {
@@ -1900,6 +2185,131 @@ function getProductMapByNorm(db) {
   return map;
 }
 
+/**
+ * Return all product_map rows as an array, optionally filtered by a search
+ * term (case-insensitive substring match on title, shop_name, or stall).
+ * @param {Database.Database} db
+ * @param {string} [q]  Optional search string.
+ * @returns {Array}
+ */
+function getProductMap(db, q) {
+  const all = db.prepare('SELECT * FROM product_map ORDER BY sort_order ASC, title ASC').all();
+  if (!q) return all;
+  const lq = q.toLowerCase();
+  return all.filter(r =>
+    (r.title      || '').toLowerCase().includes(lq) ||
+    (r.shop_name  || '').toLowerCase().includes(lq) ||
+    (r.stall      || '').toLowerCase().includes(lq) ||
+    (r.charm_shop || '').toLowerCase().includes(lq) ||
+    (r.charm_code || '').toLowerCase().includes(lq),
+  );
+}
+
+/**
+ * Insert or update a single product_map row.
+ * Conflict resolution is by title_norm (UNIQUE).
+ * @param {Database.Database} db
+ * @param {{ title, shop_name?, stall?, charm_shop?, charm_code?, sort_order? }} row
+ * @returns {{ id: number, title_norm: string }}
+ */
+function upsertProductMapRow(db, row) {
+  const title = String(row.title || '').trim();
+  if (!title) { const e = new Error('Product title is required.'); e.code = 'REQUIRED'; throw e; }
+
+  const titleNorm = title
+    .replace(/\|/g, ',')
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+
+  const now = Math.floor(Date.now() / 1000);
+  const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM product_map').get().m;
+
+  const info = db.prepare(`
+    INSERT INTO product_map (title_norm, title, shop_name, stall, charm_shop, charm_code, sort_order, updated_at)
+    VALUES (@title_norm, @title, @shop_name, @stall, @charm_shop, @charm_code, @sort_order, @updated_at)
+    ON CONFLICT(title_norm) DO UPDATE SET
+      title      = excluded.title,
+      shop_name  = excluded.shop_name,
+      stall      = excluded.stall,
+      charm_shop = excluded.charm_shop,
+      charm_code = excluded.charm_code,
+      updated_at = excluded.updated_at
+  `).run({
+    title_norm: titleNorm,
+    title,
+    shop_name:  String(row.shop_name  || '').trim(),
+    stall:      String(row.stall      || '').trim(),
+    charm_shop: String(row.charm_shop || '').trim(),
+    charm_code: String(row.charm_code || '').trim(),
+    sort_order: typeof row.sort_order === 'number' ? row.sort_order : maxOrder + 1,
+    updated_at: now,
+  });
+
+  const id = info.lastInsertRowid
+    ? info.lastInsertRowid
+    : db.prepare('SELECT id FROM product_map WHERE title_norm = ?').get(titleNorm).id;
+
+  return { id, title_norm: titleNorm };
+}
+
+/**
+ * Update an existing product_map row in-place by its surrogate `id`.
+ * Unlike upsertProductMapRow, this preserves the row's position and can
+ * change the title (and hence title_norm) without creating a duplicate.
+ * Throws DUPLICATE if the new title_norm already belongs to a *different* row.
+ * @param {Database.Database} db
+ * @param {{ id, title, shop_name?, stall?, charm_shop?, charm_code? }} row
+ */
+function updateProductMapRowById(db, row) {
+  const id    = Number(row.id);
+  const title = String(row.title || '').trim();
+  if (!title) { const e = new Error('Product title is required.'); e.code = 'REQUIRED'; throw e; }
+
+  const titleNorm = title
+    .replace(/\|/g, ',')
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+
+  // Guard: another row already owns this normalised title.
+  const clash = db.prepare('SELECT id FROM product_map WHERE title_norm = ? AND id <> ?').get(titleNorm, id);
+  if (clash) {
+    const e = new Error(`A catalog entry with a matching title already exists (id ${clash.id}).`);
+    e.code = 'DUPLICATE'; throw e;
+  }
+
+  const now  = Math.floor(Date.now() / 1000);
+  const info = db.prepare(`
+    UPDATE product_map
+    SET title_norm = @title_norm, title = @title, shop_name = @shop_name, stall = @stall,
+        charm_shop = @charm_shop, charm_code = @charm_code, updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id,
+    title_norm: titleNorm,
+    title,
+    shop_name:  String(row.shop_name  || '').trim(),
+    stall:      String(row.stall      || '').trim(),
+    charm_shop: String(row.charm_shop || '').trim(),
+    charm_code: String(row.charm_code || '').trim(),
+    updated_at: now,
+  });
+
+  if (info.changes === 0) {
+    const e = new Error('Entry not found.'); e.code = 'NOT_FOUND'; throw e;
+  }
+}
+
+/**
+ * Delete a product_map row by its surrogate `id`.
+ * @param {Database.Database} db
+ * @param {number|string} id
+ * @returns {boolean}  true when a row was actually deleted
+ */
+function deleteProductMapRow(db, id) {
+  const info = db.prepare('DELETE FROM product_map WHERE id = ?').run(Number(id));
+  return info.changes > 0;
+}
+
 module.exports = {
   initDb,
   getDb,
@@ -1911,6 +2321,10 @@ module.exports = {
   replaceSupplierDirectory,
   replaceCharmShopDirectory,
   replaceProductMap,
+  getProductMap,
+  upsertProductMapRow,
+  updateProductMapRowById,
+  deleteProductMapRow,
   getSupplierDirectory,
   getCharmShopDirectory,
   getProductMapByNorm,
@@ -1930,9 +2344,13 @@ module.exports = {
   deleteCharmLibraryRow,
   renumberCharmLibrary,
   reorderCharmLibrary,
+  getCharmPurchaseProgress,
+  setCharmPurchaseProgress,
   upsertReceipt,
   upsertTransaction,
   upsertListingImage,
+  getListingImageData,
+  upsertListingImageData,
   upsertListing,
   upsertListingInventory,
   logEvent,

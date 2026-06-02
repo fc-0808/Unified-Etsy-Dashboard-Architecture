@@ -40,7 +40,11 @@ const crypto = require('crypto');
 
 const FOURPX_HOST    = 'open.4px.com';
 const FOURPX_PATH    = '/router/api/service';
-const FOURPX_VERSION = '2.0.0';
+// The ds.xms.* (Direct Shipping) family of methods this module talks to runs on
+// API version 1.0.0. Calling them with v2.0.0 routes to a non-existent
+// downstream service and returns "服务商接口404" (service provider interface 404).
+// (Tracking methods tr.* use 2.0.0 but those live in src/tracking/checker.js.)
+const FOURPX_VERSION = '1.0.0';
 
 // ── Signature ────────────────────────────────────────────────────────────────
 
@@ -113,34 +117,51 @@ function callApi(appKey, appSecret, method, body = {}, options = {}) {
         path:     `${FOURPX_PATH}?${qs}`,
         method:   'POST',
         headers:  {
-          'Content-Type':   'application/json',
+          'Content-Type':   'application/json;charset=UTF-8',
           'Content-Length': Buffer.byteLength(paramJson),
           'User-Agent':     'EtsyDashboard/1.0 (4PX OpenPlatform)',
-          'Accept':         'application/json',
+          // CRITICAL: do NOT send `Accept: application/json`. The 4PX gateway
+          // reacts to that exact value by transcoding its response body to ASCII,
+          // which replaces every Chinese character (product names AND error
+          // messages) with literal '?'. `Accept: */*` keeps the UTF-8 body intact.
+          'Accept':         '*/*',
+          'Accept-Charset': 'utf-8',
         },
       },
       (res) => {
-        let raw = '';
-        res.on('data', (chunk) => (raw += chunk));
+        // Collect raw Buffers; decode as UTF-8 only after all chunks arrive.
+        // Concatenating with += converts each chunk to a string independently,
+        // which splits multi-byte sequences (e.g. Chinese error messages) at
+        // chunk boundaries and produces garbage ("??????") instead of real text.
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
         res.on('end', () => {
           clearTimeout(timer);
+          const raw = Buffer.concat(chunks).toString('utf8');
           let json;
           try {
             json = JSON.parse(raw);
           } catch {
             return reject(new Error(
               `4PX API returned non-JSON response for method "${method}": ` +
-              raw.slice(0, 300)
+              raw.slice(0, 500)
             ));
           }
           // 4PX uses result="1" for success; anything else is a business error.
           if (json.result !== '1') {
+            // The actionable detail lives in errors[].error_msg / error_code.
+            // json.msg is only a generic header (e.g. "System processing failed").
+            const firstErr = Array.isArray(json.errors) && json.errors.length
+              ? json.errors[0]
+              : null;
+            const detailMsg  = firstErr?.error_msg  || firstErr?.errorMsg;
+            const detailCode = firstErr?.error_code || firstErr?.errorCode;
             const errMsg =
-              json.message || json.msg ||
-              `4PX API error — code: ${json.code ?? json.result}`;
-            const err    = new Error(errMsg);
-            err.code     = json.code ?? json.result;
-            err.apiBody  = json;
+              detailMsg || json.message || json.msg ||
+              `4PX API error — result: ${json.result}`;
+            const err   = new Error(errMsg);
+            err.code    = detailCode || json.code || json.result;
+            err.apiBody = json;
             return reject(err);
           }
           resolve(json.data ?? {});

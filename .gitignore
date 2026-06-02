@@ -17,10 +17,28 @@ node_modules/
 dist/
 build/
 
+# Generated shopping-route files (large, regenerated on demand)
+output/
+supplier_catalog.xlsx
+
+# Vendored route-engine: keep the code (src/, requirements.txt), ignore the
+# bundled data + scratch dirs (large binaries / regenerated at runtime).
+route-engine/data/
+route-engine/cache/
+route-engine/input/
+route-engine/output/
+
 # Logs
 logs/
 *.log
 npm-debug.log*
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Local API scratch scripts (may contain credentials)
+_fpx_test.js
 
 # OS junk
 .DS_Store

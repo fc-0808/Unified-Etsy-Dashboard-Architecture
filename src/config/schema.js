@@ -257,8 +257,21 @@ function loadConfig() {
     // project.  The Route tab calls src/generate_shopping_route.py via
     // osp_python (default: 'python') to produce shopping_route.xlsx without
     // any manual PDF exports.
+    // ── Self-contained route engine (vendored — no external program needed) ──
+    // route_engine_dir is the project root of THIS dashboard's own copy of the
+    // shopping-route generator. It contains src/generate_shopping_route.py plus
+    // its data/ (supplier_catalog.xlsx, charm_images, charm_manifest.json,
+    // etsy_orders.db), cache/ and input/ subdirs. Defaults to
+    // <dashboard project>/route-engine. The dashboard NO LONGER depends on the
+    // separate Orders Sorting Program; osp_project_dir is kept only as a
+    // legacy fallback for installs that have not been migrated.
+    route_engine_dir: (raw.route_engine_dir && String(raw.route_engine_dir).trim()) || null,
     osp_project_dir: raw.osp_project_dir || null,
     osp_python:      raw.osp_python      || 'python',
+    // Where the generated shopping-route files (full / simple / Chinese) are
+    // written. Defaults to <dashboard project>/output when unset, so the route
+    // files always live inside THIS program's folder.
+    osp_output_dir:  (raw.osp_output_dir && String(raw.osp_output_dir).trim()) || null,
   };
 
   return config;
