@@ -70,6 +70,8 @@ function usesGroupProxy(group) {
  *                                                          carrier tracking for unconfirmed orders. With the
  *                                                          4PX API integration active, carrier_confirmed_at IS NULL
  *                                                          is the true pre-transit signal. Default: 30 days.
+ * @property {number}        tracking_edit_days           - Window (in days) during which Etsy permits editing the
+ *                                                          tracking number of a shipped receipt. Default: 3 days.
  * @property {string}        db_path                      - Path to SQLite database file
  * @property {GroupConfig[]} groups                       - All shop groups
  * @property {boolean}       auto_restock_enabled         - Auto-restock zero-stock offerings (default true).
@@ -282,6 +284,14 @@ function loadConfig() {
     // keeping the list bounded to recent shipments. Operators who prefer a tighter list
     // can lower this value (e.g. 5) at the cost of missing slow-scan packages.
     pre_transit_days: raw.pre_transit_days ?? 30,
+    // Window (in days) during which Etsy allows the tracking number on a shipped
+    // receipt to be edited/re-submitted. Etsy's policy is ~3 days from the ship
+    // notification; after that, re-submitting tracking is rejected by their API.
+    // We use this to gate the "Edit tracking" action in the Orders tab so operators
+    // get a clear, pre-emptive message instead of an opaque Etsy 4xx error. The
+    // value is advisory on our side — Etsy remains the source of truth and any call
+    // outside the window will still surface Etsy's own rejection. Default: 3 days.
+    tracking_edit_days: raw.tracking_edit_days ?? 3,
     db_path: raw.db_path
       ? path.resolve(path.dirname(CONFIG_PATH), raw.db_path)
       : path.resolve(__dirname, '../../data/etsy_dashboard.db'),

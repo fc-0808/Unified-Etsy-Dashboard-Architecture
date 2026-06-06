@@ -102,6 +102,35 @@ function lineItemKey(title, listingId) {
 }
 
 /**
+ * A line is "fully purchased" — and therefore needs NO further shopping — once
+ * every component it actually carries (case / grip / charm) is marked Purchased.
+ *
+ * This is the SINGLE SOURCE OF TRUTH for that predicate, shared by:
+ *   • buildRouteRows (to stamp `fully_purchased` on each row),
+ *   • the dashboard summary ("N orders to shop"), and
+ *   • route generation (so the generated Excel contains EXACTLY the orders the
+ *     dashboard says still need shopping — never the already-purchased ones).
+ *
+ * It deliberately reads the live `status_*` fields so callers can recompute it
+ * AFTER mutating statuses (e.g. the charm purchase-progress reconciliation that
+ * runs at generation time) without the stale value lingering. Out of Stock /
+ * Out of Production are NOT treated as purchased — those still need attention.
+ *
+ * Mirrors the client's `_rowFullyPurchased` in public/index.html byte-for-byte.
+ *
+ * @param {{has_case?:boolean, has_grip?:boolean, has_charm?:boolean,
+ *          status_case?:string, status_grip?:string, status_charm?:string}} row
+ * @returns {boolean}
+ */
+function rowFullyPurchased(row) {
+  const present = [];
+  if (row.has_case)  present.push(row.status_case  || DEFAULT_STATUS);
+  if (row.has_grip)  present.push(row.status_grip  || DEFAULT_STATUS);
+  if (row.has_charm) present.push(row.status_charm || DEFAULT_STATUS);
+  return present.length > 0 && present.every(s => s === 'Purchased');
+}
+
+/**
  * Derive which components an order line needs from its Style string.
  * Mirrors OSP's `_style_has`: "stand"/"kickstand" counts as a grip.
  * @param {string} style
@@ -155,6 +184,8 @@ function parseVariations(variations) {
  * @param {string} [filters.shop_id]
  * @param {boolean}[filters.include_shipped]
  * @param {boolean}[filters.enrich_supplier] - look up supplier shop/stall from OSP catalog
+ * @param {boolean}[filters.include_dismissed] - include lines the operator removed
+ *        from the dashboard (default false — they are hidden from view + generation)
  * @returns {Array<object>} one row per order line-item
  */
 function buildRouteRows(db, config, filters = {}) {
@@ -240,7 +271,15 @@ function buildRouteRows(db, config, filters = {}) {
       params.shop_id = filters.shop_id;
     }
 
-    whereClause = `r.is_paid = 1 AND ${scopeClause}${shopClause}`;
+    // Archived orders are parked OUT of every active workflow (the Orders tab
+    // hides them too). They must never appear in the purchasing Route — not even
+    // via the needs-purchase OR-branch — so exclude them as a hard top-level AND
+    // that wraps the entire scope. This is defense-in-depth: the write paths now
+    // keep archived + needs_purchase mutually exclusive, and this guarantees a
+    // stale/legacy archived row can still never leak into route generation.
+    const archivedClause = ' AND r.archived_at IS NULL';
+
+    whereClause = `r.is_paid = 1 AND ${scopeClause}${shopClause}${archivedClause}`;
   }
 
   const rows = db.prepare(`
@@ -323,6 +362,12 @@ function buildRouteRows(db, config, filters = {}) {
     const product  = productMap[key] || {};
     const excelPM  = excelProductMap.get(titleNorm) || {};
 
+    // Durably removed lines drop out of the dashboard AND route generation
+    // entirely. They are only materialised when the caller explicitly asks for
+    // them (the "Show removed" view), so the operator can review / restore.
+    const isDismissed = !!saved.dismissed_at;
+    if (isDismissed && !filters.include_dismissed) return;
+
     let supplier = null;
     if (cat) {
       // Supplier match is purely a function of the title — cache by title key.
@@ -373,6 +418,22 @@ function buildRouteRows(db, config, filters = {}) {
     const effectiveCharmCode = saved.charm_code || product.charm_code || '';
     const effectiveCharmShop = saved.charm_shop || product.charm_shop || '';
 
+    // ── Derived shopping-completion state ─────────────────────────────────────
+    // A line is "fully purchased" once EVERY component it actually has (case /
+    // grip / charm) is marked Purchased. Such a line needs no further shopping,
+    // so the dashboard drops it out of the "to shop" headline counts and the
+    // active queue (purely a derived view — the row is never destructively
+    // excluded, so route generation, the ready-to-ship report and history keep
+    // seeing it). Out of Stock / Out of Production are deliberately NOT treated
+    // as purchased: those still warrant operator attention.
+    const statusCase  = saved.status_case  || DEFAULT_STATUS;
+    const statusGrip  = saved.status_grip  || DEFAULT_STATUS;
+    const statusCharm = saved.status_charm || DEFAULT_STATUS;
+    const fullyPurchased = rowFullyPurchased({
+      has_case:  comps.hasCase,  has_grip:  comps.hasGrip,  has_charm:  comps.hasCharm,
+      status_case: statusCase,   status_grip: statusGrip,   status_charm: statusCharm,
+    });
+
     out.push({
       receipt_id:  meta.receipt_id,
       item_key:    key,
@@ -397,10 +458,18 @@ function buildRouteRows(db, config, filters = {}) {
       has_charm:   comps.hasCharm,
       charm_code:  effectiveCharmCode,
       charm_shop:  effectiveCharmShop,
-      status_case:  saved.status_case  || DEFAULT_STATUS,
-      status_grip:  saved.status_grip  || DEFAULT_STATUS,
-      status_charm: saved.status_charm || DEFAULT_STATUS,
+      status_case:  statusCase,
+      status_grip:  statusGrip,
+      status_charm: statusCharm,
       excluded:    saved.excluded ? 1 : 0,
+      // Durably removed from the dashboard (see setRouteDismissed). Only present
+      // in the result when filters.include_dismissed was requested.
+      dismissed:    isDismissed ? 1 : 0,
+      dismissed_at: saved.dismissed_at || null,
+      // True when every component this line has is Purchased — the line is done
+      // shopping. Used by the dashboard to drop it from the "to shop" counts and
+      // the active queue without ever altering the underlying assignment.
+      fully_purchased: fullyPurchased,
       // Manual (operator-created) line-item markers — used by the UI to show a
       // badge and route deletion through the manual-order endpoint.
       is_manual:   !!line.is_manual,
@@ -1036,6 +1105,16 @@ function rowsToImportOrders(rows) {
       phone_model: row.phone_model,
       style:       row.style,
       image_url:   row.image_url,
+      // Etsy listing id — the ONLY stable per-line discriminator. Two genuinely
+      // different listings on the same order can share the first 50 normalised
+      // title characters AND the same component set (e.g. two "Case+Grip+Charm"
+      // variants of the same product family). The generator's line dedup keys on
+      // (order, title[:50], components); without this id it collapses those two
+      // distinct lines into one and silently drops a product the operator must
+      // still buy. Carried through so Python can keep them apart. Empty string
+      // for manual items / legacy rows with no listing — the generator then
+      // falls back to the old title-only behaviour, so nothing breaks.
+      listing_id:  row.listing_id != null ? String(row.listing_id) : '',
       // Internal UED key — used by the image-fetcher to look up cached bytes
       // before writing the JSON payload. Stripped from the payload after image
       // injection so the OSP never sees it.
@@ -1177,6 +1256,7 @@ module.exports = {
   itemKey,
   lineItemKey,
   LINE_KEY_MARKER,
+  rowFullyPurchased,
   styleComponents,
   parseVariations,
   buildRouteRows,

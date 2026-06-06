@@ -1384,6 +1384,33 @@
 				border-color: rgba(245, 158, 11, 0.38);
 				color: #f0b429;
 			}
+			/* ── Edit tracking (correct number within Etsy's editable window) ── */
+			.btn-edit-tracking {
+				display: inline-flex;
+				align-items: center;
+				gap: 5px;
+				margin-top: 6px;
+				padding: 4px 11px;
+				border-radius: 20px;
+				border: 1px solid rgba(96, 165, 250, 0.32);
+				background: rgba(59, 130, 246, 0.08);
+				color: #60a5fa;
+				font-size: 10.5px;
+				font-weight: 600;
+				cursor: pointer;
+				letter-spacing: 0.01em;
+				white-space: nowrap;
+				align-self: flex-start;
+				transition:
+					background 0.15s,
+					border-color 0.15s,
+					color 0.15s;
+			}
+			.btn-edit-tracking:hover {
+				background: rgba(59, 130, 246, 0.18);
+				border-color: rgba(96, 165, 250, 0.6);
+				color: #93c5fd;
+			}
 			.btn-archive-restore:hover {
 				background: rgba(59, 130, 246, 0.12);
 				border-color: rgba(59, 130, 246, 0.38);
@@ -4310,6 +4337,21 @@
 				border-color: rgba(239, 68, 68, 0.3);
 				background: rgba(239, 68, 68, 0.08);
 			}
+			/* Fully-purchased pill — completed work, shown as a calm green. Clickable
+			   to reveal/hide those lines; .is-active marks the "currently revealed" state. */
+			.route-metric.is-done {
+				color: #34d399;
+				border-color: rgba(16, 185, 129, 0.3);
+				background: rgba(16, 185, 129, 0.08);
+				cursor: pointer;
+			}
+			.route-metric.is-done:hover {
+				background: rgba(16, 185, 129, 0.16);
+			}
+			.route-metric.is-done.is-active {
+				background: rgba(16, 185, 129, 0.22);
+				border-color: rgba(16, 185, 129, 0.55);
+			}
 			.route-dash-controls {
 				display: flex;
 				align-items: center;
@@ -4951,6 +4993,33 @@
 			}
 			.route-dash-table tr.row-excluded {
 				opacity: 0.4;
+			}
+			/* Fully purchased lines (only visible when the operator un-hides them):
+			   a subtle green wash + left accent so they read as "done, no action". */
+			.route-dash-table tr.row-fully-purchased {
+				background: rgba(16, 185, 129, 0.06);
+				box-shadow: inset 3px 0 0 0 #10b981;
+			}
+			.route-dash-table tr.row-fully-purchased .route-prod-title {
+				color: var(--muted);
+				text-decoration: line-through;
+				text-decoration-color: rgba(16, 185, 129, 0.6);
+			}
+			.route-done-badge {
+				display: inline-flex;
+				align-items: center;
+				margin-left: 7px;
+				padding: 1px 7px;
+				font-size: 10px;
+				font-weight: 700;
+				letter-spacing: 0.2px;
+				color: #34d399;
+				background: rgba(16, 185, 129, 0.12);
+				border: 1px solid rgba(16, 185, 129, 0.35);
+				border-radius: 6px;
+				vertical-align: middle;
+				text-decoration: none;
+				white-space: nowrap;
 			}
 			.route-thumb {
 				width: 80px;
@@ -6993,6 +7062,129 @@
 				color: #f87171;
 				background: rgba(239, 68, 68, 0.1);
 			}
+			/* Restore / delete-forever buttons shown in the "Removed" view. */
+			.route-row-restore {
+				background: rgba(16, 185, 129, 0.12);
+				border: 1px solid rgba(16, 185, 129, 0.35);
+				color: #34d399;
+				cursor: pointer;
+				padding: 3px 9px;
+				border-radius: 6px;
+				font-size: 11px;
+				font-weight: 600;
+				white-space: nowrap;
+			}
+			.route-row-restore:hover {
+				background: rgba(16, 185, 129, 0.22);
+			}
+			.route-row-delete-forever {
+				display: block;
+				margin: 5px auto 0;
+				background: none;
+				border: none;
+				color: var(--muted);
+				cursor: pointer;
+				padding: 1px 5px;
+				border-radius: 4px;
+				font-size: 10px;
+			}
+			.route-row-delete-forever:hover {
+				color: #f87171;
+				background: rgba(239, 68, 68, 0.1);
+			}
+			.route-removed-badge {
+				display: inline-flex;
+				align-items: center;
+				margin-left: 7px;
+				padding: 1px 7px;
+				font-size: 10px;
+				font-weight: 700;
+				color: #f87171;
+				background: rgba(239, 68, 68, 0.12);
+				border: 1px solid rgba(239, 68, 68, 0.32);
+				border-radius: 6px;
+				vertical-align: middle;
+				text-decoration: none;
+				white-space: nowrap;
+			}
+			.route-metric.is-removed {
+				color: #fca5a5;
+				border-color: rgba(239, 68, 68, 0.3);
+				background: rgba(239, 68, 68, 0.06);
+				cursor: pointer;
+			}
+			.route-metric.is-removed:hover {
+				background: rgba(239, 68, 68, 0.14);
+			}
+			.route-metric.is-removed.is-active {
+				background: rgba(239, 68, 68, 0.2);
+				border-color: rgba(239, 68, 68, 0.55);
+			}
+			.route-dash-table tr.row-dismissed {
+				background: rgba(239, 68, 68, 0.05);
+				box-shadow: inset 3px 0 0 0 #ef4444;
+			}
+			/* ── Undo snackbar ─────────────────────────────────────────────── */
+			.route-snackbar {
+				position: fixed;
+				left: 50%;
+				bottom: 28px;
+				transform: translateX(-50%) translateY(20px);
+				display: none;
+				align-items: center;
+				gap: 14px;
+				max-width: min(560px, calc(100vw - 32px));
+				padding: 11px 14px 11px 18px;
+				background: #1c2230;
+				border: 1px solid var(--border);
+				border-radius: 11px;
+				box-shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
+				color: var(--text);
+				font-size: 13px;
+				z-index: 4000;
+				opacity: 0;
+				transition: opacity 0.18s ease, transform 0.18s ease;
+			}
+			.route-snackbar.is-open {
+				display: flex;
+				opacity: 1;
+				transform: translateX(-50%) translateY(0);
+			}
+			.route-snackbar-msg {
+				flex: 1;
+				line-height: 1.35;
+			}
+			.route-snackbar-action {
+				flex-shrink: 0;
+				background: rgba(129, 140, 248, 0.16);
+				border: 1px solid rgba(129, 140, 248, 0.45);
+				color: #a5b4fc;
+				cursor: pointer;
+				padding: 5px 13px;
+				border-radius: 7px;
+				font-size: 12.5px;
+				font-weight: 700;
+			}
+			.route-snackbar-action:hover {
+				background: rgba(129, 140, 248, 0.28);
+			}
+			.route-snackbar-action[hidden] {
+				display: none;
+			}
+			.route-snackbar-close {
+				flex-shrink: 0;
+				background: none;
+				border: none;
+				color: var(--muted);
+				cursor: pointer;
+				font-size: 13px;
+				padding: 3px 5px;
+				border-radius: 5px;
+			}
+			.route-snackbar-close:hover {
+				color: var(--text);
+				background: rgba(255, 255, 255, 0.08);
+			}
 			/* ── Add Order modal ───────────────────────────────────────────── */
 			.add-order-modal {
 				position: fixed;
@@ -8414,8 +8606,10 @@
 						<div class="route-filter-cluster">
 							<span class="route-filter-cluster-label">View</span>
 							<div class="route-filter-group">
+								<label class="route-filter-chip" title="Hide line-items where every component is already purchased — they need no more shopping. Counts stay in the '✓ fully purchased' pill above."> <input type="checkbox" id="routeHideFullyPurchased" checked onchange="renderRouteDashboard()" /> Hide fully purchased </label>
 								<label class="route-filter-chip" title="Hide items you've excluded from the route"> <input type="checkbox" id="routeHideExcluded" onchange="renderRouteDashboard()" /> Hide excluded </label>
 								<label class="route-filter-chip" title="Show only orders that have a private note saved"> <input type="checkbox" id="routeOnlyWithNote" onchange="renderRouteDashboard()" /> Has private note </label>
+								<label class="route-filter-chip" title="Show the orders you've removed from this dashboard, so you can restore them or delete them for good"> <input type="checkbox" id="routeShowRemoved" onchange="renderRouteDashboard()" /> Show removed </label>
 							</div>
 						</div>
 						<div class="route-dash-actions">
@@ -8453,7 +8647,7 @@
 								<th class="sortable" style="width: 150px" id="rhSort-supplier" onclick="setRouteSort('supplier')">Supplier / Location <span class="sort-arrow" id="rhArr-supplier">↕</span></th>
 								<th style="width: 150px">Components</th>
 								<th style="width: 190px">Charm</th>
-								<th style="width: 60px">Exclude</th>
+								<th style="width: 92px" title="Exclude from the next route, or remove the order from this dashboard">Actions</th>
 							</tr>
 						</thead>
 						<tbody id="routeDashBody">
@@ -8468,6 +8662,13 @@
 
 		<!-- ── Charm hover-zoom preview (fixed overlay, pointer-events:none) ────── -->
 		<img id="charmHoverPreview" src="" alt="" />
+
+		<!-- ── Undo snackbar (bottom-center toast with an optional action) ──────── -->
+		<div id="routeSnackbar" class="route-snackbar" role="status" aria-live="polite">
+			<span class="route-snackbar-msg" id="routeSnackbarMsg"></span>
+			<button class="route-snackbar-action" id="routeSnackbarAction" type="button"></button>
+			<button class="route-snackbar-close" id="routeSnackbarClose" type="button" title="Dismiss" onclick="hideRouteSnackbar()">✕</button>
+		</div>
 
 		<!-- ── Supplier picker popover (compact inline panel) ────────────────── -->
 		<div id="spPopover" style="display: none">
@@ -9288,6 +9489,8 @@
 			ordersTotal = data.total
 			// Cache the server-configured pre-transit window for badge logic below
 			const preTransitDays = data.pre_transit_days ?? 21
+			// Etsy's editable-tracking window (days). Drives the "Edit tracking" action.
+			const trackingEditDays = data.tracking_edit_days ?? 3
 
 			// Client-side safety guard: deduplicate by receipt_id in case the API
 			// ever returns the same receipt_id twice (e.g. due to a proxy cache
@@ -9408,6 +9611,21 @@
 						const trackingNumberHtml = is4pxTracking
 							? `<div class="tracking-number fpx-track-link" onclick="open4pxTrackModal('${o.tracking_code}')" title="Click to view live parcel route">${o.tracking_code}</div>`
 							: `<div class="tracking-number" title="Click to select">${o.tracking_code}</div>`
+
+						// ── Edit tracking (within Etsy's editable window) ──────────
+						// Etsy lets a tracking number be corrected for ~tracking_edit_days days
+						// after the order ships. Only meaningful while still pre-transit (once the
+						// carrier scans the package, the number is locked in). We show the action
+						// with the remaining time so the operator knows the deadline.
+						let editTrackingHtml = ''
+						if (isPreTransit && labelCreatedAt > 0) {
+							const daysLeft = trackingEditDays - daysSinceLabel
+							if (daysLeft > 0) {
+								const leftLabel = daysLeft >= 1 ? `${Math.floor(daysLeft)}d left` : `${Math.max(1, Math.ceil(daysLeft * 24))}h left`
+								editTrackingHtml = `<button class="btn-edit-tracking" onclick="openEditTrackingModal(${o.receipt_id},'${(o.shop_name || '').replace(/'/g, "\\'")}','${(o.buyer_name || '').replace(/'/g, "\\'")}','${jsAttr(o.tracking_code || '')}','${jsAttr(o.carrier_name || '4PX')}')" title="Correct the tracking number and re-notify the buyer. Etsy allows this for ${trackingEditDays} days after shipping.">✎ Edit tracking · ${leftLabel}</button>`
+							}
+						}
+
 						trackingBadgeHtml = `
         <div class="tracking-block">
           <div class="tracking-badge ${statusClass}" title="${statusTip}">${statusLabel}</div>
@@ -9415,6 +9633,7 @@
             ${carrierHtml}
             ${trackingNumberHtml}
           </div>
+          ${editTrackingHtml}
         </div>`
 						}
 
@@ -9785,6 +10004,80 @@
 				_shipReceiptId = null
 			}
 
+			// ── Edit tracking (correct the tracking number on a pre-transit order) ──
+			// Etsy has no separate "update tracking" endpoint — re-submitting tracking
+			// updates it and re-notifies the buyer, within Etsy's ~3-day edit window.
+			let _editTrackingReceiptId = null
+
+			function openEditTrackingModal(receiptId, shopName, buyerName, currentTracking, currentCarrier) {
+				_editTrackingReceiptId = receiptId
+				document.getElementById('editTrackingSubtitle').textContent = `${shopName} — ${buyerName || 'Order #' + receiptId}`
+				document.getElementById('editTrackingCode').value = currentTracking || ''
+				document.getElementById('editTrackingCarrier').value = currentCarrier || '4PX'
+				document.getElementById('editTrackingNote').value = ''
+				const errEl = document.getElementById('editTrackingError')
+				errEl.classList.remove('show')
+				errEl.textContent = ''
+				const btn = document.getElementById('editTrackingSubmitBtn')
+				btn.disabled = false
+				btn.textContent = 'Update tracking'
+				document.getElementById('editTrackingModal').classList.add('open')
+				setTimeout(() => {
+					const input = document.getElementById('editTrackingCode')
+					input.focus()
+					input.select()
+				}, 60)
+			}
+
+			function closeEditTrackingModal() {
+				document.getElementById('editTrackingModal').classList.remove('open')
+				_editTrackingReceiptId = null
+			}
+
+			async function submitEditTrackingModal() {
+				if (!_editTrackingReceiptId) return
+				const tracking = document.getElementById('editTrackingCode').value.trim()
+				const carrier = document.getElementById('editTrackingCarrier').value.trim() || '4PX'
+				const note = document.getElementById('editTrackingNote').value.trim()
+				const errEl = document.getElementById('editTrackingError')
+				const btn = document.getElementById('editTrackingSubmitBtn')
+
+				if (!tracking) {
+					errEl.textContent = 'A tracking number is required.'
+					errEl.classList.add('show')
+					document.getElementById('editTrackingCode').focus()
+					return
+				}
+
+				btn.disabled = true
+				btn.textContent = 'Updating…'
+				errEl.classList.remove('show')
+
+				try {
+					const resp = await fetch(`${API}/api/orders/${_editTrackingReceiptId}/update-tracking`, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ tracking_code: tracking, carrier_name: carrier, note_to_buyer: note }),
+					})
+					let json
+					try {
+						json = await resp.json()
+					} catch {
+						if (!resp.ok) throw new Error(`Server returned HTTP ${resp.status}. The dashboard may need to be restarted — please reload the page and try again.`)
+						throw new Error('Unexpected response from server. Please reload the page and try again.')
+					}
+					if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`)
+					closeEditTrackingModal()
+					showRouteToast('✓ Tracking updated — buyer notified')
+					await fetchOrders()
+				} catch (err) {
+					errEl.textContent = err.message
+					errEl.classList.add('show')
+					btn.disabled = false
+					btn.textContent = 'Update tracking'
+				}
+			}
+
 			// ── Archive stuck pre-transit orders ──────────────────────────────────
 			// An order can be stuck on "Pre-transit" forever when the wrong tracking
 			// number was entered (the carrier never scans it, so it never advances to
@@ -10064,6 +10357,12 @@
 						if (e.target === archiveOverlay) closeArchiveModal()
 					})
 				}
+				const editTrackingOverlay = document.getElementById('editTrackingModal')
+				if (editTrackingOverlay) {
+					editTrackingOverlay.addEventListener('click', (e) => {
+						if (e.target === editTrackingOverlay) closeEditTrackingModal()
+					})
+				}
 			})
 
 			// Close on Escape
@@ -10071,6 +10370,7 @@
 				if (e.key === 'Escape') {
 					closeShipModal()
 					closeArchiveModal()
+					closeEditTrackingModal()
 					close4pxDrawer()
 					closeTrackModal()
 					closeFpxBulkModal()
@@ -15601,7 +15901,9 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 						const pd = await pr.json()
 						if (pd.ok) _charmProgress = pd.progress || {}
 					} catch { /* non-fatal — badge falls back to status-derived counts */ }
-					_renderRouteSummary(data.summary)
+					// renderRouteDashboard() recomputes the summary live from _routeRows,
+					// so we don't render data.summary separately here (avoids a flash of
+					// the server snapshot before the client-derived counts take over).
 					renderRouteDashboard()
 				} catch (err) {
 					if (tbody) tbody.innerHTML = `<tr><td colspan="7" style="color:var(--red);padding:16px">Error loading dashboard: ${escHtml(err.message)}</td></tr>`
@@ -15971,16 +16273,59 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 				}
 			}
 
+			/**
+			 * A line-item is "fully purchased" when every component it actually has
+			 * (case / grip / charm) is marked Purchased — there is nothing left to
+			 * shop for it. Computed live from the in-memory row so it stays correct
+			 * the instant a status dropdown changes (no server round-trip needed).
+			 * Out of Stock / Out of Production are intentionally NOT counted as
+			 * purchased: they still warrant operator attention.
+			 */
+			function _rowFullyPurchased(row) {
+				const present = []
+				if (row.has_case) present.push(row.status_case || 'Pending')
+				if (row.has_grip) present.push(row.status_grip || 'Pending')
+				if (row.has_charm) present.push(row.status_charm || 'Pending')
+				return present.length > 0 && present.every((s) => s === 'Purchased')
+			}
+
+			/**
+			 * Recompute the summary headline from the in-memory rows so it reflects
+			 * what STILL needs shopping the moment a status changes. Mirrors the
+			 * server-side shape in GET /api/route/dashboard exactly — fully purchased
+			 * and excluded lines are dropped from the "to shop" counts.
+			 */
+			function _computeRouteSummary(rows) {
+				// Removed (dismissed) lines are a separate bucket — never shopping work.
+				const live = rows.filter((r) => !r.dismissed)
+				const active = live.filter((r) => !r.excluded && !_rowFullyPurchased(r))
+				return {
+					orders: new Set(active.map((r) => r.receipt_id)).size,
+					items: active.length,
+					excluded: live.filter((r) => r.excluded).length,
+					fully_purchased: live.filter((r) => !r.excluded && _rowFullyPurchased(r)).length,
+					dismissed: rows.filter((r) => r.dismissed).length,
+					charms_needed: active.filter((r) => r.has_charm).length,
+					charms_assigned: active.filter((r) => r.has_charm && r.charm_code).length,
+					supplier_matched: live.filter((r) => r.supplier_in_catalog).length,
+					supplier_missing: live.filter((r) => !r.supplier_in_catalog).length,
+				}
+			}
+
 			function _renderRouteSummary(s) {
 				const pills = document.getElementById('routeSummaryPills')
 				if (!pills || !s) return
+				const revealing = document.getElementById('routeHideFullyPurchased')?.checked === false
+				const showingRemoved = document.getElementById('routeShowRemoved')?.checked === true
 				pills.innerHTML =
-					`<span class="route-metric"><b>${s.orders}</b> orders</span>` +
-					`<span class="route-metric"><b>${s.items}</b> items</span>` +
+					`<span class="route-metric" title="Orders that still need shopping (fully purchased orders excluded)"><b>${s.orders}</b> orders to shop</span>` +
+					`<span class="route-metric" title="Line-items still needing shopping (fully purchased items excluded)"><b>${s.items}</b> items to shop</span>` +
 					`<span class="route-metric" title="Charms assigned / needing a charm">🔗 <b>${s.charms_assigned}</b>/${s.charms_needed} charms</span>` +
 					(s.supplier_matched != null ? `<span class="route-metric" title="Matched to a supplier in the catalog">📍 <b>${s.supplier_matched}</b> matched</span>` : '') +
 					(s.supplier_missing ? `<span class="route-metric is-warn" title="Click to show only these unmatched items so you can fill in their supplier" onclick="toggleUnmatchedFilter()">⚠ <b>${s.supplier_missing}</b> unmatched</span>` : '') +
-					(s.excluded ? `<span class="route-metric is-danger"><b>${s.excluded}</b> excluded</span>` : '')
+					(s.fully_purchased ? `<span class="route-metric is-done${revealing ? ' is-active' : ''}" title="Fully purchased — nothing left to shop. Click to ${revealing ? 'hide' : 'show'} these in the list." onclick="toggleFullyPurchasedFilter()">✓ <b>${s.fully_purchased}</b> fully purchased</span>` : '') +
+					(s.excluded ? `<span class="route-metric is-danger"><b>${s.excluded}</b> excluded</span>` : '') +
+					(s.dismissed ? `<span class="route-metric is-removed${showingRemoved ? ' is-active' : ''}" title="Removed from this dashboard. Click to ${showingRemoved ? 'go back to the active list' : 'review / restore them'}." onclick="toggleRemovedFilter()">🗑 <b>${s.dismissed}</b> removed</span>` : '')
 			}
 
 			/** Render the table body from _routeRows, applying filters, pinned set, and sort. */
@@ -15995,6 +16340,13 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 				const hideExcluded = document.getElementById('routeHideExcluded')?.checked
 				const onlyUnmatched = document.getElementById('routeOnlyUnmatched')?.checked
 				const onlyWithNote = document.getElementById('routeOnlyWithNote')?.checked
+				const hideFullyPurchased = document.getElementById('routeHideFullyPurchased')?.checked
+				const showRemoved = document.getElementById('routeShowRemoved')?.checked
+
+				// Recompute the headline counts from the live in-memory rows so they
+				// always reflect what still needs shopping (fully purchased + excluded
+				// + removed lines dropped), independent of which table filters are active.
+				_renderRouteSummary(_computeRouteSummary(_routeRows))
 
 				let rows = _routeRows
 
@@ -16002,17 +16354,32 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 				// server — they show alongside the pending orders, never replacing them.
 				_applyRoutePinBar()
 
-				// Checkbox filters
-				if (onlyUnmatched) rows = rows.filter((r) => !r.supplier_in_catalog && !r.supplier_is_override)
-				if (onlyCharm) rows = rows.filter((r) => r.has_charm && !r.charm_code)
-				if (hideExcluded) rows = rows.filter((r) => !r.excluded)
-				if (onlyWithNote) rows = rows.filter((r) => (r.team_note || '').trim().length > 0)
+				// "Show removed" is a dedicated review mode: it shows ONLY the lines the
+				// operator removed from the dashboard (so they can restore or hard-delete
+				// them) and bypasses the other shopping filters. Otherwise removed lines
+				// are always hidden from the active list.
+				if (showRemoved) {
+					rows = rows.filter((r) => r.dismissed)
+				} else {
+					rows = rows.filter((r) => !r.dismissed)
+
+					// Checkbox filters (active list only)
+					if (onlyUnmatched) rows = rows.filter((r) => !r.supplier_in_catalog && !r.supplier_is_override)
+					if (onlyCharm) rows = rows.filter((r) => r.has_charm && !r.charm_code)
+					if (hideExcluded) rows = rows.filter((r) => !r.excluded)
+					if (onlyWithNote) rows = rows.filter((r) => (r.team_note || '').trim().length > 0)
+					// Fully purchased lines need no more shopping — hide them from the
+					// active queue by default so the operator only sees outstanding work.
+					// The "✓ N fully purchased" pill toggles this filter to reveal them.
+					if (hideFullyPurchased) rows = rows.filter((r) => !_rowFullyPurchased(r))
+				}
 
 				// 3. Column sort
 				rows = _sortedRouteRows(rows)
 
 				if (rows.length === 0) {
-					tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:28px;color:var(--muted)">No matching orders.</td></tr>'
+					const msg = showRemoved ? 'No removed orders.' : 'No matching orders.'
+					tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:28px;color:var(--muted)">${msg}</td></tr>`
 					return
 				}
 
@@ -16112,13 +16479,40 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 				// Components column holds only Case + Grip — no redundancy.
 				const comps = `<div class="comp-chip-row">` + _statusSelect(row, 'case', row.has_case) + _statusSelect(row, 'grip', row.has_grip) + `</div>`
 
-				const removeBtn = `<button class="route-row-remove" title="Remove from this route session"
-      onclick="removeRouteRow(${row.receipt_id},'${jsAttr(row.item_key)}')">⊗</button>`
+				// Fully purchased = every component bought, nothing left to shop. Shown
+				// only when the operator un-hides them via the "✓ fully purchased" pill;
+				// a green tint + badge makes their done state unmistakable.
+				const isFullyPurchased = _rowFullyPurchased(row)
+				const isDismissed = !!row.dismissed
+				const rowCls = [row.excluded ? 'row-excluded' : '', isFullyPurchased && !isDismissed ? 'row-fully-purchased' : '', isDismissed ? 'row-dismissed' : ''].filter(Boolean).join(' ')
+				const doneBadge = isFullyPurchased && !isDismissed ? `<span class="route-done-badge" title="Every component purchased — ready to package &amp; ship">✓ Fully purchased</span>` : ''
+				const removedBadge = isDismissed ? `<span class="route-removed-badge" title="Removed from this dashboard${row.dismissed_at ? ' · ' + new Date(row.dismissed_at * 1000).toLocaleDateString() : ''}">🗑 Removed</span>` : ''
 
-				return `<tr class="${row.excluded ? 'row-excluded' : ''}">
+				// Action cell. In the normal list it carries the Exclude toggle + a
+				// permanent "Remove from dashboard" button (with Undo). In the "Show
+				// removed" review view it offers Restore, plus Delete-forever for the
+				// synthetic manual items that have no Etsy receipt to fall back on.
+				const target = `${row.receipt_id},'${jsAttr(row.item_key)}'`
+				let actionCell
+				if (isDismissed) {
+					actionCell = `<button class="route-row-restore" title="Put this order back on the dashboard"
+        onclick="restoreRouteRow(${target})">↩ Restore</button>` +
+						(row.is_manual
+							? `<button class="route-row-delete-forever" title="Permanently delete this manual order — cannot be undone"
+        onclick="deleteManualForever(${target})">Delete forever</button>`
+							: '')
+				} else {
+					actionCell = `<input type="checkbox" class="route-excl-toggle" ${row.excluded ? 'checked' : ''}
+        title="Exclude from the next generated route (keeps the row here for reference)"
+        onchange="saveRouteExcluded(${row.receipt_id}, '${jsAttr(row.item_key)}', this.checked)">` +
+						`<button class="route-row-remove" title="Remove from this dashboard (e.g. after purchasing). Undo available."
+        onclick="removeRouteRow(${target})">🗑</button>`
+				}
+
+				return `<tr class="${rowCls}">
     <td>${img}</td>
     <td>
-      <div class="route-prod-title">${escHtml(row.title)}${qty}</div>
+      <div class="route-prod-title">${escHtml(row.title)}${qty}${doneBadge}${removedBadge}</div>
       <div class="route-prod-meta">${escHtml(meta)}</div>
       ${note}
     </td>
@@ -16133,10 +16527,7 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
     <td>${comps}</td>
     <td>${_charmCellHtml(row)}</td>
     <td style="text-align:center">
-      <input type="checkbox" class="route-excl-toggle" ${row.excluded ? 'checked' : ''}
-        title="Exclude from route generation"
-        onchange="saveRouteExcluded(${row.receipt_id}, '${jsAttr(row.item_key)}', this.checked)">
-      ${removeBtn}
+      ${actionCell}
     </td>
   </tr>`
 			}
@@ -16144,6 +16535,31 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 			/** Toggle the "Unmatched only" filter (also wired to the summary pill). */
 			function toggleUnmatchedFilter() {
 				const cb = document.getElementById('routeOnlyUnmatched')
+				if (cb) {
+					cb.checked = !cb.checked
+					renderRouteDashboard()
+				}
+			}
+
+			/**
+			 * Toggle the "Show removed" review view — wired to the "🗑 N removed"
+			 * summary pill so a single click jumps to (or leaves) the removed orders.
+			 */
+			function toggleRemovedFilter() {
+				const cb = document.getElementById('routeShowRemoved')
+				if (cb) {
+					cb.checked = !cb.checked
+					renderRouteDashboard()
+				}
+			}
+
+			/**
+			 * Toggle the "Hide fully purchased" filter — wired to the "✓ N fully
+			 * purchased" summary pill so a single click reveals (or re-hides) the
+			 * completed lines in the active list.
+			 */
+			function toggleFullyPurchasedFilter() {
+				const cb = document.getElementById('routeHideFullyPurchased')
 				if (cb) {
 					cb.checked = !cb.checked
 					renderRouteDashboard()
@@ -16305,6 +16721,10 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 				const row = _routeRows.find((r) => r.receipt_id === Number(receiptId) && r.item_key === itemKey)
 				if (row) row[field] = value
 				_saveRouteAssign(Number(receiptId), itemKey, { [field]: value })
+				// Re-render so the headline "to shop" counts update live and the line
+				// drops out of the active queue the moment it becomes fully purchased
+				// (or returns if a component is moved back to Pending).
+				renderRouteDashboard()
 			}
 
 			function saveRouteExcluded(receiptId, itemKey, excluded) {
@@ -16314,34 +16734,149 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 				renderRouteDashboard() // re-render to apply opacity / hide-excluded filter
 			}
 
+			// ── Undo snackbar ────────────────────────────────────────────────────────
+			let _snackbarTimer = null
+
 			/**
-			 * Remove a single row from this route session.
-			 * Marks it excluded in the DB (so it persists across refreshes) and
-			 * removes it from the in-memory _routeRows so it disappears immediately
-			 * regardless of the "Hide excluded" checkbox state.
+			 * Show a bottom-center snackbar with an optional action button. Auto-hides
+			 * after `ms` (default 6s); the action (e.g. Undo) cancels the timer on use.
+			 * @param {string} message
+			 * @param {{label?: string, onAction?: Function, ms?: number}} [opts]
+			 */
+			function showRouteSnackbar(message, opts = {}) {
+				const bar = document.getElementById('routeSnackbar')
+				const msgEl = document.getElementById('routeSnackbarMsg')
+				const actEl = document.getElementById('routeSnackbarAction')
+				if (!bar || !msgEl || !actEl) return
+				if (_snackbarTimer) clearTimeout(_snackbarTimer)
+
+				msgEl.textContent = message
+				if (opts.label && typeof opts.onAction === 'function') {
+					actEl.textContent = opts.label
+					actEl.hidden = false
+					actEl.onclick = () => {
+						hideRouteSnackbar()
+						opts.onAction()
+					}
+				} else {
+					actEl.hidden = true
+					actEl.onclick = null
+				}
+
+				bar.classList.add('is-open')
+				_snackbarTimer = setTimeout(hideRouteSnackbar, opts.ms || 6000)
+			}
+
+			function hideRouteSnackbar() {
+				const bar = document.getElementById('routeSnackbar')
+				if (bar) bar.classList.remove('is-open')
+				if (_snackbarTimer) {
+					clearTimeout(_snackbarTimer)
+					_snackbarTimer = null
+				}
+			}
+
+			/**
+			 * Permanently remove a line from the Orders Sorting Dashboard (the typical
+			 * "I've finished buying this, take it off my list" action — works for both
+			 * real Etsy orders and manual entries).
+			 *
+			 * It is a DURABLE but REVERSIBLE dismissal: the line is flagged server-side
+			 * (route_assignments.dismissed_at) so it never reappears in the dashboard or
+			 * the next generated route, yet the underlying Etsy receipt is untouched and
+			 * the operator can Restore it (Undo snackbar, the "Show removed" view, or by
+			 * re-adding it via "Add Order"). Manual items can additionally be deleted for
+			 * good from the "Show removed" view.
 			 */
 			async function removeRouteRow(receiptId, itemKey) {
 				const row = _routeRows.find((r) => r.receipt_id === receiptId && r.item_key === itemKey)
-				// Manual (operator-created) items are deleted outright server-side —
-				// they have no real receipt, so excluding them would just resurrect
-				// them on the next reload.
-				if (row && row.is_manual) {
-					try {
-						await fetch(`${API}/api/route/manual-order`, {
-							method: 'DELETE',
-							headers: { 'Content-Type': 'application/json' },
-							body: JSON.stringify({ receipt_id: receiptId }),
-						})
-					} catch (err) {
-						console.error('[route] manual delete error:', err)
-					}
-					_routeRows = _routeRows.filter((r) => !(r.receipt_id === receiptId && r.item_key === itemKey))
+				if (!row) return
+
+				// Optimistic local update — flag dismissed and re-render so it drops out
+				// of the active list immediately.
+				row.dismissed = 1
+				row.dismissed_at = Math.floor(Date.now() / 1000)
+				renderRouteDashboard()
+
+				try {
+					const res = await fetch(`${API}/api/route/dismiss`, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ receipt_id: receiptId, item_key: itemKey, title: row.title, dismissed: true }),
+					})
+					if (!res.ok) throw new Error('HTTP ' + res.status)
+				} catch (err) {
+					// Roll back on failure so the UI never lies about what was saved.
+					row.dismissed = 0
+					row.dismissed_at = null
 					renderRouteDashboard()
+					showRouteSnackbar('Could not remove the order — please try again.')
 					return
 				}
-				await _saveRouteAssign(receiptId, itemKey, { excluded: 1 })
+
+				const label = (row.title || 'Order').length > 40 ? row.title.slice(0, 40) + '…' : row.title || 'Order'
+				showRouteSnackbar(`Removed “${label}” from the dashboard.`, {
+					label: 'Undo',
+					onAction: () => restoreRouteRow(receiptId, itemKey),
+				})
+			}
+
+			/**
+			 * Put a removed line back on the dashboard (clears the dismissal). Used by
+			 * the Undo snackbar and the per-row Restore button in the "Show removed" view.
+			 */
+			async function restoreRouteRow(receiptId, itemKey) {
+				const row = _routeRows.find((r) => r.receipt_id === receiptId && r.item_key === itemKey)
+				if (row) {
+					row.dismissed = 0
+					row.dismissed_at = null
+				}
+				renderRouteDashboard()
+				try {
+					const res = await fetch(`${API}/api/route/dismiss`, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ receipt_id: receiptId, item_key: itemKey, title: row?.title, dismissed: false }),
+					})
+					if (!res.ok) throw new Error('HTTP ' + res.status)
+				} catch (err) {
+					if (row) {
+						row.dismissed = 1
+						renderRouteDashboard()
+					}
+					showRouteSnackbar('Could not restore the order — please try again.')
+				}
+			}
+
+			/**
+			 * Permanently delete a MANUAL (operator-created) order from the database.
+			 * Only offered from the "Show removed" view, and only for manual items —
+			 * real Etsy orders are never destroyed, just dismissed. This is irreversible,
+			 * so it asks for explicit confirmation.
+			 */
+			async function deleteManualForever(receiptId, itemKey) {
+				const row = _routeRows.find((r) => r.receipt_id === receiptId && r.item_key === itemKey)
+				const label = row?.title ? `“${row.title}”` : 'this manual order'
+				if (!confirm(`Permanently delete ${label}?\n\nThis cannot be undone. (Real Etsy orders are never deleted — only manual entries.)`)) return
+
+				try {
+					const res = await fetch(`${API}/api/route/manual-order`, {
+						method: 'DELETE',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ receipt_id: receiptId }),
+					})
+					if (!res.ok) {
+						const d = await res.json().catch(() => ({}))
+						showRouteSnackbar('Delete failed: ' + (d.error || res.status))
+						return
+					}
+				} catch (err) {
+					showRouteSnackbar('Network error — could not delete.')
+					return
+				}
 				_routeRows = _routeRows.filter((r) => !(r.receipt_id === receiptId && r.item_key === itemKey))
 				renderRouteDashboard()
+				showRouteSnackbar('Manual order permanently deleted.')
 			}
 
 			// ── Add Order modal ─────────────────────────────────────────────────────────
@@ -16951,8 +17486,10 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 					return
 				}
 
-				// Check if already loaded
-				const alreadyLoaded = _routeRows.filter((r) => r.receipt_id === receiptId)
+				// Check if already loaded. Removed (dismissed) lines don't count — the
+				// operator may be re-adding an order they previously took off the list,
+				// and the server clears the dismissal on this explicit fetch.
+				const alreadyLoaded = _routeRows.filter((r) => r.receipt_id === receiptId && !r.dismissed)
 				if (alreadyLoaded.length) {
 					resEl.innerHTML = `<div class="add-order-result-row" style="cursor:default">
       <div class="add-order-result-id">#${receiptId}</div>
@@ -17334,7 +17871,7 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 				// In "apply to product" mode (from the Charms-to-buy list) the code is set
 				// on every loaded order line of this product; otherwise just the one line.
 				const targets = _charmModalApplyAll
-					? _routeRows.filter((r) => r.item_key === item_key && r.has_charm && !r.excluded)
+					? _routeRows.filter((r) => r.item_key === item_key && r.has_charm && !r.excluded && !r.dismissed)
 					: _routeRows.filter((r) => r.receipt_id === receipt_id && r.item_key === item_key)
 				if (!targets.length) targets.push({ receipt_id, item_key })
 				targets.forEach((r) => {
@@ -17373,8 +17910,9 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 			/** Charm-bearing rows in the current scope (pinned set aware, excludes dropped lines). */
 			function _charmPurchaseScopeRows() {
 				// _routeRows already includes any added (pre-transit) orders merged in
-				// by the server, so the charm scope is simply the full dashboard set.
-				return _routeRows.filter((r) => r.has_charm && !r.excluded)
+				// by the server, so the charm scope is simply the full dashboard set —
+				// minus excluded and removed lines, which are not part of the shop.
+				return _routeRows.filter((r) => r.has_charm && !r.excluded && !r.dismissed)
 			}
 
 			/** Group charm rows → assigned (by code) and unassigned (by product). */
@@ -18333,7 +18871,7 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 			 * the modal to reflect the confirmation.
 			 */
 			async function acceptSuggestedCharmForGroup(itemKey, code, shop) {
-				const targets = _routeRows.filter((r) => r.item_key === itemKey && r.has_charm && !r.charm_code)
+				const targets = _routeRows.filter((r) => r.item_key === itemKey && r.has_charm && !r.charm_code && !r.dismissed)
 				if (!targets.length) return
 				for (const r of targets) {
 					r.charm_code = code
@@ -18613,6 +19151,45 @@ ${configuredKey ? `<p style="margin-top:8px;font-size:12px;color:#94a3b8">Curren
 				<div class="modal-actions">
 					<button class="modal-cancel" onclick="closeShipModal()">Cancel</button>
 					<button class="modal-submit" id="shipSubmitBtn" onclick="submitShipModal()">Complete order</button>
+				</div>
+			</div>
+		</div>
+
+		<!-- ── Edit Tracking Modal ─────────────────────────────────────────────── -->
+		<!-- Re-submits the tracking number on an already-shipped (pre-transit) order.
+		     Etsy has no separate "update" endpoint — re-submitting tracking updates it
+		     and re-notifies the buyer, within Etsy's ~3-day edit window. -->
+		<div class="modal-overlay" id="editTrackingModal">
+			<div class="modal-box">
+				<div class="modal-title">Edit tracking number</div>
+				<div class="modal-subtitle" id="editTrackingSubtitle">Update the tracking number and re-notify the buyer.</div>
+
+				<div class="modal-note" id="editTrackingWindowNote">
+					Etsy allows editing tracking for a limited time after an order ships. Submitting
+					a new tracking number updates it on Etsy and sends the buyer an updated shipping
+					notification.
+				</div>
+
+				<div class="modal-field">
+					<label class="modal-label">Shipping carrier</label>
+					<input class="modal-input" id="editTrackingCarrier" type="text" value="4PX" />
+				</div>
+
+				<div class="modal-field">
+					<label class="modal-label">Tracking number <span style="color: var(--red)">*</span></label>
+					<input class="modal-input" id="editTrackingCode" type="text" placeholder="Enter the corrected tracking number" autocomplete="off" />
+				</div>
+
+				<div class="modal-field">
+					<label class="modal-label">Note to buyer <span style="color: var(--muted); font-weight: 400">(optional)</span></label>
+					<input class="modal-input" id="editTrackingNote" type="text" placeholder="e.g. Updated tracking number for your order" />
+				</div>
+
+				<div class="modal-error" id="editTrackingError"></div>
+
+				<div class="modal-actions">
+					<button class="modal-cancel" onclick="closeEditTrackingModal()">Cancel</button>
+					<button class="modal-submit" id="editTrackingSubmitBtn" onclick="submitEditTrackingModal()">Update tracking</button>
 				</div>
 			</div>
 		</div>

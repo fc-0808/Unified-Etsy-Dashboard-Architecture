@@ -538,6 +538,15 @@ class OrderItem:
     phone_model: str   = ""
     style:       str   = ""
     photo_bytes: bytes | None = None   # raw JPEG bytes extracted from PDF
+    # Etsy listing id supplied by the Unified Dashboard (--import-json).  This is
+    # the ONLY stable per-line discriminator: two genuinely-different listings on
+    # the same order can share the first 50 normalised title characters AND the
+    # same component set, so keying line dedup on title alone collapses them into
+    # one and silently drops a product the operator still has to buy.  Folding
+    # the listing id into the dedup key keeps such lines distinct.  Empty for
+    # PDF-parsed orders (no listing id) and manual items — the dedup then behaves
+    # exactly as before (title-only), so nothing regresses.
+    listing_id:  str = ""
     # Optional manual charm assignment supplied by the Unified Dashboard
     # (Route tab).  When set, these override whatever the catalog match would
     # have produced for this line — see _apply_import_charm_overrides().
@@ -777,6 +786,7 @@ def import_orders_from_json(path: Path) -> list[Order]:
                 phone_model = str(raw_item.get("phone_model", "")),
                 style       = str(raw_item.get("style", "")),
                 photo_bytes = _photo,
+                listing_id  = str(raw_item.get("listing_id", "") or "").strip(),
                 charm_code_override = str(raw_item.get("charm_code", "") or "").strip(),
                 charm_shop_override = str(raw_item.get("charm_shop", "") or "").strip(),
                 supplier_shop_override  = str(raw_item.get("supplier_shop", "") or "").strip(),
@@ -11795,6 +11805,21 @@ def main() -> None:
         hc, hg, hch = _style_has(s)
         return frozenset(x for x, v in (("case", hc), ("grip", hg), ("charm", hch)) if v)
 
+    # Helper: per-line discriminator used in every line-dedup key.
+    #
+    # Two genuinely-different Etsy listings on the SAME order can collide on
+    # (order, title[:50], components) — e.g. order 4072485033 carries two
+    # "Case+Grip+Charm" Tamagotchi variants (listings 4498121408 and 4498110917)
+    # whose first 50 normalised title chars are identical.  Keying dedup on title
+    # alone collapses them into one, silently dropping a line the operator still
+    # has to buy (this is exactly why an exported 109-item route rendered as 108).
+    # The Etsy listing id uniquely identifies the product on the line, so we fold
+    # it into the dedup key.  PDF-parsed / manual items have no listing id -> ""
+    # -> the key is identical to the old title-only form, so those paths are
+    # unaffected and nothing regresses.
+    def _line_disc(item: OrderItem) -> str:
+        return str(getattr(item, "listing_id", "") or "").strip()
+
     # Merge: cache (has photos) takes priority; Excel fills in anything missing.
     #
     # Phase 1 — add all cache entries, deduped by (order, title, components).
@@ -11813,12 +11838,12 @@ def main() -> None:
     #        {'grip'}∪{'charm'}={'grip','charm'} covers the Excel item → skip.
     #   Only truly missing items (absent order+title or missing components)
     #   are recovered from the Excel.
-    _prior_key_set: set[tuple[str, str, frozenset]] = set()
+    _prior_key_set: set[tuple[str, str, frozenset, str]] = set()
     prior_items: list[ResolvedItem] = []
 
     # Phase 1: all cached items
     for r in cached_items:
-        key = (r.order.order_number, _normalize(r.item.title)[:50], _style_comps(r.item.style))
+        key = (r.order.order_number, _normalize(r.item.title)[:50], _style_comps(r.item.style), _line_disc(r.item))
         if key not in _prior_key_set:
             _prior_key_set.add(key)
             prior_items.append(r)
@@ -11845,7 +11870,7 @@ def main() -> None:
     # (genuine safety-net: cache was deleted but Excel survived).
     for r in excel_items:
         comps = _style_comps(r.item.style)
-        key   = (r.order.order_number, _normalize(r.item.title)[:50], comps)
+        key   = (r.order.order_number, _normalize(r.item.title)[:50], comps, _line_disc(r.item))
         ot    = (r.order.order_number, _normalize(r.item.title)[:50])
         if key in _prior_key_set:
             continue  # exact duplicate
@@ -11874,8 +11899,8 @@ def main() -> None:
     # On runs where the cache does NOT yet contain "Charm Only", it is
     # absent from this set, _style_comps correctly distinguishes it from the
     # "Grip Only" entry, and it is picked up as truly new.
-    _cached_item_keys: set[tuple[str, str, frozenset]] = {
-        (r.order.order_number, _normalize(r.item.title)[:50], _style_comps(r.item.style))
+    _cached_item_keys: set[tuple[str, str, frozenset, str]] = {
+        (r.order.order_number, _normalize(r.item.title)[:50], _style_comps(r.item.style), _line_disc(r.item))
         for r in _raw_cached_items  # full pre-merge cache with all split-component entries
     }
 
@@ -12078,10 +12103,10 @@ def main() -> None:
     # "Grip Only" and "Charm Only" items for the same product/order pass
     # through independently while still preventing exact duplicates that
     # appear in more than one input PDF from being double-added on the same run.
-    _seen_new: set[tuple[str, str, frozenset]] = set()
+    _seen_new: set[tuple[str, str, frozenset, str]] = set()
     truly_new: list[ResolvedItem] = []
     for _r in new_resolved:
-        _k  = (_r.order.order_number, _normalize(_r.item.title)[:50], _style_comps(_r.item.style))
+        _k  = (_r.order.order_number, _normalize(_r.item.title)[:50], _style_comps(_r.item.style), _line_disc(_r.item))
         _ot = (_r.order.order_number, _normalize(_r.item.title)[:50])
         if _k in _cached_item_keys or _k in _seen_new:
             continue  # already in cache or already seen this run

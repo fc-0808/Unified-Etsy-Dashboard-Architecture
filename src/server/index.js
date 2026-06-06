@@ -55,7 +55,8 @@ const { upsertListing, upsertListingInventory,
         deleteCharmLibraryRow, reorderCharmLibrary,
         getCharmPurchaseProgress, setCharmPurchaseProgress,
         getProductMap, upsertProductMapRow, updateProductMapRowById, deleteProductMapRow,
-        insertManualItem, getManualItems, getManualItemImage, deleteManualItemByReceipt } = require('../db/setup');
+        insertManualItem, getManualItems, getManualItemImage, deleteManualItemByReceipt,
+        setRouteDismissed, clearDismissedByReceipt } = require('../db/setup');
 const routeDashboard                               = require('../route/dashboard');
 const enginePaths                                  = require('../route/engine-paths');
 const { batchFetchRouteImages }                    = require('../route/image-fetcher');
@@ -856,6 +857,7 @@ app.get('/api/orders', (req, res) => {
     limit,
     offset,
     pre_transit_days: config.pre_transit_days ?? 30,
+    tracking_edit_days: config.tracking_edit_days ?? 3,
     orders: deduped,
   });
 });
@@ -1220,7 +1222,13 @@ app.post('/api/orders/:receipt_id/archive', (req, res) => {
     UPDATE receipts SET
       -- Preserve the original archive timestamp if already archived (idempotent re-archive)
       archived_at    = COALESCE(archived_at, @archived_at),
-      archive_reason = @archive_reason
+      archive_reason = @archive_reason,
+      -- Archiving parks the order out of every active workflow, including the
+      -- purchasing queue / Route. Clear any needs-purchase flag so an order can
+      -- never be simultaneously Archived AND Needs-purchase — a contradiction
+      -- (the two states are mutually exclusive by design).
+      needs_purchase_at   = NULL,
+      needs_purchase_note = NULL
     WHERE receipt_id = @receipt_id
   `).run({ receipt_id: req.params.receipt_id, archived_at: nowEpoch, archive_reason: reason || null });
 
@@ -1400,10 +1408,27 @@ function orderHasOutstanding(receiptId) {
  * auto-flagged (they are already in the Route by default).
  */
 function recomputeNeedsPurchaseRollup(receiptId) {
-  const r = db.prepare('SELECT is_shipped, carrier_confirmed_at, needs_purchase_at FROM receipts WHERE receipt_id = ?').get(receiptId);
+  const r = db.prepare('SELECT is_shipped, carrier_confirmed_at, needs_purchase_at, archived_at FROM receipts WHERE receipt_id = ?').get(receiptId);
   if (!r) return false;
   const outstanding = orderHasOutstanding(receiptId);
   const isPreTransit = r.is_shipped === 1 && !r.carrier_confirmed_at;
+
+  // Invariant: an order is NEVER both Archived and Needs-purchase.
+  // Archiving parks an order out of every active workflow — including the
+  // purchasing queue / Route (e.g. "case out of production — awaiting restock").
+  // This auto-rollup must therefore never flag an archived order, and must clear
+  // a stale flag if one is present, otherwise a pre-transit archived order with
+  // outstanding components would be silently re-flagged here on the next status
+  // change and reappear in the Route in a contradictory state. To put an archived
+  // order back into the buy queue the operator explicitly flags it (which
+  // unarchives it — see the /needs-purchase endpoints).
+  if (r.archived_at) {
+    if (r.needs_purchase_at) {
+      db.prepare('UPDATE receipts SET needs_purchase_at = NULL, needs_purchase_note = NULL WHERE receipt_id = ?').run(receiptId);
+    }
+    return outstanding;
+  }
+
   if (!outstanding) {
     db.prepare('UPDATE receipts SET needs_purchase_at = NULL, needs_purchase_note = NULL WHERE receipt_id = ?').run(receiptId);
   } else if (isPreTransit && !r.needs_purchase_at) {
@@ -1464,8 +1489,12 @@ app.post('/api/orders/:receipt_id/needs-purchase', (req, res) => {
 
   const txn = db.transaction(() => {
     for (const it of items) if (!it.components.length) setItemPurchaseState(receiptId, it.item_key, it.title, true, null);
+    // Explicitly flagging an order into the purchasing queue re-activates it, so
+    // it must NOT remain archived (the two states are mutually exclusive). Clear
+    // any archive so the operator's explicit "buy this" intent wins and the order
+    // never ends up Archived + Needs-purchase at the same time.
     db.prepare(
-      'UPDATE receipts SET needs_purchase_at = COALESCE(needs_purchase_at, ?), needs_purchase_note = COALESCE(?, needs_purchase_note) WHERE receipt_id = ?'
+      'UPDATE receipts SET needs_purchase_at = COALESCE(needs_purchase_at, ?), needs_purchase_note = COALESCE(?, needs_purchase_note), archived_at = NULL, archive_reason = NULL WHERE receipt_id = ?'
     ).run(Math.floor(Date.now() / 1000), note, receiptId);
   });
   txn();
@@ -1574,8 +1603,10 @@ app.post('/api/orders/bulk-needs-purchase', (req, res) => {
       if (items === null) continue;
       if (flag) {
         for (const it of items) if (!it.components.length) setItemPurchaseState(id, it.item_key, it.title, true, null);
+        // Re-activating an order for purchase unarchives it — the two states are
+        // mutually exclusive, so an order can never be Archived + Needs-purchase.
         db.prepare(
-          'UPDATE receipts SET needs_purchase_at = COALESCE(needs_purchase_at, ?), needs_purchase_note = COALESCE(?, needs_purchase_note) WHERE receipt_id = ?'
+          'UPDATE receipts SET needs_purchase_at = COALESCE(needs_purchase_at, ?), needs_purchase_note = COALESCE(?, needs_purchase_note), archived_at = NULL, archive_reason = NULL WHERE receipt_id = ?'
         ).run(Math.floor(Date.now() / 1000), note, id);
       } else {
         const nowEpoch = Math.floor(Date.now() / 1000);
@@ -1610,12 +1641,20 @@ app.post('/api/orders/bulk-needs-purchase', (req, res) => {
  * @param {string} [opts.carrier_name='4PX']
  * @param {string} [opts.note_to_buyer]
  * @param {boolean} [opts.send_bcc=false]
+ * @param {'ship'|'update'} [opts.mode='ship']   'ship' marks a new order shipped
+ *                                               (status → Completed). 'update' re-submits
+ *                                               tracking on an already-shipped order
+ *                                               (edit-tracking flow): it preserves the
+ *                                               existing status and RESETS the carrier
+ *                                               confirmation so the corrected number is
+ *                                               re-evaluated from scratch as pre-transit.
  * @returns {Promise<object>}  The Etsy createReceiptShipment result.
  * @throws  {Error}  err.status carries an HTTP-friendly status when known.
  */
 async function shipEtsyReceipt(receiptId, opts = {}) {
   const tracking = (opts.tracking_code || '').trim();
   const carrier  = (opts.carrier_name || '4PX').trim();
+  const mode     = opts.mode === 'update' ? 'update' : 'ship';
   if (!tracking) {
     const e = new Error('tracking_code is required'); e.status = 400; throw e;
   }
@@ -1654,11 +1693,28 @@ async function shipEtsyReceipt(receiptId, opts = {}) {
   });
 
   // 6. Mirror the change locally so the UI updates without waiting for the next sync.
-  db.prepare(
-    "UPDATE receipts SET is_shipped = 1, tracking_code = ?, carrier_name = ?, status = 'Completed' WHERE receipt_id = ?"
-  ).run(tracking, carrier, receiptId);
-
-  console.log(`[ship] ${order.shop_id} receipt ${receiptId} marked shipped — tracking: ${tracking}`);
+  if (mode === 'update') {
+    // Edit-tracking flow: the order is already shipped/completed. Swap the tracking
+    // number and carrier, and RESET the carrier confirmation + last-check time so the
+    // tracking poller re-evaluates the corrected number from scratch — the new code
+    // legitimately starts life as pre-transit again. We deliberately do NOT touch
+    // shipment_notified_at: the Etsy edit window is measured from the ORIGINAL ship
+    // notification, so preserving it keeps our remaining-window math accurate.
+    db.prepare(
+      `UPDATE receipts SET
+         tracking_code        = ?,
+         carrier_name         = ?,
+         carrier_confirmed_at = NULL,
+         tracking_checked_at  = NULL
+       WHERE receipt_id = ?`
+    ).run(tracking, carrier, receiptId);
+    console.log(`[ship] ${order.shop_id} receipt ${receiptId} tracking UPDATED — new tracking: ${tracking}`);
+  } else {
+    db.prepare(
+      "UPDATE receipts SET is_shipped = 1, tracking_code = ?, carrier_name = ?, status = 'Completed' WHERE receipt_id = ?"
+    ).run(tracking, carrier, receiptId);
+    console.log(`[ship] ${order.shop_id} receipt ${receiptId} marked shipped — tracking: ${tracking}`);
+  }
   return result;
 }
 
@@ -1680,6 +1736,75 @@ app.post('/api/orders/:receipt_id/ship', async (req, res) => {
     const etsyBody = err.response?.data;
     const errMsg   = (typeof etsyBody === 'object' ? (etsyBody?.error_description || etsyBody?.error) : null) || err.message;
     console.error(`[ship] Error shipping receipt ${receipt_id}:`, errMsg, err.stack?.split('\n')[0]);
+    res.status(err.status || err.response?.status || 500).json({ error: errMsg });
+  }
+});
+
+/**
+ * POST /api/orders/:receipt_id/update-tracking
+ * Body: { tracking_code, carrier_name?, note_to_buyer? }
+ *
+ * Edit / correct the tracking number on an ALREADY-shipped receipt. Etsy has no
+ * dedicated "update tracking" endpoint — instead, re-submitting tracking via the
+ * same createReceiptShipment call updates the buyer-facing tracking and triggers a
+ * fresh shipping notification. This is exactly what Etsy's own "Edit tracking"
+ * button does, and it is only permitted within a short window (≈3 days) after the
+ * original ship notification.
+ *
+ * We pre-validate against that window (config.tracking_edit_days) so the operator
+ * gets a clear message instead of an opaque Etsy 4xx, but Etsy stays the source of
+ * truth: a call it rejects is surfaced verbatim.
+ */
+app.post('/api/orders/:receipt_id/update-tracking', async (req, res) => {
+  const { receipt_id } = req.params;
+  const { tracking_code, carrier_name = '4PX', note_to_buyer = '' } = req.body;
+
+  try {
+    const tracking = (tracking_code || '').trim();
+    if (!tracking) {
+      return res.status(400).json({ error: 'A tracking number is required.' });
+    }
+
+    // Load current state to validate the edit is sensible BEFORE calling Etsy.
+    const row = db.prepare(
+      'SELECT is_shipped, status, tracking_code, shipment_notified_at, carrier_confirmed_at FROM receipts WHERE receipt_id = ?'
+    ).get(receipt_id);
+    if (!row) return res.status(404).json({ error: 'Order not found' });
+
+    if (!row.is_shipped) {
+      return res.status(409).json({
+        error: 'This order has not been marked shipped yet. Use "Complete order" to add tracking for the first time.',
+      });
+    }
+    if (/^(Canceled|Cancelled|Fully Refunded|Fully refunded)$/.test(row.status || '')) {
+      return res.status(409).json({ error: `Cannot edit tracking on a ${row.status} order.` });
+    }
+
+    // Editable window: Etsy allows re-submitting tracking for ~tracking_edit_days days
+    // after the original ship notification. shipment_notified_at is the authoritative
+    // ship-notification epoch. If it's missing (legacy rows), we let the request through
+    // and rely on Etsy to accept or reject it.
+    const editDays = config.tracking_edit_days ?? 3;
+    if (row.shipment_notified_at) {
+      const daysSince = (Math.floor(Date.now() / 1000) - row.shipment_notified_at) / 86400;
+      if (daysSince > editDays) {
+        return res.status(409).json({
+          error: `Etsy's ${editDays}-day window for editing tracking has passed (this order shipped ${daysSince.toFixed(1)} days ago). The tracking number can no longer be changed via the API.`,
+        });
+      }
+    }
+
+    const result = await shipEtsyReceipt(receipt_id, {
+      tracking_code: tracking,
+      carrier_name,
+      note_to_buyer,
+      mode: 'update',
+    });
+    res.json({ success: true, receipt_id, tracking_code: tracking, shipment: result });
+  } catch (err) {
+    const etsyBody = err.response?.data;
+    const errMsg   = (typeof etsyBody === 'object' ? (etsyBody?.error_description || etsyBody?.error) : null) || err.message;
+    console.error(`[ship] Error updating tracking for receipt ${receipt_id}:`, errMsg, err.stack?.split('\n')[0]);
     res.status(err.status || err.response?.status || 500).json({ error: errMsg });
   }
 });
@@ -4182,22 +4307,42 @@ app.get('/api/route/dashboard', (req, res) => {
       // they reliably get bought (durable, server-side — not browser localStorage).
       include_needs_purchase: req.query.include_needs_purchase !== 'false',
       enrich_supplier:   req.query.enrich_supplier !== 'false',
+      // Include durably-removed lines so the client can power its "Show removed"
+      // view + Undo without a second round-trip. They are flagged (r.dismissed)
+      // and hidden from the active list client-side, exactly like fully-purchased.
+      include_dismissed: req.query.include_dismissed !== 'false',
       receipt_ids:       receiptIds.length ? receiptIds : undefined,
       extra_receipt_ids: extraIds.length ? extraIds : undefined,
     });
 
     // Headline counts for the dashboard summary bar.
+    //
+    // The headline "orders" / "items" counts reflect what STILL NEEDS SHOPPING:
+    // a line that is excluded or fully purchased (every component bought) is done,
+    // so it is dropped from these counts to avoid inflating the shopping workload.
+    // Fully purchased lines are surfaced separately via `fully_purchased` so the
+    // operator can still see (and reveal) them. The client recomputes this exact
+    // shape live from the in-memory rows as statuses change — keep the two in sync.
+    //
     // `charms_assigned` counts rows where the operator (or a per-product default) has
     // explicitly confirmed a charm code.  Catalog/Excel suggestions intentionally do NOT
     // count — r.charm_code is only populated from user-confirmed sources in buildRouteRows.
+    // Removed (dismissed) lines never count toward shopping work — they are a
+    // separate, reviewable bucket surfaced via the "🗑 removed" pill.
+    const live   = rows.filter(r => !r.dismissed);
+    const active = live.filter(r => !r.excluded && !r.fully_purchased);
     const summary = {
-      orders:    new Set(rows.map(r => r.receipt_id)).size,
-      items:     rows.length,
-      excluded:  rows.filter(r => r.excluded).length,
-      charms_needed:   rows.filter(r => r.has_charm && !r.excluded).length,
-      charms_assigned: rows.filter(r => r.has_charm && r.charm_code).length,
-      supplier_matched: rows.filter(r => r.supplier_in_catalog).length,
-      supplier_missing: rows.filter(r => !r.supplier_in_catalog).length,
+      orders:    new Set(active.map(r => r.receipt_id)).size,
+      items:     active.length,
+      excluded:  live.filter(r => r.excluded).length,
+      fully_purchased: live.filter(r => r.fully_purchased && !r.excluded).length,
+      dismissed: rows.filter(r => r.dismissed).length,
+      charms_needed:   active.filter(r => r.has_charm).length,
+      charms_assigned: active.filter(r => r.has_charm && r.charm_code).length,
+      supplier_matched: live.filter(r => r.supplier_in_catalog).length,
+      supplier_missing: live.filter(r => !r.supplier_in_catalog).length,
+      total_orders: new Set(live.map(r => r.receipt_id)).size,
+      total_items:  live.length,
     };
 
     res.json({ rows, summary, statuses: routeDashboard.STATUS_OPTIONS });
@@ -4304,6 +4449,9 @@ app.get('/api/route/order/:receiptId', (req, res) => {
   const receiptId = parseInt(req.params.receiptId, 10);
   if (isNaN(receiptId)) return res.status(400).json({ error: 'Invalid receipt_id' });
   try {
+    // Explicitly pulling an order back in is an unambiguous "un-remove": clear any
+    // prior dismissal so the order returns to the active dashboard cleanly.
+    clearDismissedByReceipt(db, receiptId);
     const rows = routeDashboard.buildRouteRows(db, config, {
       receipt_id:      receiptId,
       enrich_supplier: true,
@@ -4442,6 +4590,47 @@ app.delete('/api/route/manual-order', express.json(), (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('[route] manual-order delete error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/route/dismiss
+ * Body: { receipt_id, item_key, title?, dismissed? }  -- single line
+ *   or  { items: [{ receipt_id, item_key, title? }], dismissed? }  -- batch
+ *
+ * Durably removes (or, with dismissed:false, restores) one or more order lines
+ * from the Orders Sorting Dashboard. A removed line stays out of the dashboard
+ * and the next generated route, but the underlying Etsy receipt is untouched —
+ * it still appears in the Orders tab and can be re-added later. Reversible.
+ */
+app.post('/api/route/dismiss', express.json(), (req, res) => {
+  const b = req.body ?? {};
+  const dismissed = b.dismissed !== false; // default true (remove)
+  const items = Array.isArray(b.items) && b.items.length
+    ? b.items
+    : [{ receipt_id: b.receipt_id, item_key: b.item_key, title: b.title }];
+
+  const valid = items.filter(it => it && it.receipt_id != null && it.item_key);
+  if (!valid.length) {
+    return res.status(400).json({ error: 'receipt_id and item_key are required.' });
+  }
+
+  try {
+    const apply = db.transaction((list) => {
+      for (const it of list) {
+        setRouteDismissed(db, {
+          receipt_id: Number(it.receipt_id),
+          item_key:   String(it.item_key),
+          title:      it.title,
+          dismissed,
+        });
+      }
+    });
+    apply(valid);
+    res.json({ ok: true, dismissed, count: valid.length });
+  } catch (err) {
+    console.error('[route] dismiss error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -5004,11 +5193,23 @@ app.post('/api/route/generate', express.json(), async (req, res) => {
     console.warn(`[route] charm status reconciliation failed (non-fatal): ${err.message}`);
   }
 
-  const includedRows   = rows.filter(r => !r.excluded);
-  const exportedOrders = routeDashboard.rowsToImportOrders(rows);
+  // ── The route MUST mirror the dashboard's "to shop" set exactly ───────────
+  // The Orders Sorting Dashboard headline ("N orders / M items to shop") hides
+  // two buckets that need no shopping: rows the operator EXCLUDED, and rows that
+  // are FULLY PURCHASED (every component already bought). The generated route is
+  // a shopping list, so it must contain the SAME set — otherwise the operator
+  // sees "63 orders to shop" but the Excel prints 100+ orders, re-listing things
+  // already in hand. We therefore drop both buckets here.
+  //
+  // `fully_purchased` is recomputed live (not the value stamped at buildRouteRows
+  // time) because the charm purchase-progress reconciliation above may have just
+  // flipped a line's charm status to Purchased — completing it. Using the helper
+  // guarantees byte-identical logic with the dashboard summary + client view.
+  const shoppingRows   = rows.filter(r => !r.excluded && !routeDashboard.rowFullyPurchased(r));
+  const exportedOrders = routeDashboard.rowsToImportOrders(shoppingRows);
 
   if (exportedOrders.length === 0) {
-    return failEarly(400, 'No pending orders to generate a route for (after exclusions).');
+    return failEarly(400, 'Nothing to shop — every order in scope is already fully purchased or excluded.');
   }
 
   // Route files are generated INTO this dashboard's own folder (not the OSP's).
@@ -5060,10 +5261,11 @@ app.post('/api/route/generate', express.json(), async (req, res) => {
   // items that arrive WITHOUT an image and never overrides a supplied one, so
   // the route Excel always shows the same per-order photo as this dashboard.
   try {
-    // Build a deduped Map<listing_id, image_url> from the full row set
-    // (rows, not exportedOrders, because rows carry listing_id + image_url).
+    // Build a deduped Map<listing_id, image_url> from the to-shop row set
+    // (shoppingRows carry listing_id + image_url, and match exportedOrders so we
+    // never fetch images for items that won't appear in the route).
     const listingIdToUrl = new Map();
-    for (const row of rows) {
+    for (const row of shoppingRows) {
       if (row.listing_id && row.image_url && !listingIdToUrl.has(row.listing_id)) {
         listingIdToUrl.set(row.listing_id, row.image_url);
       }
@@ -5104,7 +5306,7 @@ app.post('/api/route/generate', express.json(), async (req, res) => {
   // so it must live in our output dir alongside shopping_route.xlsx.
   let statusCacheInfo = { count: 0 };
   try {
-    statusCacheInfo = routeDashboard.writeStatusCache(outputDir, includedRows);
+    statusCacheInfo = routeDashboard.writeStatusCache(outputDir, shoppingRows);
   } catch (err) {
     return failEarly(500, `Cannot write status cache: ${err.message}`);
   }

@@ -765,6 +765,12 @@ function initDb(dbPath) {
     // or fill in a supplier for items not yet in the OSP catalog.
     ['supplier_shop_override', 'TEXT', "''"],
     ['supplier_stall_override', 'TEXT', "''"],
+    // Durable "removed from the Orders Sorting Dashboard" marker. When set (a unix
+    // timestamp), the line is permanently dropped from the route dashboard view AND
+    // from route generation — without touching the underlying Etsy receipt. NULL =
+    // active. This is distinct from `excluded` (which keeps the line visible for
+    // reference but skips it in the next generated route). Reversible via Restore.
+    ['dismissed_at', 'INTEGER', 'NULL'],
   ];
   for (const [col, type, dflt] of newRouteCols) {
     if (!routeCols.includes(col)) {
@@ -1665,6 +1671,62 @@ function upsertRouteAssignment(db, a) {
   `).run(row);
 
   return row;
+}
+
+/**
+ * Mark (or unmark) a single order line as removed from the Orders Sorting
+ * Dashboard. A removed line is durably hidden from the route dashboard and
+ * excluded from route generation, but the underlying receipt is never touched.
+ *
+ * Implemented as an upsert so a line that has no other saved assignment yet
+ * (e.g. a freshly-synced order the operator never edited) can still be removed.
+ * Only the dismissal marker is changed; charm / status / supplier fields are
+ * preserved. Works for real receipts and manual items alike — both are keyed by
+ * (receipt_id, item_key), with manual items carrying a negative receipt_id.
+ *
+ * @param {Database.Database} db
+ * @param {{ receipt_id: number, item_key: string, title?: string, dismissed: boolean }} a
+ * @returns {{ receipt_id: number, item_key: string, dismissed_at: number|null }}
+ */
+function setRouteDismissed(db, a) {
+  if (a.receipt_id == null || !a.item_key) {
+    throw new Error('setRouteDismissed requires receipt_id and item_key');
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const dismissedAt = a.dismissed ? now : null;
+
+  db.prepare(`
+    INSERT INTO route_assignments (receipt_id, item_key, title, dismissed_at, updated_at)
+    VALUES (@receipt_id, @item_key, @title, @dismissed_at, @updated_at)
+    ON CONFLICT(receipt_id, item_key) DO UPDATE SET
+      dismissed_at = excluded.dismissed_at,
+      updated_at   = excluded.updated_at
+  `).run({
+    receipt_id:   Number(a.receipt_id),
+    item_key:     String(a.item_key),
+    title:        a.title ?? '',
+    dismissed_at: dismissedAt,
+    updated_at:   now,
+  });
+
+  return { receipt_id: Number(a.receipt_id), item_key: String(a.item_key), dismissed_at: dismissedAt };
+}
+
+/**
+ * Clear any "removed" markers on every line of a receipt. Used when the operator
+ * explicitly pulls an order back into the dashboard via "Add Order", which is an
+ * unambiguous intent to un-remove it.
+ * @param {Database.Database} db
+ * @param {number} receiptId
+ * @returns {number} number of rows un-dismissed
+ */
+function clearDismissedByReceipt(db, receiptId) {
+  try {
+    const info = db.prepare(
+      'UPDATE route_assignments SET dismissed_at = NULL WHERE receipt_id = ? AND dismissed_at IS NOT NULL'
+    ).run(Number(receiptId));
+    return info.changes || 0;
+  } catch { return 0; }
 }
 
 /**
@@ -2584,6 +2646,8 @@ module.exports = {
   getDb,
   syncConfigToDb,
   upsertRouteAssignment,
+  setRouteDismissed,
+  clearDismissedByReceipt,
   getAllRouteAssignments,
   upsertProductAssignment,
   getAllProductAssignments,

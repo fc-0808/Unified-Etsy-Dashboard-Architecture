@@ -14,6 +14,9 @@
   "_pre_transit_comment": "pre_transit_days: upper bound (in days) for how long after label creation we query carrier tracking for an order. With the 4PX tracking integration active (Pass D in sync worker), this is NOT the primary pre-transit signal — carrier_confirmed_at IS NULL is. This value controls how far back we look for unconfirmed orders to check. 30 days is the default — it gives a generous window so even slow-moving packages are checked. Once carrier_confirmed_at is set (carrier physically picked up the package), the order immediately moves to In-transit regardless of this value.",
   "pre_transit_days": 30,
 
+  "_tracking_edit_comment": "tracking_edit_days: window (in days) during which Etsy allows the tracking number of a shipped receipt to be edited / re-submitted. Etsy's policy is ~3 days from the shipment notification; after that their API rejects re-submitting tracking. The dashboard uses this value to show/hide the 'Edit tracking' action on pre-transit orders and to display the remaining time. Etsy remains the source of truth — a call outside the window still surfaces Etsy's own rejection.",
+  "tracking_edit_days": 3,
+
   "_fourpx_comment": "4PX Official Open Platform API credentials (https://open.4px.com). When set, the sync worker uses the authenticated tr.order.tracking.get endpoint to determine precise pre-transit/in-transit status for 4PX shipments. These credentials ALSO power the 'Create 4PX Shipment' feature in the Orders tab. Register at https://open.4px.com to obtain these values.",
   "fourpx_app_key": "YOUR_4PX_APP_KEY",
   "fourpx_app_secret": "YOUR_4PX_APP_SECRET",
