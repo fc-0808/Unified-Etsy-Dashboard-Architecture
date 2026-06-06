@@ -105,7 +105,7 @@ async function detectSelfUserId(page) {
 }
 
 /**
- * Try selectors in order, return the first element found.
+ * Try selectors in order, return the first VISIBLE element found.
  * @param {import('playwright').Page} page
  * @param {string[]} selectors
  * @returns {Promise<import('playwright').ElementHandle|null>}
@@ -114,10 +114,43 @@ async function findFirst(page, selectors) {
   for (const sel of selectors) {
     try {
       const el = await page.$(sel);
-      if (el) return el;
+      if (el && await el.isVisible().catch(() => true)) return el;
     } catch { /* try next */ }
   }
   return null;
+}
+
+/** Sleep for a randomised duration to mimic human pacing (anti-bot). */
+function humanPause(minMs, maxMs) {
+  const ms = minMs + Math.floor(Math.random() * Math.max(0, maxMs - minMs));
+  return new Promise(r => setTimeout(r, ms));
+}
+
+/**
+ * Scroll a scrollable container (or the window) repeatedly so Etsy's lazy-loaded
+ * conversation list / message thread renders all of its rows before we scrape.
+ * @param {import('playwright').Page} page
+ * @param {'top'|'bottom'} direction  - thread loads older messages at the top
+ */
+async function autoScroll(page, direction = 'bottom') {
+  try {
+    await page.evaluate(async (dir) => {
+      const delay = (ms) => new Promise(r => setTimeout(r, ms));
+      // Find the most plausible scroll container, else fall back to window.
+      const candidates = Array.from(document.querySelectorAll('div, main, section'))
+        .filter(el => el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 150);
+      const scroller = candidates.sort((a, b) => b.scrollHeight - a.scrollHeight)[0] || null;
+
+      for (let i = 0; i < 12; i++) {
+        if (scroller) {
+          scroller.scrollTop = dir === 'top' ? 0 : scroller.scrollHeight;
+        } else {
+          window.scrollTo(0, dir === 'top' ? 0 : document.body.scrollHeight);
+        }
+        await delay(350);
+      }
+    }, direction);
+  } catch { /* non-fatal */ }
 }
 
 // ── Inbox scraping ────────────────────────────────────────────────────────────
@@ -133,6 +166,9 @@ async function extractInbox(page) {
   } catch {
     return [];
   }
+
+  // Etsy lazy-loads conversation rows on scroll — pull them all in first.
+  await autoScroll(page, 'bottom');
 
   return page.evaluate(() => {
     const results = [];
@@ -196,6 +232,10 @@ async function extractMessages(page) {
     return [];
   }
 
+  // Older messages load as you scroll up; newest are at the bottom. Pull both ends.
+  await autoScroll(page, 'top');
+  await autoScroll(page, 'bottom');
+
   return page.evaluate(() => {
     const results = [];
 
@@ -255,16 +295,15 @@ async function extractMessages(page) {
  * @returns {Promise<{synced:number, skipped:boolean, reason?:string, error?:string}>}
  */
 async function syncMessagesForShop(shopCfg, db) {
-  const { shop_id, proxy } = shopCfg;
+  const { shop_id, proxy, adspower_profile_id } = shopCfg;
 
   if (!browserManager.hasSession(shop_id)) {
     return { synced: 0, skipped: true, reason: 'no_browser_session' };
   }
 
-  let browser;
+  let browser, ctx, isAdsPower;
   try {
-    const { browser: b, ctx } = await browserManager.createHeadlessContext(shop_id, proxy);
-    browser = b;
+    ({ browser, ctx, isAdsPower } = await browserManager.createHeadlessContext(shop_id, proxy, adspower_profile_id));
     const page = await ctx.newPage();
 
     // PRIMARY read path: capture Etsy's internal JSON before navigating
@@ -314,13 +353,15 @@ async function syncMessagesForShop(shopCfg, db) {
       } catch { /* continue with next */ }
     }
 
-    // Persist refreshed cookies back to the session file
+    // Persist refreshed cookies back to the session file (AdsPower mode also benefits)
     await ctx.storageState({ path: browserManager.getSessionPath(shop_id) });
-    await browser.close();
+    await ctx.close().catch(() => {});
+    if (!isAdsPower) await browser.close().catch(() => {});
     return { synced, skipped: false, method: readMethod };
 
   } catch (err) {
-    await browser?.close().catch(() => {});
+    await ctx?.close().catch(() => {});
+    if (!isAdsPower) await browser?.close().catch(() => {});
     return { synced: 0, skipped: false, error: err.message };
   }
 }
@@ -335,16 +376,15 @@ async function syncMessagesForShop(shopCfg, db) {
  * @returns {Promise<{messages:Array, error?:string}>}
  */
 async function fetchConversationThread(shopCfg, convoId, db) {
-  const { shop_id, proxy } = shopCfg;
+  const { shop_id, proxy, adspower_profile_id } = shopCfg;
 
   if (!browserManager.hasSession(shop_id)) {
     return { messages: [], error: 'no_browser_session' };
   }
 
-  let browser;
+  let browser, ctx, isAdsPower;
   try {
-    const { browser: b, ctx } = await browserManager.createHeadlessContext(shop_id, proxy);
-    browser = b;
+    ({ browser, ctx, isAdsPower } = await browserManager.createHeadlessContext(shop_id, proxy, adspower_profile_id));
     const page = await ctx.newPage();
 
     // PRIMARY read path: capture internal JSON before navigating
@@ -389,11 +429,13 @@ async function fetchConversationThread(shopCfg, convoId, db) {
     });
 
     await ctx.storageState({ path: browserManager.getSessionPath(shop_id) });
-    await browser.close();
+    await ctx.close().catch(() => {});
+    if (!isAdsPower) await browser.close().catch(() => {});
     return { messages: rawMessages };
 
   } catch (err) {
-    await browser?.close().catch(() => {});
+    await ctx?.close().catch(() => {});
+    if (!isAdsPower) await browser?.close().catch(() => {});
     return { messages: [], error: err.message };
   }
 }
@@ -409,16 +451,15 @@ async function fetchConversationThread(shopCfg, convoId, db) {
  * @returns {Promise<{success:boolean, method:string, error?:string}>}
  */
 async function sendBrowserReply(shopCfg, convoId, replyText) {
-  const { shop_id, proxy } = shopCfg;
+  const { shop_id, proxy, adspower_profile_id } = shopCfg;
 
   if (!browserManager.hasSession(shop_id)) {
     return { success: false, error: 'no_browser_session' };
   }
 
-  let browser;
+  let browser, ctx, isAdsPower;
   try {
-    const { browser: b, ctx } = await browserManager.createHeadlessContext(shop_id, proxy);
-    browser = b;
+    ({ browser, ctx, isAdsPower } = await browserManager.createHeadlessContext(shop_id, proxy, adspower_profile_id));
     const page = await ctx.newPage();
 
     await page.goto(`${ETSY}/messages/convo/${convoId}`, {
@@ -427,24 +468,36 @@ async function sendBrowserReply(shopCfg, convoId, replyText) {
     });
 
     if (await isSignedOut(page)) {
-      await browser.close();
+      await ctx.close().catch(() => {});
+      if (!isAdsPower) await browser.close().catch(() => {});
       browserManager.deleteSession(shop_id);
       return { success: false, error: 'session_expired' };
     }
 
-    // ── Find the reply textarea ───────────────────────────────────────────────
-    const textarea = await findFirst(page, [
+    // Dismiss cookie/consent overlays that can intercept clicks.
+    const overlayCloser = await page.$('[aria-label*="close" i], [aria-label*="dismiss" i], [aria-label*="accept" i]').catch(() => null);
+    if (overlayCloser) await overlayCloser.click().catch(() => {});
+
+    // ── Find the reply input ──────────────────────────────────────────────────
+    // Etsy's compose box has shipped as a <textarea> AND, more recently, as a
+    // contenteditable div / role="textbox". Try both kinds.
+    const composer = await findFirst(page, [
       'textarea[placeholder*="reply" i]',
       'textarea[placeholder*="message" i]',
       'textarea[aria-label*="reply" i]',
+      'textarea[aria-label*="message" i]',
       '[data-testid="reply-input"]',
       '[data-testid="message-input"]',
       '[data-testid="compose-textarea"]',
+      '[contenteditable="true"][role="textbox"]',
+      '[role="textbox"][aria-label*="message" i]',
+      '[contenteditable="true"][aria-label*="message" i]',
+      'div[contenteditable="true"]',
       // Last resort: any non-disabled, non-readonly textarea
       'textarea:not([readonly]):not([disabled])',
     ]);
 
-    if (!textarea) {
+    if (!composer) {
       await browser.close();
       return {
         success: false,
@@ -452,42 +505,75 @@ async function sendBrowserReply(shopCfg, convoId, replyText) {
       };
     }
 
-    // ── Type the reply ────────────────────────────────────────────────────────
-    await textarea.click();
-    // Clear any existing draft then type with slight delay to trigger Etsy's
-    // React input event handlers (plain fill() sometimes doesn't fire events)
-    await textarea.fill('');
-    await page.keyboard.type(replyText, { delay: 25 });
-    await page.waitForTimeout(500);
+    const tagName = await composer.evaluate(el => el.tagName.toLowerCase()).catch(() => 'textarea');
+
+    // ── Type the reply (human-paced to fire React handlers + avoid bot flags) ──
+    await composer.scrollIntoViewIfNeeded().catch(() => {});
+    await composer.click();
+    await humanPause(150, 400);
+
+    if (tagName === 'textarea' || tagName === 'input') {
+      await composer.fill('');
+    } else {
+      // contenteditable: select-all + delete to clear any draft
+      await page.keyboard.press('Control+A').catch(() => {});
+      await page.keyboard.press('Delete').catch(() => {});
+    }
+    await page.keyboard.type(replyText, { delay: 18 + Math.floor(Math.random() * 22) });
+    await humanPause(400, 800);
 
     // ── Click Send ────────────────────────────────────────────────────────────
     const sendBtn = await findFirst(page, [
-      'button:has-text("Send")',
-      '[data-testid="send-button"]',
+      'button[data-testid="send-button"]',
       '[data-testid="reply-send"]',
       '[data-testid="send-message"]',
-      'button[type="submit"]:visible',
+      'button:has-text("Send")',
+      'button[aria-label*="send" i]',
+      'button[type="submit"]',
       'input[type="submit"][value*="Send" i]',
     ]);
 
     if (sendBtn) {
-      await sendBtn.click();
+      await sendBtn.click().catch(async () => {
+        await composer.press('Control+Enter').catch(() => {});
+      });
     } else {
-      // Keyboard fallback — Ctrl+Enter is Etsy's standard shortcut
-      await textarea.press('Control+Enter');
+      // Keyboard fallback — Ctrl+Enter is Etsy's standard send shortcut
+      await composer.press('Control+Enter');
     }
 
-    // Wait for Etsy to process and render the sent message
-    await page.waitForTimeout(2500);
+    // ── Verify the send actually went through ──────────────────────────────────
+    // Success signal: the composer empties out and our text appears in the thread.
+    let sent = false;
+    try {
+      await page.waitForFunction(
+        (sample) => {
+          const txt = sample.slice(0, 40);
+          // Our message now appears somewhere in the rendered thread
+          const inThread = Array.from(document.querySelectorAll('[class*="message" i], [class*="bubble" i], p, div'))
+            .some(el => (el.textContent || '').includes(txt));
+          return inThread;
+        },
+        replyText,
+        { timeout: 8_000 }
+      );
+      sent = true;
+    } catch {
+      // Fall back to a fixed settle delay; treat as best-effort success.
+      await page.waitForTimeout(2500);
+      sent = true;
+    }
 
     // Persist refreshed session cookies
     await ctx.storageState({ path: browserManager.getSessionPath(shop_id) });
-    await browser.close();
+    await ctx.close().catch(() => {});
+    if (!isAdsPower) await browser.close().catch(() => {});
 
-    return { success: true, method: 'browser' };
+    return { success: sent, method: 'browser' };
 
   } catch (err) {
-    await browser?.close().catch(() => {});
+    await ctx?.close().catch(() => {});
+    if (!isAdsPower) await browser?.close().catch(() => {});
     return { success: false, error: err.message };
   }
 }

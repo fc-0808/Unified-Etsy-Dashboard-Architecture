@@ -29,8 +29,35 @@
 
 const path = require('path');
 const fs   = require('fs');
+const adspower = require('../automation/adspower');
 
 const SESSIONS_DIR = path.resolve(__dirname, '../../data/sessions');
+
+// Shared browser identity so the LOGIN session and the HEADLESS sync/reply
+// sessions present an identical fingerprint to Etsy. A mismatch between the
+// browser that created the cookies and the one that reuses them is a common
+// trigger for Etsy invalidating the session ("unusual activity").
+const USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+const CONTEXT_FINGERPRINT = {
+  userAgent: USER_AGENT,
+  viewport: { width: 1280, height: 800 },
+  locale: 'en-US',
+  timezoneId: 'America/New_York',
+  extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' },
+};
+
+/** Init script applied to every context to strip the most obvious bot signals. */
+function applyStealth(ctx) {
+  return ctx.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+    if (!navigator.plugins || navigator.plugins.length === 0) {
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+    }
+  });
+}
 
 if (!fs.existsSync(SESSIONS_DIR)) {
   fs.mkdirSync(SESSIONS_DIR, { recursive: true });
@@ -68,7 +95,10 @@ class BrowserManager {
   // ── Session paths ───────────────────────────────────────────────────────────
 
   getSessionPath(shopId) {
-    return path.join(SESSIONS_DIR, `${shopId}_session.json`);
+    // MUST match the filename used by src/automation/etsy-marketing.js
+    // ('{shopId}.json', not '{shopId}_session.json') so that sessions captured
+    // through the Discounts/Marketing tab are immediately usable here.
+    return path.join(SESSIONS_DIR, `${shopId}.json`);
   }
 
   hasSession(shopId) {
@@ -102,17 +132,42 @@ class BrowserManager {
   }
 
   /**
-   * Open a VISIBLE Chromium window so the user can log into Etsy manually.
-   * The login is detected automatically; the session is saved and the browser
-   * closes on its own.  Poll getLoginStatus() to track progress.
+   * Open a login browser for a shop.
+   *
+   * Mode A — AdsPower CDP (PREFERRED when adspowerProfileId is provided):
+   *   Connects to the existing AdsPower Chromium via CDP, opens an isolated
+   *   context, and waits for the user to log in. This reuses AdsPower's
+   *   per-profile proxy routing + anti-detect fingerprint — exactly the same
+   *   mechanism the Discounts tab's "Capture Session" flow uses.
+   *   Session is saved to data/sessions/{shopId}.json and shared with the
+   *   Discounts/Marketing automation module.
+   *
+   * Mode B — Standalone Playwright (fallback when no AdsPower profile set):
+   *   Launches a fresh Chromium window. Less optimal (generic fingerprint,
+   *   no AdsPower proxy routing) but works without AdsPower.
+   *   Also saves to data/sessions/{shopId}.json.
    *
    * @param {string}      shopId
-   * @param {string|null} proxyUrl  - Optional socks5:// proxy URL
+   * @param {string|null} proxyUrl           - Group socks5:// proxy (Mode B fallback only)
+   * @param {string|null} adspowerProfileId  - AdsPower user_id for this shop (enables Mode A)
    */
-  async startLoginBrowser(shopId, proxyUrl = null) {
-    // Tear down any in-progress login for this shop
+  async startLoginBrowser(shopId, proxyUrl = null, adspowerProfileId = null) {
     await this.closeLoginBrowser(shopId);
 
+    const entry = { browser: null, ctx: null, page: null, status: 'waiting_login', mode: 'standalone' };
+    this._loginSessions.set(shopId, entry);
+
+    // ── Mode A: AdsPower CDP ─────────────────────────────────────────────────
+    if (adspowerProfileId) {
+      entry.mode = 'adspower';
+      this._startLoginViaAdsPower(shopId, adspowerProfileId, entry).catch(err => {
+        entry.status = 'error';
+        entry.error  = err.message;
+      });
+      return;
+    }
+
+    // ── Mode B: Standalone Playwright ────────────────────────────────────────
     const pw = this._getPlaywright();
 
     const launchOpts = {
@@ -123,16 +178,14 @@ class BrowserManager {
         '--window-size=1280,800',
       ],
     };
-    if (proxyUrl) launchOpts.proxy = { server: proxyUrl };
+    // For standalone mode, route through the group proxy so Etsy sees the
+    // correct static IP (same IP the API calls come from).
+    if (proxyUrl && proxyUrl !== 'direct') launchOpts.proxy = { server: proxyUrl };
 
     const browser = await pw.chromium.launch(launchOpts);
-    const ctx     = await browser.newContext({
-      viewport: { width: 1280, height: 800 },
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    });
+    const ctx     = await browser.newContext({ ...CONTEXT_FINGERPRINT });
+    await applyStealth(ctx);
 
-    // If an older session exists, pre-load its cookies — user might already be
-    // logged in and just needs to click through or the session may be stale.
     if (this.hasSession(shopId)) {
       try {
         const saved = JSON.parse(fs.readFileSync(this.getSessionPath(shopId), 'utf8'));
@@ -141,57 +194,103 @@ class BrowserManager {
     }
 
     const page = await ctx.newPage();
-    // Start at the Etsy sign-in page
     await page.goto('https://www.etsy.com/signin', { waitUntil: 'domcontentloaded' }).catch(() => {});
 
-    const entry = { browser, ctx, page, status: 'waiting_login' };
-    this._loginSessions.set(shopId, entry);
+    entry.browser = browser;
+    entry.ctx     = ctx;
+    entry.page    = page;
 
-    // Start async poll — never awaited by caller
     this._pollUntilLoggedIn(shopId, entry).catch(err => {
       entry.status = 'error';
       entry.error  = err.message;
     });
   }
 
+  /**
+   * Mode A login: connect to AdsPower via CDP and wait for Etsy login.
+   * Shares the same session file as the Discounts/Marketing capture flow.
+   */
+  async _startLoginViaAdsPower(shopId, profileId, entry) {
+    const { chromium } = this._getPlaywright();
+
+    entry.status = 'opening_adspower';
+
+    const wsEndpoint = await adspower.openProfile(profileId);
+    const browser    = await chromium.connectOverCDP(wsEndpoint);
+    const ctx        = await browser.newContext({ ignoreHTTPSErrors: true });
+    const page       = await ctx.newPage();
+
+    entry.browser = browser;
+    entry.ctx     = ctx;
+    entry.page    = page;
+    entry.status  = 'waiting_login';
+
+    await page.goto('https://www.etsy.com/signin', { waitUntil: 'domcontentloaded' }).catch(() => {});
+
+    const POLL_MS    = 1500;
+    const TIMEOUT_MS = 5 * 60 * 1000;
+    const deadline   = Date.now() + TIMEOUT_MS;
+
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, POLL_MS));
+      if (!this._loginSessions.has(shopId)) return;
+
+      try {
+        const url = page.url();
+        if (/\/(signin|join|login)/i.test(url)) continue;
+        if (!url.includes('etsy.com')) continue;
+
+        const authEl = await page.$('[data-testid="account-icon"], [aria-label*="Account"], [href*="/messages"]').catch(() => null);
+        if (authEl || url.includes('/messages') || url.includes('/shop-manager')) {
+          entry.status = 'saving';
+          await ctx.storageState({ path: this.getSessionPath(shopId) });
+          entry.status = 'logged_in';
+          await new Promise(r => setTimeout(r, 2000));
+          await ctx.close().catch(() => {});
+          // Do NOT close the AdsPower browser — AdsPower manages its own lifecycle
+          this._loginSessions.delete(shopId);
+          return;
+        }
+      } catch (err) {
+        entry.status = 'error';
+        entry.error  = err.message;
+        await ctx.close().catch(() => {});
+        this._loginSessions.delete(shopId);
+        return;
+      }
+    }
+
+    entry.status = 'timeout';
+    await ctx.close().catch(() => {});
+    this._loginSessions.delete(shopId);
+  }
+
   async _pollUntilLoggedIn(shopId, entry) {
     const { browser, ctx, page } = entry;
     const POLL_MS     = 1500;
-    const TIMEOUT_MS  = 5 * 60 * 1000; // 5 minutes
+    const TIMEOUT_MS  = 5 * 60 * 1000;
     const deadline    = Date.now() + TIMEOUT_MS;
 
     while (Date.now() < deadline) {
       await new Promise(r => setTimeout(r, POLL_MS));
-      if (!this._loginSessions.has(shopId)) return; // cancelled externally
+      if (!this._loginSessions.has(shopId)) return;
 
       try {
         const url = page.url();
-
-        // Still on sign-in / join / login pages → user hasn't completed login yet
         if (/\/(signin|join|login)/i.test(url)) continue;
-        // Must be on Etsy domain
         if (!url.includes('etsy.com')) continue;
 
-        // Look for a nav element that only appears when logged in
-        const authEl = await page.$(
-          '[data-testid="account-icon"], [aria-label*="Account"], [href*="/messages"], nav .account-nav-item'
-        ).catch(() => null);
-
+        const authEl = await page.$('[data-testid="account-icon"], [aria-label*="Account"], [href*="/messages"]').catch(() => null);
         if (authEl || url.includes('/messages') || url.includes('/shop-manager')) {
-          // User is logged in ─ save the full storageState
           entry.status = 'saving';
           await ctx.storageState({ path: this.getSessionPath(shopId) });
           entry.status = 'logged_in';
-
-          // Let the user see the logged-in state for a moment, then close
           await new Promise(r => setTimeout(r, 2000));
           await browser.close().catch(() => {});
           this._loginSessions.delete(shopId);
           return;
         }
-
       } catch (err) {
-        // Page navigated away or crashed — stop polling
         entry.status = 'error';
         entry.error  = err.message;
         await browser.close().catch(() => {});
@@ -200,7 +299,6 @@ class BrowserManager {
       }
     }
 
-    // Timed out without detecting login
     entry.status = 'timeout';
     await browser.close().catch(() => {});
     this._loginSessions.delete(shopId);
@@ -209,62 +307,83 @@ class BrowserManager {
   async closeLoginBrowser(shopId) {
     const entry = this._loginSessions.get(shopId);
     if (!entry) return;
-    await entry.browser.close().catch(() => {});
+    // In AdsPower mode we only close the context, not the AdsPower browser itself
+    if (entry.mode === 'adspower') {
+      await entry.ctx?.close().catch(() => {});
+    } else {
+      await entry.browser?.close().catch(() => {});
+    }
     this._loginSessions.delete(shopId);
   }
 
   // ── Headless context factory (for sync + reply) ─────────────────────────────
 
   /**
-   * Create a headless Playwright context using the saved session.
-   * Caller MUST call `browser.close()` after use.
+   * Create a browser context for sync/reply using the saved session.
+   *
+   * Mode A — AdsPower CDP (when adspowerProfileId provided):
+   *   Connects to AdsPower's running Chromium. Correct proxy + fingerprint
+   *   guaranteed by AdsPower. Caller must call ctx.close() after use
+   *   and MUST NOT call browser.close() (AdsPower owns the browser lifecycle).
+   *
+   * Mode B — Standalone Playwright headless (fallback):
+   *   Launches a new headless Chromium. Caller must call browser.close().
+   *
+   * Return shape: { browser, ctx, isAdsPower }
+   *   isAdsPower=true → caller should close ctx only, not browser
    *
    * @param {string}      shopId
-   * @param {string|null} proxyUrl
-   * @returns {Promise<{browser, ctx}>}
+   * @param {string|null} proxyUrl           - Group SOCKS5 URL (Mode B only)
+   * @param {string|null} adspowerProfileId  - Opens Mode A when provided
+   * @returns {Promise<{browser, ctx, isAdsPower: boolean}>}
    */
-  async createHeadlessContext(shopId, proxyUrl = null) {
+  async createHeadlessContext(shopId, proxyUrl = null, adspowerProfileId = null) {
     if (!this.hasSession(shopId)) {
-      throw new Error(`No browser session for ${shopId} — open the Messages tab and click "Login with Browser".`);
+      throw new Error(
+        `No session for ${shopId}. ` +
+        `Use "Connect Inbox" in the Messages tab (or capture a session in the Discounts tab).`
+      );
     }
 
+    // ── Mode A: AdsPower CDP ─────────────────────────────────────────────────
+    if (adspowerProfileId) {
+      try {
+        const { chromium } = this._getPlaywright();
+        const wsEndpoint = await adspower.openProfile(adspowerProfileId);
+        const browser    = await chromium.connectOverCDP(wsEndpoint);
+        const ctx        = await browser.newContext({
+          storageState: this.getSessionPath(shopId),
+          ignoreHTTPSErrors: true,
+        });
+        return { browser, ctx, isAdsPower: true };
+      } catch (err) {
+        // AdsPower unavailable (not running, API key missing, etc.)
+        // Log a clear warning and fall through to Mode B.
+        console.warn(
+          `[browser-manager] AdsPower CDP failed for ${shopId} (profile ${adspowerProfileId}): ` +
+          `${err.message}. Falling back to standalone Playwright.`
+        );
+      }
+    }
+
+    // ── Mode B: Standalone Playwright headless ───────────────────────────────
     const pw = this._getPlaywright();
 
     const launchOpts = {
       headless: true,
-      args: [
-        '--no-sandbox',
-        // Removes the navigator.webdriver=true flag that headless Chrome sets,
-        // which is the single most common bot-detection signal.
-        '--disable-blink-features=AutomationControlled',
-      ],
+      args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'],
     };
-    if (proxyUrl) launchOpts.proxy = { server: proxyUrl };
+    // Route through the group proxy so Etsy sees the same IP as the API calls.
+    if (proxyUrl && proxyUrl !== 'direct') launchOpts.proxy = { server: proxyUrl };
 
     const browser = await pw.chromium.launch(launchOpts);
     const ctx     = await browser.newContext({
       storageState: this.getSessionPath(shopId),
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      // Mimic a real desktop browser so Etsy renders the full layout
-      viewport: { width: 1280, height: 800 },
-      locale: 'en-US',
-      timezoneId: 'America/New_York',
-      // A real Accept-Language header helps avoid "unusual activity" flags
-      extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' },
+      ...CONTEXT_FINGERPRINT,
     });
+    await applyStealth(ctx);
 
-    // Patch the most obvious automation fingerprints before any page script runs
-    await ctx.addInitScript(() => {
-      // navigator.webdriver → undefined (real browsers don't set it)
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-      // Fake a plausible plugins/languages array
-      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-      if (!navigator.plugins || navigator.plugins.length === 0) {
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-      }
-    });
-
-    return { browser, ctx };
+    return { browser, ctx, isAdsPower: false };
   }
 
   // ── Status snapshot ─────────────────────────────────────────────────────────

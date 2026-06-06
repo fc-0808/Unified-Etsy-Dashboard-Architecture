@@ -22,6 +22,36 @@ const path = require('path');
 let _db = null;
 
 /**
+ * Decode HTML entities in a string returned by the Etsy API.
+ *
+ * Etsy's receipt API HTML-encodes certain characters in text fields
+ * (e.g. buyer names: "Timothy O&#39;Keefe" instead of "Timothy O'Keefe").
+ * Storing the raw HTML-encoded value causes shipping carriers (4PX, etc.)
+ * to reject the name with encoding/validation errors.
+ *
+ * Handles:
+ *   &#NNN;   decimal numeric references  (e.g. &#39; → ')
+ *   &#xHH;   hex numeric references      (e.g. &#x27; → ')
+ *   Named:   &amp; &lt; &gt; &quot; &apos; &nbsp;
+ *
+ * @param {*} value
+ * @returns {string|null}
+ */
+function decodeHtmlEntities(value) {
+  if (value == null) return null;
+  if (typeof value !== 'string') return value;
+  return value
+    .replace(/&#(\d+);/g,      (_, n)   => String.fromCharCode(parseInt(n, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/&amp;/gi,  '&')
+    .replace(/&lt;/gi,   '<')
+    .replace(/&gt;/gi,   '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&nbsp;/gi, ' ');
+}
+
+/**
  * Initialize the database at the given path.
  * Creates the file and all tables if they don't exist.
  * Safe to call on every startup — uses IF NOT EXISTS throughout.
@@ -286,6 +316,69 @@ function initDb(dbPath) {
     );
 
     -- ─────────────────────────────────────────────────────────────────
+    -- receipt_item_purchase: per LINE-ITEM "needs purchase" tracking for the
+    --   Orders tab. An order can contain several products; when it is created
+    --   pre-transit (a label was made to hit the ship-by deadline) some products
+    --   may already be in stock while others still have to be bought. This table
+    --   records, per line-item, whether that specific product still needs buying.
+    --
+    --   The ORDER-level flag receipts.needs_purchase_at is a denormalised rollup
+    --   of these rows (set while ANY line still needs purchase; cleared when all
+    --   are bought). That rollup is what the Orders "Needs purchase" filter and the
+    --   Route auto-include query read, so partial-purchase orders stay in the
+    --   purchasing queue until every outstanding product is bought.
+    --
+    --   item_key matches route/dashboard.lineItemKey(title, listing_id) so a line
+    --   here lines up 1:1 with its Route-tab row (which adds per-component status).
+    --
+    --   needs_purchase: 1 = still to buy, 0 = purchased.
+    -- ─────────────────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS receipt_item_purchase (
+      receipt_id     INTEGER NOT NULL,
+      item_key       TEXT    NOT NULL,
+      title          TEXT,
+      needs_purchase INTEGER NOT NULL DEFAULT 1,
+      note           TEXT,
+      flagged_at     INTEGER,
+      purchased_at   INTEGER,
+      updated_at     INTEGER DEFAULT (strftime('%s','now')),
+      PRIMARY KEY (receipt_id, item_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_rip_receipt ON receipt_item_purchase(receipt_id);
+    CREATE INDEX IF NOT EXISTS idx_rip_outstanding ON receipt_item_purchase(receipt_id, needs_purchase);
+
+    -- ─────────────────────────────────────────────────────────────────
+    -- route_manual_items: operator-created route line-items that do NOT
+    --   originate from a synced Etsy receipt. Added via the Route tab's
+    --   "Add Order" → product picker / custom-product flow.
+    --
+    --   Each row owns a synthetic NEGATIVE receipt_id (= -id) so it never
+    --   collides with a real Etsy receipt and slots straight into the
+    --   existing receipt_id-keyed assignment / status / exclude machinery.
+    --
+    --   • Catalog picks  carry a real listing_id + image_url (CDN) so the
+    --     supplier match and route image pipeline work unchanged.
+    --   • Custom products store uploaded bytes in image_data/image_mime and
+    --     are served via GET /api/route/manual-image/:id.
+    -- ─────────────────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS route_manual_items (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      receipt_id  INTEGER NOT NULL UNIQUE,
+      item_key    TEXT    NOT NULL,
+      title       TEXT    NOT NULL,
+      phone_model TEXT    DEFAULT '',
+      style       TEXT    DEFAULT '',
+      quantity    INTEGER DEFAULT 1,
+      shop_name   TEXT    DEFAULT '',
+      listing_id  INTEGER,
+      image_url   TEXT    DEFAULT '',
+      image_data  BLOB,
+      image_mime  TEXT    DEFAULT '',
+      source      TEXT    DEFAULT 'manual',
+      created_at  INTEGER DEFAULT (strftime('%s','now'))
+    );
+
+    -- ─────────────────────────────────────────────────────────────────
     -- product_assignments: remember supplier + charm per product title
     --   item_key = normalised 50-char title hash (same as route_assignments)
     --   These are applied as defaults for NEW orders so the user never
@@ -493,6 +586,63 @@ function initDb(dbPath) {
     ['fourpx_order_status',    'TEXT'],
     // Unix epoch when the 4PX order was created via the dashboard. Immutable once set.
     ['fourpx_created_at',      'INTEGER'],
+
+    // ── Operator Archive (stuck pre-transit orders) ───────────────────────────
+    // Sometimes a shipping label is created with the WRONG tracking number, so the
+    // order is stuck showing "Pre-transit" forever even though the parcel is really
+    // in transit or already delivered (the carrier never scans the bogus number, so
+    // carrier_confirmed_at never gets set). The operator can manually archive such an
+    // order to remove it from the active Orders views WITHOUT cancelling it on Etsy
+    // or losing the historical record.
+    //
+    // NULL          = active (visible in normal views).
+    // Non-NULL      = Unix epoch when the operator archived the order. Surfaces only
+    //                 in the dedicated "Archived" view (shipped=archived) and is
+    //                 preserved across Etsy re-syncs (this column is never written by
+    //                 upsertReceipt, so ON CONFLICT leaves it untouched).
+    ['archived_at',            'INTEGER'],
+    // Optional free-text reason captured at archive time, e.g.
+    // "wrong tracking number — parcel already delivered". Cleared on restore.
+    ['archive_reason',         'TEXT'],
+
+    // ── Needs-purchase / out-of-stock flag (pre-transit orders) ────────────────
+    // As order volume grows, products frequently go out of stock right as the Etsy
+    // ship-by deadline arrives. The operator buys time by creating a shipping label
+    // and marking the order shipped on Etsy (so it becomes "Pre-transit"), but the
+    // physical product STILL has to be purchased. Because such orders are already
+    // is_shipped = 1, the default purchasing queries (which look at unshipped orders)
+    // would otherwise drop them — and they'd silently never get bought.
+    //
+    // This flag lets the operator explicitly mark a pre-transit order as "still out
+    // of stock — needs purchase". Flagged orders are surfaced in a dedicated Orders
+    // view AND automatically merged into the Route (purchasing) dashboard, server-side
+    // and durably, so they reliably get bought regardless of which browser is used.
+    //
+    // NULL     = not flagged.
+    // Non-NULL = Unix epoch when the operator marked it as needing purchase.
+    // Preserved across Etsy re-syncs (never written by upsertReceipt, so ON CONFLICT
+    // leaves it untouched). Cleared once the product has actually been purchased.
+    ['needs_purchase_at',      'INTEGER'],
+    // Optional free-text note captured when flagging, e.g. "switched buyer to design B".
+    ['needs_purchase_note',    'TEXT'],
+
+    // ── Packaged flag (pre-transit orders) ────────────────────────────────────
+    // Operator-set flag indicating the physical parcel has been fully assembled
+    // (all products picked, packed, and labelled) and is physically ready for
+    // carrier pickup — distinct from "shipped" (Etsy label created) and from
+    // "in transit" (carrier first scan).
+    //
+    // Workflow: order ships on Etsy to meet the deadline → Pre-transit view →
+    // operator physically packs the order → clicks "Mark packaged" →
+    // packaged_at is set. The pre-transit view can then be filtered to show
+    // only "Not yet packaged" or "Packaged", letting the operator track exactly
+    // which parcels are still sitting on the packing bench vs. ready for pickup.
+    //
+    // NULL     = not yet packaged.
+    // Non-NULL = Unix epoch when the operator marked it as packaged.
+    // Preserved across Etsy re-syncs (never written by upsertReceipt, so
+    // ON CONFLICT leaves it untouched). Can be cleared (unmark) if set in error.
+    ['packaged_at',            'INTEGER'],
   ];
   const addedCols = [];
   for (const [col, type] of newReceiptCols) {
@@ -572,7 +722,10 @@ function initDb(dbPath) {
     CREATE INDEX IF NOT EXISTS idx_receipts_notified_at       ON receipts(shipment_notified_at DESC);
     CREATE INDEX IF NOT EXISTS idx_receipts_carrier_confirmed ON receipts(carrier_confirmed_at);
     CREATE INDEX IF NOT EXISTS idx_receipts_tracking_checked  ON receipts(tracking_checked_at);
-    CREATE INDEX IF NOT EXISTS idx_receipts_fourpx_consignment ON receipts(fourpx_consignment_no)
+    CREATE INDEX IF NOT EXISTS idx_receipts_fourpx_consignment ON receipts(fourpx_consignment_no);
+    CREATE INDEX IF NOT EXISTS idx_receipts_archived_at       ON receipts(archived_at);
+    CREATE INDEX IF NOT EXISTS idx_receipts_needs_purchase    ON receipts(needs_purchase_at);
+    CREATE INDEX IF NOT EXISTS idx_receipts_packaged_at       ON receipts(packaged_at)
   `);
 
   // If shipment_notified_at already exists but wasn't populated during the backfill
@@ -919,13 +1072,21 @@ function upsertReceipt(db, shopId, groupId, receipt) {
       shipping_state       = excluded.shipping_state,
       shipping_zip         = excluded.shipping_zip,
       shipping_country_iso = excluded.shipping_country_iso,
-      first_product_title  = excluded.first_product_title,
-      first_listing_id     = excluded.first_listing_id,
-      first_quantity       = excluded.first_quantity,
-      first_ship_by        = excluded.first_ship_by,
-      first_variations     = excluded.first_variations,
-      all_transactions     = excluded.all_transactions,
-      formatted_address    = excluded.formatted_address,
+      -- Protect these fields from being overwritten with NULL when the Etsy API
+      -- returns an incomplete payload (e.g. Pass B "recently-updated" queries
+      -- sometimes return receipts whose transactions[] array is empty or whose
+      -- expected_ship_date has not yet been computed).  COALESCE means: use the
+      -- new value if it is non-NULL, otherwise keep what we already have.
+      -- This is safe because a legitimately-changed value (new ship date, title
+      -- edit, address correction) will always arrive as a non-NULL string from
+      -- Etsy — the only source of NULL here is a transient API gap.
+      first_product_title  = COALESCE(excluded.first_product_title, first_product_title),
+      first_listing_id     = COALESCE(excluded.first_listing_id,    first_listing_id),
+      first_quantity       = COALESCE(excluded.first_quantity,       first_quantity),
+      first_ship_by        = COALESCE(excluded.first_ship_by,        first_ship_by),
+      first_variations     = COALESCE(excluded.first_variations,     first_variations),
+      all_transactions     = COALESCE(excluded.all_transactions,     all_transactions),
+      formatted_address    = COALESCE(excluded.formatted_address,    formatted_address),
       tracking_code        = excluded.tracking_code,
       carrier_name         = excluded.carrier_name,
       shipment_was_shipped = excluded.shipment_was_shipped,
@@ -944,7 +1105,7 @@ function upsertReceipt(db, shopId, groupId, receipt) {
     group_id: groupId,
     buyer_user_id: receipt.buyer_user_id ?? null,
     buyer_email: receipt.buyer_email ?? null,
-    name: receipt.name ?? null,
+    name: decodeHtmlEntities(receipt.name ?? null),
     status: receipt.status ?? null,
     is_shipped: receipt.is_shipped ? 1 : 0,
     is_paid: receipt.is_paid ? 1 : 0,
@@ -954,10 +1115,10 @@ function upsertReceipt(db, shopId, groupId, receipt) {
     discount_amount: money(receipt.discount_amt),
     shipping_cost: money(receipt.total_shipping_cost),
     total_tax_cost: money(receipt.total_tax_cost),
-    message_from_buyer: receipt.message_from_buyer ?? null,
-    message_from_seller: receipt.message_from_seller ?? null,
-    shipping_first_line:  receipt.first_line  ?? null,
-    shipping_second_line: receipt.second_line ?? null,
+    message_from_buyer: decodeHtmlEntities(receipt.message_from_buyer ?? null),
+    message_from_seller: decodeHtmlEntities(receipt.message_from_seller ?? null),
+    shipping_first_line:  decodeHtmlEntities(receipt.first_line  ?? null),
+    shipping_second_line: decodeHtmlEntities(receipt.second_line ?? null),
     shipping_city:        receipt.city        ?? null,
     shipping_state:       receipt.state       ?? null,
     shipping_zip:         receipt.zip         ?? null,
@@ -2310,6 +2471,114 @@ function deleteProductMapRow(db, id) {
   return info.changes > 0;
 }
 
+// ─── Manual route items ─────────────────────────────────────────────────────
+
+/**
+ * Insert a manual (operator-created) route line-item and assign it a stable
+ * synthetic NEGATIVE receipt_id so it integrates with the receipt_id-keyed
+ * route_assignments / status / exclude machinery without colliding with any
+ * real Etsy receipt.
+ *
+ * @param {Database.Database} db
+ * @param {object} row
+ * @param {string} row.item_key   - line-item key (see route/dashboard.lineItemKey)
+ * @param {string} row.title
+ * @param {string} [row.phone_model]
+ * @param {string} [row.style]
+ * @param {number} [row.quantity]
+ * @param {string} [row.shop_name]
+ * @param {number|null} [row.listing_id]
+ * @param {string} [row.image_url]   - CDN/remote URL (catalog picks)
+ * @param {Buffer|null} [row.image_data] - uploaded image bytes (custom products)
+ * @param {string} [row.image_mime]
+ * @param {string} [row.source]      - 'catalog' | 'custom'
+ * @returns {{ id: number, receipt_id: number }}
+ */
+function insertManualItem(db, row) {
+  const title = String(row.title || '').trim();
+  if (!title) { const e = new Error('Product title is required.'); e.code = 'REQUIRED'; throw e; }
+  if (!row.item_key) { const e = new Error('item_key is required.'); e.code = 'REQUIRED'; throw e; }
+
+  const tx = db.transaction(() => {
+    const info = db.prepare(`
+      INSERT INTO route_manual_items
+        (receipt_id, item_key, title, phone_model, style, quantity, shop_name,
+         listing_id, image_url, image_data, image_mime, source, created_at)
+      VALUES
+        (0, @item_key, @title, @phone_model, @style, @quantity, @shop_name,
+         @listing_id, @image_url, @image_data, @image_mime, @source, strftime('%s','now'))
+    `).run({
+      item_key:    String(row.item_key),
+      title,
+      phone_model: String(row.phone_model || '').trim(),
+      style:       String(row.style || '').trim(),
+      quantity:    Math.max(1, parseInt(row.quantity, 10) || 1),
+      shop_name:   String(row.shop_name || '').trim(),
+      listing_id:  row.listing_id != null && String(row.listing_id).trim() !== '' ? Number(row.listing_id) : null,
+      image_url:   String(row.image_url || '').trim(),
+      image_data:  row.image_data && row.image_data.length ? row.image_data : null,
+      image_mime:  String(row.image_mime || '').trim(),
+      source:      row.source === 'catalog' ? 'catalog' : (row.source === 'custom' ? 'custom' : 'manual'),
+    });
+    const id = Number(info.lastInsertRowid);
+    // Synthetic negative receipt id, guaranteed unique via the AUTOINCREMENT id.
+    const receiptId = -id;
+    db.prepare('UPDATE route_manual_items SET receipt_id = ? WHERE id = ?').run(receiptId, id);
+    return { id, receipt_id: receiptId };
+  });
+  return tx();
+}
+
+/**
+ * Return all manual route items (metadata only — no image BLOB), newest first.
+ * @param {Database.Database} db
+ * @returns {Array}
+ */
+function getManualItems(db) {
+  try {
+    return db.prepare(`
+      SELECT id, receipt_id, item_key, title, phone_model, style, quantity,
+             shop_name, listing_id, image_url,
+             (image_data IS NOT NULL) AS has_image_data, image_mime, source, created_at
+      FROM route_manual_items
+      ORDER BY created_at DESC, id DESC
+    `).all();
+  } catch { return []; }
+}
+
+/**
+ * Fetch a manual item's stored image bytes + mime, or null.
+ * @param {Database.Database} db
+ * @param {number} id
+ * @returns {{ data: Buffer, mime: string }|null}
+ */
+function getManualItemImage(db, id) {
+  try {
+    const row = db.prepare('SELECT image_data, image_mime FROM route_manual_items WHERE id = ?').get(Number(id));
+    if (row && row.image_data && row.image_data.length) {
+      return { data: row.image_data, mime: row.image_mime || 'image/png' };
+    }
+  } catch { /* table may not exist yet */ }
+  return null;
+}
+
+/**
+ * Delete a manual item by its synthetic receipt_id, also clearing any
+ * route_assignments (charm / status / exclude) attached to it.
+ * @param {Database.Database} db
+ * @param {number} receiptId  negative synthetic receipt id
+ * @returns {boolean} true when a row was deleted
+ */
+function deleteManualItemByReceipt(db, receiptId) {
+  const rid = Number(receiptId);
+  const tx = db.transaction(() => {
+    try { db.prepare('DELETE FROM route_assignments WHERE receipt_id = ?').run(rid); } catch {}
+    const info = db.prepare('DELETE FROM route_manual_items WHERE receipt_id = ?').run(rid);
+    return info.changes > 0;
+  });
+  return tx();
+}
+
 module.exports = {
   initDb,
   getDb,
@@ -2325,6 +2594,10 @@ module.exports = {
   upsertProductMapRow,
   updateProductMapRowById,
   deleteProductMapRow,
+  insertManualItem,
+  getManualItems,
+  getManualItemImage,
+  deleteManualItemByReceipt,
   getSupplierDirectory,
   getCharmShopDirectory,
   getProductMapByNorm,

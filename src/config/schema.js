@@ -23,8 +23,19 @@ const CONFIG_PATH = path.resolve(__dirname, '../../config.json');
  * @property {string}  api_key        - Etsy app keystring (first part of x-api-key header)
  * @property {string}  shared_secret  - Etsy app shared secret (second part of x-api-key)
  *                                      x-api-key header sent to Etsy = "keystring:shared_secret"
- * @property {string}  [refresh_token] - Optional backup refresh token. Primary store is tokens.json.
- *                                       Run 'npm run oauth:setup' — tokens.json is auto-populated.
+ * @property {string}  [refresh_token]        - Optional backup refresh token. Primary store is tokens.json.
+ *                                              Run 'npm run oauth:setup' — tokens.json is auto-populated.
+ * @property {string}  [adspower_profile_id]  - AdsPower user_id for this shop's browser profile.
+ *                                              When set, the Messages tab (and Discounts tab) use AdsPower
+ *                                              CDP to open/automate this shop's browser rather than launching
+ *                                              a fresh Playwright instance. This is the RECOMMENDED mode:
+ *                                              it reuses AdsPower's per-profile proxy routing + anti-detect
+ *                                              fingerprint, meaning the session is identical to normal human
+ *                                              use. Find the user_id in AdsPower → select a profile → the
+ *                                              numeric ID shown in the URL or profile list.
+ *                                              Can also be set at the group level as a default for all shops
+ *                                              in the group (shop-level overrides group-level).
+ * @property {object}  [email_imap]   - IMAP credentials for email-notification sync (read-only fallback).
  */
 
 /**
@@ -77,8 +88,11 @@ function usesGroupProxy(group) {
  * @property {string|null}   fourpx_app_secret            - 4PX Open Platform AppSecret paired with fourpx_app_key.
  * @property {object|null}   fourpx_sender                - Sender (shipper) address for 4PX order creation.
  *                                                          Required to use the "Create 4PX Shipment" feature.
- *                                                          Fields: first_name, [last_name], [company], [phone],
- *                                                          country (ISO-2), city, [state], [street], [post_code].
+ *                                                          Required sub-fields: first_name, country, city, post_code.
+ *                                                          post_code MUST be present — 4PX rejects orders without it
+ *                                                          with error DS000000 ("shipper's postcode is required").
+ *                                                          Optional: last_name, company, phone, state, street.
+ *                                                          Aliases postcode/postal_code/zip are auto-normalised.
  * @property {string|null}   fourpx_warehouse_code        - 4PX warehouse/drop-off code for order creation,
  *                                                          e.g. "CNSZX01" for the Shenzhen warehouse.
  *                                                          Corresponds to deliver_type_info.warehouse_code.
@@ -165,6 +179,62 @@ function validateGroup(group, index) {
 }
 
 /**
+ * Normalize and validate the fourpx_sender block.
+ *
+ * 1. Returns null if the sender is not configured (feature disabled).
+ * 2. Resolves common post_code alias spellings so a user who writes
+ *    "postcode", "postal_code", "zip", or "zipcode" instead of "post_code"
+ *    still gets a working config instead of a silent DS000000 failure.
+ * 3. Emits a startup warning when post_code is still absent after alias
+ *    resolution, so the problem surfaces immediately in logs rather than
+ *    at shipment-creation time.
+ *
+ * @param {object|null|undefined} sender  Raw value from config.json
+ * @returns {object|null}
+ */
+function normalizeFourpxSender(sender) {
+  if (!sender || typeof sender !== 'object') return null;
+
+  const normalized = { ...sender };
+
+  // Resolve post_code aliases — many users naturally write one of these variants.
+  // Priority: post_code > postcode > postal_code > zip > zipcode
+  if (!normalized.post_code) {
+    const alias =
+      normalized.postcode    ||
+      normalized.postal_code ||
+      normalized.zip         ||
+      normalized.zipcode;
+    if (alias) {
+      normalized.post_code = String(alias).trim();
+      // Remove the alias key so the payload stays clean
+      delete normalized.postcode;
+      delete normalized.postal_code;
+      delete normalized.zip;
+      delete normalized.zipcode;
+      console.warn(
+        '[config] fourpx_sender: auto-resolved post_code alias. ' +
+        'Rename the field to "post_code" in config.json to silence this warning.'
+      );
+    }
+  }
+
+  if (!normalized.post_code?.trim()) {
+    // Fail fast at startup rather than silently produce DS000000 at order-creation time.
+    // Australia and several other destinations trigger strict sender-postcode validation
+    // on the 4PX side; a missing postcode causes every shipment to those countries to fail.
+    throw new Error(
+      'config.json: fourpx_sender.post_code is required. ' +
+      '4PX rejects every shipment order that lacks a sender postcode (error DS000000). ' +
+      'Add "post_code": "<your warehouse ZIP>" to the fourpx_sender block in config.json ' +
+      'and restart the server.'
+    );
+  }
+
+  return normalized;
+}
+
+/**
  * Load and validate config.json.
  * Throws a descriptive error if the file is missing or invalid.
  *
@@ -243,14 +313,31 @@ function loadConfig() {
     // ── 4PX Shipping Order Creation ────────────────────────────────────────────
     // These fields enable the "Create 4PX Shipment" feature in the Orders tab.
     // fourpx_sender:           Shipper address (your warehouse in China).
+    //                          REQUIRED sub-fields: first_name, country, city, post_code.
+    //                          post_code is mandatory — 4PX rejects orders without it
+    //                          with error DS000000 ("shipper's postcode is required").
     // fourpx_warehouse_code:   4PX warehouse code where you drop off packages.
     //                          e.g. "CNSZX01" (Shenzhen SZX warehouse).
     //                          Leave null to omit from the API request.
     // fourpx_default_product:  Default logistics product code, e.g. "BDS".
     //                          Used to pre-select the dropdown in the drawer.
-    fourpx_sender:           raw.fourpx_sender           ?? null,
+    fourpx_sender:           normalizeFourpxSender(raw.fourpx_sender),
     fourpx_warehouse_code:   raw.fourpx_warehouse_code   ?? null,
     fourpx_default_product:  raw.fourpx_default_product  ?? null,
+
+    // ── EU IOSS / VAT compliance ───────────────────────────────────────────────
+    // fourpx_ioss_no:  Import One-Stop Shop (IOSS) registration number used for
+    //                  EU-bound parcels with a declared value ≤ €150. 4PX maps it
+    //                  to the order's `ioss_no` field (per the official model). For
+    //                  marketplace sales the platform's IOSS number is used (e.g.
+    //                  Etsy's). The server attaches it automatically to every EU27
+    //                  destination so customs clears the parcel as VAT-prepaid.
+    //                  Format: "IM" + 10 digits (12 chars, no spaces).
+    // fourpx_vat_no / fourpx_eori_no: optional EU VAT / EORI identifiers, attached
+    //                  to EU destinations when present.
+    fourpx_ioss_no:          (raw.fourpx_ioss_no && String(raw.fourpx_ioss_no).trim()) || null,
+    fourpx_vat_no:           (raw.fourpx_vat_no  && String(raw.fourpx_vat_no).trim())  || null,
+    fourpx_eori_no:          (raw.fourpx_eori_no && String(raw.fourpx_eori_no).trim()) || null,
 
     // ── Shopping Route Generator (Orders Sorting Program) integration ──────────
     // Set osp_project_dir to the absolute path of the Orders_sorting_program
@@ -309,6 +396,10 @@ function getAllShops(config) {
       proxy: usesGroupProxy(group) ? group.proxy : null,
       uses_proxy: usesGroupProxy(group),
       owner_email: shop.owner_email ?? null,
+      // Shop-level adspower_profile_id wins; fall back to group-level default.
+      // This allows one profile per group (shared proxy container) or a dedicated
+      // profile per shop depending on how AdsPower is configured.
+      adspower_profile_id: shop.adspower_profile_id ?? group.adspower_profile_id ?? null,
     }))
   );
 }

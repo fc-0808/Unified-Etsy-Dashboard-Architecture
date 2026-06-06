@@ -360,6 +360,21 @@ STATUS_OPTIONS = ["Pending", "Purchased", "Out of Stock", "Out of Production"]
 # Simplified-Chinese status options (same order)
 ZH_STATUS_OPTIONS = ["待处理", "已购买", "缺货", "停产"]
 
+# Order-status checklist workbook (extra file 1) — an order-centric, Simplified
+# Chinese sheet (full-route layout minus Floor/Supplier/Stall/Product) that
+# employees use to record, per order, whether each component was purchased.
+STATUS_CHECK_SHEET    = "订单核对"          # sheet title for the checklist file
+STATUS_CHECK_SHEET_EN = "Order Check"
+
+# Ready-to-ship workbook (extra file 2) — built from the edited checklist file:
+# lists every order whose components are ALL Purchased, ready to pack & ship.
+READY_SHIP_SHEET      = "可发货订单"
+READY_SHIP_SHEET_EN   = "Ready to Ship"
+
+# Pack / ship status dropdown shown to employees in the ready-to-ship report.
+ZH_PACK_OPTIONS = ["待打包", "已打包", "已发货"]
+EN_PACK_OPTIONS = ["To Pack", "Packed", "Shipped"]
+
 # Simplified-Chinese translation table
 _ZH: dict[str, str] = {
     # Sheet / tab names
@@ -1047,10 +1062,13 @@ def get_db_connection(db_path: Path) -> sqlite3.Connection:
         ...
         conn.close()
     """
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # Wait (rather than fail immediately) when another connection briefly holds
+    # the write lock — the dashboard keeps a read-only handle on this same file.
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
@@ -3155,15 +3173,55 @@ def list_product_map_rows_for_picker(path: Path) -> list[ProductMapPickerRow]:
     return out
 
 
+def _build_catalog_photo_map(
+    pairs: Iterable[tuple[str, bytes]],
+) -> dict[str, bytes]:
+    """Build the {normalized-title → photo} lookup used to apply canonical
+    Product Map photos, with a collision-guarded 50-char prefix fallback.
+
+    See :func:`get_catalog_photo_map` for the rationale.  Exact full-title
+    keys are always registered.  A 50-char prefix key is registered only when
+    exactly one distinct full title produces it AND it does not collide with an
+    existing full-title key — otherwise the lookup would risk handing one
+    product's photo to a different product that merely shares a title prefix.
+    """
+    result: dict[str, bytes] = {}
+    short_titles: dict[str, set[str]] = defaultdict(set)
+    short_photo:  dict[str, bytes] = {}
+    for title, photo in pairs:
+        key = _normalize(title)
+        if not key:
+            continue
+        result[key] = photo                       # exact match — authoritative
+        short = key[:50]
+        short_titles[short].add(key)
+        short_photo.setdefault(short, photo)
+    for short, titles in short_titles.items():
+        # Unambiguous prefix (one product) and not already a full-title key.
+        if len(titles) == 1 and short not in result:
+            result[short] = short_photo[short]
+    return result
+
+
 def get_catalog_photo_map(catalog_path: Path) -> dict[str, bytes]:
     """Return a mapping of *normalized product title* → canonical photo bytes.
 
     Used by the Orders Dashboard so every order for the same product always
     displays the same photo regardless of which PDF it was extracted from.
 
-    Each product contributes two keys:
-      • The full normalized title (exact-match priority).
-      • The first 50 characters (backward-compat for older cache entries).
+    Each product contributes:
+      • The full normalized title (exact-match priority — always safe).
+      • A 50-char prefix key (backward-compat for older cache entries) **only
+        when that prefix unambiguously identifies a single product**.
+
+    The 50-char prefix is intentionally collision-guarded: two genuinely
+    different products can share the same first 50 normalized characters (e.g.
+    "Kawaii Monchhichi MagSafe Case with Magnetic Grip Stand…" vs "…Grip &
+    Beaded Charm…").  If such a prefix were exposed as a lookup key it would
+    silently assign one product's photo to the other — the exact "wrong image
+    on the order" class of bug.  We therefore drop any prefix shared by more
+    than one distinct full title and fall back to the order's own (dashboard)
+    image instead of guessing.
 
     Reads photo BLOBs from ``data/etsy_orders.db`` (SQLite) when the
     database exists; falls back to extracting them from column A of the
@@ -3177,17 +3235,12 @@ def get_catalog_photo_map(catalog_path: Path) -> dict[str, bytes]:
                 "SELECT product_title, photo FROM catalog WHERE photo IS NOT NULL"
             ).fetchall()
             conn.close()
-            result: dict[str, bytes] = {}
-            for row in rows:
-                photo = bytes(row["photo"])
-                key   = _normalize(row["product_title"])
-                result[key] = photo
-                short = key[:50]
-                if short not in result:
-                    result[short] = photo
+            result = _build_catalog_photo_map(
+                (row["product_title"], bytes(row["photo"])) for row in rows
+            )
             log.info(
-                "Catalog photo map: %d product(s) have canonical photos (SQLite)",
-                len(result),
+                "Catalog photo map: %d key(s) for %d product(s) with photos (SQLite)",
+                len(result), len(rows),
             )
             return result
         except Exception as exc:
@@ -3205,19 +3258,15 @@ def get_catalog_photo_map(catalog_path: Path) -> dict[str, bytes]:
         row_photos = extract_photos_from_xlsx(
             catalog_path, sheet_name=CATALOG_SHEET, photo_col_idx=0
         )
-        result = {}
-        for row in rows:
-            photo = row_photos.get(row.row_num)
-            if not photo:
-                continue
-            key = _normalize(row.title)
-            result[key] = photo
-            short = key[:50]
-            if short not in result:
-                result[short] = photo
+        pairs = [
+            (row.title, row_photos[row.row_num])
+            for row in rows
+            if row_photos.get(row.row_num)
+        ]
+        result = _build_catalog_photo_map(pairs)
         log.info(
-            "Catalog photo map: %d product(s) have canonical photos (xlsx fallback)",
-            len(result),
+            "Catalog photo map: %d key(s) for %d product(s) with photos (xlsx fallback)",
+            len(result), len(pairs),
         )
         return result
     except Exception as exc:
@@ -3277,16 +3326,28 @@ def apply_canonical_charm_fields_to_resolved(
 def apply_catalog_photos_to_resolved(
     resolved: list[ResolvedItem],
     catalog_path: Path,
+    *,
+    fill_missing_only: bool = False,
 ) -> int:
-    """Overwrite each item's ``photo_bytes`` with the canonical photo from the
-    Product Map when one is available.
+    """Apply the canonical Product Map photo to each item from the catalog.
 
-    This ensures the shopping route Excel (and the JSON cache) always show the
-    same photo for the same product regardless of which PDF batch it was
-    originally extracted from.  When a user uploads a replacement photo via the
-    Orders Dashboard the new image is committed to the Product Map; calling this
-    function before writing the cache and route files propagates that change
-    throughout the system automatically on the next regeneration.
+    Two modes:
+
+    * ``fill_missing_only=False`` (PDF flow — default): overwrite every item's
+      ``photo_bytes`` with the catalog photo when one is available.  This
+      normalises photos across PDF batches so the same product always looks the
+      same regardless of which slip it was scanned from.
+
+    * ``fill_missing_only=True`` (Unified Dashboard ``--import-json`` flow):
+      treat the image supplied by the dashboard as the **single source of
+      truth** and only *fill in* a catalog photo for items that arrived without
+      one.  The dashboard already embeds, for every line item, the exact Etsy
+      listing image it renders in its own order gallery (``image_b64``).
+      Overwriting that with a title-matched catalog photo is what made the
+      route Excel disagree with the dashboard (e.g. order #4070998188 showed the
+      curated Product Map photo instead of the live listing image the operator
+      sees).  In this mode the route and the dashboard are guaranteed to display
+      identical per-order images.
 
     Returns the number of items whose photo was updated.
     """
@@ -3294,13 +3355,24 @@ def apply_catalog_photos_to_resolved(
     if not catalog_photos:
         return 0
     updated = 0
+    skipped = 0
     for r in resolved:
+        # Dashboard-supplied images are authoritative — never replace them.
+        if fill_missing_only and r.item.photo_bytes:
+            skipped += 1
+            continue
         norm = _normalize(r.item.title)
         canonical = catalog_photos.get(norm) or catalog_photos.get(norm[:50])
         if canonical and canonical != r.item.photo_bytes:
             r.item.photo_bytes = canonical
             updated += 1
-    if updated:
+    if fill_missing_only:
+        log.info(
+            "apply_catalog_photos: kept %d dashboard-supplied image(s) as-is; "
+            "filled %d missing photo(s) from the Product Map",
+            skipped, updated,
+        )
+    elif updated:
         log.info(
             "apply_catalog_photos: replaced photos for %d of %d item(s) "
             "with canonical Product Map images",
@@ -4287,6 +4359,16 @@ def _save_cache_sqlite(
             "Cache saved (SQLite): %d item(s) -> %s",
             len(resolved), db_path.name,
         )
+        # Truncate the write-ahead log back to disk.  Long-lived reader
+        # connections (e.g. the dashboard's cached read-only handle) prevent
+        # passive auto-checkpoints from shrinking the WAL, so it can balloon to
+        # tens of MB and slow every subsequent query.  A best-effort TRUNCATE
+        # checkpoint keeps the database compact; it is a no-op if a reader is
+        # currently active and never blocks the route output.
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception as exc:  # pragma: no cover - housekeeping only
+            log.debug("WAL checkpoint skipped: %s", exc)
     finally:
         conn.close()
 
@@ -4869,6 +4951,23 @@ def _section_complete(status: str | None) -> bool:
     Both "Purchased" and "Out of Production" are terminal — no further action.
     """
     return status in ("Purchased", "Out of Production")
+
+
+# Cell-value readers shared by the ready-to-ship importer.  They are
+# language-agnostic so an employee's English- *or* Chinese-edited checklist is
+# read identically.
+_PURCHASED_VALUES = {"已购买", "Purchased"}
+_NA_VALUES        = {"不适用", "N/A", "NA", ""}
+
+
+def _status_is_purchased(value) -> bool:
+    """True when a component status cell reads as 'Purchased' (any language)."""
+    return str(value or "").strip() in _PURCHASED_VALUES
+
+
+def _status_is_na(value) -> bool:
+    """True when a component cell is N/A / blank (component not in this order)."""
+    return str(value or "").strip() in _NA_VALUES
 
 
 def _charm_status_key(r: ResolvedItem) -> tuple[str, str, str]:
@@ -5597,24 +5696,56 @@ def fill_charm_library_vision_sku(
     return updated, lines
 
 
+def _charm_photo_for_code(
+    code: str,
+    charm_library: dict[str, CharmLibraryEntry] | None,
+    charm_images_dir: Path | None = None,
+) -> bytes | None:
+    """Resolve a charm's photo by code using the SAME source of truth as the
+    Orders Sorting Dashboard, so the route Excel/HTML and the dashboard gallery
+    can never show different images for the same charm.
+
+    Source-of-truth ordering (critical — do not reorder):
+
+      1. On-disk ``data/charm_images/<code>.<ext>`` — this is exactly what the
+         dashboard reads via ``GET /api/route/charm-image`` AND exactly what it
+         (re)writes whenever the operator uploads/replaces a charm image
+         (``saveCharmImage`` → ``<code>.<ext>``).  It is therefore the single
+         live source of truth and MUST win.
+
+      2. Charm Library BLOB in the SQLite mirror (``charm_library.photo``) — a
+         fallback only.  This BLOB is seeded once and is NOT refreshed when the
+         operator replaces an image from the dashboard, so it goes stale; it may
+         only be used for legacy codes that have no on-disk file yet.
+
+    Previously the BLOB was consulted first, which is why a charm updated in the
+    dashboard kept showing its OLD image in the generated Excel.
+    """
+    code = (code or "").strip()
+    if not code:
+        return None
+    disk = charm_photo_bytes_from_folder(code, charm_images_dir)
+    if disk:
+        return disk
+    if charm_library:
+        ent = charm_library.get(code)
+        if ent and ent.photo_bytes:
+            return ent.photo_bytes
+    return None
+
+
 def _resolve_charm_photo_bytes(
     r: ResolvedItem,
     charm_library: dict[str, CharmLibraryEntry] | None,
     charm_images_dir: Path | None = None,
 ) -> bytes | None:
-    """Resolve charm photo: Charm Library embed FIRST (canonical source — the
-    same photo the user sees in the dashboard's charm gallery), with the
-    on-disk folder only as a fallback for codes not yet in the library."""
+    """Resolve the charm photo for a resolved order line (see
+    :func:`_charm_photo_for_code` for the source-of-truth ordering)."""
     if not r.supplier:
         return None
-    code = (r.supplier.charm_code or "").strip()
-    if not code:
-        return None
-    if charm_library:
-        ent = charm_library.get(code)
-        if ent and ent.photo_bytes:
-            return ent.photo_bytes
-    return charm_photo_bytes_from_folder(code, charm_images_dir)
+    return _charm_photo_for_code(
+        r.supplier.charm_code, charm_library, charm_images_dir
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -7269,10 +7400,10 @@ def _sheet_route(ws, items: list[ResolvedItem],
         #   2. r.supplier.charm_shop (fallback for codes not yet in library)
         #   3. "" (empty — row shows "--")
         #
-        # Photo resolution priority (always prefer the Charm Library tab):
-        #   1. CharmLibraryEntry.photo_bytes (embedded in supplier_catalog.xlsx)
-        #   2. charm_photo_bytes_from_folder  (on-disk fallback)
-        #   3. None                            (no photo — cell left blank)
+        # Photo resolution is delegated to _charm_photo_for_code so it matches
+        # the dashboard exactly: on-disk charm_images/<code>.<ext> FIRST (the
+        # live source of truth the dashboard reads + writes), Charm Library BLOB
+        # only as a legacy fallback.
         _charm_agg: dict[str, dict] = {}
         for _ci in _coded_items:
             _cc  = _ci.supplier.charm_code.strip()
@@ -7286,11 +7417,9 @@ def _sheet_route(ws, items: list[ResolvedItem],
             if not _cs:
                 _cs = (_ci.supplier.charm_shop if _ci.supplier else "").strip()
             if _cc not in _charm_agg:
-                # Photo: Charm Library embed FIRST (matches the dashboard's
-                # gallery tiles), on-disk folder second.
-                _ph = _lib.photo_bytes if _lib and _lib.photo_bytes else None
-                if not _ph:
-                    _ph = charm_photo_bytes_from_folder(_cc, charm_images_dir)
+                # Same source of truth as the dashboard: on-disk image first,
+                # Charm Library BLOB fallback (see _charm_photo_for_code).
+                _ph = _charm_photo_for_code(_cc, charm_library, charm_images_dir)
                 _charm_agg[_cc] = {
                     "code": _cc,
                     "sku": _lib.sku if _lib else "",
@@ -7799,13 +7928,16 @@ def _sheet_orders(ws, items: list[ResolvedItem], lang: str = "en", title_fn=None
         if r.order.private_notes:
             ws.cell(row, _pn).alignment = _WRAP
         ws.row_dimensions[row].height = ROW_HEIGHT
-        _, _, _has_charm = _style_has(r.item.style)
-        _od_ph = (
-            (_resolve_charm_photo_bytes(r, charm_library, charm_images_dir)
-             or r.item.photo_bytes)
-            if _has_charm else r.item.photo_bytes
-        )
-        _embed_photo(ws, _od_ph, row, _ph)
+        # The Orders Detail "Photo" column mirrors the Orders Sorting Dashboard's
+        # per-order thumbnail, which is ALWAYS the product (phone-case) image —
+        # never the charm.  A charm's presence is already conveyed by the ✓ in
+        # the Charm column, and the charm's own photo lives in the Shopping Route
+        # charm section / Charm Library.  Previously this column showed the charm
+        # bead image whenever the style included a charm, producing a photo that
+        # contradicted both the dashboard and the row's own Product title (e.g. a
+        # "Tamagotchi Clear MagSafe Case" row displaying a bead bracelet).  The
+        # product photo is the single source of truth here.
+        _embed_photo(ws, r.item.photo_bytes, row, _ph)
         row += 1
 
     if lang == "zh":
@@ -7978,16 +8110,25 @@ def _sheet_route_simple(
     charm_library: dict[str, CharmLibraryEntry] | None = None,
     charm_images_dir: Path | None = None,
     lang: str = "en",
+    show_components: bool | None = None,
 ) -> None:
     ws.title = _t("Shopping Route", lang)
     ws.sheet_properties.tabColor = "1F4E79"
 
     # Chinese version omits the Private Notes column (col 10) to keep the
     # sheet compact — private notes are English-only buyer messages.
-    # Chinese version also omits the individual Case / Grip status columns
-    # (cols 6-7) — 待购项 is sufficient for employees.
+    #
+    # Case / Grip status columns (cols 6-7):
+    #   • English  → always shown.
+    #   • Chinese  → hidden by default (the compact 待购项 column is enough),
+    #                but forced ON for the extra "Chinese + status" workbook
+    #                via show_components=True, so the purchasing employee can
+    #                record the per-component buy status (Pending / Purchased /
+    #                Out of Stock / Out of Production) directly — mirroring the
+    #                full route. The Charm status column lives in Section 2 and
+    #                already carries the same dropdown in both languages.
     _has_notes_col  = lang != "zh"
-    _has_comp_cols  = lang != "zh"   # Case + Grip columns present only in EN
+    _has_comp_cols  = (lang != "zh") if show_components is None else show_components
     if _has_notes_col:
         COLS = 10
     elif _has_comp_cols:
@@ -8334,9 +8475,9 @@ def _sheet_route_simple(
             if not _cs:
                 _cs = (_ci.supplier.charm_shop if _ci.supplier else "").strip()
             if _cc not in _charm_agg:
-                _ph = _lib.photo_bytes if _lib and _lib.photo_bytes else None
-                if not _ph:
-                    _ph = charm_photo_bytes_from_folder(_cc, charm_images_dir)
+                # Same source of truth as the dashboard: on-disk image first,
+                # Charm Library BLOB fallback (see _charm_photo_for_code).
+                _ph = _charm_photo_for_code(_cc, charm_library, charm_images_dir)
                 _charm_agg[_cc] = {
                     "code": _cc,
                     "default_shop": _lib.default_charm_shop if _lib else "",
@@ -8624,9 +8765,9 @@ def _sheet_route_simple(
                 row += 1
 
     # ── Column widths ─────────────────────────────────────────────────────
-    # EN (10 cols): # | Photo | Supplier | Stall | ITP | Case | Grip | Phone | Qty | Notes
-    # EN-no-notes (9 cols): same minus Notes
-    # ZH (7 cols):  # | Photo | Supplier | Stall | ITP | Phone | Qty
+    # EN (10 cols):      # | Photo | Supplier | Stall | ITP | Case | Grip | Phone | Qty | Notes
+    # ZH + status (9):   same minus Notes  (Chinese employee status file)
+    # ZH compact (7):    # | Photo | Supplier | Stall | ITP | Phone | Qty  (no comp cols)
     if _has_notes_col:
         col_widths = [4, _photo_col_w, 14, 14, 9, 10, 8, 8, 18, 32]
     elif _has_comp_cols:
@@ -8649,12 +8790,19 @@ def generate_xlsx_simple(
     charm_library: dict[str, CharmLibraryEntry] | None = None,
     charm_images_dir: Path | None = None,
     lang: str = "en",
+    show_components: bool | None = None,
 ) -> None:
     """Generate the simplified single-sheet shopping route workbook.
 
     Pass ``lang='zh'`` to produce the Chinese-translated variant, which uses
     the same compact layout as the English simple version but with Simplified
     Chinese column headers, section banners, and status dropdown values.
+
+    ``show_components`` overrides whether the per-item Case / Grip status
+    columns are rendered.  When ``None`` (default) they follow the language
+    convention (shown for English, hidden for the compact Chinese file).  Pass
+    ``True`` to force them on — used for the extra Chinese status-tracking
+    workbook so employees can record each component's buy status in-file.
     """
     wb = openpyxl.Workbook()
     _sheet_route_simple(
@@ -8664,6 +8812,7 @@ def generate_xlsx_simple(
         charm_library=charm_library,
         charm_images_dir=charm_images_dir,
         lang=lang,
+        show_components=show_components,
     )
     from openpyxl.worksheet.page import PageMargins
     ws = wb.active
@@ -8678,6 +8827,526 @@ def generate_xlsx_simple(
     )
     wb.save(output)
     log.info("Simple route saved -> %s", output.resolve())
+
+
+# ---------------------------------------------------------------------------
+# Extra workbook 1 -- Order-status checklist (employee purchase verification)
+# ---------------------------------------------------------------------------
+#
+# A Simplified-Chinese, ORDER-centric status sheet.  It reuses the full-route
+# column set MINUS the supplier-shopping columns (Floor / Supplier / Stall /
+# Product) so it reads as a clean per-order checklist.  Employees take this
+# file shopping and, for every order, set each component's dropdown to record
+# whether the Case / Grip / Charm was actually purchased.  Its sibling builder
+# ``build_ready_to_ship_from_check`` reads this exact sheet back to produce the
+# "ready to package & ship" report (extra workbook 2).
+
+def generate_xlsx_status_check(
+    items: list[ResolvedItem],
+    output: Path,
+    statuses: dict[tuple[str, str, str], str] | None = None,
+    charm_shops: list[CharmShop] | None = None,
+    charm_library: dict[str, CharmLibraryEntry] | None = None,
+    charm_images_dir: Path | None = None,
+    lang: str = "zh",
+) -> int:
+    """Write the order-status checklist workbook; returns the line-item count.
+
+    Layout (the full route minus Floor/Supplier/Stall/Product):
+        # · Photo · Order # · Etsy Shop · Items to Purchase ·
+        Case · Grip · Charm · Phone Model · Qty · Private Notes
+
+    Rows are grouped by order (a thicker top border + alternating shade marks
+    each new order) so an employee verifies one order at a time.  The Case /
+    Grip / Charm cells carry the 4-state dropdown and recolour automatically as
+    they are edited.
+    """
+    _statuses = statuses or {}
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = STATUS_CHECK_SHEET if lang == "zh" else STATUS_CHECK_SHEET_EN
+    ws.sheet_properties.tabColor = "2E7D32"
+
+    # Column map (1-based).
+    COL_SEQ, COL_PHOTO, COL_ORDER, COL_SHOP, COL_ITP = 1, 2, 3, 4, 5
+    COL_CASE, COL_GRIP, COL_CHARM = 6, 7, 8
+    COL_PHONE, COL_QTY, COL_NOTES = 9, 10, 11
+    COLS = 11
+    HDR_ROW = 4
+    col_end = get_column_letter(COLS)
+
+    _row_h    = ZH_ROW_HEIGHT if lang == "zh" else ROW_HEIGHT
+    _photo_px = ZH_PHOTO_PX   if lang == "zh" else PHOTO_PX
+
+    # Column widths.
+    ws.column_dimensions[get_column_letter(COL_SEQ)].width   = 5
+    ws.column_dimensions[get_column_letter(COL_PHOTO)].width = ZH_PHOTO_COL_W if lang == "zh" else 14
+    ws.column_dimensions[get_column_letter(COL_ORDER)].width = 16
+    ws.column_dimensions[get_column_letter(COL_SHOP)].width  = 20
+    ws.column_dimensions[get_column_letter(COL_ITP)].width   = 14
+    for _c in (COL_CASE, COL_GRIP, COL_CHARM):
+        ws.column_dimensions[get_column_letter(_c)].width = 12
+    ws.column_dimensions[get_column_letter(COL_PHONE)].width = 18
+    ws.column_dimensions[get_column_letter(COL_QTY)].width   = 7
+    ws.column_dimensions[get_column_letter(COL_NOTES)].width = 32
+
+    # Title.
+    ws.merge_cells(f"A1:{col_end}1")
+    if lang == "zh":
+        title_text = f"订单采购核对  --  {date.today().strftime('%Y年%m月%d日')}"
+    else:
+        title_text = f"Order Purchase Check  --  {date.today().strftime('%B %d, %Y')}"
+    ws.cell(1, 1, title_text).font = _TITLE_FONT
+    ws.row_dimensions[1].height = 36
+
+    order_count = len({r.order.order_number for r in items})
+    total_qty   = sum(r.item.quantity for r in items)
+    ws.merge_cells(f"A2:{col_end}2")
+    if lang == "zh":
+        sub = (f"{len(items)} 件商品  |  {order_count} 个订单  |  共 {total_qty} 件"
+               f"  |  按订单分组，请逐单核对采购状态")
+    else:
+        sub = (f"{len(items)} items  |  {order_count} orders  |  {total_qty} qty"
+               f"  |  grouped by order — verify the purchase status of each order")
+    ws.cell(2, 1, sub).font = _SUB_FONT
+    ws.row_dimensions[2].height = 22
+
+    # Legend.
+    ws.merge_cells(f"A3:{col_end}3")
+    if lang == "zh":
+        legend = ("在 手机壳 / 支架 / 挂件 列用下拉框更新状态：  "
+                  "已购买（绿）|  待处理（白）|  缺货（黄）|  停产（红）|  不适用（灰，本单不含该部件）")
+    else:
+        legend = ("Update the Case / Grip / Charm columns via the dropdown:  "
+                  "Purchased (green) | Pending (white) | Out of Stock (amber) | "
+                  "Out of Production (red) | N/A (gray)")
+    ws.cell(3, 1, legend).font = Font("Calibri", size=9, italic=True, color="555555")
+    ws.row_dimensions[3].height = 14
+
+    # Header.
+    HDRS = [
+        "#", _t("Photo", lang), _t("Order #", lang), _t("Etsy Shop", lang),
+        _t("Items to Purchase", lang), _t("Case", lang), _t("Grip", lang),
+        _t("Charm", lang), _t("Phone Model", lang), _t("Qty", lang),
+        _t("Private Notes", lang),
+    ]
+    for ci, h in enumerate(HDRS, 1):
+        ws.cell(HDR_ROW, ci, h)
+    _style_header(ws, HDR_ROW, COLS)
+    ws.cell(HDR_ROW, COL_ITP).fill   = PatternFill("solid", fgColor="2E7D32")
+    ws.cell(HDR_ROW, COL_CASE).fill  = PatternFill("solid", fgColor="1A6B3C")
+    ws.cell(HDR_ROW, COL_GRIP).fill  = PatternFill("solid", fgColor="1A3D6B")
+    ws.cell(HDR_ROW, COL_CHARM).fill = PatternFill("solid", fgColor="5B1A6B")
+    ws.row_dimensions[HDR_ROW].height = 18
+    ws.freeze_panes = f"A{HDR_ROW + 1}"
+
+    # Group by order, preserving the (date-ordered) encounter sequence so the
+    # employee works through orders in the same order the dashboard shows.
+    by_order: dict[str, list[ResolvedItem]] = {}
+    order_seq: list[str] = []
+    for r in items:
+        onum = str(r.order.order_number)
+        if onum not in by_order:
+            by_order[onum] = []
+            order_seq.append(onum)
+        by_order[onum].append(r)
+
+    _status_opts = ZH_STATUS_OPTIONS if lang == "zh" else STATUS_OPTIONS
+    dv = DataValidation(
+        type="list", formula1=f'"{",".join(_status_opts)}"',
+        allow_blank=False, showDropDown=False, showErrorMessage=True,
+        error=("请从下拉列表中选择一个值。" if lang == "zh" else "Pick a value from the dropdown."),
+        errorTitle=("状态无效" if lang == "zh" else "Invalid status"),
+    )
+    ws.add_data_validation(dv)
+
+    _TOP_BORDER = Border(
+        left=_THIN, right=_THIN, bottom=_THIN,
+        top=Side(style="medium", color="8FA0B3"),
+    )
+
+    def _comp_cell(row, col, has, onum, comp, title):
+        cell = ws.cell(row, col)
+        if has:
+            nt  = _normalize(title)[:50]
+            prv = _statuses.get((onum, nt, comp))
+            cell.value     = _t(prv, lang) if prv else _t("Pending", lang)
+            cell.alignment = _CENTER
+            dv.add(cell)
+        else:
+            cell.value     = _t("N/A", lang)
+            cell.fill      = _NA_FILL
+            cell.font      = _NA_FONT
+            cell.alignment = _CENTER
+
+    row = HDR_ROW + 1
+    first_data_row = row
+    seq = 1
+    for gidx, onum in enumerate(order_seq):
+        fill = _GROUP_FILLS[gidx % 2]
+        for i, r in enumerate(by_order[onum]):
+            has_case, has_grip, has_charm = _style_has(r.item.style)
+            nt = _normalize(r.item.title)[:50]
+            cs = _statuses.get((onum, nt, "case"))
+            gs = _statuses.get((onum, nt, "grip"))
+            itp = _items_to_purchase(has_case, has_grip, cs, gs, lang)
+
+            ws.cell(row, COL_SEQ, seq)
+            ws.cell(row, COL_ORDER, f"#{onum}")
+            ws.cell(row, COL_SHOP, r.order.etsy_shop or "")
+            itpc = ws.cell(row, COL_ITP, itp)
+            itpc.alignment = _CENTER
+            itpc.font      = _ITEMS_TO_PURCHASE_FONT
+            _comp_cell(row, COL_CASE,  has_case,  onum, "case",  r.item.title)
+            _comp_cell(row, COL_GRIP,  has_grip,  onum, "grip",  r.item.title)
+            _comp_cell(row, COL_CHARM, has_charm, onum, "charm", r.item.title)
+            ws.cell(row, COL_PHONE, r.item.phone_model or "")
+            ws.cell(row, COL_QTY,   r.item.quantity)
+            if r.order.private_notes:
+                ws.cell(row, COL_NOTES, r.order.private_notes)
+
+            _style_row(ws, row, COLS, fill=fill)
+            # Re-apply per-cell styling cleared by _style_row.
+            for c, has in ((COL_CASE, has_case), (COL_GRIP, has_grip), (COL_CHARM, has_charm)):
+                cc = ws.cell(row, c)
+                if not has:
+                    cc.fill = _NA_FILL
+                    cc.font = _NA_FONT
+                cc.alignment = _CENTER
+            ws.cell(row, COL_SEQ).alignment   = _CENTER
+            ws.cell(row, COL_ORDER).alignment = _CENTER
+            ws.cell(row, COL_QTY).alignment   = _CENTER
+            if r.order.private_notes:
+                ws.cell(row, COL_NOTES).alignment = _WRAP
+            # Thicker top border marks the first row of each new order group.
+            if i == 0:
+                for c in range(1, COLS + 1):
+                    ws.cell(row, c).border = _TOP_BORDER
+            ws.row_dimensions[row].height = _row_h
+            _embed_photo(ws, r.item.photo_bytes, row, COL_PHOTO, _photo_px)
+            row += 1
+            seq += 1
+
+    last_data_row = row - 1
+
+    # Conditional formatting — each status column recolours by value so an
+    # employee's edits are immediately visible.
+    if last_data_row >= first_data_row:
+        _done = _t("Purchased", lang)
+        _oos  = _t("Out of Stock", lang)
+        _oop  = _t("Out of Production", lang)
+        for col in (COL_CASE, COL_GRIP, COL_CHARM):
+            L   = get_column_letter(col)
+            rng = f"{L}{first_data_row}:{L}{last_data_row}"
+            ws.conditional_formatting.add(rng, FormulaRule(
+                formula=[f'{L}{first_data_row}="{_oop}"'],
+                fill=_STATUS_FILLS["Out of Production"],
+                font=_STATUS_FONTS["Out of Production"], stopIfTrue=True))
+            ws.conditional_formatting.add(rng, FormulaRule(
+                formula=[f'{L}{first_data_row}="{_oos}"'],
+                fill=_STATUS_FILLS["Out of Stock"],
+                font=_STATUS_FONTS["Out of Stock"], stopIfTrue=True))
+            ws.conditional_formatting.add(rng, FormulaRule(
+                formula=[f'{L}{first_data_row}="{_done}"'],
+                fill=_STATUS_FILLS["Purchased"],
+                font=_STATUS_FONTS["Purchased"], stopIfTrue=True))
+
+    from openpyxl.worksheet.page import PageMargins
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.paperSize   = ws.PAPERSIZE_A4
+    ws.page_setup.fitToPage   = True
+    ws.page_setup.fitToWidth  = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_margins = PageMargins(
+        left=0.4, right=0.4, top=0.6, bottom=0.6, header=0.3, footer=0.3,
+    )
+
+    wb.save(output)
+    log.info("Order-status checklist saved -> %s", output.resolve())
+    return len(items)
+
+
+# ---------------------------------------------------------------------------
+# Extra workbook 2 -- Ready-to-ship report (built from the checklist file)
+# ---------------------------------------------------------------------------
+#
+# Reads the (employee-edited) order-status checklist and lists every order
+# whose components are ALL Purchased — i.e. fully bought and ready to package &
+# ship.  Reading is done by HEADER NAME (Chinese or English), so the importer
+# tolerates column reordering and either language.
+
+_CHECK_HEADER_ALIASES: dict[str, set[str]] = {
+    "order": {"订单号", "Order #", "Order#", "Order No", "Order"},
+    "shop":  {"Etsy店铺", "Etsy Shop", "Shop"},
+    "itp":   {"待购项", "Items to Purchase"},
+    "case":  {"手机壳", "Case"},
+    "grip":  {"支架", "Grip"},
+    "charm": {"挂件", "Charm"},
+    "phone": {"手机型号", "Phone Model", "Model"},
+    "qty":   {"数量", "Qty", "Quantity"},
+    "notes": {"私信备注", "Private Notes", "买家备注", "Notes"},
+    "photo": {"图片", "Photo"},
+}
+
+
+def _locate_check_headers(ws) -> tuple[int | None, dict[str, int]]:
+    """Find the header row + column map in a checklist sheet (1-based indices)."""
+    max_col = ws.max_column or 0
+    for hr in range(1, 13):
+        found: dict[str, int] = {}
+        for ci in range(1, max_col + 1):
+            v = ws.cell(hr, ci).value
+            if v is None:
+                continue
+            s = str(v).strip()
+            for key, names in _CHECK_HEADER_ALIASES.items():
+                if s in names and key not in found:
+                    found[key] = ci
+        # A valid header row identifies the order column plus a component column.
+        if "order" in found and ("case" in found or "grip" in found or "charm" in found):
+            return hr, found
+    return None, {}
+
+
+def build_ready_to_ship_from_check(
+    check_path: Path,
+    output: Path,
+    lang: str = "zh",
+) -> int:
+    """Build the ready-to-ship report from an edited checklist file.
+
+    An order is "ready" only when every applicable component cell (Case / Grip
+    / Charm that is not N/A) across all its rows reads 'Purchased'.  Returns the
+    number of ready orders written.
+    """
+    try:
+        wb = openpyxl.load_workbook(check_path, data_only=True)
+    except Exception as exc:
+        raise ValueError(f"Could not open checklist file: {exc}") from exc
+    ws = wb.worksheets[0]
+    sheet_name = ws.title
+
+    hr, cols = _locate_check_headers(ws)
+    if hr is None:
+        wb.close()
+        raise ValueError(
+            "Could not find the checklist header row (订单号 / 手机壳 …). "
+            "Make sure this is the order-status checklist file (shopping_route_zh_check.xlsx)."
+        )
+
+    def gv(vals, key):
+        ci = cols.get(key)
+        return vals[ci - 1] if ci and (ci - 1) < len(vals) else None
+
+    rows: list[dict] = []
+    last_order = ""
+    for excel_row, vals in enumerate(
+        ws.iter_rows(min_row=hr + 1, values_only=True), start=hr + 1
+    ):
+        if not vals or all(v is None for v in vals):
+            continue
+        order_raw = str(gv(vals, "order") or "").strip().lstrip("#").strip()
+        if order_raw:
+            last_order = order_raw
+        order = order_raw or last_order   # forward-fill across blank order cells
+        if not order or not order.isdigit():
+            continue
+        case_v, grip_v, charm_v = gv(vals, "case"), gv(vals, "grip"), gv(vals, "charm")
+        if case_v is None and grip_v is None and charm_v is None:
+            continue   # spacer / banner row — no component data
+        qty_v = gv(vals, "qty")
+        if isinstance(qty_v, (int, float)):
+            qty = int(qty_v)
+        elif isinstance(qty_v, str) and qty_v.strip().isdigit():
+            qty = int(qty_v.strip())
+        else:
+            qty = 1
+        rows.append({
+            "excel_row": excel_row,
+            "order":     order,
+            "shop":      str(gv(vals, "shop") or "").strip(),
+            "itp":       str(gv(vals, "itp") or "").strip(),
+            "case":      case_v,
+            "grip":      grip_v,
+            "charm":     charm_v,
+            "phone":     str(gv(vals, "phone") or "").strip(),
+            "qty":       qty,
+            "notes":     str(gv(vals, "notes") or "").strip(),
+            "photo":     None,
+        })
+    wb.close()
+
+    # Pull embedded product photos so the report can show what to pack.
+    try:
+        photo_idx = cols.get("photo", 2) - 1
+        photos = extract_photos_from_xlsx(
+            check_path, sheet_name=sheet_name, photo_col_idx=photo_idx
+        )
+        for rec in rows:
+            rec["photo"] = photos.get(rec["excel_row"])
+    except Exception as exc:
+        log.warning("ready-to-ship: could not extract photos: %s", exc)
+
+    # Group by order, then keep only orders where every applicable component
+    # is Purchased.
+    grouped: "dict[str, list[dict]]" = {}
+    order_seq: list[str] = []
+    for rec in rows:
+        if rec["order"] not in grouped:
+            grouped[rec["order"]] = []
+            order_seq.append(rec["order"])
+        grouped[rec["order"]].append(rec)
+
+    ready: list[tuple[str, list[dict]]] = []
+    for onum in order_seq:
+        recs = grouped[onum]
+        applicable = 0
+        all_purchased = True
+        for rec in recs:
+            for comp in ("case", "grip", "charm"):
+                if _status_is_na(rec[comp]):
+                    continue
+                applicable += 1
+                if not _status_is_purchased(rec[comp]):
+                    all_purchased = False
+        if applicable > 0 and all_purchased:
+            ready.append((onum, recs))
+
+    _write_ready_workbook(ready, output, check_path.name, lang)
+    return len(ready)
+
+
+def _write_ready_workbook(
+    ready: list[tuple[str, list[dict]]],
+    output: Path,
+    source_name: str,
+    lang: str = "zh",
+) -> None:
+    """Render the ready-to-ship workbook: one row per fully-purchased order."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = READY_SHIP_SHEET if lang == "zh" else READY_SHIP_SHEET_EN
+    ws.sheet_properties.tabColor = "2E7D32"
+
+    COLS = 8
+    col_end = get_column_letter(COLS)
+    HDR_ROW = 3
+    widths = [5, 16, 20, 9, 10, 48, 30, 16]
+    for ci, w in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(ci)].width = w
+
+    # Title.
+    ws.merge_cells(f"A1:{col_end}1")
+    if lang == "zh":
+        title = f"可发货订单（全部已购买）  --  {date.today().strftime('%Y年%m月%d日')}"
+    else:
+        title = f"Ready to Ship (All Purchased)  --  {date.today().strftime('%B %d, %Y')}"
+    ws.cell(1, 1, title).font = _TITLE_FONT
+    ws.row_dimensions[1].height = 36
+
+    total_items = sum(len(recs) for _, recs in ready)
+    total_qty   = sum(rec["qty"] for _, recs in ready for rec in recs)
+    ws.merge_cells(f"A2:{col_end}2")
+    if lang == "zh":
+        sub = (f"{len(ready)} 个可发货订单  |  {total_items} 件商品  |  共 {total_qty} 件"
+               f"  |  源文件：{source_name}")
+    else:
+        sub = (f"{len(ready)} ready order(s)  |  {total_items} items  |  {total_qty} qty"
+               f"  |  source: {source_name}")
+    ws.cell(2, 1, sub).font = _SUB_FONT
+    ws.row_dimensions[2].height = 22
+
+    HDRS = (["#", "订单号", "Etsy店铺", "商品数", "总数量", "商品明细", "私信备注", "打包发货状态"]
+            if lang == "zh" else
+            ["#", "Order #", "Etsy Shop", "Items", "Total Qty", "Item Details",
+             "Private Notes", "Pack / Ship Status"])
+    for ci, h in enumerate(HDRS, 1):
+        ws.cell(HDR_ROW, ci, h)
+    _style_header(ws, HDR_ROW, COLS)
+    ws.row_dimensions[HDR_ROW].height = 20
+    ws.freeze_panes = f"A{HDR_ROW + 1}"
+
+    if not ready:
+        ws.merge_cells(start_row=HDR_ROW + 1, start_column=1,
+                       end_row=HDR_ROW + 1, end_column=COLS)
+        msg = ("暂无可发货订单 —— 请确认采购状态（手机壳 / 支架 / 挂件）已全部标记为「已购买」"
+               if lang == "zh" else
+               "No orders are ready yet — make sure every Case / Grip / Charm is marked Purchased.")
+        c = ws.cell(HDR_ROW + 1, 1, msg)
+        c.font, c.fill, c.alignment, c.border = _WARN_FONT, _WARN_FILL, _CENTER, _BORDER
+        ws.row_dimensions[HDR_ROW + 1].height = 28
+    else:
+        _ready_fill = PatternFill("solid", fgColor="EAF7EE")
+        _pack_opts  = ZH_PACK_OPTIONS if lang == "zh" else EN_PACK_OPTIONS
+        dv = DataValidation(
+            type="list", formula1=f'"{",".join(_pack_opts)}"',
+            allow_blank=True, showDropDown=False,
+        )
+        ws.add_data_validation(dv)
+
+        row = HDR_ROW + 1
+        seq = 1
+        for onum, recs in ready:
+            shop  = next((r["shop"] for r in recs if r["shop"]), "")
+            notes = next((r["notes"] for r in recs if r["notes"]), "")
+            qty   = sum(r["qty"] for r in recs)
+            detail_lines = []
+            for r in recs:
+                label = r["phone"] or ("商品" if lang == "zh" else "item")
+                detail_lines.append(f"• {label}  ×{r['qty']}")
+            detail = "\n".join(detail_lines)
+
+            ws.cell(row, 1, seq)
+            ws.cell(row, 2, f"#{onum}")
+            ws.cell(row, 3, shop)
+            ws.cell(row, 4, len(recs))
+            ws.cell(row, 5, qty)
+            ws.cell(row, 6, detail)
+            ws.cell(row, 7, notes)
+            pcell = ws.cell(row, 8, _pack_opts[0])
+            dv.add(pcell)
+
+            _style_row(ws, row, COLS, fill=_ready_fill)
+            for c in (1, 2, 4, 5, 8):
+                ws.cell(row, c).alignment = _CENTER
+            ws.cell(row, 6).alignment = _WRAP
+            ws.cell(row, 7).alignment = _WRAP
+            ws.row_dimensions[row].height = max(22, 15 * len(recs) + 8)
+            row += 1
+            seq += 1
+
+        # Pack/ship status colours.
+        last_row = row - 1
+        if last_row >= HDR_ROW + 1:
+            L   = get_column_letter(8)
+            rng = f"{L}{HDR_ROW + 1}:{L}{last_row}"
+            _shipped = _pack_opts[2]
+            _packed  = _pack_opts[1]
+            ws.conditional_formatting.add(rng, FormulaRule(
+                formula=[f'{L}{HDR_ROW + 1}="{_shipped}"'],
+                fill=_STATUS_FILLS["Purchased"],
+                font=_STATUS_FONTS["Purchased"], stopIfTrue=True))
+            ws.conditional_formatting.add(rng, FormulaRule(
+                formula=[f'{L}{HDR_ROW + 1}="{_packed}"'],
+                fill=_STATUS_FILLS["Out of Stock"],
+                font=_STATUS_FONTS["Out of Stock"], stopIfTrue=True))
+
+    from openpyxl.worksheet.page import PageMargins
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.paperSize   = ws.PAPERSIZE_A4
+    ws.page_setup.fitToPage   = True
+    ws.page_setup.fitToWidth  = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_margins = PageMargins(
+        left=0.4, right=0.4, top=0.6, bottom=0.6, header=0.3, footer=0.3,
+    )
+
+    wb.save(output)
+    log.info("Ready-to-ship report saved -> %s (%d ready order(s))",
+             output.resolve(), len(ready))
 
 
 # ---------------------------------------------------------------------------
@@ -9320,11 +9989,9 @@ def generate_html(items: list[ResolvedItem], output: Path,
                     "orders": [],
                     "items": [],
                 }
-                # Charm Library embed first, on-disk folder fallback — the
-                # Charm Library tab is the canonical photo source.
-                _hph = _hlib.photo_bytes if _hlib and _hlib.photo_bytes else None
-                if not _hph:
-                    _hph = charm_photo_bytes_from_folder(_hcc, charm_images_dir)
+                # Same source of truth as the dashboard: on-disk image first,
+                # Charm Library BLOB fallback (see _charm_photo_for_code).
+                _hph = _charm_photo_for_code(_hcc, charm_library, charm_images_dir)
                 _h_agg[_hcc]["photo_bytes"] = _hph
             _h_agg[_hcc]["total_qty"] += _hci.item.quantity
             _h_agg[_hcc]["orders"].append(_hci.order.order_number)
@@ -10159,6 +10826,69 @@ loadSavedStatuses();
 # ---------------------------------------------------------------------------
 
 
+class RouteOutputLockedError(SystemExit):
+    """Raised when a target route file is locked (e.g. open in Excel)."""
+
+
+def _assert_route_outputs_writable(
+    output_path: Path, *, want_chinese: bool, want_html: bool
+) -> None:
+    """Fail fast — *before* the slow build — if any route output file is locked.
+
+    On Windows a workbook open in Excel holds an exclusive lock, so the later
+    ``wb.save()`` raises ``PermissionError`` part-way through the run.  Because
+    the full + simple files are written before the Chinese one, a locked
+    ``_zh.xlsx`` lets the first two succeed while the Chinese file is left
+    untouched — which is exactly why "I regenerate but the Excel never changes".
+
+    We probe every file we are about to write and, if any are locked, abort
+    immediately with one clear, actionable message naming the file(s) to close,
+    instead of doing all the work and then crashing with a raw traceback.
+    """
+    targets: list[Path] = [
+        output_path,
+        output_path.with_stem(output_path.stem + "_simple"),
+    ]
+    if want_chinese:
+        targets.append(output_path.with_stem(output_path.stem + "_zh"))
+        targets.append(output_path.with_stem(output_path.stem + "_zh_status"))
+        targets.append(output_path.with_stem(output_path.stem + "_zh_check"))
+    if want_html:
+        targets.append(output_path.with_suffix(".html"))
+        if want_chinese:
+            targets.append(
+                output_path.with_stem(output_path.stem + "_zh").with_suffix(".html")
+            )
+
+    locked: list[str] = []
+    for p in targets:
+        if not p.exists():
+            continue  # nothing to overwrite — guaranteed writable
+        try:
+            # Open for read+write WITHOUT truncating; this acquires the same
+            # write access wb.save needs, so it fails iff the file is locked.
+            with open(p, "r+b"):
+                pass
+        except PermissionError:
+            locked.append(p.name)
+        except OSError:
+            # Other transient IO errors are not a lock — let the real save report them.
+            pass
+
+    if locked:
+        names = ", ".join(sorted(set(locked)))
+        log.error(
+            "Route output file(s) locked: %s — open in Excel or another program. "
+            "Close the file(s) and run the generation again.",
+            names,
+        )
+        # A recognisable, single-line message the dashboard can surface verbatim.
+        raise RouteOutputLockedError(
+            f"ROUTE_OUTPUT_LOCKED: {names} is open in Excel. "
+            f"Close it and click Generate again."
+        )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Generate a shopping route from Etsy order PDFs + supplier catalog."
@@ -10528,6 +11258,20 @@ def main() -> None:
             "--import-json orders_export.json --refresh-catalog"
         ),
     )
+    ap.add_argument(
+        "--build-ready-from",
+        default="",
+        metavar="FILE",
+        help=(
+            "Build the ready-to-ship report from an (employee-edited) order-status "
+            "checklist workbook (shopping_route_zh_check.xlsx). Reads each order's "
+            "Case / Grip / Charm status and writes a workbook listing every order "
+            "whose components are ALL 'Purchased' — ready to package & ship. "
+            "Combine with --output to set the report path "
+            "(default: shopping_route_zh_ready.xlsx next to the input). "
+            "Runs standalone — no PDF parsing or catalog access."
+        ),
+    )
     args = ap.parse_args()
 
     if not args.import_charm_patterns:
@@ -10566,6 +11310,51 @@ def main() -> None:
         ap.error(
             "Use only one of --mark-product-discontinued and --mark-product-discontinued-row."
         )
+
+    # ------------------------------------------------------------------ #
+    # --build-ready-from: standalone ready-to-ship report                  #
+    # ------------------------------------------------------------------ #
+    # Reads an (employee-edited) order-status checklist and writes the list of
+    # fully-purchased orders.  Runs entirely on its own — no PDF parsing, cache,
+    # or supplier catalog — so it stays fast and never touches the route state.
+    if (args.build_ready_from or "").strip():
+        src = Path(args.build_ready_from).expanduser().resolve()
+        if not src.is_file():
+            log.error("Checklist file not found: %s", src)
+            sys.exit(1)
+        ready_out = (
+            Path(args.output).expanduser().resolve()
+            if (args.output or "").strip() and args.output != OUTPUT_FILE
+            else src.with_name("shopping_route_zh_ready.xlsx")
+        )
+        try:
+            ready_out.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        # Fail fast if the report is open in Excel (Windows holds a write lock).
+        if ready_out.exists():
+            try:
+                with open(ready_out, "r+b"):
+                    pass
+            except PermissionError:
+                raise RouteOutputLockedError(
+                    f"ROUTE_OUTPUT_LOCKED: {ready_out.name} is open in Excel. "
+                    f"Close it and try again."
+                )
+            except OSError:
+                pass
+        try:
+            n_ready = build_ready_to_ship_from_check(src, ready_out, lang="zh")
+        except ValueError as exc:
+            log.error("%s", exc)
+            sys.exit(1)
+        print(f"\n{'=' * 60}")
+        print(f"  [READY]  {ready_out.resolve()}")
+        print(f"  READY_TO_SHIP_COUNT: {n_ready}")
+        print(f"  ({n_ready} order(s) fully purchased — ready to package & ship)")
+        print(f"  [source]  {src.name}")
+        print(f"{'=' * 60}\n")
+        sys.exit(0)
 
     # Resolve paths: --project-dir enables organized layout (data/, input/, output/, cache/)
     if args.project_dir:
@@ -11149,10 +11938,26 @@ def main() -> None:
         log.error("Catalog not found: %s", catalog_path)
         sys.exit(1)
 
+    # Fail fast if a route file we are about to (over)write is locked (open in
+    # Excel). Doing this here — before the multi-second build — turns a cryptic
+    # mid-run PermissionError + stale file into one clear, instant instruction.
+    _assert_route_outputs_writable(
+        output_path, want_chinese=bool(args.chinese), want_html=bool(args.html)
+    )
+
     # Ensure charm infrastructure + Product Map columns exist, then load catalog
     # so columns G/H/I are visible on the first run after an upgrade.
-    init_charm_shops_sheet(catalog_path)
-    init_charm_library_sheet(catalog_path)
+    #
+    # These two calls each fully load (and conditionally re-save) the supplier
+    # catalog workbook.  For a large catalog with embedded photos that file can
+    # be tens of MB, so loading it twice per run is a major fixed cost.  When the
+    # caller passed --no-catalog-update (the Unified Dashboard always does — it
+    # owns catalog edits and reads everything from the SQLite mirror) the xlsx is
+    # never written, so this structural init is pure overhead and is skipped.
+    # All catalog / charm / shop / photo reads below come from etsy_orders.db.
+    if not args.no_catalog_update:
+        init_charm_shops_sheet(catalog_path)
+        init_charm_library_sheet(catalog_path)
     catalog = load_catalog(catalog_path)
     charm_shops = load_charm_shops(catalog_path)
     charm_library = load_charm_library(catalog_path)
@@ -11313,8 +12118,18 @@ def main() -> None:
     #     regeneration without any manual steps.                           #
     # The updated photo_bytes are also written into the cache (step 7) so  #
     # subsequent regenerations are consistent.                             #
+    #                                                                      #
+    # When orders come from the Unified Dashboard (--import-json), the      #
+    # dashboard already supplies the exact listing image it renders for     #
+    # each line item, so that image is authoritative and must NOT be        #
+    # overwritten — otherwise the route Excel shows a different photo than  #
+    # the dashboard.  Catalog photos then only FILL IN items that arrived   #
+    # without an image (e.g. manual products with no upload).               #
     # ------------------------------------------------------------------ #
-    apply_catalog_photos_to_resolved(all_resolved, catalog_path)
+    apply_catalog_photos_to_resolved(
+        all_resolved, catalog_path,
+        fill_missing_only=bool(import_json_path),
+    )
 
     # ------------------------------------------------------------------ #
     # Step 5b -- (optional) Purge purchased sections                      #
@@ -11609,6 +12424,34 @@ def main() -> None:
                              lang="zh")
         log.info("Chinese version saved -> %s", zh_path.resolve())
 
+        # Extra Chinese status-tracking workbook — same Simplified-Chinese
+        # layout PLUS the per-item Case / Grip status columns (the Charm status
+        # column already lives in Section 2), each with the 4-state dropdown
+        # (待处理 / 已购买 / 缺货 / 停产).  Handed to employees so they can record
+        # the correct buy status for every order, mirroring the full route.
+        zh_status_path = output_path.with_stem(output_path.stem + "_zh_status")
+        generate_xlsx_simple(zh_items, zh_status_path, statuses=existing_statuses,
+                             charm_shops=charm_shops,
+                             charm_library=charm_library,
+                             charm_images_dir=charm_images_dir,
+                             lang="zh", show_components=True)
+        log.info("Chinese status version saved -> %s", zh_status_path.resolve())
+
+        # Extra Chinese order-status CHECKLIST — the full-route layout minus the
+        # supplier-shopping columns (Floor / Supplier / Stall / Product), grouped
+        # by order.  Employees take this shopping and tick off, per order, whether
+        # each Case / Grip / Charm was purchased.  Its companion report
+        # (shopping_route_zh_ready.xlsx) is built later from the edited copy via
+        # --build-ready-from.
+        zh_check_path = output_path.with_stem(output_path.stem + "_zh_check")
+        generate_xlsx_status_check(zh_items, zh_check_path,
+                                   statuses=existing_statuses,
+                                   charm_shops=charm_shops,
+                                   charm_library=charm_library,
+                                   charm_images_dir=charm_images_dir,
+                                   lang="zh")
+        log.info("Chinese order-status checklist saved -> %s", zh_check_path.resolve())
+
     # ------------------------------------------------------------------ #
     # Step 8c -- Optionally generate HTML file(s)                         #
     # ------------------------------------------------------------------ #
@@ -11704,6 +12547,10 @@ def main() -> None:
     if args.chinese:
         zh_path = output_path.with_stem(output_path.stem + "_zh")
         print(f"  [ZH]  {zh_path.resolve()}  ({zh_item_count} items  |  Simplified Chinese)")
+        zh_status_path = output_path.with_stem(output_path.stem + "_zh_status")
+        print(f"  [ZH+STATUS]  {zh_status_path.resolve()}  ({zh_item_count} items  |  Simplified Chinese + Case/Grip/Charm status)")
+        zh_check_path = output_path.with_stem(output_path.stem + "_zh_check")
+        print(f"  [ZH CHECK]   {zh_check_path.resolve()}  ({zh_item_count} items  |  per-order purchase checklist — no floor/supplier/stall/product)")
         if args.html and zh_items:
             zh_html_path = zh_path.with_suffix(".html")
             print(f"  [ZH HTML] {zh_html_path.resolve()}  (mobile-friendly Chinese)")
@@ -11723,4 +12570,22 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except RouteOutputLockedError:
+        # Already carries a clear, single-line "close the file" message.
+        raise
+    except PermissionError as _exc:
+        # A route file was opened in Excel AFTER the pre-flight check but before
+        # its save (a race) — convert the raw traceback into the same clear,
+        # actionable instruction the pre-flight uses.
+        _fname = getattr(_exc, "filename", "") or "a route file"
+        _name = Path(_fname).name if _fname else "a route file"
+        log.error(
+            "Could not write %s — it is open in Excel or another program. "
+            "Close it and run the generation again.", _name,
+        )
+        raise SystemExit(
+            f"ROUTE_OUTPUT_LOCKED: {_name} is open in Excel. "
+            f"Close it and click Generate again."
+        )

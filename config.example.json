@@ -18,18 +18,24 @@
   "fourpx_app_key": "YOUR_4PX_APP_KEY",
   "fourpx_app_secret": "YOUR_4PX_APP_SECRET",
 
-  "_fourpx_order_comment": "4PX shipping order creation settings. These three fields enable the 'Create 4PX Shipment' button on unshipped orders. fourpx_sender: your warehouse/shipper address in China. fourpx_warehouse_code: the 4PX warehouse code where you drop off packages (e.g. 'CNSZX01' for Shenzhen SZX, ask your 4PX account manager if unsure). fourpx_default_product: the default logistics product code used to pre-select the dropdown (e.g. 'BDS' for Business Direct Small — confirm with your 4PX account). Leave fourpx_sender null to disable the shipment creation feature.",
+  "_fourpx_order_comment": "4PX shipping order creation settings. These three fields enable the 'Create 4PX Shipment' button on unshipped orders. fourpx_sender: your registered shipper address — must match the address registered with your 4PX account. REQUIRED fields: first_name, country, city, post_code. IMPORTANT: post_code (sender ZIP/postal code) is required for ALL destinations — 4PX rejects orders without it with error DS000000. Australia, Canada, NZ, US, and GB also require phone. fourpx_warehouse_code: the 4PX warehouse/drop-off code (e.g. 'CNSZX01' for Shenzhen SZX — ask your 4PX account manager). fourpx_default_product: default logistics product code pre-selected in the drawer (e.g. 'BDS' or 'S5058'). Leave fourpx_sender null to disable shipment creation.",
   "fourpx_sender": {
-    "first_name": "Warehouse",
-    "company": "Your Company Name",
-    "phone": "+86-755-00000000",
+    "first_name": "YOUR NAME",
+    "company": "YOUR COMPANY",
+    "phone": "86XXXXXXXXXX",
     "country": "CN",
-    "city": "Shenzhen",
-    "state": "Guangdong",
-    "street": "Your warehouse address"
+    "state": "GUANGDONG",
+    "city": "GUANGDONG",
+    "street": "YOUR STREET ADDRESS",
+    "post_code": "XXXXXX"
   },
   "fourpx_warehouse_code": "CNSZX01",
   "fourpx_default_product": "BDS",
+
+  "_fourpx_ioss_comment": "EU VAT compliance. fourpx_ioss_no: your Import One-Stop Shop (IOSS) registration number — REQUIRED by 4PX for EU (EU27) destinations with a declared value <= EUR 150 (field 'ioss_no'). For marketplace sales (e.g. Etsy) use the platform's IOSS number. Format: 'IM' + 10 digits (12 chars, no spaces, no 'IOSS' prefix). The server attaches it automatically to every EU27 order. fourpx_vat_no / fourpx_eori_no: optional EU VAT / EORI identifiers, attached to EU orders when set. Leave null to omit.",
+  "fourpx_ioss_no": "IM0000000000",
+  "fourpx_vat_no": null,
+  "fourpx_eori_no": null,
 
   "_route_engine_comment": "Self-contained Shopping Route generator. This dashboard ships its OWN vendored copy of the route engine under <project>/route-engine (src/generate_shopping_route.py + data/supplier_catalog.xlsx, charm_images, charm_manifest.json, etsy_orders.db). It is completely independent of any external program. route_engine_dir overrides that location; leave null to use the bundled engine. osp_python is the Python interpreter (defaults to 'python'; use 'py' or a full path to python.exe on Windows). osp_output_dir: where the three route files are written; null = this dashboard's own output/ folder. osp_project_dir is a deprecated legacy fallback to an external Orders Sorting Program — leave null.",
   "route_engine_dir": null,
