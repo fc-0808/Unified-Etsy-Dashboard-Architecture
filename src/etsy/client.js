@@ -203,9 +203,51 @@ function attachRateLimitInterceptor(instance) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Retry with exponential backoff
-// Retryable: 429 (rate limit), 500, 502, 503, 504
-// Not retried: 401 (re-authenticate), 403 (scope missing), 404 (not found)
+// Retryable HTTP:    429 (rate limit), 500, 502, 503, 504
+// Retryable network: transient transport failures with NO HTTP response — e.g.
+//                    "socket hang up" (ECONNRESET), connection timeouts, DNS
+//                    blips. These are common over the VPN→proxy chain and have
+//                    err.response === undefined, so they must be matched on
+//                    err.code / err.message rather than a status code.
+// Not retried:       401 (re-authenticate), 403 (scope missing), 404 (not found)
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Transport-level error codes that are safe to retry. All requests here are
+// idempotent (GETs, and the inventory PUT writes a fixed target quantity), so a
+// reset socket can be replayed without risk of double-applying a side effect.
+const RETRYABLE_NETWORK_CODES = new Set([
+  'ECONNRESET',     // "socket hang up" — peer/proxy dropped the connection
+  'ECONNABORTED',   // axios client-side timeout
+  'ETIMEDOUT',      // OS-level connection/read timeout
+  'EPIPE',          // broken pipe while writing the request
+  'ECONNREFUSED',   // proxy hop briefly refused the connection
+  'ENETUNREACH',    // transient network unreachable
+  'EHOSTUNREACH',   // transient host unreachable
+  'EAI_AGAIN',      // temporary DNS resolution failure
+  'ERR_SOCKET_CONNECTION_TIMEOUT',
+]);
+
+const RETRYABLE_NETWORK_MESSAGES = [
+  'socket hang up',
+  'client network socket disconnected',
+  'network socket disconnected',
+  'timeout',
+];
+
+/**
+ * True when an error is a transient transport failure (no HTTP response was
+ * ever received) that is worth retrying rather than surfacing to the user.
+ * @param {any} err
+ */
+function isRetryableNetworkError(err) {
+  // A real HTTP response means the request reached Etsy — handled by status code.
+  if (err?.response) return false;
+
+  if (err?.code && RETRYABLE_NETWORK_CODES.has(err.code)) return true;
+
+  const msg = String(err?.message || '').toLowerCase();
+  return RETRYABLE_NETWORK_MESSAGES.some((m) => msg.includes(m));
+}
 
 async function withRetry(fn, maxRetries = 3) {
   const RETRYABLE = new Set([429, 500, 502, 503, 504]);
@@ -218,19 +260,26 @@ async function withRetry(fn, maxRetries = 3) {
       // Never retry token-related errors — they need human action
       if (err instanceof TokenExpiredError) throw err;
 
-      const status = err.response?.status;
-      if (!RETRYABLE.has(status)) throw err;
+      const status     = err.response?.status;
+      const isHttp      = RETRYABLE.has(status);
+      const isNetwork   = isRetryableNetworkError(err);
+      if (!isHttp && !isNetwork) throw err;
 
       lastError = err;
       if (attempt === maxRetries) break;
 
-      // Use Etsy's retry-after header if present, else exponential backoff
+      // Use Etsy's retry-after header if present, else exponential backoff.
+      // Network errors have no headers, so they always fall back to backoff.
       const retryAfter = err.response?.headers?.['retry-after'];
       const backoff = Math.pow(2, attempt) * 1000 + Math.random() * 500;
       const waitMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : backoff;
 
+      const reason = isHttp
+        ? `HTTP ${status}`
+        : `network ${err.code || ''} (${err.message})`.trim();
+
       console.warn(
-        `[etsy/client] HTTP ${status} — attempt ${attempt}/${maxRetries}. ` +
+        `[etsy/client] ${reason} — attempt ${attempt}/${maxRetries}. ` +
           `Waiting ${Math.round(waitMs / 1000)}s before retry...`
       );
       await new Promise((res) => setTimeout(res, waitMs));
@@ -258,7 +307,7 @@ async function withRetry(fn, maxRetries = 3) {
  * @param {string} accessToken   - Current OAuth access token (e.g. "12345678.token")
  * @returns {import('axios').AxiosInstance}
  */
-function buildShopClient(groupProxyClient, apiKey, sharedSecret, accessToken) {
+function buildShopClient(groupProxyClient, apiKey, sharedSecret, accessToken, getToken) {
   // Use axios.create() — Object.create() on an axios instance does not propagate
   // defaults into the actual request headers (axios merges from instance.defaults
   // at request time, which requires a real instance, not a prototype clone).
@@ -276,6 +325,42 @@ function buildShopClient(groupProxyClient, apiKey, sharedSecret, accessToken) {
     },
   });
   attachRateLimitInterceptor(instance);
+
+  // Etsy access tokens expire after 1 hour. For long-lived clients (e.g. a bulk
+  // run that spans >1h), a token baked in at creation goes stale mid-run →
+  // "invalid_token". When a getToken() provider is supplied, we (1) attach a
+  // FRESH auto-refreshed token on every request, and (2) on a 401 force a refresh
+  // and retry the request once. This keeps any long-running job authenticated
+  // without re-creating the client.
+  if (typeof getToken === 'function') {
+    instance.interceptors.request.use(async (cfg) => {
+      try {
+        const tok = await getToken(false);
+        if (tok) cfg.headers.Authorization = `Bearer ${tok}`;
+      } catch { /* fall back to the baked-in token */ }
+      return cfg;
+    });
+    instance.interceptors.response.use(undefined, async (error) => {
+      const status = error.response?.status;
+      const cfg = error.config;
+      const body = error.response?.data;
+      const isAuth = status === 401 || /invalid_token|token.*expired|unauthor/i.test(
+        (body && (body.error || body.error_description)) || error.message || ''
+      );
+      if (isAuth && cfg && !cfg._authRetried) {
+        cfg._authRetried = true;
+        try {
+          const tok = await getToken(true); // force refresh
+          if (tok) {
+            cfg.headers = cfg.headers || {};
+            cfg.headers.Authorization = `Bearer ${tok}`;
+            return instance.request(cfg);
+          }
+        } catch { /* fall through to reject */ }
+      }
+      return Promise.reject(error);
+    });
+  }
   return instance;
 }
 
@@ -1137,6 +1222,47 @@ async function getShopSections(shopClient, shopId) {
   });
 }
 
+/**
+ * GET /application/shops/{shop_id}/readiness-state-definitions — scope shops_r
+ * Returns the shop's processing profiles. Every physical listing requires a
+ * readiness_state_id (Etsy made this mandatory in 2025); the id to send on
+ * createDraftListing / inventory offerings is the definition's id.
+ */
+async function getShopReadinessStateDefinitions(shopClient, shopId) {
+  const numericId = await resolveShopId(shopClient, shopId);
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const { data } = await shopClient.get(`/application/shops/${numericId}/readiness-state-definitions`);
+    return data;
+  });
+}
+
+/**
+ * POST /application/shops/{shop_id}/readiness-state-definitions — scope shops_w
+ * Creates a processing profile. Used as a fallback when a shop has none, so we
+ * can satisfy Etsy's mandatory readiness_state_id on physical listings.
+ * @returns the created definition (with its id)
+ */
+async function createShopReadinessStateDefinition(shopClient, shopId, {
+  readiness_state = 'made_to_order', min_processing_time = 3, max_processing_time = 5, processing_time_unit = 'days',
+} = {}) {
+  const numericId = await resolveShopId(shopClient, shopId);
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const params = new URLSearchParams();
+    params.append('readiness_state', readiness_state);
+    params.append('min_processing_time', String(min_processing_time));
+    params.append('max_processing_time', String(max_processing_time));
+    params.append('processing_time_unit', processing_time_unit);
+    const { data } = await shopClient.post(
+      `/application/shops/${numericId}/readiness-state-definitions`,
+      params,
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
+    );
+    return data;
+  });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Seller taxonomy — resolve a numeric taxonomy_id for listing creation.
 // The full node tree rarely changes, so it is cached process-wide.
@@ -1154,6 +1280,41 @@ async function getSellerTaxonomyNodes(shopClient) {
   });
   _taxonomyNodesCache = data;
   return data;
+}
+
+// Taxonomy attribute (property) definitions per taxonomy_id. These define the
+// "feature section" fields (Theme, Occasion, Pattern, colours, etc.) and rarely
+// change, so we cache them process-wide per taxonomy.
+const _taxonomyPropsCache = new Map();
+
+/** GET /application/seller-taxonomy/nodes/{taxonomy_id}/properties — scope none */
+async function getPropertiesByTaxonomyId(shopClient, taxonomyId) {
+  const key = String(taxonomyId);
+  if (_taxonomyPropsCache.has(key)) return _taxonomyPropsCache.get(key);
+  getRateLimiter(shopClient).check();
+  const data = await withRetry(async () => {
+    const res = await shopClient.get(`/application/seller-taxonomy/nodes/${taxonomyId}/properties`);
+    return res.data;
+  });
+  _taxonomyPropsCache.set(key, data);
+  return data;
+}
+
+/**
+ * PUT /application/shops/{shop_id}/listings/{listing_id}/properties/{property_id}
+ * Scope: listings_w — sets a single listing attribute (taxonomy property).
+ * @param {object} body  { value_ids?:number[], values?:string[], scale_id?:number }
+ */
+async function updateListingProperty(shopClient, shopId, listingId, propertyId, body) {
+  const numericId = await resolveShopId(shopClient, shopId);
+  getRateLimiter(shopClient).check();
+  return withRetry(async () => {
+    const { data } = await shopClient.put(
+      `/application/shops/${numericId}/listings/${listingId}/properties/${propertyId}`,
+      body,
+    );
+    return data;
+  });
 }
 
 /**
@@ -1198,8 +1359,12 @@ module.exports = {
   getShopShippingProfiles,
   getShopReturnPolicies,
   getShopProductionPartners,
+  getShopReadinessStateDefinitions,
+  createShopReadinessStateDefinition,
   getShopSections,
   getSellerTaxonomyNodes,
+  getPropertiesByTaxonomyId,
+  updateListingProperty,
   findTaxonomyId,
   getReceipts,
   getReceipt,

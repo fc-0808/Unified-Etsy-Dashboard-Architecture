@@ -21,12 +21,18 @@ require('dotenv').config();
 
 const path           = require('path');
 const https          = require('https');
+const http           = require('http');
 const fs             = require('fs');
 const { spawn }      = require('child_process');
 const os             = require('os');
 const express        = require('express');
 const cors           = require('cors');
 const cron           = require('node-cron');
+// RFC 6266 / RFC 5987 Content-Disposition builder (same library Express uses
+// internally for res.download). Produces a valid ASCII `filename=` fallback PLUS
+// a UTF-8 `filename*=` form, so non-ASCII buyer names (e.g. "Łukasz Gierszon")
+// never throw ERR_INVALID_CHAR when written to the response header.
+const contentDisposition = require('content-disposition');
 
 const { loadConfig, getAllShops }          = require('../config/schema');
 const { TokenManager }                     = require('../auth/token-manager');
@@ -56,9 +62,15 @@ const { upsertListing, upsertListingInventory,
         getCharmPurchaseProgress, setCharmPurchaseProgress,
         getProductMap, upsertProductMapRow, updateProductMapRowById, deleteProductMapRow,
         insertManualItem, getManualItems, getManualItemImage, deleteManualItemByReceipt,
+        insertManualOrder, updateManualOrder, deleteManualOrder, purgeManualOrder, setManualOrderShipped,
+        MANUAL_SHOP_ID, MANUAL_GROUP_ID,
+        recordPurchaseSyncRun, listPurchaseSyncRuns, getPurchaseSyncRun,
+        getListingImageData,
         setRouteDismissed, clearDismissedByReceipt } = require('../db/setup');
 const routeDashboard                               = require('../route/dashboard');
 const enginePaths                                  = require('../route/engine-paths');
+const statusImport                                 = require('../route/status-import');
+const { buildSyncReportWorkbook }                  = require('../route/sync-report-xlsx');
 const { batchFetchRouteImages }                    = require('../route/image-fetcher');
 const unmatchedImages                              = require('../route/unmatched-images');
 const { logZeroStockIfNeeded, listingHasLiveZero,
@@ -78,6 +90,9 @@ const { getFullTrackingEvents }                    = require('../tracking/checke
 const { scanInputRoot }                            = require('../listings/scanner');
 const { getShopListingSettings }                   = require('../listings/shop-settings');
 const { BulkJobManager }                           = require('../listings/bulk-runner');
+const { getPricesForCurrency, STYLE_KEYS }         = require('../listings/pricing');
+const { resolveDefaultPrices }                     = require('../listings/shop-prices');
+const { CHARACTERS }                               = require('../listings/character-catalog');
 
 const TOKENS_PATH = path.resolve(__dirname, '../../tokens.json');
 
@@ -409,9 +424,10 @@ app.get('/api/shops', (req, res) => {
     FROM shops s
     JOIN groups g ON g.group_id = s.group_id
     LEFT JOIN receipts r ON r.shop_id = s.shop_id
+    WHERE s.group_id <> @manual_group
     GROUP BY s.shop_id
     ORDER BY g.group_id, s.shop_name
-  `).all();
+  `).all({ manual_group: MANUAL_GROUP_ID });
 
   // Enrich with token status
   const allShopIds = getAllShops(config).map((s) => s.shop_id);
@@ -483,6 +499,216 @@ app.get('/api/summary', (req, res) => {
   });
 });
 
+// Component purchase statuses that still require shopping. Mirrors
+// PURCHASE_OUTSTANDING_STATUSES used by the per-order rollup logic below so the
+// "fully purchased" predicate is computed identically everywhere.
+const PURCHASE_QUEUE_OUTSTANDING = new Set(['Pending', 'Out of Stock']);
+
+/**
+ * Classify a candidate set of receipts by purchasing progress.
+ *
+ * A single order line is "to buy" when it has a recognised Case/Grip/Charm
+ * component still Pending / Out of Stock (components default to Pending until the
+ * operator marks them bought), OR — for a line with no components — when its
+ * binary receipt_item_purchase flag is set. Components default to Pending, so a
+ * brand-new order is "to buy" until the operator records each purchase.
+ *
+ * There are THREE distinct buckets, not two, because the operator can EXCLUDE a
+ * line from the next route or DISMISS it from the dashboard. Such a line is out
+ * of the active purchasing queue but is NOT therefore purchased — so it must fall
+ * out of BOTH the buy queue and the ready-to-pack queue:
+ *
+ *   • outstanding (Needs purchase)  — at least one line is still to buy AND has
+ *                                     NOT been excluded/dismissed. Mirrors the
+ *                                     Route dashboard's active shopping list, so
+ *                                     the two stay reconciled.
+ *   • ready (Ready to pack)         — EVERY line is fully purchased, considering
+ *                                     ALL lines INCLUDING excluded/dismissed ones
+ *                                     (an excluded line whose product was never
+ *                                     bought must never mark an order shippable).
+ *   • neither                       — an order with an excluded/dismissed line
+ *                                     that is still unpurchased sits in a
+ *                                     deliberate limbo until the operator either
+ *                                     buys it or re-includes it.
+ *
+ * `ready` and `outstanding` are mutually exclusive but NOT exhaustive. Loads the
+ * route_assignments + receipt_item_purchase tables ONCE and reads each receipt's
+ * already-cached `all_transactions`, so filtering a full page never triggers an
+ * N+1 query storm.
+ *
+ * @param {Array<{receipt_id:number, all_transactions:string}>} candidates
+ * @returns {{ ready:Set<number>, outstanding:Set<number> }}
+ */
+function classifyPurchaseState(candidates) {
+  const ra = new Map();   // `${receipt_id}\x00${item_key}` → component statuses
+  const rip = new Map();  // `${receipt_id}\x00${item_key}` → { needs_purchase }
+  try {
+    db.prepare('SELECT receipt_id, item_key, status_case, status_grip, status_charm, excluded, dismissed_at FROM route_assignments')
+      .all()
+      .forEach((x) => ra.set(`${x.receipt_id}\x00${x.item_key}`, x));
+  } catch { /* table may be missing on first run */ }
+  try {
+    db.prepare('SELECT receipt_id, item_key, needs_purchase FROM receipt_item_purchase')
+      .all()
+      .forEach((x) => rip.set(`${x.receipt_id}\x00${x.item_key}`, x));
+  } catch { /* table may be missing on first run */ }
+
+  const ready = new Set();
+  const outstanding = new Set();
+  for (const c of candidates) {
+    let txs = [];
+    try { txs = JSON.parse(c.all_transactions || '[]'); } catch { txs = []; }
+    if (!Array.isArray(txs)) txs = [];
+
+    const seen = new Set();
+    // buyQueueOutstanding — any NON-excluded / NON-dismissed line still to buy
+    //                       (drives the Needs-purchase queue; mirrors the Route).
+    // anyUnpurchased       — any line at all still to buy, INCLUDING excluded /
+    //                        dismissed ones (blocks ready-to-pack: the product is
+    //                        not actually in hand just because it was excluded).
+    let buyQueueOutstanding = false;
+    let anyUnpurchased = false;
+    for (const t of txs) {
+      const key = routeDashboard.lineItemKey(t.title || '', t.listing_id);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const a = ra.get(`${c.receipt_id}\x00${key}`) || {};
+      const comps = txComponents(t);
+      let lineToBuy;
+      if (comps.length) {
+        lineToBuy = comps.some((comp) => PURCHASE_QUEUE_OUTSTANDING.has(a[`status_${comp}`] || 'Pending'));
+      } else {
+        const b = rip.get(`${c.receipt_id}\x00${key}`);
+        lineToBuy = !!(b && b.needs_purchase === 1);
+      }
+      if (lineToBuy) {
+        anyUnpurchased = true;
+        // Excluded / dismissed lines leave the ACTIVE buy queue (so they don't keep
+        // the order in Needs-purchase, matching the Route) but still count as
+        // unpurchased for ready-to-pack — an order can't ship until its product is
+        // really bought, regardless of any route exclusion.
+        if (!a.excluded && !a.dismissed_at) buyQueueOutstanding = true;
+      }
+    }
+    if (buyQueueOutstanding) outstanding.add(c.receipt_id);
+    // Ready ⇔ nothing left to buy on ANY line. Excluded-but-unpurchased orders are
+    // therefore in neither set (deliberate limbo) — never shippable, never in the
+    // active buy queue — until the operator buys or re-includes the line.
+    if (!anyUnpurchased) ready.add(c.receipt_id);
+  }
+  return { ready, outstanding };
+}
+
+// Time window (seconds) within which two same-product receipts for the same buyer
+// are treated as a single Etsy double-fire rather than two genuine orders.
+const DEDUP_WINDOW_SEC = 300; // 5 minutes
+
+/**
+ * Identify near-duplicate "double-fire" receipts ACROSS THE ENTIRE TABLE and
+ * decide, for each cluster, which single receipt is authoritative.
+ *
+ * Etsy occasionally issues two distinct receipt_ids for what is effectively the
+ * same order — a buyer double-taps "Buy Now", or Etsy's payment pipeline fires
+ * twice. The losing receipt usually never clears payment (status stays "Payment
+ * Processing"), so Etsy never computes its `expected_ship_date`. That ghost then
+ * surfaces in Needs-shipping with NO "Ship by" date while the real order ships
+ * normally.
+ *
+ * WHY THIS MUST BE GLOBAL (not per-page): the surviving sibling and its ghost
+ * routinely land in DIFFERENT tab filters — the real order becomes
+ * shipped/Completed (shipped=true) while the ghost stays unshipped
+ * (shipped=false / Needs-shipping). A dedup pass that only sees one page's rows
+ * can never pair them, so the ghost is never collapsed. Computing the suppressed
+ * set over every receipt once, then excluding it from every query, hides each
+ * duplicate consistently in EVERY view and keeps COUNT/pagination exact.
+ *
+ * Cluster key:  shop_id + buyer (user_id, else name+zip) + product (listing_id,
+ *               else normalised title). Receipts collapse when they share that
+ *               key AND form a chain of creations each within DEDUP_WINDOW_SEC of
+ *               the previous one.
+ *
+ * Survivor = the most-progressed real order, scored shipped(8) > paid(4) >
+ *            ship-by present(2), ties broken by the higher (latest) receipt_id.
+ *            This guarantees a shipped/paid order always beats an unpaid
+ *            "Payment Processing" ghost.
+ *
+ * Manual orders (negative receipt_id, source='manual') are operator-authored,
+ * never an Etsy double-fire, and are excluded entirely.
+ *
+ * @returns {{ suppressed: Set<number>, survivorOf: Map<number, number[]> }}
+ *          suppressed  — receipt_ids to hide from every view.
+ *          survivorOf  — survivor receipt_id → list of receipt_ids it absorbed
+ *                        (for audit display on the surviving row).
+ */
+function computeDuplicateSuppression() {
+  const suppressed = new Set();
+  const survivorOf = new Map();
+
+  let rows = [];
+  try {
+    rows = db.prepare(`
+      SELECT receipt_id, shop_id, buyer_user_id, name AS buyer_name, shipping_zip,
+             first_listing_id, first_product_title, first_ship_by,
+             is_paid, is_shipped, etsy_created_at
+      FROM receipts
+      WHERE source IS NULL OR source != 'manual'
+    `).all();
+  } catch {
+    return { suppressed, survivorOf };
+  }
+
+  const groups = new Map();
+  for (const o of rows) {
+    const buyerKey = o.buyer_user_id
+      ? `uid:${o.buyer_user_id}`
+      : `name:${(o.buyer_name || '').trim().toLowerCase()}|zip:${(o.shipping_zip || '').trim()}`;
+    const productKey = o.first_listing_id
+      ? `lid:${o.first_listing_id}`
+      : `title:${(o.first_product_title || '').trim().toLowerCase().slice(0, 60)}`;
+    const key = `${o.shop_id}|${buyerKey}|${productKey}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(o);
+  }
+
+  const score = (r) => (r.is_shipped ? 8 : 0) + (r.is_paid ? 4 : 0) + (r.first_ship_by ? 2 : 0);
+
+  const collapseCluster = (cluster) => {
+    if (cluster.length < 2) return;
+    let primary = cluster[0];
+    for (const c of cluster) {
+      const cs = score(c);
+      const ps = score(primary);
+      if (cs > ps || (cs === ps && c.receipt_id > primary.receipt_id)) primary = c;
+    }
+    const absorbed = [];
+    for (const c of cluster) {
+      if (c.receipt_id !== primary.receipt_id) {
+        suppressed.add(c.receipt_id);
+        absorbed.push(c.receipt_id);
+      }
+    }
+    if (absorbed.length) survivorOf.set(primary.receipt_id, absorbed);
+  };
+
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    group.sort((a, b) => (a.etsy_created_at || 0) - (b.etsy_created_at || 0));
+    let cluster = [group[0]];
+    for (let i = 1; i < group.length; i++) {
+      const gap = (group[i].etsy_created_at || 0) - (group[i - 1].etsy_created_at || 0);
+      if (gap <= DEDUP_WINDOW_SEC) {
+        cluster.push(group[i]);
+      } else {
+        collapseCluster(cluster);
+        cluster = [group[i]];
+      }
+    }
+    collapseCluster(cluster);
+  }
+
+  return { suppressed, survivorOf };
+}
+
 /**
  * GET /api/orders
  * Paginated, filterable orders list.
@@ -494,6 +720,12 @@ app.get('/api/summary', (req, res) => {
  *   limit     — page size (default 50, max 200)
  *   offset    — pagination offset
  *   sort      — 'newest' (default) | 'oldest' | 'highest'
+ *   shipped   — false | true | pre_transit | in_transit | needs_purchase |
+ *               ready_to_pack | cancelled | archived | all
+ *   purchase  — ready (fully purchased) | outstanding (still needs buying).
+ *               Orthogonal to `shipped`; combine with Needs-shipping/Pre-transit
+ *               to isolate "fully purchased but not yet packed" orders.
+ *   packaged  — true | false (parcel physically packed flag)
  */
 app.get('/api/orders', (req, res) => {
   const limit  = Math.min(Math.max(parseInt(req.query.limit  ?? 50, 10), 1), 5000);
@@ -501,6 +733,19 @@ app.get('/api/orders', (req, res) => {
 
   const conditions = [];
   const params     = {};
+
+  // ── Global near-duplicate suppression ─────────────────────────────────────
+  // Hide Etsy double-fire ghost receipts in EVERY view (computed across the whole
+  // table, since a duplicate's surviving sibling often lives in a different tab —
+  // e.g. shipped — and a per-page pass could never pair them). Excluding the ids
+  // here, at the SQL level, also keeps COUNT(*) and pagination exact.
+  const { suppressed: suppressedDupIds, survivorOf: dupSurvivorOf } = computeDuplicateSuppression();
+  if (suppressedDupIds.size > 0) {
+    // receipt_ids are integers from our own DB — inline them directly so we are
+    // never bound by SQLite's host-parameter limit.
+    const idList = [...suppressedDupIds].map(Number).filter(Number.isInteger).join(',');
+    conditions.push(`r.receipt_id NOT IN (${idList})`);
+  }
 
   if (req.query.shop_id) { conditions.push('r.shop_id = @shop_id'); params.shop_id = req.query.shop_id; }
   if (req.query.status)  { conditions.push('r.status = @status');   params.status  = req.query.status; }
@@ -562,12 +807,66 @@ app.get('/api/orders', (req, res) => {
   } else if (req.query.shipped === 'cancelled') {
     conditions.push("r.status IN ('Canceled', 'Cancelled')");
   } else if (req.query.shipped === 'needs_purchase') {
-    // Orders the operator has flagged as "still out of stock — needs purchase".
-    // These are typically Pre-transit (a label was created to meet the Etsy ship-by
-    // deadline, but the physical product still has to be bought). Show them regardless
-    // of carrier/ship state so nothing flagged ever falls out of the purchasing queue.
-    conditions.push(`r.needs_purchase_at IS NOT NULL
-      AND r.status NOT IN ('Canceled', 'Cancelled', 'Fully Refunded', 'Fully refunded')`);
+    // ── Needs-purchase work queue ──────────────────────────────────────────
+    // The actionable "still have to BUY these" list — the exact complement of the
+    // Ready-to-pack queue. An order belongs here when BOTH are true:
+    //   1. It still has to LEAVE the warehouse — Needs-shipping (unshipped) OR
+    //      Pre-transit (a label was created early to beat the Etsy ship-by
+    //      deadline, but the parcel hasn't actually entered the carrier network).
+    //   2. It still has OUTSTANDING shopping work — at least one Case/Grip/Charm
+    //      component is not yet Purchased, or a no-component line is still flagged
+    //      to buy.
+    // The ship-state half (1) is expressed here; the "outstanding" half (2) is
+    // applied below via classifyPurchaseState (purchaseWant = 'outstanding') so
+    // this view uses the SAME single source of truth as the Ready-to-pack queue
+    // and the per-row purchase chips — they can never disagree.
+    //
+    // We additionally UNION in every order the operator has explicitly flagged
+    // (needs_purchase_at) regardless of ship state, so a manually-queued or an
+    // already-in-transit "out of stock" order never silently drops out of the buy
+    // queue (the flag rollup guarantees a flagged order is always outstanding, so
+    // the outstanding gate below keeps it).
+    const preTransitDays = config.pre_transit_days ?? 30;
+    const cutoff = Math.floor(Date.now() / 1000) - preTransitDays * 24 * 3600;
+    conditions.push(`(
+      (r.is_shipped = 0 AND r.status NOT IN ('Canceled', 'Cancelled', 'Fully Refunded', 'Fully refunded'))
+      OR
+      (r.is_shipped = 1
+        AND r.tracking_code IS NOT NULL
+        AND r.shipment_notified_at IS NOT NULL
+        AND r.shipment_notified_at >= ${cutoff}
+        AND r.carrier_confirmed_at IS NULL
+        AND r.status NOT IN ('Canceled', 'Cancelled', 'Fully Refunded', 'Fully refunded'))
+      OR
+      (r.needs_purchase_at IS NOT NULL
+        AND r.status NOT IN ('Canceled', 'Cancelled', 'Fully Refunded', 'Fully refunded'))
+    )`);
+    // Only PAID orders belong in the purchasing queue — you don't buy stock for an
+    // order that has not been paid for yet (e.g. "Payment Processing"). This keeps
+    // the Needs-purchase view aligned with the Route, which is paid-only.
+    conditions.push('r.is_paid = 1');
+  } else if (req.query.shipped === 'ready_to_pack') {
+    // ── Ready-to-pack work queue ───────────────────────────────────────────
+    // The actionable "go pack & ship these" list: orders that still have to LEAVE
+    // the warehouse (Needs-shipping OR Pre-transit) AND whose every product has
+    // been fully purchased AND which have NOT yet been physically packaged. This
+    // scope only sets the ship-state half here; the "fully purchased" half is
+    // applied below via classifyPurchaseState (purchaseWant = 'ready') and the
+    // "not yet packaged" half is forced via the packaged filter. Pre-transit
+    // matters because a label may have been created early to beat the Etsy
+    // ship-by deadline while the parcel itself was never actually packed.
+    const preTransitDays = config.pre_transit_days ?? 30;
+    const cutoff = Math.floor(Date.now() / 1000) - preTransitDays * 24 * 3600;
+    conditions.push(`(
+      (r.is_shipped = 0 AND r.status NOT IN ('Canceled', 'Cancelled', 'Fully Refunded', 'Fully refunded'))
+      OR
+      (r.is_shipped = 1
+        AND r.tracking_code IS NOT NULL
+        AND r.shipment_notified_at IS NOT NULL
+        AND r.shipment_notified_at >= ${cutoff}
+        AND r.carrier_confirmed_at IS NULL
+        AND r.status NOT IN ('Canceled', 'Cancelled', 'Fully Refunded', 'Fully refunded'))
+    )`);
   }
 
   // ── Packaged filter ──────────────────────────────────────────────────────────
@@ -577,9 +876,13 @@ app.get('/api/orders', (req, res) => {
   //   packaged=true  → only orders with packaged_at IS NOT NULL
   //   packaged=false → only orders with packaged_at IS NULL (not yet packed)
   //   (omit)         → all orders regardless of packaged state
-  if (req.query.packaged === 'true') {
+  // The Ready-to-pack queue is, by definition, the NOT-yet-packaged set, so it
+  // defaults packaged=false unless the caller overrides it explicitly.
+  let packagedParam = req.query.packaged;
+  if (req.query.shipped === 'ready_to_pack' && packagedParam == null) packagedParam = 'false';
+  if (packagedParam === 'true') {
     conditions.push('r.packaged_at IS NOT NULL');
-  } else if (req.query.packaged === 'false') {
+  } else if (packagedParam === 'false') {
     conditions.push('r.packaged_at IS NULL');
   }
 
@@ -593,6 +896,44 @@ app.get('/api/orders', (req, res) => {
     conditions.push('r.archived_at IS NOT NULL');
   } else if (req.query.include_archived !== 'true') {
     conditions.push('r.archived_at IS NULL');
+  }
+
+  // ── Purchase-state filter ──────────────────────────────────────────────────
+  // "fully purchased" (no outstanding shopping) vs "outstanding" (something still
+  // to buy). This predicate depends on per-line component statuses + the binary
+  // purchase flag — data that cannot be expressed in the base SQL — so we resolve
+  // it against the CURRENT scope: take every receipt matching the conditions
+  // above, classify it with the same logic the rest of the app uses, then narrow
+  // the query to just the wanted receipt_ids. Doing it as an extra WHERE clause
+  // (rather than a post-query JS filter) keeps pagination + COUNT(*) exact.
+  //
+  //   purchase=ready        → fully purchased
+  //   purchase=outstanding  → still needs buying
+  //   shipped=ready_to_pack → implies purchase=ready
+  let purchaseWant = null;
+  if (req.query.purchase === 'ready' || req.query.purchase === 'outstanding') {
+    purchaseWant = req.query.purchase;
+  }
+  if (req.query.shipped === 'ready_to_pack') purchaseWant = 'ready';
+  // The Needs-purchase view is, by definition, the OUTSTANDING half of the
+  // Needs-shipping + Pre-transit (+ explicitly-flagged) scope set above.
+  if (req.query.shipped === 'needs_purchase') purchaseWant = 'outstanding';
+
+  if (purchaseWant) {
+    const baseWhere = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const candidates = db
+      .prepare(`SELECT r.receipt_id, r.all_transactions FROM receipts r ${baseWhere}`)
+      .all(params);
+    const { ready, outstanding } = classifyPurchaseState(candidates);
+    const keep = purchaseWant === 'ready' ? ready : outstanding;
+    if (keep.size === 0) {
+      conditions.push('1 = 0'); // no receipt qualifies → empty page (count stays 0)
+    } else {
+      // receipt_ids are integers from our own DB — inline them directly so we are
+      // never bound by SQLite's host-parameter limit on a large queue.
+      const idList = [...keep].map(Number).filter(Number.isInteger).join(',');
+      conditions.push(`r.receipt_id IN (${idList})`);
+    }
   }
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -652,7 +993,8 @@ app.get('/api/orders', (req, res) => {
       r.fourpx_tracking_no,
       r.fourpx_label_url,
       r.fourpx_order_status,
-      r.fourpx_created_at
+      r.fourpx_created_at,
+      r.source
     FROM receipts r
     JOIN shops s ON s.shop_id = r.shop_id
     LEFT JOIN listing_images li ON li.listing_id = r.first_listing_id
@@ -769,96 +1111,27 @@ app.get('/api/orders', (req, res) => {
     };
   });
 
-  // ── Near-duplicate COLLAPSING ─────────────────────────────────────────────
-  // Etsy occasionally issues two distinct receipt_ids for what is effectively
-  // the same order: a buyer double-taps "Buy Now", or Etsy's payment pipeline
-  // fires twice and both receipts survive.  The secondary receipt often
-  // arrives with an incomplete payload (missing expected_ship_date) because
-  // Etsy computes ship-by asynchronously and the duplicate races ahead of that
-  // computation — that is exactly why the extra row showed up without a ship
-  // date.
-  //
-  // We COLLAPSE such near-duplicates down to a single authoritative row so the
-  // operator never sees the same order twice.  Detection key:
-  //   shop_id + buyer (user_id, else name+zip) + product (listing_id, else title)
-  // Receipts collapse when they share that key AND fall inside a chain of
-  // creations each within DEDUP_WINDOW_SEC of the previous one.
-  //
-  // The surviving "primary" is the most complete receipt (ship-by present),
-  // ties broken by the higher receipt_id (Etsy's latest = most authoritative).
-  // The hidden receipt_ids are recorded on the survivor (duplicate_receipt_ids)
-  // purely for audit/debugging — no second row is ever rendered.
-  const DEDUP_WINDOW_SEC = 300; // 5-minute window between consecutive creations
-  const dedupGroups = new Map();
+  // ── Near-duplicate annotation ─────────────────────────────────────────────
+  // Etsy double-fire ghost receipts have ALREADY been excluded at the SQL level
+  // (see computeDuplicateSuppression above), so the page never contains both a
+  // survivor and its ghost and COUNT(*) is already exact. Here we only annotate
+  // any surviving row that absorbed one or more duplicates, so the UI can surface
+  // the hidden receipt_ids for audit/debugging — no second row is ever rendered.
   for (const o of enriched) {
-    const buyerKey = o.buyer_user_id
-      ? `uid:${o.buyer_user_id}`
-      : `name:${(o.buyer_name || '').trim().toLowerCase()}|zip:${(o.shipping_zip || '').trim()}`;
-    // Use first_listing_id when available; fall back to normalised product title
-    const productKey = o.first_listing_id
-      ? `lid:${o.first_listing_id}`
-      : `title:${(o.first_product_title || '').trim().toLowerCase().slice(0, 60)}`;
-    const key = `${o.shop_id}|${buyerKey}|${productKey}`;
-
-    if (!dedupGroups.has(key)) dedupGroups.set(key, []);
-    dedupGroups.get(key).push(o);
+    const absorbed = dupSurvivorOf.get(o.receipt_id);
+    if (absorbed && absorbed.length) {
+      o.had_duplicate = true;
+      o.duplicate_receipt_ids = absorbed;
+    }
   }
-
-  // receipt_ids that lose to a more-complete sibling and must be hidden.
-  const suppressedIds = new Set();
-
-  // Pick the winning row for a time-clustered set of duplicates and mark the
-  // rest for suppression.  Survivor = most complete (ship-by set), then highest id.
-  const collapseCluster = (cluster) => {
-    if (cluster.length < 2) return;
-    let primary = cluster[0];
-    for (const c of cluster) {
-      const cScore = c.first_ship_by ? 2 : 0;
-      const pScore = primary.first_ship_by ? 2 : 0;
-      if (cScore > pScore || (cScore === pScore && c.receipt_id > primary.receipt_id)) {
-        primary = c;
-      }
-    }
-    primary.had_duplicate = true;
-    primary.duplicate_receipt_ids = cluster
-      .filter((c) => c.receipt_id !== primary.receipt_id)
-      .map((c) => c.receipt_id);
-    for (const c of cluster) {
-      if (c.receipt_id !== primary.receipt_id) suppressedIds.add(c.receipt_id);
-    }
-  };
-
-  for (const group of dedupGroups.values()) {
-    if (group.length < 2) continue;
-
-    // Sort by creation time, then chain receipts whose consecutive gap is
-    // within the window into a single cluster (handles 2, 3, … duplicates).
-    group.sort((a, b) => (a.etsy_created_at || 0) - (b.etsy_created_at || 0));
-    let cluster = [group[0]];
-    for (let i = 1; i < group.length; i++) {
-      const gap = (group[i].etsy_created_at || 0) - (group[i - 1].etsy_created_at || 0);
-      if (gap <= DEDUP_WINDOW_SEC) {
-        cluster.push(group[i]);
-      } else {
-        collapseCluster(cluster);
-        cluster = [group[i]];
-      }
-    }
-    collapseCluster(cluster);
-  }
-
-  const deduped = enriched.filter((o) => !suppressedIds.has(o.receipt_id));
-  // Keep the pager honest: every duplicate hidden on this page is one fewer
-  // real order than the raw COUNT(*) reported.
-  const adjustedTotal = Math.max(0, countRow.total - suppressedIds.size);
 
   res.json({
-    total: adjustedTotal,
+    total: countRow.total,
     limit,
     offset,
     pre_transit_days: config.pre_transit_days ?? 30,
     tracking_edit_days: config.tracking_edit_days ?? 3,
-    orders: deduped,
+    orders: enriched,
   });
 });
 
@@ -1325,6 +1598,112 @@ app.post('/api/orders/bulk-mark-packaged', (req, res) => {
   res.json({ success: true, changed });
 });
 
+// ─── Manual orders (operator-created orders in the Orders tab) ────────────────
+//
+// A manual order is a real `receipts` row authored by the operator for a sale
+// that did not come from Etsy (off-Etsy / replacement / wholesale). It carries a
+// negative receipt_id + source='manual' and is otherwise a first-class order:
+// it shows in the Orders tab, can be marked packaged, shipped with 4PX, and have
+// its label downloaded — all through the SAME endpoints Etsy orders use. It is
+// never pushed to or fetched from Etsy.
+
+/**
+ * Resolve { shop_id, group_id } for a manual order. Manual orders live under the
+ * dedicated synthetic "Manual Orders" shop by default; a real shop_id may still
+ * be supplied to attribute the order to a specific shop.
+ */
+function resolveManualOrderShop(rawShopId) {
+  const shopId = String(rawShopId || '').trim() || MANUAL_SHOP_ID;
+  const shop = db.prepare('SELECT shop_id, group_id FROM shops WHERE shop_id = ?').get(shopId);
+  if (!shop) { const e = new Error(`Unknown shop "${shopId}".`); e.status = 400; throw e; }
+  return { shop_id: shop.shop_id, group_id: shop.group_id };
+}
+
+/**
+ * POST /api/orders/manual
+ * Create a manual order. Body: {
+ *   shop_id, name, buyer_email?, shipping_first_line?, shipping_second_line?,
+ *   shipping_city?, shipping_state?, shipping_zip?, shipping_country_iso?,
+ *   items: [{ title, quantity?, listing_id? }], grandtotal_amount?,
+ *   grandtotal_currency?, message_from_buyer?, team_note?
+ * }
+ */
+app.post('/api/orders/manual', (req, res) => {
+  try {
+    const b = req.body ?? {};
+    if (!String(b.name || '').trim()) {
+      return res.status(400).json({ error: 'Buyer name is required.' });
+    }
+    const { shop_id, group_id } = resolveManualOrderShop(b.shop_id);
+    const { receipt_id } = insertManualOrder(db, { ...b, shop_id, group_id, requireName: true });
+    console.log(`[manual-order] created receipt ${receipt_id} for shop ${shop_id} — buyer "${String(b.name || '').trim()}"`);
+    res.status(201).json({ success: true, receipt_id });
+  } catch (err) {
+    const status = err.status || (err.code === 'REQUIRED' ? 400 : 500);
+    if (status >= 500) console.error('[manual-order] create error:', err.message);
+    res.status(status).json({ error: err.message });
+  }
+});
+
+/**
+ * PUT /api/orders/manual/:receipt_id
+ * Edit a manual order's buyer / address / items. Etsy orders are rejected.
+ */
+app.put('/api/orders/manual/:receipt_id', (req, res) => {
+  try {
+    const ok = updateManualOrder(db, req.params.receipt_id, req.body ?? {});
+    if (!ok) return res.status(404).json({ error: 'Manual order not found.' });
+    res.json({ success: true, receipt_id: Number(req.params.receipt_id) });
+  } catch (err) {
+    const status = err.code === 'NOT_FOUND' ? 404 : err.code === 'FORBIDDEN' ? 403 : err.code === 'REQUIRED' ? 400 : 500;
+    if (status >= 500) console.error('[manual-order] update error:', err.message);
+    res.status(status).json({ error: err.message });
+  }
+});
+
+/**
+ * DELETE /api/orders/manual/:receipt_id
+ * Permanently delete a manual order. Blocked while a 4PX shipment still exists —
+ * the operator must cancel the 4PX order first so no label is orphaned.
+ */
+app.delete('/api/orders/manual/:receipt_id', (req, res) => {
+  try {
+    const rid = Number(req.params.receipt_id);
+    const row = db.prepare('SELECT source, fourpx_consignment_no FROM receipts WHERE receipt_id = ?').get(rid);
+    if (!row) return res.status(404).json({ error: 'Manual order not found.' });
+    if (row.source !== 'manual') return res.status(403).json({ error: 'Only manual orders can be deleted.' });
+    if (row.fourpx_consignment_no) {
+      return res.status(409).json({ error: 'This manual order has a 4PX shipment. Cancel the 4PX shipment first, then delete it.' });
+    }
+    const ok = deleteManualOrder(db, rid);
+    if (!ok) return res.status(404).json({ error: 'Manual order not found.' });
+    console.log(`[manual-order] deleted receipt ${rid}`);
+    res.json({ success: true });
+  } catch (err) {
+    const status = err.code === 'FORBIDDEN' ? 403 : 500;
+    if (status >= 500) console.error('[manual-order] delete error:', err.message);
+    res.status(status).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/orders/manual/:receipt_id/shipped
+ * Body: { shipped: boolean }
+ * Toggle a manual order's LOCAL shipped state (manual orders never touch Etsy).
+ */
+app.post('/api/orders/manual/:receipt_id/shipped', (req, res) => {
+  try {
+    const shipped = req.body?.shipped !== false;
+    const ok = setManualOrderShipped(db, req.params.receipt_id, shipped);
+    if (!ok) return res.status(404).json({ error: 'Manual order not found.' });
+    res.json({ success: true, receipt_id: Number(req.params.receipt_id), shipped });
+  } catch (err) {
+    const status = err.code === 'NOT_FOUND' ? 404 : err.code === 'FORBIDDEN' ? 403 : 500;
+    if (status >= 500) console.error('[manual-order] shipped toggle error:', err.message);
+    res.status(status).json({ error: err.message });
+  }
+});
+
 // ─── Needs-purchase / out-of-stock tracking (line-item & component aware) ────────
 //
 // Use case: order volume is high and a product goes out of stock right as the Etsy
@@ -1660,8 +2039,15 @@ async function shipEtsyReceipt(receiptId, opts = {}) {
   }
 
   // 1. Resolve which shop this receipt belongs to (receipts store shop_id).
-  const order = db.prepare('SELECT shop_id FROM receipts WHERE receipt_id = ?').get(receiptId);
+  const order = db.prepare('SELECT shop_id, source FROM receipts WHERE receipt_id = ?').get(receiptId);
   if (!order) { const e = new Error('Order not found'); e.status = 404; throw e; }
+  // Manual orders have no Etsy counterpart — an Etsy ship/tracking API call for a
+  // fabricated receipt id would 404. They are shipped locally instead.
+  if (order.source === 'manual') {
+    const e = new Error('Manual orders are not on Etsy and cannot be shipped or tracked through Etsy. Mark them shipped locally or ship them with 4PX.');
+    e.status = 400;
+    throw e;
+  }
 
   // 2. Find shop + group config by shop_id.
   let shopCfg, groupCfg;
@@ -1952,6 +2338,47 @@ app.get('/api/4px/products', async (req, res) => {
       // Stable, useful ordering: trackable first, then by code.
       products.sort((a, b) => (Number(b.trackable) - Number(a.trackable)) ||
                               String(a.logistics_product_code).localeCompare(String(b.logistics_product_code)));
+
+      // ── Curated supplements ──────────────────────────────────────────────────
+      // The live API's product list is account-scoped: products not enabled on
+      // the merchant's 4PX account are simply omitted, even if they are valid
+      // shipping options.  US-ISLAND-PH (S5118) is a prime example — it handles
+      // deliveries to HI/AK/GU/PR/VI and is supported on all direct accounts,
+      // but many API keys never see it in the getlist response.
+      //
+      // Strategy: after normalising live results, scan the curated static catalog
+      // for destination-relevant products that are absent from the API response
+      // and append them as "supplemented" entries.  Live API items are never
+      // modified or removed; supplements are always placed after live results so
+      // the operator's account-configured products remain the primary choices.
+      if (country) {
+        const liveCodeSet = new Set(products.map(p => p.logistics_product_code));
+        const tierOrder   = { economy: 0, standard: 1, express: 2, premium: 3, custom: 99 };
+        const supplements = FOURPX_PRODUCT_CATALOG
+          .filter(p =>
+            p.tier !== 'custom' &&
+            (p.countries.length === 0 || p.countries.includes(country)) &&
+            !liveCodeSet.has(p.code)
+          )
+          .sort((a, b) => {
+            const aSpec = a.countries.length > 0 ? 0 : 1;
+            const bSpec = b.countries.length > 0 ? 0 : 1;
+            if (aSpec !== bSpec) return aSpec - bSpec;
+            return (tierOrder[a.tier] ?? 99) - (tierOrder[b.tier] ?? 99);
+          })
+          .map(p => ({
+            logistics_product_code: p.code,
+            logistics_product_name: p.name,
+            description:            p.desc,
+            tier:                   p.tier,
+            country_specific:       p.countries.length > 0,
+            supplemented:           true,   // not from live API; curated catalog entry
+          }));
+        if (supplements.length) {
+          products = [...products, ...supplements];
+          console.log(`[4px/products] Live API (${country}): ${liveCodeSet.size} live + ${supplements.length} curated supplement(s) [${supplements.map(s => s.logistics_product_code).join(', ')}]`);
+        }
+      }
     }
 
     _fpxProductsCache.set(cacheKey, { products, source, country, expiresAt: Date.now() + 30 * 60 * 1000 });
@@ -2014,6 +2441,39 @@ app.get('/api/4px/order/:receipt_id', (req, res) => {
  * @returns {Promise<object>}  createShipOrder result (trackingNo, dsConsignmentNo, …).
  * @throws  {Error}  err.status set to a sensible HTTP code; err.code carries any 4PX code.
  */
+/**
+ * Translate opaque 4PX risk-control rejections into actionable English guidance.
+ *
+ * 4PX returns "此订单为申报收件人黑名单" (DS000000) when the declared recipient
+ * matches its blacklist. The most common cause was a shared placeholder phone
+ * reused across every order — now eliminated by generateRecipientPhone(), which
+ * gives each order a unique destination-localized number. If a blacklist
+ * rejection still surfaces, the recipient name/address itself is flagged on 4PX's
+ * side and only 4PX support can clear it, so we say exactly that.
+ *
+ * @param {Error}        err         The error thrown by createShipOrder.
+ * @param {number|string} receipt_id Etsy receipt for log/operator context.
+ * @returns {Error}                  The same error, or a clearer replacement.
+ */
+function annotate4pxOrderError(err, receipt_id) {
+  const msg = (err && err.message) || '';
+  if (/黑名单|blacklist/i.test(msg)) {
+    const friendly = new Error(
+      `4PX rejected receipt ${receipt_id}: the declared recipient is on 4PX's ` +
+      `risk-control blacklist. Each order now sends a unique, destination-` +
+      `localized contact phone, so a previously over-used shared number is no ` +
+      `longer the cause. If this persists, the recipient's name/address is ` +
+      `flagged on 4PX's side and must be cleared with 4PX support. ` +
+      `(Original 4PX message: ${msg})`
+    );
+    friendly.status  = 422;
+    friendly.code    = err.code || 'DS000000';
+    friendly.apiBody = err.apiBody;
+    return friendly;
+  }
+  return err;
+}
+
 async function create4pxShipmentForReceipt({ appKey, appSecret, receipt_id, recipient, parcel, logistics_product_code, duty_type = 'U' }) {
   if (!receipt_id)               { const e = new Error('receipt_id is required'); e.status = 400; throw e; }
   if (!recipient)                { const e = new Error('recipient is required'); e.status = 400; throw e; }
@@ -2028,7 +2488,7 @@ async function create4pxShipmentForReceipt({ appKey, appSecret, receipt_id, reci
 
   // Idempotency: never create a second 4PX order for the same receipt.
   const order = db.prepare(
-    'SELECT receipt_id, shop_id, fourpx_consignment_no, fourpx_tracking_no FROM receipts WHERE receipt_id = ?'
+    'SELECT receipt_id, shop_id, source, buyer_email, fourpx_consignment_no, fourpx_tracking_no FROM receipts WHERE receipt_id = ?'
   ).get(receipt_id);
   if (!order) { const e = new Error(`Receipt ${receipt_id} not found`); e.status = 404; throw e; }
   if (order.fourpx_consignment_no) {
@@ -2039,16 +2499,36 @@ async function create4pxShipmentForReceipt({ appKey, appSecret, receipt_id, reci
     throw e;
   }
 
-  // EU IOSS / VAT compliance: for EU27 destinations (declared value ≤ €150,
-  // always true here), 4PX requires the IOSS number on `ioss_no` so the parcel
-  // clears customs as VAT-prepaid. vat_no / eori_no are attached when configured.
   const destCountry = (recipient?.country || '').toUpperCase();
   const isEuDestination = FOURPX_IOSS_COUNTRIES.has(destCountry);
-  const euCompliance = isEuDestination ? {
-    ...(config.fourpx_ioss_no && { ioss_no: config.fourpx_ioss_no }),
-    ...(config.fourpx_vat_no  && { vat_no:  config.fourpx_vat_no  }),
-    ...(config.fourpx_eori_no && { eori_no: config.fourpx_eori_no }),
-  } : {};
+
+  // ── Destination tax / customs compliance ─────────────────────────────────────
+  // IMPORTANT: 4PX validates BOTH the EU IOSS/VAT and the destination recipient
+  // tax id against the ORDER-LEVEL `vat_no` / `ioss_no` / `eori_no` fields — NOT
+  // the recipient_info sub-object. Its error is labelled "recipient_info.vat_no
+  // required", but supplying the value inside recipient_info is silently ignored
+  // (verified by probing every recipient_info field name against the live API).
+  // The value MUST be set at the order top level.
+  //
+  //   • EU27 (declared value ≤ €150, always true here): attach the marketplace
+  //     IOSS number so the parcel clears as VAT-prepaid; vat_no / eori_no too.
+  //   • Mexico (MX): since the Oct-2024 SAT reform, a recipient RFC/CURP is
+  //     mandatory. Use the buyer's RFC when supplied, else the SAT generic RFC
+  //     for unregistered individuals (XAXX010101000) so the shipment clears.
+  const COUNTRIES_REQUIRING_RECIPIENT_VAT = new Set(['MX']);
+  const MX_GENERIC_RFC = 'XAXX010101000';
+  const recipientVatNo =
+    (recipient.vat_no || '').trim() ||
+    (COUNTRIES_REQUIRING_RECIPIENT_VAT.has(destCountry) ? MX_GENERIC_RFC : '');
+
+  const taxCompliance = {};
+  if (isEuDestination) {
+    if (config.fourpx_ioss_no) taxCompliance.ioss_no = config.fourpx_ioss_no;
+    if (config.fourpx_vat_no)  taxCompliance.vat_no  = config.fourpx_vat_no;
+    if (config.fourpx_eori_no) taxCompliance.eori_no = config.fourpx_eori_no;
+  }
+  // Recipient tax id (e.g. MX RFC) is supplied at the order-level vat_no field.
+  if (recipientVatNo) taxCompliance.vat_no = recipientVatNo;
 
   if (isEuDestination && !config.fourpx_ioss_no) {
     console.warn(
@@ -2057,19 +2537,52 @@ async function create4pxShipmentForReceipt({ appKey, appSecret, receipt_id, reci
     );
   }
 
-  const result = await createShipOrder(appKey, appSecret, {
-    ref_no:                `ETSY-${receipt_id}`,
-    logistics_product_code,
-    warehouse_code:        config.fourpx_warehouse_code ?? undefined,
-    deliver_type:          '3',
-    sender:                config.fourpx_sender,
-    recipient,
-    parcels:               [parcel],
-    duty_type,
-    sales_platform:        'ETSY',
-    trade_id:              receipt_id,
-    ...euCompliance,
-  });
+  // ── Recipient enrichment ─────────────────────────────────────────────────────
+  // Email: 4PX requires recipient_info.email for all Etsy-sourced shipments and
+  // some destinations enforce it strictly (MX, etc.).  Resolution order:
+  //   1. Caller-supplied recipient.email (e.g. from the UI form)
+  //   2. buyer_email stored in the receipts row (synced from Etsy at order time)
+  //   3. Explicit override from config (fourpx_default_recipient_email)
+  //   4. Hard fallback — the shop owner's contact address
+  const recipientEmail =
+    (recipient.email || '').trim() ||
+    (order.buyer_email || '').trim() ||
+    (config.fourpx_default_recipient_email || '').trim() ||
+    'w088studio@gmail.com';
+
+  const enrichedRecipient = {
+    ...recipient,
+    email: recipientEmail,
+    // Mirror the tax id into recipient_info too (harmless; used by 4PX for label
+    // printing). The binding validation is satisfied by the order-level vat_no.
+    ...(recipientVatNo && { vat_no: recipientVatNo }),
+  };
+
+  // Customer reference 4PX echoes back. Manual orders use a MANUAL- prefix with
+  // the absolute id (the raw id is negative) so the ref stays human-readable and
+  // never looks like a real Etsy receipt.
+  const refNo = order.source === 'manual'
+    ? `MANUAL-${Math.abs(receipt_id)}`
+    : `ETSY-${receipt_id}`;
+
+  let result;
+  try {
+    result = await createShipOrder(appKey, appSecret, {
+      ref_no:                refNo,
+      logistics_product_code,
+      warehouse_code:        config.fourpx_warehouse_code ?? undefined,
+      deliver_type:          '3',
+      sender:                config.fourpx_sender,
+      recipient:             enrichedRecipient,
+      parcels:               [parcel],
+      duty_type,
+      sales_platform:        'ETSY',
+      trade_id:              receipt_id,
+      ...taxCompliance,
+    });
+  } catch (err) {
+    throw annotate4pxOrderError(err, receipt_id);
+  }
 
   // Persist immediately — tracking number is now available even before label fetch.
   upsertFourpxShipment(db, receipt_id, {
@@ -2276,29 +2789,58 @@ app.get('/api/4px/label-download/:receipt_id', async (req, res) => {
       return res.status(404).json({ error: 'Label not yet available — please try again in a few seconds.' });
     }
 
-    // Filename = buyer name only: "Julie Zaring.pdf"
+    // Filename = buyer name only: "Julie Zaring.pdf". Built via the
+    // content-disposition library (RFC 6266) so non-ASCII buyer names such as
+    // "Łukasz Gierszon" produce a valid ASCII `filename=` fallback PLUS a UTF-8
+    // `filename*=` form, instead of throwing ERR_INVALID_CHAR on setHeader.
     const filename = `${safe4pxLabelBaseName(buyerName, trackingNo || consignmentNo)}.pdf`;
 
-    // Proxy the PDF from 4PX (may be plain HTTP, so must happen server-side)
-    const fetchFn  = labelUrl.startsWith('https') ? require('https') : require('http');
+    // Proxy the PDF from 4PX (label URLs are often plain HTTP, so the fetch must
+    // happen server-side to avoid the browser blocking mixed content).
+    const fetchFn  = labelUrl.startsWith('https') ? https : http;
     const proxyReq = fetchFn.get(labelUrl, (upstream) => {
-      if (upstream.statusCode !== 200) {
-        res.status(502).json({ error: `4PX label server returned ${upstream.statusCode}` });
+      // Everything inside this callback runs asynchronously and is OUTSIDE the
+      // surrounding try/catch, so a throw here (e.g. a bad header value) would
+      // become an uncaught exception that resets the socket / crashes the
+      // process. Guard the whole body so any failure becomes a clean 502.
+      try {
+        if (upstream.statusCode !== 200) {
+          upstream.resume();  // drain so the socket can be freed
+          if (!res.headersSent) res.status(502).json({ error: `4PX label server returned ${upstream.statusCode}` });
+          return;
+        }
+        res.setHeader('Content-Type', upstream.headers['content-type'] || 'application/pdf');
+        res.setHeader('Content-Disposition', contentDisposition(filename));
+        if (upstream.headers['content-length']) {
+          res.setHeader('Content-Length', upstream.headers['content-length']);
+        }
+        // If 4PX drops the connection mid-transfer, tear down the client
+        // response cleanly rather than letting the unhandled stream 'error'
+        // crash the process.
+        upstream.on('error', (err) => {
+          console.error('[4px] label upstream stream error:', err.message);
+          if (!res.headersSent) res.status(502).json({ error: `Failed to fetch label: ${err.message}` });
+          else res.destroy(err);
+        });
+        upstream.pipe(res);
+      } catch (err) {
+        console.error('[4px] label proxy response error:', err.message);
         upstream.resume();
-        return;
+        if (!res.headersSent) res.status(502).json({ error: `Failed to stream label: ${err.message}` });
+        else res.destroy(err);
       }
-      res.setHeader('Content-Type', upstream.headers['content-type'] || 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
-      if (upstream.headers['content-length']) {
-        res.setHeader('Content-Length', upstream.headers['content-length']);
-      }
-      // Stream directly — no buffering
-      upstream.pipe(res);
     });
     proxyReq.on('error', (err) => {
+      console.error('[4px] label proxy request error:', err.message);
       if (!res.headersSent) res.status(502).json({ error: `Failed to fetch label: ${err.message}` });
     });
-    req.on('close', () => proxyReq.destroy());
+    // Fail fast if the 4PX label host hangs instead of leaving the browser
+    // request open indefinitely.
+    proxyReq.setTimeout(25_000, () => proxyReq.destroy(new Error('4PX label download timed out')));
+    // Abort the upstream fetch only if the client disconnects BEFORE the
+    // response finished — guarding on writableEnded avoids needlessly
+    // destroying the socket after a successful transfer.
+    res.on('close', () => { if (!res.writableEnded) proxyReq.destroy(); });
 
   } catch (err) {
     console.error('[4px] GET /api/4px/label-download:', err.message);
@@ -2721,7 +3263,15 @@ async function getShopClientForShopName(shopName) {
   const accessToken  = await tokenManager.getAccessToken(
     shopCfg.shop_id, shopCfg.api_key, shopCfg.refresh_token ?? null, proxyClient
   );
-  const shopClient   = buildShopClient(proxyClient, shopCfg.api_key, shopCfg.shared_secret, accessToken);
+  // Fresh-token provider so the client auto-refreshes mid-run (long bulk jobs can
+  // outlive a 1h access token). forceRefresh=true is used by the 401 retry path.
+  const getToken = async (forceRefresh) => {
+    if (forceRefresh) tokenManager.invalidate(shopCfg.shop_id);
+    return tokenManager.getAccessToken(
+      shopCfg.shop_id, shopCfg.api_key, shopCfg.refresh_token ?? null, proxyClient
+    );
+  };
+  const shopClient   = buildShopClient(proxyClient, shopCfg.api_key, shopCfg.shared_secret, accessToken, getToken);
   const numericShopId = await resolveShopId(shopClient, shopCfg.shop_id);
   return { shopClient, numericShopId, shopCfg, groupCfg };
 }
@@ -2953,7 +3503,20 @@ app.get('/api/bulk/shop-settings/:shop_name', async (req, res) => {
       db, shopClient, shopId: numericShopId,
       shopKey: req.params.shop_name, force: req.query.force === '1',
     });
-    res.json({ shop_key: shopCfg.shop_id, ...settings });
+    // Default variation prices = the shop's CURRENT prices (from cached live
+    // listings), with the master sheet filling any style the shop doesn't sell.
+    let sheetPrices = {};
+    try { sheetPrices = getPricesForCurrency(settings.currency_code, { column: 'anchor' }).prices; } catch { sheetPrices = {}; }
+    const { prices, source, shop } = resolveDefaultPrices({ db, shopId: shopCfg.shop_id, sheetPrices });
+    res.json({
+      shop_key: shopCfg.shop_id, ...settings,
+      style_keys: STYLE_KEYS,
+      default_prices: prices,
+      prices_source: source,
+      shop_current_prices: shop.prices,
+      shop_price_listings: shop.listingCount,
+      sheet_prices: sheetPrices,
+    });
   } catch (err) {
     console.error('[bulk] shop-settings error:', err.response?.data || err.message);
     res.status(err.status || err.response?.status || 500).json({ error: err.response?.data?.error || err.message });
@@ -2967,7 +3530,7 @@ app.get('/api/bulk/shop-settings/:shop_name', async (req, res) => {
  */
 app.post('/api/bulk/run', (req, res) => {
   try {
-    const { shop_name, input_path, state, overrides, dry_run, brand_tags } = req.body;
+    const { shop_name, input_path, state, overrides, dry_run, brand_tags, style_prices } = req.body;
     if (!shop_name) return res.status(400).json({ error: 'shop_name required' });
     if (!input_path) return res.status(400).json({ error: 'input_path required' });
     const job = bulkManager.createAndStart({
@@ -2977,6 +3540,7 @@ app.post('/api/bulk/run', (req, res) => {
       dryRun: Boolean(dry_run),
       overrides: overrides || {},
       brandTags: Array.isArray(brand_tags) ? brand_tags : undefined,
+      stylePrices: (style_prices && typeof style_prices === 'object') ? style_prices : undefined,
     });
     res.status(201).json({ success: true, job });
   } catch (err) {
@@ -2984,9 +3548,30 @@ app.post('/api/bulk/run', (req, res) => {
   }
 });
 
-/** GET /api/bulk/jobs — recent jobs (newest first). */
+/**
+ * GET /api/bulk/jobs?shop=<shop_name>&limit=50 — saved runs (newest first), with
+ * per-job item rollups so the History panel can summarise each run and the user
+ * can reopen/recover it after leaving the session.
+ */
 app.get('/api/bulk/jobs', (req, res) => {
-  const jobs = db.prepare('SELECT * FROM bulk_jobs ORDER BY created_at DESC LIMIT 50').all();
+  const limit = Math.min(parseInt(req.query.limit ?? 50, 10) || 50, 200);
+  const params = { limit };
+  let where = '';
+  if (req.query.shop) { where = 'WHERE j.shop_name = @shop'; params.shop = String(req.query.shop); }
+  const jobs = db.prepare(`
+    SELECT j.*,
+      (SELECT COUNT(*) FROM bulk_job_items i WHERE i.job_id = j.job_id) AS item_count,
+      (SELECT COUNT(*) FROM bulk_job_items i WHERE i.job_id = j.job_id AND i.status = 'done') AS done_count,
+      (SELECT COUNT(*) FROM bulk_job_items i WHERE i.job_id = j.job_id AND i.status = 'failed') AS failed_count,
+      (SELECT COUNT(*) FROM bulk_job_items i WHERE i.job_id = j.job_id AND i.listing_id IS NOT NULL) AS created_count,
+      (SELECT COUNT(*) FROM bulk_job_items i WHERE i.job_id = j.job_id AND i.published_at IS NOT NULL) AS published_count
+    FROM bulk_jobs j
+    ${where}
+    ORDER BY j.created_at DESC
+    LIMIT @limit
+  `).all(params);
+  // Annotate with whether the job is actively executing in this process.
+  for (const j of jobs) j.is_active = bulkManager.isActive(j.job_id);
   res.json({ jobs });
 });
 
@@ -2994,7 +3579,17 @@ app.get('/api/bulk/jobs', (req, res) => {
 app.get('/api/bulk/jobs/:job_id', (req, res) => {
   const job = bulkManager.getJob(req.params.job_id);
   if (!job) return res.status(404).json({ error: 'Job not found' });
-  res.json({ job, items: bulkManager.getItems(req.params.job_id) });
+  res.json({ job, items: bulkManager.getItems(req.params.job_id), is_active: bulkManager.isActive(job.job_id) });
+});
+
+/** DELETE /api/bulk/jobs/:job_id — remove a saved run (and its items). */
+app.delete('/api/bulk/jobs/:job_id', (req, res) => {
+  try {
+    bulkManager.deleteJob(req.params.job_id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
 });
 
 /** GET /api/bulk/stream/:job_id — SSE live progress. */
@@ -3020,6 +3615,219 @@ app.post('/api/bulk/jobs/:job_id/retry', (req, res) => {
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
+});
+
+/**
+ * POST /api/bulk/jobs/:job_id/create-drafts — promote a finished DRY-RUN job to
+ * a real run that creates Etsy DRAFT listings, reusing the reviewed previews.
+ */
+app.post('/api/bulk/jobs/:job_id/create-drafts', (req, res) => {
+  try {
+    const job = bulkManager.createDraftsFromDryRun(req.params.job_id);
+    res.json({ success: true, job });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/** POST /api/bulk/jobs/:job_id/pause — stop after the current product. */
+app.post('/api/bulk/jobs/:job_id/pause', (req, res) => {
+  try {
+    const job = bulkManager.pause(req.params.job_id);
+    res.json({ success: true, job });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/** POST /api/bulk/jobs/:job_id/resume — continue a paused/incomplete job. */
+app.post('/api/bulk/jobs/:job_id/resume', (req, res) => {
+  try {
+    const job = bulkManager.resume(req.params.job_id, { overrides: req.body?.overrides });
+    res.json({ success: true, job });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/** POST /api/bulk/jobs/:job_id/cancel — stop the job (after the current product). */
+app.post('/api/bulk/jobs/:job_id/cancel', (req, res) => {
+  try {
+    const job = bulkManager.cancel(req.params.job_id);
+    res.json({ success: true, job });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/bulk/jobs/:job_id/items/:seq/detail
+ * Full inspection payload for one product (copy, image order, variation matrix,
+ * resolved shop settings, listing/publish state).
+ */
+app.get('/api/bulk/jobs/:job_id/items/:seq/detail', (req, res) => {
+  try {
+    res.json(bulkManager.buildItemDetail(req.params.job_id, req.params.seq));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/bulk/jobs/:job_id/items/:seq/image/:rank
+ * Streams a product image (validated to live inside the job's input folder)
+ * so the Inspector can show the real photos in upload order.
+ */
+app.get('/api/bulk/jobs/:job_id/items/:seq/image/:rank', (req, res) => {
+  try {
+    const { path: imgPath, mime } = bulkManager.resolveItemImage(
+      req.params.job_id, req.params.seq, req.params.rank
+    );
+    res.setHeader('Content-Type', mime || 'application/octet-stream');
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    fs.createReadStream(imgPath).on('error', () => {
+      if (!res.headersSent) res.status(500).end();
+    }).pipe(res);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/** POST /api/bulk/jobs/:job_id/items/:seq/publish — publish one draft to Etsy. */
+app.post('/api/bulk/jobs/:job_id/items/:seq/publish', async (req, res) => {
+  try {
+    const result = await bulkManager.publishItem(req.params.job_id, req.params.seq);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('[bulk] publish item error:', err.response?.data || err.message);
+    res.status(err.status || err.response?.status || 500).json({ error: err.response?.data?.error || err.message });
+  }
+});
+
+/** POST /api/bulk/jobs/:job_id/publish — publish all created drafts (background + SSE). */
+app.post('/api/bulk/jobs/:job_id/publish', (req, res) => {
+  try {
+    res.json({ success: true, ...bulkManager.publishAll(req.params.job_id) });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/** POST /api/bulk/jobs/:job_id/items/:seq/reviewed — toggle manual-review sign-off. */
+app.post('/api/bulk/jobs/:job_id/items/:seq/reviewed', (req, res) => {
+  try {
+    const reviewed = req.body?.reviewed !== false; // default true
+    res.json({ success: true, ...bulkManager.setItemReviewed(req.params.job_id, req.params.seq, reviewed) });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/** POST /api/bulk/jobs/:job_id/reviewed — bulk toggle review sign-off { seqs, reviewed }. */
+app.post('/api/bulk/jobs/:job_id/reviewed', (req, res) => {
+  try {
+    const reviewed = req.body?.reviewed !== false;
+    res.json({ success: true, ...bulkManager.setItemsReviewed(req.params.job_id, Array.isArray(req.body?.seqs) ? req.body.seqs : [], reviewed) });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/bulk/jobs/:job_id/items/:seq/prices  { style_prices: {styleKey: price} }
+ * Update one product's per-style prices; re-pushes inventory if it's a live draft.
+ */
+app.post('/api/bulk/jobs/:job_id/items/:seq/prices', async (req, res) => {
+  try {
+    const result = await bulkManager.updateItemPrices(req.params.job_id, req.params.seq, req.body?.style_prices || {});
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('[bulk] item prices error:', err.response?.data || err.message);
+    res.status(err.status || err.response?.status || 500).json({ error: err.response?.data?.error || err.message });
+  }
+});
+
+/**
+ * POST /api/bulk/jobs/:job_id/items/:seq/variations  { enabled_styles, style_prices }
+ * Adjust which of the 6 styles a listing offers (and optionally its prices);
+ * re-pushes the variation inventory for a live draft.
+ */
+app.post('/api/bulk/jobs/:job_id/items/:seq/variations', async (req, res) => {
+  try {
+    const result = await bulkManager.updateItemVariations(req.params.job_id, req.params.seq, {
+      enabledStyles: req.body?.enabled_styles,
+      stylePrices: req.body?.style_prices,
+      styleImageMapping: req.body?.style_image_mapping,
+      enabledModels: req.body?.enabled_models,
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('[bulk] item variations error:', err.response?.data || err.message);
+    res.status(err.status || err.response?.status || 500).json({ error: err.response?.data?.error || err.message });
+  }
+});
+
+/**
+ * POST /api/bulk/jobs/:job_id/prices  { style_prices: {styleKey: price} }
+ * Bulk-apply one price set to every product in the job (background + SSE).
+ */
+/**
+ * POST /api/bulk/jobs/:job_id/bulk-models
+ * Body: { seqs: number[], enabled_models: {model: bool} }
+ * Bulk-apply an iPhone-model selection to the chosen listings (background + SSE).
+ */
+app.post('/api/bulk/jobs/:job_id/bulk-models', (req, res) => {
+  try {
+    const result = bulkManager.bulkUpdateModels(
+      req.params.job_id,
+      Array.isArray(req.body?.seqs) ? req.body.seqs : [],
+      req.body?.enabled_models || {},
+    );
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.post('/api/bulk/jobs/:job_id/prices', (req, res) => {
+  try {
+    res.json({ success: true, ...bulkManager.updateAllPrices(req.params.job_id, req.body?.style_prices || {}) });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/bulk/jobs/:job_id/items/:seq/regenerate  { character_name? }
+ * Regenerate copy (Phase-2 only), optionally with a corrected character name;
+ * pushes the new title/description/tags to Etsy for a live draft.
+ */
+app.post('/api/bulk/jobs/:job_id/items/:seq/regenerate', async (req, res) => {
+  try {
+    const result = await bulkManager.regenerateItemCopy(req.params.job_id, req.params.seq, {
+      characterName: req.body?.character_name,
+      magsafe: typeof req.body?.magsafe === 'boolean' ? req.body.magsafe : undefined,
+      enabledModels: req.body?.enabled_models,
+      enabledStyles: req.body?.enabled_styles,
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('[bulk] regenerate error:', err.response?.data || err.message);
+    res.status(err.status || err.response?.status || 500).json({ error: err.response?.data?.error || err.message });
+  }
+});
+
+/** GET /api/bulk/characters — the curated character catalog (for the picker). */
+app.get('/api/bulk/characters', (req, res) => {
+  const byFranchise = {};
+  for (const c of CHARACTERS) {
+    (byFranchise[c.franchise] ||= []).push(c.name);
+  }
+  for (const f of Object.keys(byFranchise)) byFranchise[f].sort((a, b) => a.localeCompare(b));
+  res.json({
+    characters: CHARACTERS.map((c) => ({ name: c.name, franchise: c.franchise })),
+    by_franchise: byFranchise,
+  });
 });
 
 // ─── Inventory ────────────────────────────────────────────────────────────────
@@ -3882,7 +4690,9 @@ app.post('/api/messages/:shop_id/:convo_id/reply', async (req, res) => {
   const groupCfg = config.groups.find(g => g.shops.some(s => s.shop_id === shop_id));
   if (!groupCfg) return res.status(404).json({ error: 'Group not found for shop' });
 
-  const etsyUrl     = `https://www.etsy.com/messages/convo/${convo_id}`;
+  // Current Etsy conversation URL is /messages/{id} (the old /messages/convo/{id}
+  // pattern now 404s). Used for the "Open on Etsy" link + clipboard fallback.
+  const etsyUrl     = `https://www.etsy.com/messages/${convo_id}`;
   const trimmedBody = body.trim();
   const now         = Math.floor(Date.now() / 1000);
 
@@ -3912,6 +4722,24 @@ app.post('/api/messages/:shop_id/:convo_id/reply', async (req, res) => {
         success: false, method: 'session_expired',
         message: 'Your Etsy browser session expired. Click "Re-login" in the Messages tab to reconnect.',
         etsy_url: etsyUrl,
+      });
+    }
+
+    if (result.error === 'access_restricted') {
+      // Etsy is bot-challenging this shop's IP (common for direct/datacenter/VPN
+      // IPs without an AdsPower anti-detect profile). Don't waste a call on the
+      // dead API tier — go straight to the clipboard + open-Etsy flow, which the
+      // user completes in their own already-trusted browser.
+      const ipNote = result.blocked_ip ? ` (Etsy flagged IP ${result.blocked_ip})` : '';
+      return res.json({
+        success:   false,
+        method:    'clipboard',
+        etsy_url:  etsyUrl,
+        copy_text: trimmedBody,
+        message:   `Etsy is verifying this shop's connection${ipNote}. Your reply was copied — paste it in the Etsy tab that just opened. ` +
+                   (shopCfg.adspower_profile_id
+                     ? 'Tip: open this shop\'s AdsPower profile once to clear the check.'
+                     : 'Tip: give this shop an AdsPower profile or residential proxy for one-click replies.'),
       });
     }
 
@@ -4043,6 +4871,20 @@ app.post('/api/messages/sync', async (req, res) => {
         if (result.error === 'session_expired') {
           broadcastSyncEvent({ type: 'messages:session-expired', shop_id: shopCfg.shop_id });
           console.warn(`[messages/sync] ${shopCfg.shop_id}: browser session expired — re-login required`);
+        } else if (result.error === 'access_restricted') {
+          const ipNote = result.blocked_ip ? ` (flagged IP ${result.blocked_ip})` : '';
+          broadcastSyncEvent({
+            type: 'messages:access-restricted',
+            shop_id: shopCfg.shop_id,
+            blocked_ip: result.blocked_ip || null,
+            uses_adspower: !!shopCfg.adspower_profile_id,
+          });
+          console.warn(
+            `[messages/sync] ${shopCfg.shop_id}: Etsy bot-block${ipNote}. ` +
+            (shopCfg.adspower_profile_id
+              ? 'Check the AdsPower profile / proxy for this group.'
+              : 'This shop has no AdsPower profile — its egress IP is flagged. Assign an AdsPower profile or a residential proxy, or use email sync.')
+          );
         } else if (result.error) {
           console.warn(`[messages/sync] ${shopCfg.shop_id}: browser sync error — ${result.error}`);
         } else {
@@ -4530,7 +5372,25 @@ app.post('/api/route/manual-order', express.json({ limit: '25mb' }), (req, res) 
     }
 
     const itemKey = routeDashboard.lineItemKey(title, listingId);
+
+    // Create the companion manual ORDER first (a real `receipts` row) so this
+    // Route-tab entry AUTOMATICALLY appears in the Orders tab, where the operator
+    // fills in the buyer name + shipping address. The order and the route sidecar
+    // share ONE receipt_id, so they are the same order in both tabs and a delete
+    // from either side tears down both. Product model/style ride along as order
+    // line-item variations (shown in the Orders tab + used by 4PX weight detection).
+    const phoneModel = String(b.phone_model || '').trim();
+    const style      = String(b.style || '').trim();
+    const variations = [];
+    if (phoneModel) variations.push({ formatted_name: 'Phone Model', formatted_value: phoneModel });
+    if (style)      variations.push({ formatted_name: 'Style',       formatted_value: style });
+    const order = insertManualOrder(db, {
+      shop_id: MANUAL_SHOP_ID,
+      items: [{ title, quantity: b.quantity, listing_id: listingId, variations }],
+    });
+
     const created = insertManualItem(db, {
+      receipt_id:  order.receipt_id,   // LINK the sidecar to the manual order
       item_key:    itemKey,
       title,
       phone_model: b.phone_model,
@@ -4585,6 +5445,12 @@ app.delete('/api/route/manual-order', express.json(), (req, res) => {
   const rid = Number((req.body ?? {}).receipt_id);
   if (!Number.isInteger(rid)) return res.status(400).json({ error: 'receipt_id is required.' });
   try {
+    // Block deletion while a 4PX shipment exists — the manual order may have been
+    // shipped from the Orders tab, and deleting it here would orphan the label.
+    const linked = db.prepare('SELECT fourpx_consignment_no FROM receipts WHERE receipt_id = ?').get(rid);
+    if (linked?.fourpx_consignment_no) {
+      return res.status(409).json({ error: 'This manual order has a 4PX shipment. Cancel the 4PX shipment in the Orders tab first, then delete it.' });
+    }
     const removed = deleteManualItemByReceipt(db, rid);
     if (!removed) return res.status(404).json({ error: 'Manual item not found.' });
     res.json({ ok: true });
@@ -5092,17 +5958,12 @@ const ROUTE_OUTPUT_FILES = [
   { file: 'shopping_route_simple.xlsx',    label: 'Simple route',       desc: 'Compact supplier checklist',      icon: '🧾', generated: true,  group: 'en' },
   { file: 'shopping_route_zh.xlsx',        label: 'Shopping route',     desc: '简化版购物路线',                    icon: '🛍️', generated: true,  group: 'zh' },
   { file: 'shopping_route_zh_status.xlsx', label: 'Route + status',     desc: '含 手机壳 / 支架 / 挂件 状态',       icon: '📝', generated: true,  group: 'zh' },
-  { file: 'shopping_route_zh_check.xlsx',  label: 'Purchase checklist', desc: '员工按订单核对采购状态',             icon: '📋', generated: true,  group: 'zh' },
-  { file: 'shopping_route_zh_ready.xlsx',  label: 'Ready to ship',      desc: '全部已购买 · 可打包发货',           icon: '✅', generated: false, group: 'zh' },
 ];
 // Just the filenames, for membership checks / lock probing.
 const ROUTE_OUTPUT_XLSX = ROUTE_OUTPUT_FILES.map(s => s.file);
 // Subset (re)written by a normal route generation — used for the pre-flight
-// lock check so an open ready-to-ship report never blocks route generation.
+// lock check so an open route file never blocks route generation.
 const ROUTE_GENERATED_XLSX = ROUTE_OUTPUT_FILES.filter(s => s.generated).map(s => s.file);
-// The on-demand ready-to-ship report, and the checklist it is built from.
-const ROUTE_CHECK_FILE = 'shopping_route_zh_check.xlsx';
-const ROUTE_READY_FILE = 'shopping_route_zh_ready.xlsx';
 
 /**
  * POST /api/route/generate
@@ -5456,7 +6317,7 @@ function _routeOutputDir() {
   return path.join(UED_ROOT, 'output');
 }
 function _isAllowedRouteFile(name) {
-  return /^shopping_route(_simple|_zh_status|_zh_check|_zh_ready|_zh)?\.(xlsx|html)$/i.test(name) && !/[/\\]/.test(name);
+  return /^shopping_route(_simple|_zh_status|_zh)?\.(xlsx|html)$/i.test(name) && !/[/\\]/.test(name);
 }
 
 /**
@@ -5479,116 +6340,489 @@ app.get('/api/route/output-files', (req, res) => {
 });
 
 /**
- * POST /api/route/build-ready
- * Body (all optional): { data_b64?, file? }
+ * POST /api/route/import-status
+ * Body: { data_b64 }  — base64 of an employee-edited shopping_route_zh_status.xlsx
  *
- * Builds the ready-to-ship report (shopping_route_zh_ready.xlsx) from an
- * employee-edited order-status checklist. The source checklist is resolved as:
- *   1. `data_b64`  — base64 of an uploaded .xlsx the operator just picked, or
- *   2. `file`      — the name of an existing route file in the output dir, or
- *   3. the in-place shopping_route_zh_check.xlsx (default).
+ * Reads the per-component purchase statuses an employee recorded in the Chinese
+ * status workbook and writes them straight back into `route_assignments` — the
+ * SAME table the Route tab edits and the Orders tab reads for its
+ * "needs shipping / pre-transit" purchasing rollup. After applying the edits we
+ * re-roll each affected order's needs_purchase flag, so a pre-transit order that
+ * is now fully bought drops out of the buy queue automatically (and one that
+ * still has outstanding work stays in it).
  *
- * Spawns the Python generator in its standalone --build-ready-from mode (no PDF
- * parsing / catalog access) and returns the ready-order count when it finishes.
+ * The workbook must have been produced by the current generator, which embeds a
+ * hidden machine-readable key column on every row (see src/route/status-import.js
+ * and generate_shopping_route.py). Older files without that column cannot be
+ * mapped back to orders — the caller is told to regenerate the route first.
  */
-app.post('/api/route/build-ready', express.json({ limit: '60mb' }), (req, res) => {
-  const ospScript = enginePaths.engineScript(config);
-  const ospDir    = enginePaths.engineDir(config);
-  try { fs.accessSync(ospScript, fs.constants.R_OK); }
-  catch { return res.status(400).json({ error: `Route engine script not found: ${ospScript}` }); }
-
-  const outputDir = _routeOutputDir();
-  if (!outputDir) return res.status(400).json({ error: 'Route output directory could not be resolved.' });
-  try { fs.mkdirSync(outputDir, { recursive: true }); }
-  catch (err) { return res.status(500).json({ error: `Cannot create output directory: ${err.message}` }); }
-
-  const readyPath = path.join(outputDir, ROUTE_READY_FILE);
-
-  // ── Resolve the source checklist ──────────────────────────────────────────
-  const { data_b64, file } = req.body ?? {};
-  let srcPath;
-  let tmpToClean = null;
-  if (data_b64 && String(data_b64).trim()) {
-    let buf;
-    try { buf = Buffer.from(String(data_b64).replace(/^data:[^,]*,/, ''), 'base64'); }
-    catch { return res.status(400).json({ error: 'Uploaded file data is not valid base64.' }); }
-    if (!buf || buf.length === 0) return res.status(400).json({ error: 'Uploaded file is empty.' });
-    // .xlsx files are ZIP archives — verify the "PK" magic to reject bad uploads early.
-    if (!(buf.length > 4 && buf[0] === 0x50 && buf[1] === 0x4b)) {
-      return res.status(400).json({ error: 'Uploaded file is not a valid .xlsx workbook.' });
-    }
-    srcPath = path.join(os.tmpdir(), `ued_check_${Date.now()}.xlsx`);
-    try { fs.writeFileSync(srcPath, buf); tmpToClean = srcPath; }
-    catch (err) { return res.status(500).json({ error: `Cannot stage uploaded file: ${err.message}` }); }
-  } else if (file && _isAllowedRouteFile(String(file).trim())) {
-    srcPath = path.join(outputDir, String(file).trim());
-  } else {
-    srcPath = path.join(outputDir, ROUTE_CHECK_FILE);
+app.post('/api/route/import-status', express.json({ limit: '60mb' }), (req, res) => {
+  const { data_b64 } = req.body ?? {};
+  if (!data_b64 || !String(data_b64).trim()) {
+    return res.status(400).json({ error: 'No file uploaded.' });
   }
 
-  const _cleanup = () => { if (tmpToClean) { try { fs.unlinkSync(tmpToClean); } catch { /* ignore */ } } };
+  let buf;
+  try { buf = Buffer.from(String(data_b64).replace(/^data:[^,]*,/, ''), 'base64'); }
+  catch { return res.status(400).json({ error: 'Uploaded file data is not valid base64.' }); }
+  if (!buf || buf.length === 0) return res.status(400).json({ error: 'Uploaded file is empty.' });
+  // .xlsx files are ZIP archives — verify the "PK" magic to reject bad uploads early.
+  if (!(buf.length > 4 && buf[0] === 0x50 && buf[1] === 0x4b)) {
+    return res.status(400).json({ error: 'Uploaded file is not a valid .xlsx workbook.' });
+  }
 
-  try { fs.accessSync(srcPath, fs.constants.R_OK); }
-  catch {
-    _cleanup();
-    return res.status(404).json({
-      error: `Checklist not found. Generate a shopping route first (creates ${ROUTE_CHECK_FILE}) ` +
-             `or upload an edited checklist file.`,
+  let parsed;
+  try { parsed = statusImport.parseStatusWorkbook(buf); }
+  catch (err) { return res.status(400).json({ error: `Could not parse the workbook: ${err.message}` }); }
+
+  if (!parsed.hasKeyColumn) {
+    return res.status(422).json({
+      error: 'This file is missing the embedded order key — it was generated by an older ' +
+             'version. Click “Generate route” once to produce an importable ' +
+             'shopping_route_zh_status.xlsx, then have your employee edit and upload that.',
     });
   }
 
-  // Refuse if the report is open in Excel (Windows holds an exclusive write lock).
-  try {
-    const fd = fs.openSync(readyPath, 'r+');
-    fs.closeSync(fd);
-  } catch (err) {
-    if (err.code && ['EBUSY', 'EPERM', 'EACCES'].includes(err.code)) {
-      _cleanup();
-      return res.status(409).json({ error: `Close ${ROUTE_READY_FILE} in Excel, then try again.` });
-    }
-    // ENOENT (not created yet) and other transient errors are fine.
+  const STATUS_OK = new Set(routeDashboard.STATUS_OPTIONS);
+
+  // Merge precedence for a SINGLE component when the same physical line appears
+  // more than once in the workbook (the generator can list one line in both the
+  // routable and the "unmatched" section). A deliberate edit must never be lost
+  // to a default: 'Pending' (the unedited default) never clobbers a real status,
+  // and when two deliberate statuses disagree the later one in sheet order wins.
+  const mergeStatus = (existing, incoming) => {
+    if (!incoming || !STATUS_OK.has(incoming)) return existing || null;
+    if (!existing) return incoming;
+    if (existing === 'Pending') return incoming;
+    if (incoming === 'Pending') return existing;
+    return incoming;
+  };
+
+  // Coalesce every workbook row into ONE patch per (receipt_id, item_key) so a
+  // line carrying Case + Grip (Section 1) and a Charm (Section 2 aggregate) is
+  // written once with all three components — and duplicates collapse cleanly.
+  const lineMap = new Map();   // `${rid}\u0000${key}` → { receipt_id, item_key, status_case, status_grip, status_charm }
+  const getLine = (rid, key) => {
+    const k = `${rid}\u0000${key}`;
+    let o = lineMap.get(k);
+    if (!o) { o = { receipt_id: rid, item_key: key, status_case: null, status_grip: null, status_charm: null }; lineMap.set(k, o); }
+    return o;
+  };
+
+  for (const ln of parsed.lines) {
+    const o = getLine(ln.receipt_id, ln.item_key);
+    o.status_case = mergeStatus(o.status_case, ln.status_case);
+    o.status_grip = mergeStatus(o.status_grip, ln.status_grip);
   }
 
-  const pyArgs = [
-    ospScript,
-    '--project-dir', ospDir,
-    '--build-ready-from', srcPath,
-    '--output', readyPath,
-  ];
-
-  // Free the cached read-only catalog handle (parity with route generation).
-  try { routeDashboard.closeOspCatalog(); } catch { /* non-fatal */ }
-
-  const proc = spawn(enginePaths.enginePython(config), pyArgs, {
-    cwd: ospDir,
-    env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
-  });
-
-  let out = '', errOut = '';
-  proc.stdout.on('data', c => { out += c.toString('utf8'); });
-  proc.stderr.on('data', c => { errOut += c.toString('utf8'); });
-
-  proc.on('error', err => {
-    _cleanup();
-    if (!res.headersSent) res.status(500).json({ error: `Could not start Python: ${err.message}` });
-  });
-
-  proc.on('close', code => {
-    _cleanup();
-    if (res.headersSent) return;
-    if (code !== 0) {
-      const lockLine = (out + '\n' + errOut).split('\n').find(l => l.includes('ROUTE_OUTPUT_LOCKED'));
-      const msg = lockLine
-        ? lockLine.replace(/^.*ROUTE_OUTPUT_LOCKED:\s*/, '').trim()
-        : (errOut.trim().split('\n').filter(Boolean).pop() || `Python exited with code ${code}`);
-      return res.status(500).json({ error: msg });
+  // Charm aggregates need LOSS-SAFE handling. The status workbook collapses
+  // every line that shares a charm code into ONE row, so the cell can only be
+  // "Purchased" when EVERY constituent is already bought — a partially-bought
+  // charm (e.g. 3 of 5) therefore renders as "Pending". Blindly stamping that
+  // Pending back onto all lines (or zeroing the stepper) would wipe the 3 real
+  // purchases. So:
+  //   • Purchased            → mark every constituent Purchased + stepper = full
+  //                            qty (a clear, forward "all in hand" decision).
+  //   • Out of Stock / Out of Production → apply only to constituents NOT
+  //                            already Purchased (never downgrade completed work).
+  //   • Pending              → NO-OP. The aggregate cannot distinguish "reset"
+  //                            from "partially done / untouched default", so we
+  //                            never let it undo per-line progress. (Use the
+  //                            dashboard to reset an individual charm.)
+  const _curCharm = db.prepare('SELECT status_charm FROM route_assignments WHERE receipt_id = ? AND item_key = ?');
+  const charmProgress = [];   // { code, qty } to persist after the line writes
+  let updatedCharms = 0;
+  for (const ch of parsed.charms) {
+    if (!ch.status || !STATUS_OK.has(ch.status) || ch.status === 'Pending') continue;
+    let totalQty = 0;
+    let codeTouched = false;
+    for (const entry of (Array.isArray(ch.lines) ? ch.lines : [])) {
+      const rid = Number(Array.isArray(entry) ? entry[0] : null);
+      const key = Array.isArray(entry) ? String(entry[1] ?? '') : '';
+      const qty = Array.isArray(entry) ? Math.max(1, Math.floor(Number(entry[2]) || 1)) : 1;
+      if (!Number.isInteger(rid) || !key) continue;
+      if (ch.status !== 'Purchased') {
+        // Out of Stock / Out of Production — preserve any already-bought line.
+        let cur;
+        try { cur = _curCharm.get(rid, key); } catch { cur = null; }
+        if (cur && cur.status_charm === 'Purchased') continue;
+      }
+      const o = getLine(rid, key);
+      o.status_charm = mergeStatus(o.status_charm, ch.status);
+      totalQty += qty;
+      codeTouched = true;
     }
-    const m = out.match(/READY_TO_SHIP_COUNT:\s*(\d+)/);
-    const readyCount = m ? parseInt(m[1], 10) : null;
-    let meta = { exists: false };
-    try { const st = fs.statSync(readyPath); meta = { exists: true, size: st.size, modified: st.mtimeMs }; } catch {}
-    res.json({ ok: true, ready_count: readyCount, file: ROUTE_READY_FILE, ...meta });
+    if (codeTouched) {
+      updatedCharms++;
+      if (ch.status === 'Purchased') charmProgress.push({ code: ch.code, qty: totalQty });
+    }
+  }
+
+  // ── Snapshot the BEFORE state so the report can show real before→after diffs.
+  //    A row counts as "updated" only when a component status actually changed —
+  //    re-uploading an unchanged file produces an honest "0 orders updated".
+  const _curLine = db.prepare(
+    'SELECT status_case, status_grip, status_charm FROM route_assignments WHERE receipt_id = ? AND item_key = ?'
+  );
+  const beforeLine = new Map();   // `${rid}\u0000${key}` → prior statuses (or {})
+  for (const o of lineMap.values()) {
+    let cur = null;
+    try { cur = _curLine.get(o.receipt_id, o.item_key); } catch { cur = null; }
+    beforeLine.set(`${o.receipt_id}\u0000${o.item_key}`, cur || {});
+  }
+
+  // Resolve human-friendly metadata (shop, buyer, product titles) + the prior
+  // needs-purchase flag — captured BEFORE the rollup so we can report which
+  // orders were cleared from the buy queue.
+  const affectedIds = [...new Set([...lineMap.values()].map(o => o.receipt_id))];
+  const posIds = affectedIds.filter(id => id > 0);
+  const metaById = new Map();
+  const titleByLine = new Map();
+  const listingByLine = new Map();    // `${rid}\u0000${key}` → listing_id (for product photos)
+  if (posIds.length) {
+    const ph = posIds.map(() => '?').join(',');
+    db.prepare(
+      `SELECT r.receipt_id, r.name AS buyer_name, r.needs_purchase_at, r.is_shipped,
+              r.carrier_confirmed_at, r.all_transactions, s.shop_name
+       FROM receipts r JOIN shops s ON s.shop_id = r.shop_id
+       WHERE r.receipt_id IN (${ph})`
+    ).all(posIds).forEach(r => {
+      metaById.set(r.receipt_id, r);
+      let txs = [];
+      try { txs = JSON.parse(r.all_transactions || '[]'); } catch { txs = []; }
+      for (const t of txs) {
+        const k = routeDashboard.lineItemKey(t.title || '', t.listing_id);
+        const lk = `${r.receipt_id}\u0000${k}`;
+        if (!titleByLine.has(lk)) titleByLine.set(lk, (t.title || '').trim());
+        const lid = t.listing_id != null ? Number(t.listing_id) : null;
+        if (Number.isInteger(lid) && !listingByLine.has(lk)) listingByLine.set(lk, lid);
+      }
+    });
+  }
+  // Manual route entries (synthetic non-positive receipt ids).
+  const manualMeta = new Map();
+  try {
+    for (const m of getManualItems(db)) {
+      manualMeta.set(m.receipt_id, m);
+      titleByLine.set(`${m.receipt_id}\u0000${m.item_key}`, m.title || '');
+      const lid = m.listing_id != null ? Number(m.listing_id) : null;
+      if (Number.isInteger(lid)) listingByLine.set(`${m.receipt_id}\u0000${m.item_key}`, lid);
+    }
+  } catch { /* manual items optional */ }
+
+  const affected = new Set();
+  let upsertedLines = 0;
+
+  try {
+    const applyAll = db.transaction(() => {
+      for (const o of lineMap.values()) {
+        const patch = { receipt_id: o.receipt_id, item_key: o.item_key };
+        let touched = false;
+        if (o.status_case)  { patch.status_case  = o.status_case;  touched = true; }
+        if (o.status_grip)  { patch.status_grip  = o.status_grip;  touched = true; }
+        if (o.status_charm) { patch.status_charm = o.status_charm; touched = true; }
+        if (!touched) continue;
+        upsertRouteAssignment(db, patch);
+        affected.add(o.receipt_id);
+        upsertedLines++;
+      }
+      for (const cp of charmProgress) {
+        try { setCharmPurchaseProgress(db, cp.code, cp.qty); }
+        catch { /* progress is best-effort — never abort the import for it */ }
+      }
+    });
+    applyAll();
+  } catch (err) {
+    console.error('[route] import-status error:', err.message);
+    return res.status(500).json({ error: `Failed to apply statuses: ${err.message}` });
+  }
+
+  // Re-roll each affected Etsy order's purchasing flag so the Orders tab's
+  // needs-shipping / pre-transit views reflect the new statuses immediately.
+  // Manual route entries use synthetic non-positive ids and have no Etsy
+  // shipment, so they are excluded from the rollup.
+  const outstandingAfter = new Map();
+  let manualLines = 0;
+  for (const rid of affected) {
+    if (rid <= 0) { manualLines++; continue; }
+    try { outstandingAfter.set(rid, recomputeNeedsPurchaseRollup(rid)); }
+    catch { outstandingAfter.set(rid, true); }
+  }
+
+  // ── Build the per-order change report (only orders with a real change) ──────
+  const COMP_LABEL = { case: 'Case', grip: 'Grip', charm: 'Charm' };
+  const reportByOrder = new Map();
+  let changedLines = 0;
+  for (const o of lineMap.values()) {
+    const lk = `${o.receipt_id}\u0000${o.item_key}`;
+    const before = beforeLine.get(lk) || {};
+    const changes = [];
+    for (const comp of ['case', 'grip', 'charm']) {
+      const to = o[`status_${comp}`];
+      if (!to) continue;
+      const from = before[`status_${comp}`] || 'Pending';
+      if (from === to) continue;
+      changes.push({ component: comp, label: COMP_LABEL[comp], from, to });
+    }
+    if (!changes.length) continue;
+    changedLines++;
+    let entry = reportByOrder.get(o.receipt_id);
+    if (!entry) {
+      const meta = metaById.get(o.receipt_id);
+      const man  = manualMeta.get(o.receipt_id);
+      entry = {
+        order_number: String(o.receipt_id),
+        is_manual:    o.receipt_id <= 0,
+        shop_name:    meta ? meta.shop_name : (man ? (man.shop_name || 'Manual entry') : 'Manual entry'),
+        buyer_name:   meta ? (meta.buyer_name || '') : '',
+        lines:        [],
+        now_fully_purchased: false,
+        cleared_from_queue:  false,
+      };
+      reportByOrder.set(o.receipt_id, entry);
+    }
+    const lid = listingByLine.has(lk) ? listingByLine.get(lk) : null;
+    entry.lines.push({
+      title:      titleByLine.get(lk) || o.item_key,
+      listing_id: lid,
+      image_url:  lid ? `/api/route/listing-image/${lid}`
+                      : (o.receipt_id <= 0 && manualMeta.has(o.receipt_id) && manualMeta.get(o.receipt_id).has_image_data
+                          ? `/api/route/manual-image/${manualMeta.get(o.receipt_id).id}` : null),
+      changes,
+    });
+  }
+
+  // Per-order outcomes (ready-to-ship, cleared from the buy queue).
+  let becameReady = 0;
+  let clearedFromQueue = 0;
+  for (const [rid, entry] of reportByOrder) {
+    if (rid <= 0) continue;   // manual: no Etsy shipment lifecycle
+    const meta = metaById.get(rid);
+    const wasFlagged = !!(meta && meta.needs_purchase_at);
+    const outstanding = outstandingAfter.has(rid) ? outstandingAfter.get(rid) : true;
+    entry.now_fully_purchased = !outstanding;
+    if (!outstanding) becameReady++;
+    if (wasFlagged && !outstanding) { entry.cleared_from_queue = true; clearedFromQueue++; }
+  }
+
+  // Sort: orders that became ready first, then by order number — the most
+  // actionable rows (ready to ship / cleared from the queue) surface at the top.
+  const orders = [...reportByOrder.values()].sort((a, b) => {
+    if (a.now_fully_purchased !== b.now_fully_purchased) return a.now_fully_purchased ? -1 : 1;
+    return String(a.order_number).localeCompare(String(b.order_number));
   });
+
+  // ── Resulting-state confirmation (independent of this upload's delta) ───────
+  // A change report alone is confusing when an unchanged file is re-uploaded
+  // ("0 updated" reads like nothing happened). So we ALSO report the resulting
+  // fulfillment state of EVERY Etsy order represented in the file: how many are
+  // now fully purchased / ready to ship vs. still have items to buy. This gives
+  // a positive, actionable confirmation even when the delta is zero — mirroring
+  // how mature bulk-import tools acknowledge an already-synced upload.
+  const fileOrderIds = [...new Set([...lineMap.values()]
+    .map(o => o.receipt_id).filter(id => id > 0))];
+  const readyOrdersList = [];
+  let outstandingInFile = 0;
+  for (const rid of fileOrderIds) {
+    let outstanding;
+    if (outstandingAfter.has(rid)) outstanding = outstandingAfter.get(rid);
+    else { try { outstanding = orderHasOutstanding(rid); } catch { outstanding = true; } }
+    if (outstanding) { outstandingInFile++; continue; }
+    const meta = metaById.get(rid);
+    // First product photo + title for the order, for the report thumbnails / Excel.
+    let firstListing = null;
+    let firstTitle = '';
+    if (meta) {
+      try {
+        const txs = JSON.parse(meta.all_transactions || '[]');
+        for (const t of txs) {
+          if (!firstTitle && t.title) firstTitle = String(t.title).trim();
+          if (firstListing == null && t.listing_id != null && Number.isInteger(Number(t.listing_id))) {
+            firstListing = Number(t.listing_id);
+          }
+          if (firstListing != null && firstTitle) break;
+        }
+      } catch { /* leave blank */ }
+    }
+    readyOrdersList.push({
+      order_number:      String(rid),
+      shop_name:         meta ? meta.shop_name : '',
+      buyer_name:        meta ? (meta.buyer_name || '') : '',
+      product:           firstTitle,
+      image_listing_id:  firstListing,
+      image_url:         firstListing ? `/api/route/listing-image/${firstListing}` : null,
+      changed:           reportByOrder.has(rid),
+    });
+  }
+  readyOrdersList.sort((a, b) => String(a.order_number).localeCompare(String(b.order_number)));
+
+  const summary = {
+    updated_orders:     orders.length,
+    updated_lines:      changedLines,
+    updated_charms:     updatedCharms,
+    became_ready:       becameReady,
+    cleared_from_queue: clearedFromQueue,
+    manual_lines:       manualLines,
+    lines_processed:    upsertedLines,
+    // Resulting state across the whole file (not just this upload's delta).
+    orders_in_file:     fileOrderIds.length,
+    ready_in_file:      readyOrdersList.length,
+    outstanding_in_file: outstandingInFile,
+  };
+
+  const payload = {
+    ok: true,
+    generated_at: new Date().toISOString(),
+    file: typeof req.body?.filename === 'string' ? req.body.filename : null,
+    summary,
+    orders,
+    ready: readyOrdersList,
+    warnings: parsed.warnings || [],
+    // Back-compat flat fields (older clients / scripts).
+    updated_lines:   changedLines,
+    updated_charms:  updatedCharms,
+    affected_orders: orders.length,
+    ready_orders:    becameReady,
+    manual_lines:    manualLines,
+  };
+
+  // ── Version control: persist this sync as an immutable audit record so the
+  //    owner can always trace back which orders were purchased, when, and from
+  //    which file. Best-effort — a logging failure never blocks the import.
+  try {
+    payload.run_id = recordPurchaseSyncRun(db, {
+      file_name: payload.file,
+      summary,
+      payload,
+    });
+  } catch (err) {
+    console.warn('[route] purchase-sync history write failed:', err.message);
+  }
+
+  res.json(payload);
+});
+
+/**
+ * GET /api/route/listing-image/:id
+ * Serves a product photo for the purchase-sync report. Prefers locally cached
+ * JPEG/PNG bytes (listing_image_data); falls back to redirecting the browser to
+ * the cached Etsy CDN thumbnail URL. Returns 404 when neither is available.
+ */
+app.get('/api/route/listing-image/:id', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).end();
+  try {
+    const data = getListingImageData(db, id);
+    if (data && data.length) {
+      const mime = (data[0] === 0x89 && data[1] === 0x50) ? 'image/png' : 'image/jpeg';
+      res.setHeader('Content-Type', mime);
+      res.setHeader('Cache-Control', 'private, max-age=86400');
+      return res.send(data);
+    }
+  } catch { /* fall through to URL redirect */ }
+  try {
+    const row = db.prepare('SELECT url FROM listing_images WHERE listing_id = ?').get(id);
+    if (row && row.url) return res.redirect(302, row.url);
+  } catch { /* no cached url */ }
+  return res.status(404).end();
+});
+
+/**
+ * Collect a listing_id → image-bytes map for an entire sync report, fetching &
+ * caching any missing CDN photos so the Excel export embeds real thumbnails.
+ */
+async function _collectSyncReportImages(report) {
+  const ids = new Set();
+  for (const o of (report.orders || [])) {
+    for (const ln of (o.lines || [])) {
+      if (ln.listing_id != null) ids.add(Number(ln.listing_id));
+    }
+  }
+  for (const r of (report.ready || [])) {
+    if (r.image_listing_id != null) ids.add(Number(r.image_listing_id));
+  }
+  const result = new Map();
+  const missing = new Map();   // listing_id → cdn url (for the fetcher)
+  for (const id of ids) {
+    if (!Number.isInteger(id)) continue;
+    const cached = getListingImageData(db, id);
+    if (cached && cached.length) { result.set(id, cached); continue; }
+    try {
+      const row = db.prepare('SELECT url FROM listing_images WHERE listing_id = ?').get(id);
+      if (row && row.url) missing.set(id, row.url);
+    } catch { /* ignore */ }
+  }
+  if (missing.size) {
+    try {
+      const fetched = await batchFetchRouteImages(db, missing);
+      for (const [id, buf] of fetched) if (buf) result.set(id, buf);
+    } catch (err) {
+      console.warn('[route] sync-report image fetch failed:', err.message);
+    }
+  }
+  return result;
+}
+
+/** Stream a built sync-report workbook to the client as a download. */
+async function _sendSyncReportXlsx(res, report, downloadName) {
+  const imageMap = await _collectSyncReportImages(report);
+  const buf = await buildSyncReportWorkbook(report, imageMap);
+  res.setHeader('Content-Type',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(Buffer.from(buf));
+}
+
+/**
+ * GET /api/route/sync-history
+ * Lightweight list of every recorded purchase-status sync (newest first) for
+ * the version-history browser. Excludes the heavy stored payload.
+ */
+app.get('/api/route/sync-history', (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit, 10) || 100;
+    res.json({ runs: listPurchaseSyncRuns(db, limit) });
+  } catch (err) {
+    console.error('[route] sync-history list error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/route/sync-history/:id
+ * The full stored report for a past sync, so it can be re-opened in the report
+ * modal exactly as it appeared when first run.
+ */
+app.get('/api/route/sync-history/:id', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid id.' });
+  try {
+    const payload = getPurchaseSyncRun(db, id);
+    if (!payload) return res.status(404).json({ error: 'Sync run not found.' });
+    res.json(payload);
+  } catch (err) {
+    console.error('[route] sync-history detail error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/route/sync-history/:id/export.xlsx
+ * Download a stored sync run as a professional, image-rich Excel workbook.
+ */
+app.get('/api/route/sync-history/:id/export.xlsx', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid id.' });
+  try {
+    const report = getPurchaseSyncRun(db, id);
+    if (!report) return res.status(404).json({ error: 'Sync run not found.' });
+    const stamp = (report.generated_at || new Date().toISOString()).slice(0, 10);
+    await _sendSyncReportXlsx(res, report, `purchase-status-sync-${stamp}-run${id}.xlsx`);
+  } catch (err) {
+    console.error('[route] sync-history export error:', err.message);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
 });
 
 /**

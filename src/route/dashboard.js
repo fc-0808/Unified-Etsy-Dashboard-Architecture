@@ -237,6 +237,27 @@ function buildRouteRows(db, config, filters = {}) {
 
     let scopeClause = scope.length ? `(${scope.join(' AND ')})` : '1';
 
+    // Pre-transit orders (a label was created to hit the Etsy ship-by deadline but
+    // the carrier has not yet confirmed pickup, so the goods may still need buying)
+    // are an ACTIVE fulfilment obligation. Include them DIRECTLY here — exactly as
+    // the Orders "Needs purchase" view does — rather than depending on the
+    // needs_purchase_at rollup flag. That flag is only set lazily, when a component
+    // status is edited, so a freshly-synced pre-transit order whose components are
+    // all still default-Pending would otherwise never enter the route. Bounded by
+    // the same pre_transit window the rest of the app uses, and OR-ed on top of the
+    // date scope so it is never date-limited away. (Skipped when the caller asks for
+    // shipped orders too, since that already widens the scope.)
+    if (!filters.include_shipped) {
+      const preTransitDays = config.pre_transit_days ?? 30;
+      const preCutoff = nowSec - preTransitDays * 24 * 3600;
+      scopeClause = `(${scopeClause} OR (r.is_shipped = 1
+        AND r.tracking_code IS NOT NULL
+        AND r.shipment_notified_at IS NOT NULL
+        AND r.shipment_notified_at >= ${preCutoff}
+        AND r.carrier_confirmed_at IS NULL
+        AND r.status NOT IN ('Canceled','Cancelled','Fully Refunded','Fully refunded')))`;
+    }
+
     // Extra receipts (e.g. pre-transit orders the operator pulled in via the
     // Orders tab "Send to Route") are UNIONed on TOP of the date scope — they
     // bypass the date + shipped filters so they always show up for purchasing,
@@ -281,6 +302,15 @@ function buildRouteRows(db, config, filters = {}) {
 
     whereClause = `r.is_paid = 1 AND ${scopeClause}${shopClause}${archivedClause}`;
   }
+
+  // De-dupe linked manual orders. A manual order created from the Route tab has
+  // BOTH a `receipts` row (so it shows in the Orders tab) AND a linked
+  // `route_manual_items` sidecar (which carries its product image + purchasing
+  // detail and is merged in below). Excluding any receipt that has a sidecar
+  // ensures such an order is emitted exactly once here — via the sidecar merge,
+  // with its image — instead of twice. Manual orders WITHOUT a sidecar (created
+  // directly in the Orders tab) have no matching row and still flow through.
+  whereClause = `(${whereClause}) AND r.receipt_id NOT IN (SELECT receipt_id FROM route_manual_items)`;
 
   const rows = db.prepare(`
     SELECT r.receipt_id, r.shop_id, r.name AS buyer_name, r.buyer_email,
@@ -551,17 +581,35 @@ function buildRouteRows(db, config, filters = {}) {
       !(Array.isArray(filters.receipt_ids) && filters.receipt_ids.length)) {
     let manualItems = [];
     try { manualItems = getManualItems(db); } catch { manualItems = []; }
+    // Pull the linked manual ORDER (receipts row) for each sidecar so the Route
+    // shows the real buyer name / country / notes the operator filled in from the
+    // Orders tab, instead of a generic "Manual entry" placeholder.
+    const manualOrderById = {};
+    if (manualItems.length) {
+      const ids = manualItems.map((m) => Number(m.receipt_id)).filter(Number.isInteger);
+      if (ids.length) {
+        const ph = ids.map(() => '?').join(',');
+        try {
+          db.prepare(
+            `SELECT receipt_id, name, buyer_email, shipping_country_iso, etsy_created_at, message_from_buyer, team_note
+             FROM receipts WHERE receipt_id IN (${ph})`
+          ).all(ids).forEach((r) => { manualOrderById[r.receipt_id] = r; });
+        } catch { /* receipts may lack rows for legacy sidecars */ }
+      }
+    }
     for (const m of manualItems) {
+      const linked = manualOrderById[m.receipt_id] || null;
+      const linkedName = (linked?.name && linked.name !== 'Manual order') ? linked.name : '';
       emitRow({
         receipt_id:    m.receipt_id,
         shop_id:       '',
         shop_name:     m.shop_name || 'Manual entry',
-        buyer_name:    'Manual entry',
-        buyer_email:   '',
-        order_date:    m.created_at || null,
-        private_notes: '',
-        team_note:     '',
-        country:       '',
+        buyer_name:    linkedName || 'Manual entry',
+        buyer_email:   linked?.buyer_email || '',
+        order_date:    linked?.etsy_created_at || m.created_at || null,
+        private_notes: linked?.message_from_buyer || '',
+        team_note:     linked?.team_note || '',
+        country:       linked?.shipping_country_iso || '',
       }, {
         title:      m.title,
         item_key:   m.item_key,

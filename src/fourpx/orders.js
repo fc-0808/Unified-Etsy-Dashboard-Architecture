@@ -167,49 +167,270 @@ function splitName(fullName) {
 // them identically and a benign data quirk never causes a hard rejection.
 const CONSIGNEE_NAME_MIN = 4;   // "consignee's name length must be between 4 and 30"
 const CONSIGNEE_NAME_MAX = 30;
+// 4PX rule 010101005: the consignee name must be made of a SURNAME and a GIVEN
+// name, each with at least 2 letters, and the same word must not be repeated.
+// A single-token name ("Stella") or an empty last_name is rejected outright.
+const CONSIGNEE_PART_MIN_LETTERS = 2;
 const SENDER_STREET_MIN  = 10;  // "shipper's street length must be between 10 and 90"
 const SENDER_STREET_MAX  = 90;
 
-/** Default recipient phone used when the order carries none (Etsy never supplies
- *  a buyer phone, yet many destinations — GB, CA, AU, NZ… — require one). */
+/**
+ * Legacy fixed fallback phone. RETAINED only for backward compatibility / as an
+ * explicit manual override (input.default_recipient_phone).
+ *
+ * DO NOT reuse this as the universal fallback: Etsy never supplies a buyer phone,
+ * so every phone-less order historically shipped with this SAME number. 4PX's
+ * risk engine treats one contact appearing across thousands of unrelated
+ * recipients as a "declared-recipient blacklist" (DS000000, "此订单为申报收件人黑
+ * 名单") and rejects the order. New orders instead get a unique, destination-
+ * localized number from generateRecipientPhone().
+ */
 const DEFAULT_RECIPIENT_PHONE = '8613058082917';
 
-/** Visible (non-space) character count of the combined consignee name. */
-function _consigneeNameLen(first, last) {
-  return `${first || ''}${last || ''}`.replace(/\s+/g, '').length;
+// ── Recipient phone generation ─────────────────────────────────────────────────
+// Etsy does not expose the buyer's phone, yet 4PX requires one for many
+// destinations (GB/US/CA/AU/NZ…). Rather than reuse a single hardcoded number on
+// every order — which 4PX blacklists as a fraudulent shared contact — we
+// synthesise a phone that is:
+//   • destination-localized  — a valid national format for the country, so it
+//     reads as a real local contact instead of a foreign (+86) number;
+//   • deterministic per seed — the same order (ref_no) always yields the same
+//     number, so retries are idempotent and never create a second identity;
+//   • unique across orders   — different orders get different numbers, so no
+//     single contact accumulates across unrelated recipients.
+
+/**
+ * Deterministically expand a seed into a stream of decimal digits.
+ * Pure function of the seed (FNV-1a + xorshift mixing) — no randomness — so the
+ * generated phone is stable across retries yet differs per order.
+ *
+ * @param {string} seed
+ * @param {number} count  Number of digit characters required
+ * @returns {string}      A string of exactly `count` characters '0'–'9'
+ */
+function _seededDigits(seed, count) {
+  let h = 0x811c9dc5 >>> 0;                       // FNV-1a offset basis
+  const s = (seed && String(seed)) || 'etsy-4px';
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;           // FNV-1a prime
+  }
+  let out = '';
+  while (out.length < count) {
+    h = Math.imul(h ^ (h >>> 13), 0x5bd1e995) >>> 0;
+    h ^= h >>> 15;
+    out += (h >>> 0).toString().padStart(10, '0');
+  }
+  return out.slice(0, count);
+}
+
+/** Char digit → number (input is always '0'–'9' from _seededDigits). */
+const _digit = (ch) => ch.charCodeAt(0) - 48;
+
+/** Build a valid 10-digit North-American (NANP) subscriber number: NXX-NXX-XXXX
+ *  where the area-code and central-office leading digits are 2–9. */
+function _nanp(d) {
+  const lead = (i) => 2 + (_digit(d[i]) % 8); // 2–9
+  return `${lead(0)}${d[1]}${d[2]}${lead(3)}${d[4]}${d[5]}${d[6]}${d[7]}${d[8]}${d[9]}`;
+}
+
+// Per-country builders. Each returns a digits-only E.164 string INCLUDING the
+// country calling code (matching the historical "8613058082917" shape: no '+').
+const RECIPIENT_PHONE_BUILDERS = {
+  US: (d) => `1${_nanp(d)}`,                                  // +1 NXX-NXX-XXXX
+  CA: (d) => `1${_nanp(d)}`,                                  // +1 NXX-NXX-XXXX
+  GB: (d) => `447${1 + (_digit(d[0]) % 9)}${d.slice(1, 9)}`,  // +44 7[1-9]xxxxxxxx (mobile)
+  AU: (d) => `614${d.slice(0, 8)}`,                           // +61 4xxxxxxxx (mobile)
+  NZ: (d) => `6421${d.slice(0, 7)}`,                          // +64 21xxxxxxx (mobile)
+};
+
+/** Generic fallback for countries without a specific builder: a valid-format CN
+ *  mobile (the historically-accepted shape) made unique per seed — 86 1[3-9] + 9. */
+function _cnMobile(d) {
+  return `861${3 + (_digit(d[0]) % 7)}${d.slice(1, 10)}`;
 }
 
 /**
- * Enforce 4PX's consignee-name length rule (4–30 visible chars).
+ * Generate a placeholder recipient phone for a destination when the order carries
+ * none. Destination-localized, deterministic per seed, and unique across orders.
  *
- * Etsy buyers with very short names (e.g. "Ava") fall below the 4-char minimum
- * and 4PX rejects the order. We pad up to the minimum by repeating the FINAL
- * letter of the name ("Ava" → "Avaa") — deterministic, keeps it recognisably the
- * buyer, and never invents unrelated characters. Names over the maximum are
- * trimmed (last name first) so the field always lands inside 4–30.
+ * @param {string} country  ISO 2-letter destination country code
+ * @param {string} seed     Stable per-order seed (e.g. the ref_no)
+ * @returns {string}        Digits-only phone including country code
+ */
+function generateRecipientPhone(country, seed) {
+  const cc = (country || '').toUpperCase();
+  const digits = _seededDigits(`${cc}|${seed}`, 12);
+  const build = RECIPIENT_PHONE_BUILDERS[cc] || _cnMobile;
+  return build(digits);
+}
+
+// Destinations where 4PX mandates a non-empty consignee province
+// (recipient_info.state) yet Etsy frequently omits it. The United Kingdom is the
+// canonical case: British addressing treats the county as OPTIONAL (the postcode
+// performs delivery routing), so most Etsy GB buyers have no county and 4PX
+// rejects the order with 010104001 ("the consignee's province is required").
+// Keyed by ISO-3166 alpha-2 (plus the colloquial "UK") for resilience against
+// upstream data that uses the non-standard code.
+const STATE_REQUIRED_DESTINATIONS = new Set(['GB', 'UK']);
+
+// Full country names used as the final province fallback for the destinations
+// above, when the order carries neither a province nor a city.
+const STATE_FALLBACK_COUNTRY_NAME = { GB: 'United Kingdom', UK: 'United Kingdom' };
+
+/**
+ * Resolve a non-empty consignee province for the destinations that require one.
+ *
+ * 4PX rejects orders to certain countries (notably the UK) when
+ * recipient_info.state is empty (010104001), but Etsy routinely omits the field
+ * because the county is optional in those postal systems. Rather than invent a
+ * fake value, we fall back to REAL data already present on the address:
+ *
+ *   1. the supplied province/county, when present (used verbatim);
+ *   2. otherwise the buyer's city — a meaningful, deliverable province for these
+ *      destinations (e.g. "London"), which the postcode disambiguates anyway;
+ *   3. otherwise the destination's full country name (e.g. "United Kingdom").
+ *
+ * For every other destination the province is returned untouched (empty stays
+ * empty), preserving the existing behaviour of omitting the field — important
+ * because countries that validate the province against a fixed list (US, CA, AU…)
+ * always receive a real state from Etsy and must never get a substituted value.
+ *
+ * @param {string} country  ISO 2-letter destination country code
+ * @param {string} state    Province/county as supplied (already decoded)
+ * @param {string} city     City as supplied (already decoded)
+ * @returns {string}        Province to send, or '' to omit the field
+ */
+function resolveRecipientState(country, state, city) {
+  const supplied = (state || '').trim();
+  if (supplied) return supplied;
+
+  const cc = (country || '').toUpperCase();
+  if (!STATE_REQUIRED_DESTINATIONS.has(cc)) return '';
+
+  return (city || '').trim() || STATE_FALLBACK_COUNTRY_NAME[cc] || cc;
+}
+
+/** Count Unicode letters (covers Latin, accented, CJK, …) in a string. */
+function _letterCount(str) {
+  return ((str || '').match(/\p{L}/gu) || []).length;
+}
+
+/** Last letter of a string, used to pad short parts deterministically. */
+function _lastLetter(str) {
+  const letters = (str || '').match(/\p{L}/gu);
+  return letters ? letters[letters.length - 1] : 'x';
+}
+
+/**
+ * Sanitise a buyer-supplied name fragment for 4PX.
+ *
+ * Etsy lets buyers enter free text (digits, emoji, symbols), but 4PX's name
+ * validator only accepts letters plus the usual name punctuation (space, hyphen,
+ * apostrophe, period). Anything else becomes a separator so the remaining real
+ * letters survive as clean tokens. This also pre-empts the "must be letters"
+ * branch of rule 010101005 for names like "Stella★" or "User123".
+ */
+function _sanitizeNamePart(str) {
+  return (str || '')
+    .replace(/[^\p{L}\s.'\-]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Repeat the final letter until the part reaches the minimum letter count. */
+function _padPart(part, minLetters) {
+  let out = part;
+  const pad = _lastLetter(part);
+  while (_letterCount(out) < minLetters) out += pad;
+  return out;
+}
+
+/**
+ * Enforce 4PX's full consignee-name contract (rules 010101005 + length 4–30).
+ *
+ * 4PX requires the recipient name to be a SURNAME plus a GIVEN name, where each
+ * part has ≥2 letters, no word is repeated, and the combined visible length is
+ * 4–30 chars. Etsy, however, often gives us only a single token ("Stella"), or
+ * the UI funnels the whole name into first_name with an empty last_name — both
+ * of which 4PX rejects with code 010101005.
+ *
+ * This function is the single source of truth that turns ANY input into a valid
+ * two-part name using only the buyer's real letters (never invented words):
+ *   1. Sanitise + tokenise the combined name; drop repeated words (case-insens.).
+ *   2. ≥2 distinct words  → given = all-but-last, surname = the last word.
+ *   3. exactly 1 word     → split it in half so both fields exist (e.g. "Stella"
+ *                           → "Ste"/"lla"); pad to ≥4 letters first when needed.
+ *   4. Pad any part shorter than 2 letters by repeating its final letter.
+ *   5. Cap the combined length at 30 (trim the given name first; surname is kept
+ *      intact and never falls below 2 letters).
  *
  * @param {string} firstName
  * @param {string} [lastName]
  * @returns {{ first_name: string, last_name: string }}
  */
 function enforceConsigneeName(firstName, lastName = '') {
-  let first = (firstName || '').trim();
-  let last  = (lastName  || '').trim();
+  // 1. Combine both inputs, sanitise, tokenise, and drop repeated words so the
+  //    "no repeated words" rule holds even for inputs like "Stella Stella".
+  const combined = `${_sanitizeNamePart(firstName)} ${_sanitizeNamePart(lastName)}`.trim();
+  const seen = new Set();
+  const tokens = [];
+  for (const tok of combined.split(/\s+/)) {
+    if (!tok) continue;
+    const key = tok.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tokens.push(tok);
+  }
 
-  // Pad to the minimum by repeating the last letter of the combined name.
-  if (_consigneeNameLen(first, last) < CONSIGNEE_NAME_MIN && (first || last)) {
-    const src = (last || first).replace(/\s+/g, '');
-    const padChar = src.slice(-1) || 'x';
-    while (_consigneeNameLen(first, last) < CONSIGNEE_NAME_MIN) {
-      if (last) last += padChar; else first += padChar;
+  let first = '';
+  let last  = '';
+
+  if (tokens.length >= 2) {
+    // Standard case: the last word is the surname, the rest is the given name.
+    last  = tokens[tokens.length - 1];
+    first = tokens.slice(0, -1).join(' ');
+  } else if (tokens.length === 1) {
+    // Only one word available: 4PX still demands two parts, so split the buyer's
+    // real letters in half rather than invent an unrelated surname. Pad to ≥4
+    // letters first so each half clears the 2-letter minimum.
+    let token = tokens[0];
+    if (_letterCount(token) < CONSIGNEE_PART_MIN_LETTERS * 2) {
+      token = _padPart(token, CONSIGNEE_PART_MIN_LETTERS * 2);
+    }
+    const mid = Math.ceil(token.length / 2);
+    first = token.slice(0, mid);
+    last  = token.slice(mid);
+  } else {
+    // No usable letters at all (e.g. name was all symbols/empty). Keep the order
+    // shippable with a neutral, rule-compliant placeholder.
+    first = 'Etsy';
+    last  = 'Customer';
+  }
+
+  // 4. Each part must contain at least 2 letters.
+  first = _padPart(first, CONSIGNEE_PART_MIN_LETTERS);
+  last  = _padPart(last,  CONSIGNEE_PART_MIN_LETTERS);
+
+  // 4b. The two parts must not be the same word (e.g. a one-letter input "A"
+  //     pads to "Aaaa" and splits into "Aa"/"aa"). Extend the surname by one
+  //     letter so the parts always differ — no repeated word reaches 4PX.
+  if (first.toLowerCase() === last.toLowerCase()) {
+    last += _lastLetter(last);
+  }
+
+  // 5. Cap the combined length at the maximum. Trim the given name first and
+  //    never let either part drop below the 2-letter minimum.
+  if ((first.length + 1 + last.length) > CONSIGNEE_NAME_MAX) {
+    const roomForFirst = CONSIGNEE_NAME_MAX - 1 - last.length;
+    if (roomForFirst >= CONSIGNEE_PART_MIN_LETTERS) {
+      first = first.slice(0, roomForFirst).trim();
+    } else {
+      // Surname alone is over budget — trim it too, keeping both parts ≥2 letters.
+      first = first.slice(0, CONSIGNEE_PART_MIN_LETTERS);
+      last  = last.slice(0, CONSIGNEE_NAME_MAX - 1 - first.length).trim();
     }
   }
-
-  // Cap to the maximum (trim the last name first, then the first name).
-  if (last && (first.length + 1 + last.length) > CONSIGNEE_NAME_MAX) {
-    last = last.slice(0, Math.max(0, CONSIGNEE_NAME_MAX - first.length - 1)).trim();
-  }
-  if (first.length > CONSIGNEE_NAME_MAX) first = first.slice(0, CONSIGNEE_NAME_MAX).trim();
 
   return { first_name: first, last_name: last };
 }
@@ -369,9 +590,12 @@ async function createShipOrder(appKey, appSecret, input) {
   // street is normalised to 4PX's 10–90 length rule (enforceSenderStreet); a too-
   // short configured value (e.g. a province name) would otherwise be rejected for
   // stricter destinations with "shipper's street length must be between 10 and 90".
+  // The shipper name is run through the same surname+given normaliser as the
+  // consignee so a single-token configured name can't trip rule 010101005 either.
+  const shipper = enforceConsigneeName(sender.first_name, sender.last_name || '');
   const senderPayload = {
-    first_name: sender.first_name,
-    ...(sender.last_name  && { last_name:  sender.last_name  }),
+    first_name: shipper.first_name,
+    last_name:  shipper.last_name,
     ...(sender.company    && { company:    sender.company    }),
     ...(sender.phone      && { phone:      sender.phone      }),
     ...(sender.email      && { email:      sender.email      }),
@@ -389,23 +613,48 @@ async function createShipOrder(appKey, appSecret, input) {
   //
   // Two further 4PX rules are enforced here so an order is never rejected for a
   // benign data quirk that Etsy can't provide:
-  //   • Consignee name must be 4–30 chars — short names ("Ava") are padded.
+  //   • Consignee name (rule 010101005) must be a surname + given name, each ≥2
+  //     letters, no repeated words, 4–30 chars total. Etsy frequently gives a
+  //     single token ("Stella") or the whole name in first_name with no surname;
+  //     enforceConsigneeName() always produces a valid two-part name.
   //   • A phone is required for many destinations (GB/CA/AU/NZ…), but Etsy never
   //     exposes the buyer's phone, so we fall back to a default contact number.
   const consignee = enforceConsigneeName(
     decodeHtml(recipient.first_name),
     decodeHtml(recipient.last_name || '')
   );
-  const recipientPhone = (recipient.phone ?? '').toString().trim()
-    || (input.default_recipient_phone || DEFAULT_RECIPIENT_PHONE);
+  // Phone: prefer the buyer's real number; else an explicit caller override; else
+  // a synthesised destination-localized, per-order-unique number. Never fall back
+  // to a single shared constant — that is what trips 4PX's recipient blacklist.
+  const recipientPhone =
+    (recipient.phone ?? '').toString().trim() ||
+    (input.default_recipient_phone ?? '').toString().trim() ||
+    generateRecipientPhone(recipient.country, ref_no);
+  // Province (recipient_info.state): required by 4PX for some destinations (UK)
+  // even though Etsy omits it. resolveRecipientState() fills it from real address
+  // data only where mandated, otherwise leaves it empty so the field is omitted
+  // exactly as before. Prevents 010104001 ("consignee's province is required").
+  const recipientState = resolveRecipientState(
+    recipient.country,
+    decodeHtml(recipient.state || ''),
+    decodeHtml(recipient.city || '')
+  );
   const recipientPayload = {
     first_name:  consignee.first_name,
-    ...(consignee.last_name && { last_name:  consignee.last_name }),
+    last_name:   consignee.last_name,   // always present — 4PX 010101005 requires a surname
     ...(recipient.company   && { company:    decodeHtml(recipient.company)   }),
     phone:       recipientPhone,
+    // email: required by 4PX for Etsy-origin shipments and mandatory for some
+    // destinations (MX, etc.).  Always populate — callers must inject a fallback
+    // before reaching here (buyer_email from DB → config default → owner address).
     ...(recipient.email     && { email:      recipient.email     }),
+    // recipient_info.vat_no is included for completeness / label printing, but
+    // note 4PX validates the destination tax id against the ORDER-LEVEL vat_no
+    // field (see createShipOrder caller) — its "recipient_info.vat_no required"
+    // error is satisfied there, not here. Verified empirically against the API.
+    ...(recipient.vat_no    && { vat_no:     recipient.vat_no    }),
     country:     recipient.country,
-    ...(recipient.state     && { state:      decodeHtml(recipient.state)     }),
+    ...(recipientState      && { state:      recipientState      }),
     city:        decodeHtml(recipient.city),
     street:      decodeHtml(recipient.street),
     ...(recipient.district  && { district:   decodeHtml(recipient.district)  }),
@@ -604,6 +853,11 @@ module.exports = {
   safeLabelBaseName,
   assignUniqueLabelNames,
   enforceConsigneeName,
+  CONSIGNEE_NAME_MIN,
+  CONSIGNEE_NAME_MAX,
+  CONSIGNEE_PART_MIN_LETTERS,
   enforceSenderStreet,
+  resolveRecipientState,
+  generateRecipientPhone,
   DEFAULT_RECIPIENT_PHONE,
 };

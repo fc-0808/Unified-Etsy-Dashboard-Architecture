@@ -46,6 +46,8 @@ class TokenManager {
     this._path = tokensFilePath;
     /** @type {Record<string, ShopTokens>} shop_id → tokens */
     this._store = {};
+    /** @type {Map<string, Promise<string>>} shop_id → in-flight refresh (dedupe) */
+    this._refreshing = new Map();
     this._load();
   }
 
@@ -140,10 +142,23 @@ class TokenManager {
       );
     }
 
-    // Refresh the access token
-    const newTokens = await this._doRefresh(keystring, refreshToken, proxyClient);
-    this.storeTokens(shopId, newTokens);
-    return newTokens.access_token;
+    // Dedupe concurrent refreshes: if a refresh for this shop is already in
+    // flight (e.g. several bulk requests cross the expiry buffer at once), they
+    // all await the same network call instead of stampeding Etsy's token endpoint.
+    if (this._refreshing.has(shopId)) {
+      return this._refreshing.get(shopId);
+    }
+    const p = (async () => {
+      const newTokens = await this._doRefresh(keystring, refreshToken, proxyClient);
+      this.storeTokens(shopId, newTokens);
+      return newTokens.access_token;
+    })();
+    this._refreshing.set(shopId, p);
+    try {
+      return await p;
+    } finally {
+      this._refreshing.delete(shopId);
+    }
   }
 
   /**

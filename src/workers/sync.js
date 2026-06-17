@@ -203,23 +203,36 @@ async function checkAndRestockForOrders(listingIds, shopClient, shop, config, db
       });
 
     } catch (err) {
-      const status  = err.response?.status || err.status || 500;
-      const errMsg  = err.response?.data?.error || err.message;
-      const isAuth  = status === 403;
-      console.error(`${label}: ✗ listing ${listingId} failed (${status}): ${errMsg}`);
+      // A transport-level failure (e.g. "socket hang up") never reaches Etsy, so
+      // there is no HTTP response/status. Don't mislabel it as a server 500 —
+      // surface it as a network error so it isn't mistaken for an Etsy outage.
+      const hasResponse = !!err.response;
+      const status   = err.response?.status ?? err.status ?? null;
+      const errMsg   = err.response?.data?.error || err.message;
+      const isAuth   = status === 403;
+      const isNetwork = !hasResponse;
+      const statusLabel = status ?? 'network';
+      console.error(`${label}: ✗ listing ${listingId} failed (${statusLabel}): ${errMsg}`);
 
       const listingTitle = db.prepare('SELECT title FROM listings WHERE listing_id = ?')
         .get(listingId)?.title || `Listing ${listingId}`;
+
+      let detail;
+      if (isAuth) {
+        detail = `Order-triggered restock failed (403): listings_w scope required. Re-run "npm run oauth:setup".`;
+      } else if (isNetwork) {
+        detail = `Order-triggered restock failed (network): ${errMsg} — transient connection error, will retry on the next sync cycle.`;
+      } else {
+        detail = `Order-triggered restock failed (${statusLabel}): ${errMsg}`;
+      }
 
       logEvent(db, {
         event_type:    'RESTOCK_FAILED',
         shop_name:      shop.shop_id,
         listing_id:     listingId,
         listing_title:  listingTitle,
-        detail:         isAuth
-          ? `Order-triggered restock failed (403): listings_w scope required. Re-run "npm run oauth:setup".`
-          : `Order-triggered restock failed (${status}): ${errMsg}`,
-        meta:           { status, error: errMsg, triggered_by: 'new_order', needs_reauth: isAuth },
+        detail,
+        meta:           { status, error: errMsg, code: err.code ?? null, transient: isNetwork, triggered_by: 'new_order', needs_reauth: isAuth },
       });
     }
   }
@@ -270,11 +283,18 @@ async function syncShop(shop, group, config, proxyClient, tokenManager, db, egre
     }
 
     // ── 2. Build authenticated client for this shop ───────────────────────────
+    // Pass a fresh-token provider so the client auto-refreshes (and retries once
+    // on a 401) if a long sync cycle outlives the 1h access token.
+    const getToken = async (forceRefresh) => {
+      if (forceRefresh) tokenManager.invalidate(shop.shop_id);
+      return tokenManager.getAccessToken(shop.shop_id, shop.api_key, shop.refresh_token ?? null, proxyClient);
+    };
     const shopClient = buildShopClient(
       proxyClient,
       shop.api_key,
       shop.shared_secret,
       accessToken,
+      getToken,
     );
 
     // ── 3. Resolve shop name → numeric ID (cached after first call) ───────────
@@ -858,14 +878,25 @@ async function runInventoryWatchCycle(config, tokenManager, db) {
       });
 
     } catch (err) {
-      const status  = err.response?.status || err.status || 500;
-      const errMsg  = err.response?.data?.error || err.message;
-      const isAuth  = status === 403;
-      const userMsg = isAuth
-        ? `listings_w scope required. Re-run "npm run oauth:setup" for ${shop_id} to grant restock permission.`
-        : errMsg;
+      // Transport-level failure (e.g. "socket hang up") never reached Etsy, so
+      // there is no HTTP status — don't mislabel it as a server 500.
+      const hasResponse = !!err.response;
+      const status   = err.response?.status ?? err.status ?? null;
+      const errMsg   = err.response?.data?.error || err.message;
+      const isAuth   = status === 403;
+      const isNetwork = !hasResponse;
+      const statusLabel = status ?? 'network';
 
-      console.error(`[inventory-watch] ✗ Restock failed for listing ${listingId} (${status}): ${errMsg}`);
+      let userMsg;
+      if (isAuth) {
+        userMsg = `listings_w scope required. Re-run "npm run oauth:setup" for ${shop_id} to grant restock permission.`;
+      } else if (isNetwork) {
+        userMsg = `${errMsg} — transient connection error, will retry on the next sweep.`;
+      } else {
+        userMsg = errMsg;
+      }
+
+      console.error(`[inventory-watch] ✗ Restock failed for listing ${listingId} (${statusLabel}): ${errMsg}`);
 
       // ONE consolidated failure event per listing
       const failStyles = [...new Set(rows.map((r) => r.style_value).filter(Boolean))];
@@ -877,7 +908,7 @@ async function runInventoryWatchCycle(config, tokenManager, db) {
         listing_title:  listing_title,
         style_value:    failLabel,
         detail:         `Auto-restock failed: ${userMsg}`,
-        meta:           { status, error: errMsg, needs_reauth: isAuth },
+        meta:           { status, error: errMsg, code: err.code ?? null, transient: isNetwork, needs_reauth: isAuth },
       });
     }
   }

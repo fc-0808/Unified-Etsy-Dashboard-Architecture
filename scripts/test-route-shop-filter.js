@@ -51,10 +51,30 @@ function makeDb() {
       is_shipped           INTEGER DEFAULT 0,
       status               TEXT,
       needs_purchase_at    INTEGER,
+      tracking_code        TEXT,
       carrier_confirmed_at INTEGER,
-      shipment_notified_at INTEGER
+      shipment_notified_at INTEGER,
+      archived_at          INTEGER
     );
     CREATE TABLE listing_images (listing_id INTEGER, url TEXT);
+    -- buildRouteRows de-dupes linked manual orders via a NOT IN sub-select against
+    -- this table, so it must exist even when empty for the query to run.
+    CREATE TABLE route_manual_items (
+      id          INTEGER PRIMARY KEY,
+      receipt_id  INTEGER,
+      item_key    TEXT,
+      title       TEXT,
+      phone_model TEXT,
+      style       TEXT,
+      quantity    INTEGER,
+      shop_name   TEXT,
+      listing_id  INTEGER,
+      image_url   TEXT,
+      image_data  BLOB,
+      image_mime  TEXT,
+      source      TEXT,
+      created_at  INTEGER
+    );
   `);
   return db;
 }
@@ -71,26 +91,38 @@ function seed(db) {
   const ins = db.prepare(`
     INSERT INTO receipts
       (receipt_id, shop_id, name, etsy_created_at, all_transactions,
-       is_paid, is_shipped, status, needs_purchase_at, shipment_notified_at)
+       is_paid, is_shipped, status, needs_purchase_at, tracking_code, shipment_notified_at)
     VALUES (@receipt_id, @shop_id, @name, @etsy_created_at, @all_transactions,
-            1, @is_shipped, @status, @needs_purchase_at, @shipment_notified_at)
+            @is_paid, @is_shipped, @status, @needs_purchase_at, @tracking_code, @shipment_notified_at)
   `);
 
   // 1. Shop A — normal pending order (should ALWAYS show for shop A).
   ins.run({ receipt_id: 1001, shop_id: 'SHOP_A', name: 'Alice', etsy_created_at: now - 3600,
-    all_transactions: TX, is_shipped: 0, status: 'Paid', needs_purchase_at: null, shipment_notified_at: null });
+    all_transactions: TX, is_paid: 1, is_shipped: 0, status: 'Paid', needs_purchase_at: null, tracking_code: null, shipment_notified_at: null });
 
   // 2. Shop B — normal pending order (must NOT show when filtering shop A).
   ins.run({ receipt_id: 1002, shop_id: 'SHOP_B', name: 'Bob', etsy_created_at: now - 3600,
-    all_transactions: TX, is_shipped: 0, status: 'Paid', needs_purchase_at: null, shipment_notified_at: null });
+    all_transactions: TX, is_paid: 1, is_shipped: 0, status: 'Paid', needs_purchase_at: null, tracking_code: null, shipment_notified_at: null });
 
   // 3. Shop B — pre-transit order flagged "needs purchase" (the leak source).
   ins.run({ receipt_id: 1003, shop_id: 'SHOP_B', name: 'Carol', etsy_created_at: now - 3600,
-    all_transactions: TX, is_shipped: 1, status: 'Paid', needs_purchase_at: now, shipment_notified_at: now });
+    all_transactions: TX, is_paid: 1, is_shipped: 1, status: 'Paid', needs_purchase_at: now, tracking_code: '4PXTEST3', shipment_notified_at: now });
 
   // 4. Shop A — pre-transit needs-purchase order (should show for shop A).
   ins.run({ receipt_id: 1004, shop_id: 'SHOP_A', name: 'Dan', etsy_created_at: now - 3600,
-    all_transactions: TX, is_shipped: 1, status: 'Paid', needs_purchase_at: now, shipment_notified_at: now });
+    all_transactions: TX, is_paid: 1, is_shipped: 1, status: 'Paid', needs_purchase_at: now, tracking_code: '4PXTEST4', shipment_notified_at: now });
+
+  // 5. Shop A — pre-transit order that was NEVER flagged needs_purchase (its
+  //    components are still default-Pending so the rollup never ran). It must STILL
+  //    enter the route directly via the pre-transit scope branch — this is the bug
+  //    where unflagged pre-transit orders silently fell out of the purchasing queue.
+  ins.run({ receipt_id: 1005, shop_id: 'SHOP_A', name: 'Erin', etsy_created_at: now - 3600,
+    all_transactions: TX, is_paid: 1, is_shipped: 1, status: 'Completed', needs_purchase_at: null, tracking_code: '4PXTEST5', shipment_notified_at: now });
+
+  // 6. Shop A — UNPAID pending order. Purchasing is paid-only, so it must NOT enter
+  //    the route (you don't buy stock for an order that hasn't been paid for).
+  ins.run({ receipt_id: 1006, shop_id: 'SHOP_A', name: 'Faye', etsy_created_at: now - 3600,
+    all_transactions: TX, is_paid: 0, is_shipped: 0, status: 'Payment Processing', needs_purchase_at: null, tracking_code: null, shipment_notified_at: null });
 }
 
 function shopIds(rows) { return [...new Set(rows.map(r => r.shop_id))].sort(); }
@@ -113,6 +145,10 @@ console.log('Route dashboard shop-filter regression test\n');
     `shop_id=SHOP_A includes its own pending (1001) and needs-purchase (1004) orders (got: ${rids.join(', ')})`);
   assert(!rids.includes(1002) && !rids.includes(1003),
     `shop_id=SHOP_A excludes SHOP_B's pending (1002) and needs-purchase (1003) orders`);
+  assert(rids.includes(1005),
+    `shop_id=SHOP_A includes its UNFLAGGED pre-transit order (1005) via the pre-transit scope (got: ${rids.join(', ')})`);
+  assert(!rids.includes(1006),
+    `shop_id=SHOP_A excludes its UNPAID order (1006) — purchasing is paid-only`);
 }
 
 // — Pinned "extra" receipt from another shop must NOT leak into a filtered view. —
@@ -132,8 +168,10 @@ console.log('Route dashboard shop-filter regression test\n');
   assert(ids.includes('SHOP_A') && ids.includes('SHOP_B'),
     `no shop filter returns both shops (got: ${ids.join(', ')})`);
   const rids = receiptIds(rows);
-  assert([1001, 1002, 1003, 1004].every(id => rids.includes(id)),
-    `no shop filter returns all four orders (got: ${rids.join(', ')})`);
+  assert([1001, 1002, 1003, 1004, 1005].every(id => rids.includes(id)),
+    `no shop filter returns every paid pending / pre-transit order incl. unflagged pre-transit 1005 (got: ${rids.join(', ')})`);
+  assert(!rids.includes(1006),
+    `no shop filter still excludes the UNPAID order (1006) — purchasing is paid-only`);
 }
 
 db.close();

@@ -21,6 +21,38 @@ const path = require('path');
 /** @type {Database.Database | null} */
 let _db = null;
 
+// ── Manual-order home (synthetic shop/group) ────────────────────────────────
+// Manual orders are real `receipts` rows, so they need a shop_id that satisfies
+// the receipts→shops foreign key AND the JOIN shops in /api/orders and the Route
+// dashboard. Rather than misattribute them to a real Etsy shop (or force the
+// operator to pick one — the Route "Add Order" flow has no shop), every manual
+// order belongs to a single dedicated, synthetic "Manual Orders" shop. It is
+// seeded idempotently on startup and deliberately hidden from /api/shops so it
+// never pollutes the Shops overview, listing/create/events/bulk selectors, or
+// token accounting (it has no Etsy credentials).
+const MANUAL_GROUP_ID = '__manual__';
+const MANUAL_SHOP_ID  = '__manual__';
+const MANUAL_SHOP_NAME = 'Manual Orders';
+
+/**
+ * Idempotently seed the synthetic group + shop that own every manual order.
+ * Safe to call on every startup.
+ * @param {Database.Database} db
+ */
+function seedManualOrderShop(db) {
+  db.prepare(`
+    INSERT INTO groups (group_id, label, proxy_host)
+    VALUES (@group_id, @label, 'direct')
+    ON CONFLICT(group_id) DO UPDATE SET label = excluded.label
+  `).run({ group_id: MANUAL_GROUP_ID, label: MANUAL_SHOP_NAME });
+
+  db.prepare(`
+    INSERT INTO shops (shop_id, group_id, shop_name)
+    VALUES (@shop_id, @group_id, @shop_name)
+    ON CONFLICT(shop_id) DO UPDATE SET shop_name = excluded.shop_name, group_id = excluded.group_id
+  `).run({ shop_id: MANUAL_SHOP_ID, group_id: MANUAL_GROUP_ID, shop_name: MANUAL_SHOP_NAME });
+}
+
 /**
  * Decode HTML entities in a string returned by the Etsy API.
  *
@@ -488,7 +520,7 @@ function initDb(dbPath) {
       shop_key     TEXT NOT NULL,
       shop_name    TEXT,
       input_path   TEXT NOT NULL,
-      state        TEXT NOT NULL DEFAULT 'queued',  -- queued|running|done|error|cancelled
+      state        TEXT NOT NULL DEFAULT 'queued',  -- queued|running|paused|done|error|cancelled
       target_state TEXT NOT NULL DEFAULT 'draft',   -- draft|published
       dry_run      INTEGER NOT NULL DEFAULT 0,
       total        INTEGER NOT NULL DEFAULT 0,
@@ -507,6 +539,7 @@ function initDb(dbPath) {
       job_id          TEXT NOT NULL,
       product_folder  TEXT NOT NULL,
       product_name    TEXT,
+      seq             INTEGER,                         -- natural-sort position (1,2,3…) from the scanner
       status          TEXT NOT NULL DEFAULT 'pending', -- pending|ai_done|created|images_done|inventory_done|done|failed
       listing_id      INTEGER,
       listing_url     TEXT,
@@ -514,9 +547,35 @@ function initDb(dbPath) {
       error           TEXT,
       ai_json         TEXT,
       checkpoint_json TEXT,
+      preview_json    TEXT,                            -- full inspection payload (copy + variations + image order + settings)
+      published_at    INTEGER,                         -- epoch when the draft was published to Etsy
+      reviewed_at     INTEGER,                         -- epoch when the operator marked the listing manually reviewed
       updated_at      INTEGER DEFAULT (strftime('%s','now')),
       PRIMARY KEY (job_id, product_folder)
     );
+
+    -- ─────────────────────────────────────────────
+    -- Purchase-sync version history (audit trail)
+    -- One immutable row per "Sync purchase status" upload, so the owner can
+    -- always trace back EXACTLY which orders were marked purchased, on what
+    -- date/time, from which workbook. The payload_json column stores the full
+    -- report (orders changed, before/after per component, ready-to-ship roster,
+    -- warnings) so a past run can be re-opened or re-exported byte-for-byte.
+    -- ─────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS purchase_sync_runs (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      file_name       TEXT,
+      updated_orders  INTEGER NOT NULL DEFAULT 0,
+      updated_lines   INTEGER NOT NULL DEFAULT 0,
+      became_ready    INTEGER NOT NULL DEFAULT 0,
+      cleared_queue   INTEGER NOT NULL DEFAULT 0,
+      ready_in_file   INTEGER NOT NULL DEFAULT 0,
+      orders_in_file  INTEGER NOT NULL DEFAULT 0,
+      summary_json    TEXT,
+      payload_json    TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_purchase_sync_runs_created ON purchase_sync_runs(created_at DESC);
   `);
 
   // ── Migrations ────────────────────────────────────────────────────────────
@@ -643,6 +702,18 @@ function initDb(dbPath) {
     // Preserved across Etsy re-syncs (never written by upsertReceipt, so
     // ON CONFLICT leaves it untouched). Can be cleared (unmark) if set in error.
     ['packaged_at',            'INTEGER'],
+
+    // ── Order origin ──────────────────────────────────────────────────────────
+    // Distinguishes how a receipt entered the system:
+    //   'etsy'   = synced from the Etsy API (the default for every real order).
+    //   'manual' = operator-created directly in the Orders tab ("New manual order")
+    //              for off-Etsy / replacement / wholesale orders. Manual orders carry
+    //              a NEGATIVE receipt_id (≤ -1e9) so they never collide with Etsy's
+    //              positive receipt ids, are never pushed to or fetched from Etsy, and
+    //              are skipped by the sync worker. They still flow through the SAME
+    //              packaging, 4PX-shipping and label machinery as Etsy orders.
+    // ALTER ... ADD COLUMN with a DEFAULT backfills every existing row to 'etsy'.
+    ['source',                 "TEXT DEFAULT 'etsy'"],
   ];
   const addedCols = [];
   for (const [col, type] of newReceiptCols) {
@@ -725,7 +796,8 @@ function initDb(dbPath) {
     CREATE INDEX IF NOT EXISTS idx_receipts_fourpx_consignment ON receipts(fourpx_consignment_no);
     CREATE INDEX IF NOT EXISTS idx_receipts_archived_at       ON receipts(archived_at);
     CREATE INDEX IF NOT EXISTS idx_receipts_needs_purchase    ON receipts(needs_purchase_at);
-    CREATE INDEX IF NOT EXISTS idx_receipts_packaged_at       ON receipts(packaged_at)
+    CREATE INDEX IF NOT EXISTS idx_receipts_packaged_at       ON receipts(packaged_at);
+    CREATE INDEX IF NOT EXISTS idx_receipts_source            ON receipts(source)
   `);
 
   // If shipment_notified_at already exists but wasn't populated during the backfill
@@ -790,9 +862,67 @@ function initDb(dbPath) {
     db.exec('ALTER TABLE charm_shop_directory ADD COLUMN sort_order INTEGER DEFAULT 0');
   }
 
+  // seq for bulk_job_items — preserves the scanner's natural-sort order
+  //   (1, 2, 3 … 10, 11) instead of SQLite's lexicographic text order
+  //   (1, 10, 11, 2, 20). Without this the processing order AND the progress
+  //   table both render folders out of human order.
+  // preview_json   — full inspection payload (copy + variations + image order +
+  //                  settings) computed at generation time, so the Inspector can
+  //                  render everything with zero recomputation / Etsy calls.
+  // published_at   — epoch when a created draft was published to Etsy.
+  const bulkItemCols = db.pragma('table_info(bulk_job_items)').map(c => c.name);
+  if (!bulkItemCols.includes('seq')) {
+    db.exec('ALTER TABLE bulk_job_items ADD COLUMN seq INTEGER');
+  }
+  if (!bulkItemCols.includes('preview_json')) {
+    db.exec('ALTER TABLE bulk_job_items ADD COLUMN preview_json TEXT');
+  }
+  if (!bulkItemCols.includes('published_at')) {
+    db.exec('ALTER TABLE bulk_job_items ADD COLUMN published_at INTEGER');
+  }
+  // reviewed_at — epoch when the operator marked the listing manually reviewed
+  // ("good to go"). Drives the review badge, the reviewed counter, and the
+  // create-drafts confirmation guard.
+  if (!bulkItemCols.includes('reviewed_at')) {
+    db.exec('ALTER TABLE bulk_job_items ADD COLUMN reviewed_at INTEGER');
+  }
+  // auto_resume_count — how many times a job has been auto-resumed after an
+  // interrupted (crashed/restarted) run without making fresh progress. Caps a
+  // crash-loop: it's reset to 0 whenever an item completes, so steady progress
+  // keeps the budget topped up and only repeated no-progress crashes exhaust it.
+  const bulkJobCols = db.pragma('table_info(bulk_jobs)').map(c => c.name);
+  if (!bulkJobCols.includes('auto_resume_count')) {
+    db.exec('ALTER TABLE bulk_jobs ADD COLUMN auto_resume_count INTEGER NOT NULL DEFAULT 0');
+  }
+  // Backfill seq for items created before the column existed, using the same
+  // natural-sort the scanner applies (so legacy jobs also read 1,2,3…10,11 and
+  // become inspectable by seq).
+  const needsBackfill = db.prepare('SELECT COUNT(*) AS n FROM bulk_job_items WHERE seq IS NULL').get().n;
+  if (needsBackfill > 0) {
+    const naturalKey = (s) => {
+      const m = String(s || '').match(/\d+/);
+      return m ? parseInt(m[0], 10) : Number.MAX_SAFE_INTEGER;
+    };
+    const jobIds = db.prepare('SELECT DISTINCT job_id FROM bulk_job_items WHERE seq IS NULL').all().map((r) => r.job_id);
+    const setSeq = db.prepare('UPDATE bulk_job_items SET seq = ? WHERE job_id = ? AND product_folder = ?');
+    const tx = db.transaction((jids) => {
+      for (const jid of jids) {
+        const rows = db.prepare('SELECT product_folder, product_name FROM bulk_job_items WHERE job_id = ?').all(jid);
+        rows.sort((a, b) => naturalKey(a.product_name) - naturalKey(b.product_name)
+          || String(a.product_name).localeCompare(String(b.product_name), undefined, { numeric: true }));
+        rows.forEach((r, i) => setSeq.run(i + 1, jid, r.product_folder));
+      }
+    });
+    tx(jobIds);
+  }
+
   // One-time remap of title-prefix keys → listing-scoped keys (fixes charm
   // assignments bleeding across different products that share a title prefix).
   migrateRouteKeysToListingScope(db);
+
+  // Synthetic shop/group that owns every manual order (must exist before any
+  // manual receipt is inserted, to satisfy the receipts→shops foreign key).
+  seedManualOrderShop(db);
 
   _db = db;
   return db;
@@ -2583,8 +2713,11 @@ function insertManualItem(db, row) {
       source:      row.source === 'catalog' ? 'catalog' : (row.source === 'custom' ? 'custom' : 'manual'),
     });
     const id = Number(info.lastInsertRowid);
-    // Synthetic negative receipt id, guaranteed unique via the AUTOINCREMENT id.
-    const receiptId = -id;
+    // receipt_id: either an EXPLICIT id supplied by the caller (used to LINK this
+    // route sidecar to its companion manual ORDER in `receipts`, so they share one
+    // id across both tabs), or a synthetic negative id derived from the row id.
+    const explicit = Number(row.receipt_id);
+    const receiptId = Number.isInteger(explicit) && explicit < 0 ? explicit : -id;
     db.prepare('UPDATE route_manual_items SET receipt_id = ? WHERE id = ?').run(receiptId, id);
     return { id, receipt_id: receiptId };
   });
@@ -2632,19 +2765,375 @@ function getManualItemImage(db, id) {
  * @returns {boolean} true when a row was deleted
  */
 function deleteManualItemByReceipt(db, receiptId) {
+  return purgeManualOrder(db, receiptId);
+}
+
+/**
+ * Fully remove a manual order from EVERY table it can touch, given its shared
+ * receipt_id. A manual order may exist as a `receipts` row (Orders tab), a
+ * `route_manual_items` sidecar (Route tab), or both — plus per-line assignment /
+ * purchase rows. This single, idempotent purge is the one true teardown used by
+ * BOTH the Route-tab and Orders-tab delete endpoints so neither can ever leave a
+ * half-deleted ghost in the other tab.
+ *
+ * @param {Database.Database} db
+ * @param {number} receiptId  the shared (negative) manual receipt id
+ * @returns {boolean} true when at least one row was removed
+ */
+function purgeManualOrder(db, receiptId) {
   const rid = Number(receiptId);
   const tx = db.transaction(() => {
-    try { db.prepare('DELETE FROM route_assignments WHERE receipt_id = ?').run(rid); } catch {}
-    const info = db.prepare('DELETE FROM route_manual_items WHERE receipt_id = ?').run(rid);
-    return info.changes > 0;
+    let removed = 0;
+    for (const sql of [
+      'DELETE FROM route_assignments WHERE receipt_id = ?',
+      'DELETE FROM receipt_item_purchase WHERE receipt_id = ?',
+      'DELETE FROM transactions WHERE receipt_id = ?',
+      'DELETE FROM route_manual_items WHERE receipt_id = ?',
+      "DELETE FROM receipts WHERE receipt_id = ? AND source = 'manual'",
+    ]) {
+      try { removed += db.prepare(sql).run(rid).changes; } catch { /* table may not exist */ }
+    }
+    return removed > 0;
   });
   return tx();
+}
+
+// ─── Manual ORDERS (Orders tab) ─────────────────────────────────────────────
+//
+// A manual order is an operator-created `receipts` row — a FULL order with a
+// buyer name + shipping address + line items — for sales that did not come from
+// the Etsy API (off-Etsy sales, replacements, wholesale, etc.). It lives in the
+// SAME `receipts` table as synced Etsy orders so it automatically flows through
+// every existing Orders-tab capability (packaging, 4PX label creation, tracking,
+// notes, archive). Two invariants keep it safely separated from real Etsy data:
+//
+//   • receipt_id is NEGATIVE and ≤ -1e9 (MANUAL_RECEIPT_ID_FLOOR), so it can
+//     never collide with Etsy's positive ids nor with the small negative ids the
+//     Route tab assigns to route_manual_items.
+//   • source = 'manual', so the sync worker, Etsy-ship and edit-tracking paths
+//     all skip it (an Etsy API call for a fabricated receipt would 404).
+
+const MANUAL_RECEIPT_ID_FLOOR = -1_000_000_000;
+
+/**
+ * Allocate the next unique negative receipt_id for a manual order.
+ * Always returns a value ≤ MANUAL_RECEIPT_ID_FLOOR - 1, strictly below the
+ * current minimum receipt_id, so it is guaranteed unique and clearly outside the
+ * Etsy (positive) and Route-manual-item (small negative) id ranges.
+ *
+ * @param {Database.Database} db
+ * @returns {number}
+ */
+function nextManualReceiptId(db) {
+  const row = db.prepare('SELECT MIN(receipt_id) AS m FROM receipts').get();
+  const currentMin = Number.isFinite(row?.m) ? row.m : 0;
+  return Math.min(currentMin, MANUAL_RECEIPT_ID_FLOOR) - 1;
+}
+
+/**
+ * Build the multi-line formatted_address string the Orders tab renders/copies,
+ * matching the shape Etsy's own formatted_address uses:
+ *   Name
+ *   Street line 1
+ *   Street line 2
+ *   City, State ZIP
+ *   COUNTRY
+ *
+ * @param {object} a  { name, first_line, second_line, city, state, zip, country_iso }
+ * @returns {string}
+ */
+function _buildFormattedAddress(a) {
+  const lines = [];
+  if (a.name)        lines.push(a.name);
+  if (a.first_line)  lines.push(a.first_line);
+  if (a.second_line) lines.push(a.second_line);
+  const cityLine = [a.city, [a.state, a.zip].filter(Boolean).join(' ')]
+    .filter(Boolean).join(', ');
+  if (cityLine) lines.push(cityLine);
+  if (a.country_iso) lines.push(String(a.country_iso).toUpperCase());
+  return lines.join('\n');
+}
+
+/**
+ * Normalise an incoming manual-order payload into the column values + derived
+ * fields (all_transactions JSON, formatted_address, first_* rollups) used by the
+ * receipts table. Shared by insert + update so both paths stay identical.
+ *
+ * @param {object} p  operator-supplied fields
+ * @param {object} [opts]
+ * @param {boolean} [opts.requireName=true]  When false (Route "Add Order" path),
+ *        a missing buyer name is allowed and falls back to a clear placeholder
+ *        the operator fills in later from the Orders tab.
+ * @returns {object}  normalised values keyed by receipts column name
+ */
+const MANUAL_ORDER_NAME_PLACEHOLDER = 'Manual order';
+function _normaliseManualOrder(p, opts = {}) {
+  const requireName = opts.requireName !== false;
+  let name = String(p.name || '').trim();
+  if (!name) {
+    if (requireName) { const e = new Error('Buyer name is required.'); e.code = 'REQUIRED'; throw e; }
+    name = MANUAL_ORDER_NAME_PLACEHOLDER;
+  }
+
+  const items = (Array.isArray(p.items) ? p.items : [])
+    .map((it) => ({
+      listing_id: it.listing_id != null && String(it.listing_id).trim() !== '' ? Number(it.listing_id) : null,
+      title:      String(it.title || '').trim(),
+      quantity:   Math.max(1, parseInt(it.quantity, 10) || 1),
+      expected_ship_date: null,
+      variations: Array.isArray(it.variations) ? it.variations : [],
+    }))
+    .filter((it) => it.title);
+  if (items.length === 0) { const e = new Error('At least one line item with a title is required.'); e.code = 'REQUIRED'; throw e; }
+
+  const countryIso = String(p.shipping_country_iso || '').trim().toUpperCase() || null;
+  const addr = {
+    name,
+    first_line:  String(p.shipping_first_line  || '').trim() || null,
+    second_line: String(p.shipping_second_line || '').trim() || null,
+    city:        String(p.shipping_city  || '').trim() || null,
+    state:       String(p.shipping_state || '').trim() || null,
+    zip:         String(p.shipping_zip   || '').trim() || null,
+    country_iso: countryIso,
+  };
+
+  const grandtotal = p.grandtotal_amount != null && String(p.grandtotal_amount).trim() !== ''
+    ? Number(p.grandtotal_amount) : null;
+
+  return {
+    name,
+    buyer_email:          String(p.buyer_email || '').trim() || null,
+    shipping_first_line:  addr.first_line,
+    shipping_second_line: addr.second_line,
+    shipping_city:        addr.city,
+    shipping_state:       addr.state,
+    shipping_zip:         addr.zip,
+    shipping_country_iso: addr.country_iso,
+    formatted_address:    _buildFormattedAddress(addr),
+    first_product_title:  items[0].title,
+    first_listing_id:     items[0].listing_id,
+    first_quantity:       items[0].quantity,
+    all_transactions:     JSON.stringify(items),
+    grandtotal_amount:    Number.isFinite(grandtotal) ? grandtotal : null,
+    grandtotal_currency:  String(p.grandtotal_currency || '').trim().toUpperCase() || null,
+    message_from_buyer:   String(p.message_from_buyer || '').trim() || null,
+    team_note:            String(p.team_note || '').trim() || null,
+  };
+}
+
+/**
+ * Create a manual order as a real `receipts` row. Returns the new (negative)
+ * receipt_id. The order is marked paid + unshipped so it lands in the default
+ * "Needs shipping" Orders view exactly like a fresh Etsy order.
+ *
+ * @param {Database.Database} db
+ * @param {object} payload  { shop_id, group_id, name, buyer_email, phone,
+ *                            shipping_*, items[], grandtotal_amount, ... }
+ * @returns {{ receipt_id: number }}
+ */
+function insertManualOrder(db, payload) {
+  // Manual orders default to the synthetic "Manual Orders" shop. A real shop may
+  // still be supplied (e.g. to attribute an off-Etsy order to a specific shop),
+  // in which case its group is resolved automatically.
+  let shopId  = String(payload.shop_id  || '').trim() || MANUAL_SHOP_ID;
+  let groupId = String(payload.group_id || '').trim();
+  if (!groupId) {
+    const shopRow = db.prepare('SELECT group_id FROM shops WHERE shop_id = ?').get(shopId);
+    groupId = shopRow?.group_id || MANUAL_GROUP_ID;
+    if (!shopRow) shopId = MANUAL_SHOP_ID; // unknown shop → fall back to manual home
+  }
+
+  const v = _normaliseManualOrder(payload, { requireName: !!payload.requireName });
+  const now = Math.floor(Date.now() / 1000);
+
+  const tx = db.transaction(() => {
+    const receiptId = nextManualReceiptId(db);
+    db.prepare(`
+      INSERT INTO receipts (
+        receipt_id, shop_id, group_id, buyer_user_id, buyer_email, name,
+        status, is_shipped, is_paid, grandtotal_amount, grandtotal_currency,
+        message_from_buyer, shipping_first_line, shipping_second_line,
+        shipping_city, shipping_state, shipping_zip, shipping_country_iso,
+        first_product_title, first_listing_id, first_quantity, all_transactions,
+        formatted_address, team_note, etsy_created_at, etsy_updated_at,
+        synced_at, source
+      ) VALUES (
+        @receipt_id, @shop_id, @group_id, NULL, @buyer_email, @name,
+        'Paid', 0, 1, @grandtotal_amount, @grandtotal_currency,
+        @message_from_buyer, @shipping_first_line, @shipping_second_line,
+        @shipping_city, @shipping_state, @shipping_zip, @shipping_country_iso,
+        @first_product_title, @first_listing_id, @first_quantity, @all_transactions,
+        @formatted_address, @team_note, @now, @now,
+        @now, 'manual'
+      )
+    `).run({ ...v, receipt_id: receiptId, shop_id: shopId, group_id: groupId, now });
+    return { receipt_id: receiptId };
+  });
+  return tx();
+}
+
+/**
+ * Update an existing manual order's buyer / address / items. Refuses to touch a
+ * synced Etsy order (source must be 'manual'). Address-derived fields are
+ * recomputed from the new values.
+ *
+ * @param {Database.Database} db
+ * @param {number} receiptId
+ * @param {object} payload  same shape as insertManualOrder (minus shop/group)
+ * @returns {boolean} true when a manual order row was updated
+ */
+function updateManualOrder(db, receiptId, payload) {
+  const rid = Number(receiptId);
+  const existing = db.prepare('SELECT source FROM receipts WHERE receipt_id = ?').get(rid);
+  if (!existing) { const e = new Error('Order not found.'); e.code = 'NOT_FOUND'; throw e; }
+  if (existing.source !== 'manual') { const e = new Error('Only manual orders can be edited.'); e.code = 'FORBIDDEN'; throw e; }
+
+  const v = _normaliseManualOrder(payload);
+  const now = Math.floor(Date.now() / 1000);
+  const info = db.prepare(`
+    UPDATE receipts SET
+      name                 = @name,
+      buyer_email          = @buyer_email,
+      grandtotal_amount    = @grandtotal_amount,
+      grandtotal_currency  = @grandtotal_currency,
+      message_from_buyer   = @message_from_buyer,
+      shipping_first_line  = @shipping_first_line,
+      shipping_second_line = @shipping_second_line,
+      shipping_city        = @shipping_city,
+      shipping_state       = @shipping_state,
+      shipping_zip         = @shipping_zip,
+      shipping_country_iso = @shipping_country_iso,
+      first_product_title  = @first_product_title,
+      first_listing_id     = @first_listing_id,
+      first_quantity       = @first_quantity,
+      all_transactions     = @all_transactions,
+      formatted_address    = @formatted_address,
+      team_note            = COALESCE(@team_note, team_note),
+      etsy_updated_at      = @now
+    WHERE receipt_id = @receipt_id AND source = 'manual'
+  `).run({ ...v, receipt_id: rid, now });
+  return info.changes > 0;
+}
+
+/**
+ * Delete a manual order and its dependent per-line rows. Refuses to delete a
+ * synced Etsy order. The caller is responsible for blocking deletion while a 4PX
+ * shipment still exists (cancel it first) — this helper only enforces source.
+ *
+ * @param {Database.Database} db
+ * @param {number} receiptId
+ * @returns {boolean} true when a manual order row was deleted
+ */
+function deleteManualOrder(db, receiptId) {
+  const rid = Number(receiptId);
+  const existing = db.prepare('SELECT source FROM receipts WHERE receipt_id = ?').get(rid);
+  // A receipts row that is NOT manual must never be deleted here. (A receipt-less
+  // route sidecar — no receipts row at all — is fine to purge.)
+  if (existing && existing.source !== 'manual') {
+    const e = new Error('Only manual orders can be deleted.'); e.code = 'FORBIDDEN'; throw e;
+  }
+  return purgeManualOrder(db, rid);
+}
+
+/**
+ * Toggle the LOCAL shipped state of a manual order (manual orders are never
+ * pushed to Etsy, so "shipped" here is a purely local flag the operator sets
+ * once a manual order has left the warehouse). source must be 'manual'.
+ *
+ * @param {Database.Database} db
+ * @param {number} receiptId
+ * @param {boolean} shipped
+ * @returns {boolean} true when updated
+ */
+function setManualOrderShipped(db, receiptId, shipped) {
+  const rid = Number(receiptId);
+  const existing = db.prepare('SELECT source FROM receipts WHERE receipt_id = ?').get(rid);
+  if (!existing) { const e = new Error('Order not found.'); e.code = 'NOT_FOUND'; throw e; }
+  if (existing.source !== 'manual') { const e = new Error('Only manual orders can be marked shipped locally.'); e.code = 'FORBIDDEN'; throw e; }
+  const info = shipped
+    ? db.prepare("UPDATE receipts SET is_shipped = 1, status = 'Completed' WHERE receipt_id = ? AND source = 'manual'").run(rid)
+    : db.prepare("UPDATE receipts SET is_shipped = 0, status = 'Paid'      WHERE receipt_id = ? AND source = 'manual'").run(rid);
+  return info.changes > 0;
+}
+
+// ─── Purchase-sync version history ──────────────────────────────────────────
+
+/**
+ * Persist one purchase-status sync as an immutable audit record.
+ *
+ * @param {Database.Database} db
+ * @param {object} run
+ * @param {string|null} run.file_name   - source workbook name
+ * @param {object}      run.summary     - counts (updated_orders, became_ready, …)
+ * @param {object}      run.payload     - full report ({ orders, ready, warnings, … })
+ * @returns {number} the new run id (auto-increment)
+ */
+function recordPurchaseSyncRun(db, { file_name = null, summary = {}, payload = {} } = {}) {
+  const info = db.prepare(`
+    INSERT INTO purchase_sync_runs
+      (created_at, file_name, updated_orders, updated_lines, became_ready,
+       cleared_queue, ready_in_file, orders_in_file, summary_json, payload_json)
+    VALUES
+      (strftime('%s','now'), @file_name, @updated_orders, @updated_lines, @became_ready,
+       @cleared_queue, @ready_in_file, @orders_in_file, @summary_json, @payload_json)
+  `).run({
+    file_name:      file_name || null,
+    updated_orders: Number(summary.updated_orders || 0),
+    updated_lines:  Number(summary.updated_lines || 0),
+    became_ready:   Number(summary.became_ready || 0),
+    cleared_queue:  Number(summary.cleared_from_queue || 0),
+    ready_in_file:  Number(summary.ready_in_file || 0),
+    orders_in_file: Number(summary.orders_in_file || 0),
+    summary_json:   JSON.stringify(summary || {}),
+    payload_json:   JSON.stringify(payload || {}),
+  });
+  return Number(info.lastInsertRowid);
+}
+
+/**
+ * List recent purchase-sync runs (newest first) without the heavy payload blob.
+ * @param {Database.Database} db
+ * @param {number} [limit=100]
+ * @returns {Array<object>}
+ */
+function listPurchaseSyncRuns(db, limit = 100) {
+  try {
+    return db.prepare(`
+      SELECT id, created_at, file_name, updated_orders, updated_lines,
+             became_ready, cleared_queue, ready_in_file, orders_in_file
+      FROM purchase_sync_runs
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `).all(Math.max(1, Math.min(1000, Number(limit) || 100)));
+  } catch { return []; }
+}
+
+/**
+ * Fetch one purchase-sync run with its full stored report payload.
+ * @param {Database.Database} db
+ * @param {number} id
+ * @returns {object|null} the original report object (plus run_id / created_at)
+ */
+function getPurchaseSyncRun(db, id) {
+  try {
+    const row = db.prepare('SELECT * FROM purchase_sync_runs WHERE id = ?').get(Number(id));
+    if (!row) return null;
+    let payload = {};
+    try { payload = JSON.parse(row.payload_json || '{}'); } catch { payload = {}; }
+    payload.run_id = row.id;
+    payload.generated_at = payload.generated_at || new Date(row.created_at * 1000).toISOString();
+    if (!payload.file) payload.file = row.file_name || null;
+    return payload;
+  } catch { return null; }
 }
 
 module.exports = {
   initDb,
   getDb,
   syncConfigToDb,
+  recordPurchaseSyncRun,
+  listPurchaseSyncRuns,
+  getPurchaseSyncRun,
   upsertRouteAssignment,
   setRouteDismissed,
   clearDismissedByReceipt,
@@ -2662,6 +3151,16 @@ module.exports = {
   getManualItems,
   getManualItemImage,
   deleteManualItemByReceipt,
+  nextManualReceiptId,
+  insertManualOrder,
+  updateManualOrder,
+  deleteManualOrder,
+  purgeManualOrder,
+  setManualOrderShipped,
+  seedManualOrderShop,
+  MANUAL_SHOP_ID,
+  MANUAL_GROUP_ID,
+  MANUAL_SHOP_NAME,
   getSupplierDirectory,
   getCharmShopDirectory,
   getProductMapByNorm,

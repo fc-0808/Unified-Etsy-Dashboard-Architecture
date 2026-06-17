@@ -49,6 +49,57 @@ async function isSignedOut(page) {
 }
 
 /**
+ * Detect Etsy's anti-bot "Access is temporarily restricted" interstitial.
+ *
+ * Etsy (via its HUMAN/PerimeterX bot defense) serves a near-empty page titled
+ * "etsy.com" with the text "Access is temporarily restricted" and an offending
+ * IP when it flags the request as automated. This happens most often when:
+ *   - the browser is headless, and/or
+ *   - the egress IP is a datacenter/VPN/Tor address rather than residential.
+ *
+ * When this page is shown there are zero conversation links, so the scraper
+ * would otherwise silently return "0 conversations". We must surface it instead.
+ *
+ * @param {import('playwright').Page} page
+ * @returns {Promise<{restricted:boolean, ip?:string, refId?:string}>}
+ */
+async function detectAccessRestricted(page) {
+  try {
+    const info = await page.evaluate(() => {
+      const text = document.body?.innerText || '';
+      const title = (document.title || '').trim().toLowerCase();
+
+      // Direct text match (soft "Access is temporarily restricted" page).
+      const textMatch = /access is temporarily restricted|verification required|unusual activity|detected (bot|automated)|slide right to secure/i.test(text);
+
+      // CAPTCHA/challenge variant: the puzzle renders inside an iframe, so the
+      // top document body is nearly empty and the title collapses to "etsy.com".
+      // Real Etsy pages have a descriptive <title> and substantial body text.
+      const hasChallengeIframe = Array.from(document.querySelectorAll('iframe'))
+        .some(f => /captcha|px-captcha|perimeterx|hcaptcha|recaptcha|challenge/i.test(
+          (f.src || '') + ' ' + (f.id || '') + ' ' + (f.title || '')
+        ));
+      const looksEmptyChallenge = title === 'etsy.com'
+        && text.trim().length < 40
+        && document.querySelectorAll('a').length < 5;
+
+      const restricted = textMatch || hasChallengeIframe || looksEmptyChallenge;
+
+      const ipMatch  = text.match(/IP\s+(\d{1,3}(?:\.\d{1,3}){3})/i);
+      const refMatch = text.match(/ID:\s*([0-9a-f-]{8,})/i);
+      return {
+        restricted,
+        ip:    ipMatch ? ipMatch[1] : null,
+        refId: refMatch ? refMatch[1] : null,
+      };
+    });
+    return { restricted: !!info.restricted, ip: info.ip, refId: info.refId };
+  } catch {
+    return { restricted: false };
+  }
+}
+
+/**
  * Attach a network response listener that captures JSON payloads from
  * message-related endpoints. This is the PRIMARY read mechanism — far more
  * robust than DOM scraping because Etsy's internal JSON shapes change less
@@ -127,6 +178,36 @@ function humanPause(minMs, maxMs) {
 }
 
 /**
+ * Navigate to a deep Etsy URL the way a human would: land on the Etsy homepage
+ * first (establishing a normal browsing session + warming cookies), pause
+ * briefly, then move to the target. Jumping straight to a deep link like
+ * /messages/{id} on a cold context is a strong bot signal that triggers Etsy's
+ * "Verification Required" challenge — this warmup materially reduces that.
+ *
+ * Best-effort: any failure here is swallowed and the caller proceeds to its own
+ * goto/checks.
+ *
+ * @param {import('playwright').Page} page
+ * @param {string} targetUrl
+ * @param {{ waitUntil?: string, timeout?: number }} [opts]
+ */
+async function navigateHuman(page, targetUrl, opts = {}) {
+  const { waitUntil = 'domcontentloaded', timeout = 25_000 } = opts;
+  try {
+    // Only warm up if we're not already on an etsy.com page.
+    const cur = page.url();
+    if (!/etsy\.com/i.test(cur)) {
+      await page.goto(`${ETSY}/`, { waitUntil: 'domcontentloaded', timeout }).catch(() => {});
+      await humanPause(800, 1800);
+      // A little scroll makes the session look interactive rather than scripted.
+      await page.mouse.wheel(0, 300 + Math.floor(Math.random() * 400)).catch(() => {});
+      await humanPause(400, 900);
+    }
+  } catch { /* non-fatal */ }
+  await page.goto(targetUrl, { waitUntil, timeout });
+}
+
+/**
  * Scroll a scrollable container (or the window) repeatedly so Etsy's lazy-loaded
  * conversation list / message thread renders all of its rows before we scrape.
  * @param {import('playwright').Page} page
@@ -154,6 +235,98 @@ async function autoScroll(page, direction = 'bottom') {
 }
 
 // ── Inbox scraping ────────────────────────────────────────────────────────────
+
+/**
+ * PRIMARY inbox read path for the current Etsy Shop Manager.
+ *
+ * Etsy's Shop Manager Messages page (/messages/inbox) bootstraps the full
+ * conversation list as JSON inside an inline <script> tag, under:
+ *   ...,"initial_data":{"hasConversationsData":true,"conversations":[ {…}, … ]}
+ *
+ * Each conversation object looks like:
+ *   {
+ *     "conversation_id": 1678691087,
+ *     "excerpt": "Huh? I thought I ordered the case…",
+ *     "is_unread": false,
+ *     "message_count": 16,
+ *     "timestamp": "2 days ago",
+ *     "conversation_url": "/messages/1678691087",
+ *     "other_user": { "display_name": "Aryan", "username": "…", … }
+ *   }
+ *
+ * Parsing this blob is dramatically more reliable than DOM scraping because
+ * the rows are a virtualized list with hashed class names and no convo anchors.
+ *
+ * @param {import('playwright').Page} page
+ * @returns {Promise<Array<{convoId:string, buyerName:string, preview:string, ts:number, isUnread:boolean, messageCount:number}>>}
+ */
+async function extractInboxFromBootstrap(page) {
+  try {
+    const conversations = await page.evaluate(() => {
+      // String-aware scanner: find the matching close bracket for an array,
+      // ignoring brackets that appear inside JSON string values.
+      const matchArray = (text, openIdx) => {
+        let depth = 0, inStr = false, esc = false;
+        for (let i = openIdx; i < text.length; i++) {
+          const ch = text[i];
+          if (esc) { esc = false; continue; }
+          if (ch === '\\') { esc = true; continue; }
+          if (ch === '"') { inStr = !inStr; continue; }
+          if (inStr) continue;
+          if (ch === '[') depth++;
+          else if (ch === ']') { depth--; if (depth === 0) return i; }
+        }
+        return -1;
+      };
+
+      const scripts = Array.from(document.querySelectorAll('script'));
+      for (const s of scripts) {
+        const t = s.textContent || '';
+        if (!t.includes('hasConversationsData') || !t.includes('"conversations"')) continue;
+
+        const marker = '"conversations":[';
+        const mi = t.indexOf(marker);
+        if (mi === -1) continue;
+
+        const openIdx = mi + marker.length - 1;      // index of '['
+        const closeIdx = matchArray(t, openIdx);
+        if (closeIdx === -1) continue;
+
+        const arrStr = t.slice(openIdx, closeIdx + 1);
+        try {
+          return JSON.parse(arrStr);
+        } catch {
+          /* try next script */
+        }
+      }
+      return null;
+    });
+
+    if (!Array.isArray(conversations)) return [];
+
+    const now = Math.floor(Date.now() / 1000);
+    return conversations.map((c, idx) => {
+      // conversation_url is "/messages/1678691087"; conversation_id is numeric.
+      const convoId = String(
+        c.conversation_id ??
+        (c.conversation_url || '').match(/\/messages\/(\d+)/)?.[1] ??
+        ''
+      );
+      return {
+        convoId,
+        buyerName: c.other_user?.display_name || c.title || 'Etsy user',
+        preview: c.excerpt || '',
+        // Relative timestamps ("2 days ago") can't be parsed precisely; the
+        // array is already newest-first, so preserve order with a descending ts.
+        ts: now - idx,
+        isUnread: !!c.is_unread,
+        messageCount: c.message_count || 0,
+      };
+    }).filter(c => c.convoId);
+  } catch {
+    return [];
+  }
+}
 
 /**
  * Extract the list of conversations visible on the Etsy inbox page.
@@ -215,6 +388,92 @@ async function extractInbox(page) {
 }
 
 // ── Conversation thread scraping ──────────────────────────────────────────────
+
+/**
+ * PRIMARY thread read path: parse the messages bootstrap JSON on /messages/{id}.
+ *
+ * Etsy embeds the full message list as JSON in an inline <script>:
+ *   ..."messages":[ { "message": "<html body>", "sender_id": 1060104094,
+ *                     "create_date": 1780474817, "conversation_message_id": 7408796029,
+ *                     "is_system_message": false, ... }, … ]
+ *
+ * The seller's own messages have sender_id === the logged-in user id (exposed as
+ * <html data-user-id="…">). Message bodies are HTML (with <br/> and entities).
+ *
+ * @param {import('playwright').Page} page
+ * @returns {Promise<Array<{messageId:string, body:string, senderType:'buyer'|'seller', ts:number}>>}
+ */
+async function extractMessagesFromBootstrap(page) {
+  try {
+    const raw = await page.evaluate(() => {
+      const matchArray = (text, openIdx) => {
+        let depth = 0, inStr = false, esc = false;
+        for (let i = openIdx; i < text.length; i++) {
+          const ch = text[i];
+          if (esc) { esc = false; continue; }
+          if (ch === '\\') { esc = true; continue; }
+          if (ch === '"') { inStr = !inStr; continue; }
+          if (inStr) continue;
+          if (ch === '[') depth++;
+          else if (ch === ']') { depth--; if (depth === 0) return i; }
+        }
+        return -1;
+      };
+
+      const selfUserId = document.documentElement.getAttribute('data-user-id') || null;
+
+      const scripts = Array.from(document.querySelectorAll('script'));
+      for (const s of scripts) {
+        const t = s.textContent || '';
+        const key = '"messages":[';
+        const mi = t.indexOf(key);
+        if (mi === -1) continue;
+        // Make sure this looks like the conversation messages array
+        if (!t.includes('conversation_message_id')) continue;
+
+        const openIdx = mi + key.length - 1;
+        const closeIdx = matchArray(t, openIdx);
+        if (closeIdx === -1) continue;
+
+        try {
+          const arr = JSON.parse(t.slice(openIdx, closeIdx + 1));
+          if (Array.isArray(arr) && arr.length) return { arr, selfUserId };
+        } catch { /* try next */ }
+      }
+      return { arr: null, selfUserId };
+    });
+
+    if (!raw || !Array.isArray(raw.arr)) return [];
+
+    const self = raw.selfUserId ? String(raw.selfUserId) : null;
+
+    // Decode Etsy's HTML message body into clean plain text.
+    const decode = (html) => {
+      if (!html) return '';
+      let s = String(html)
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/p>/gi, '\n')
+        .replace(/<[^>]+>/g, '');
+      // Decode common HTML entities
+      const ents = { '&amp;': '&', '&#39;': "'", '&quot;': '"', '&lt;': '<', '&gt;': '>', '&nbsp;': ' ' };
+      s = s.replace(/&amp;|&#39;|&quot;|&lt;|&gt;|&nbsp;/g, m => ents[m] || m);
+      s = s.replace(/&#(\d+);/g, (_, n) => { try { return String.fromCodePoint(+n); } catch { return _; } });
+      return s.trim();
+    };
+
+    return raw.arr
+      .filter(m => !m.is_system_message)
+      .map(m => ({
+        messageId: String(m.conversation_message_id || ''),
+        body: decode(m.message),
+        senderType: (self && String(m.sender_id) === self) ? 'seller' : 'buyer',
+        ts: m.create_date || 0,
+      }))
+      .filter(m => m.body);
+  } catch {
+    return [];
+  }
+}
 
 /**
  * Extract individual messages from an open Etsy conversation page.
@@ -309,12 +568,27 @@ async function syncMessagesForShop(shopCfg, db) {
     // PRIMARY read path: capture Etsy's internal JSON before navigating
     const payloads = attachJsonCapture(page);
 
-    await page.goto(INBOX, { waitUntil: 'domcontentloaded', timeout: 25_000 });
+    await navigateHuman(page, INBOX, { waitUntil: 'domcontentloaded', timeout: 25_000 });
 
     if (await isSignedOut(page)) {
-      await browser.close();
+      await ctx.close().catch(() => {});
+      if (!isAdsPower) await browser.close().catch(() => {});
       browserManager.deleteSession(shop_id);
       return { synced: 0, skipped: false, error: 'session_expired' };
+    }
+
+    // Etsy bot-block interstitial — surface it instead of silently returning 0.
+    const block = await detectAccessRestricted(page);
+    if (block.restricted) {
+      await ctx.close().catch(() => {});
+      if (!isAdsPower) await browser.close().catch(() => {});
+      return {
+        synced: 0,
+        skipped: false,
+        error: 'access_restricted',
+        blocked_ip: block.ip || null,
+        ref_id: block.refId || null,
+      };
     }
 
     // Dismiss any modal overlays (cookie consent, etc.) that might block interaction
@@ -324,11 +598,18 @@ async function syncMessagesForShop(shopCfg, db) {
     // Give XHR/fetch calls time to land, then settle
     await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
 
-    // 1) Try the robust JSON-interception path first
-    let conversations = extractConversationsFromPayloads(payloads);
-    let readMethod = 'json';
+    // 1) PRIMARY: parse the inbox bootstrap JSON embedded in the page (most
+    //    reliable for the current Etsy Shop Manager Messages UI).
+    let conversations = await extractInboxFromBootstrap(page);
+    let readMethod = 'bootstrap';
 
-    // 2) Fall back to DOM scraping if no JSON conversation data was captured
+    // 2) Try the network JSON-interception path
+    if (!conversations.length) {
+      conversations = extractConversationsFromPayloads(payloads);
+      readMethod = 'json';
+    }
+
+    // 3) Fall back to DOM scraping
     if (!conversations.length) {
       conversations = await extractInbox(page);
       readMethod = 'dom';
@@ -390,33 +671,43 @@ async function fetchConversationThread(shopCfg, convoId, db) {
     // PRIMARY read path: capture internal JSON before navigating
     const payloads = attachJsonCapture(page);
 
-    await page.goto(`${ETSY}/messages/convo/${convoId}`, {
+    // Current Etsy thread URL is /messages/{id} (NOT /messages/convo/{id}).
+    await navigateHuman(page, `${ETSY}/messages/${convoId}`, {
       waitUntil: 'domcontentloaded',
       timeout: 25_000,
     });
 
     if (await isSignedOut(page)) {
-      await browser.close();
+      await ctx.close().catch(() => {});
+      if (!isAdsPower) await browser.close().catch(() => {});
       browserManager.deleteSession(shop_id);
       return { messages: [], error: 'session_expired' };
     }
 
+    const block = await detectAccessRestricted(page);
+    if (block.restricted) {
+      await ctx.close().catch(() => {});
+      if (!isAdsPower) await browser.close().catch(() => {});
+      return { messages: [], error: 'access_restricted', blocked_ip: block.ip || null };
+    }
+
     await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
 
-    // Detect our own user id so we can label seller vs buyer messages accurately
-    const selfUserId = await detectSelfUserId(page);
+    // 1) PRIMARY: parse the messages bootstrap JSON embedded in the page.
+    let rawMessages = await extractMessagesFromBootstrap(page);
 
-    // 1) Robust JSON path first, 2) DOM scraping fallback
-    let rawMessages = extractMessagesFromPayloads(payloads, selfUserId);
+    // 2) Network JSON interception, 3) DOM scraping fallback
     if (!rawMessages.length) {
-      rawMessages = await extractMessages(page);
+      const selfUserId = await detectSelfUserId(page);
+      rawMessages = extractMessagesFromPayloads(payloads, selfUserId);
+      if (!rawMessages.length) rawMessages = await extractMessages(page);
     }
 
     // Persist each message into the DB with a stable ID
     rawMessages.forEach((m, idx) => {
       try {
         upsertConversationMessage(db, convoId, shop_id, {
-          message_id:        `browser-${convoId}-${m.ts || idx}`,
+          message_id:        m.messageId || `browser-${convoId}-${m.ts || idx}`,
           body:              m.body,
           message_text:      m.body,
           sender_type:       m.senderType,
@@ -462,7 +753,8 @@ async function sendBrowserReply(shopCfg, convoId, replyText) {
     ({ browser, ctx, isAdsPower } = await browserManager.createHeadlessContext(shop_id, proxy, adspower_profile_id));
     const page = await ctx.newPage();
 
-    await page.goto(`${ETSY}/messages/convo/${convoId}`, {
+    // Current Etsy thread URL is /messages/{id} (NOT /messages/convo/{id}).
+    await navigateHuman(page, `${ETSY}/messages/${convoId}`, {
       waitUntil: 'networkidle',
       timeout: 30_000,
     });
@@ -474,15 +766,30 @@ async function sendBrowserReply(shopCfg, convoId, replyText) {
       return { success: false, error: 'session_expired' };
     }
 
+    const block = await detectAccessRestricted(page);
+    if (block.restricted) {
+      await ctx.close().catch(() => {});
+      if (!isAdsPower) await browser.close().catch(() => {});
+      return { success: false, error: 'access_restricted', blocked_ip: block.ip || null };
+    }
+
     // Dismiss cookie/consent overlays that can intercept clicks.
     const overlayCloser = await page.$('[aria-label*="close" i], [aria-label*="dismiss" i], [aria-label*="accept" i]').catch(() => null);
     if (overlayCloser) await overlayCloser.click().catch(() => {});
 
+    // The compose box is rendered by React after hydration — wait for it.
+    await page.waitForSelector(
+      'textarea[placeholder*="reply" i], textarea.new-message-textarea-min-height, ' +
+      'textarea:not([readonly]):not([disabled]), [contenteditable="true"][role="textbox"], div[contenteditable="true"]',
+      { timeout: 15_000 }
+    ).catch(() => {});
+
     // ── Find the reply input ──────────────────────────────────────────────────
-    // Etsy's compose box has shipped as a <textarea> AND, more recently, as a
-    // contenteditable div / role="textbox". Try both kinds.
+    // Etsy's Shop Manager compose box is a <textarea placeholder="Type your reply">.
+    // Older/other layouts used contenteditable; we support both.
     const composer = await findFirst(page, [
       'textarea[placeholder*="reply" i]',
+      'textarea.new-message-textarea-min-height',
       'textarea[placeholder*="message" i]',
       'textarea[aria-label*="reply" i]',
       'textarea[aria-label*="message" i]',
@@ -498,7 +805,8 @@ async function sendBrowserReply(shopCfg, convoId, replyText) {
     ]);
 
     if (!composer) {
-      await browser.close();
+      await ctx.close().catch(() => {});
+      if (!isAdsPower) await browser.close().catch(() => {});
       return {
         success: false,
         error: 'Could not locate the reply box on Etsy — the page layout may have changed. Open Etsy directly.',
@@ -523,12 +831,15 @@ async function sendBrowserReply(shopCfg, convoId, replyText) {
     await humanPause(400, 800);
 
     // ── Click Send ────────────────────────────────────────────────────────────
+    // Etsy's Shop Manager uses a filled primary button (often labelled "Send").
     const sendBtn = await findFirst(page, [
       'button[data-testid="send-button"]',
       '[data-testid="reply-send"]',
       '[data-testid="send-message"]',
       'button:has-text("Send")',
       'button[aria-label*="send" i]',
+      'button.wt-btn--filled:has-text("Send")',
+      'button.wt-btn--filled',
       'button[type="submit"]',
       'input[type="submit"][value*="Send" i]',
     ]);

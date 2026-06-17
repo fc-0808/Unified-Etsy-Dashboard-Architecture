@@ -39,6 +39,8 @@
   "fourpx_ioss_no": "IM0000000000",
   "fourpx_vat_no": null,
   "fourpx_eori_no": null,
+  "_fourpx_email_comment": "Default recipient email injected when the buyer's Etsy email is unavailable. 4PX requires recipient_info.email for all Etsy-origin shipments (and mandates it for MX, etc.). Set this to your shop contact address as a safe fallback.",
+  "fourpx_default_recipient_email": null,
 
   "_route_engine_comment": "Self-contained Shopping Route generator. This dashboard ships its OWN vendored copy of the route engine under <project>/route-engine (src/generate_shopping_route.py + data/supplier_catalog.xlsx, charm_images, charm_manifest.json, etsy_orders.db). It is completely independent of any external program. route_engine_dir overrides that location; leave null to use the bundled engine. osp_python is the Python interpreter (defaults to 'python'; use 'py' or a full path to python.exe on Windows). osp_output_dir: where the three route files are written; null = this dashboard's own output/ folder. osp_project_dir is a deprecated legacy fallback to an external Orders Sorting Program — leave null.",
   "route_engine_dir": null,

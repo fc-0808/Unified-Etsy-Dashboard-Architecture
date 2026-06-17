@@ -97,11 +97,13 @@ function extractConvoId(html, text) {
 
 /**
  * Build the canonical Etsy conversation URL from a conversation ID.
+ * Etsy's current conversation URL is /messages/{id} (the legacy
+ * /messages/convo/{id} pattern now returns 404).
  * @param {string} convoId
  * @returns {string}
  */
 function buildConvoUrl(convoId) {
-  return `https://www.etsy.com/messages/convo/${convoId}`;
+  return `https://www.etsy.com/messages/${convoId}`;
 }
 
 /**

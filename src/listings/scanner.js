@@ -15,8 +15,8 @@
  *
  * Each immediate subfolder represents ONE product (an iPhone case). Images are
  * natural-sorted so "2.png" comes before "10.png"; the first image is the
- * thumbnail. At most 10 images are kept (Etsy listing image cap is 10 via the
- * create flow we use). The first video file found is the product video.
+ * thumbnail. At most 20 images are kept (Etsy raised the per-listing photo cap
+ * from 10 to 20 in Aug 2025). The first video file found is the product video.
  */
 
 const fs   = require('fs');
@@ -24,7 +24,7 @@ const path = require('path');
 
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
 const VIDEO_EXTS = new Set(['.mp4', '.mov', '.avi', '.webm', '.m4v']);
-const MAX_IMAGES = 10;
+const MAX_IMAGES = 20; // Etsy per-listing photo cap (raised from 10 → 20 in Aug 2025)
 
 /**
  * Natural sort comparator: orders by the first integer found in the filename,

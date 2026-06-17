@@ -17,6 +17,8 @@ const {
   getShopReturnPolicies,
   getShopProductionPartners,
   getShopSections,
+  getShopReadinessStateDefinitions,
+  createShopReadinessStateDefinition,
   findTaxonomyId,
 } = require('../etsy/client');
 
@@ -43,12 +45,13 @@ function pickShippingProfile(profiles) {
  * @returns {Promise<object>}
  */
 async function fetchShopListingSettings(shopClient, shopId) {
-  const [shop, shippingRes, returnRes, partnerRes, sectionRes] = await Promise.all([
+  const [shop, shippingRes, returnRes, partnerRes, sectionRes, readinessRes] = await Promise.all([
     getShop(shopClient, shopId).catch((e) => ({ _error: e.message })),
     getShopShippingProfiles(shopClient, shopId).catch((e) => ({ _error: e.message, results: [] })),
     getShopReturnPolicies(shopClient, shopId).catch((e) => ({ _error: e.message, results: [] })),
     getShopProductionPartners(shopClient, shopId).catch((e) => ({ _error: e.message, results: [] })),
     getShopSections(shopClient, shopId).catch((e) => ({ _error: e.message, results: [] })),
+    getShopReadinessStateDefinitions(shopClient, shopId).catch((e) => ({ _error: e.message, results: [] })),
   ]);
 
   const shippingProfiles = (shippingRes.results || []).map((p) => ({
@@ -73,6 +76,33 @@ async function fetchShopListingSettings(shopClient, shopId) {
     title: s.title,
   }));
 
+  // Readiness states (processing profiles). Etsy made readiness_state_id
+  // mandatory for physical listings; the id we send is the definition's id.
+  const mapReadiness = (results) => (results || []).map((r) => ({
+    readiness_state_id: r.readiness_state_definition_id ?? r.readiness_state_id,
+    readiness_state: r.readiness_state || '',
+    min_processing_time: r.min_processing_time ?? null,
+    max_processing_time: r.max_processing_time ?? null,
+    processing_time_unit: r.processing_time_unit || 'days',
+  })).filter((r) => r.readiness_state_id != null);
+
+  let readinessStates = mapReadiness(readinessRes.results);
+
+  // Fallback: a shop with no processing profile cannot list physical items at
+  // all. Auto-create a sensible default (made-to-order, 3-5 days) so listing
+  // creation just works — mirrors how mature listing tools handle this.
+  if (!readinessStates.length) {
+    try {
+      const created = await createShopReadinessStateDefinition(shopClient, shopId, {
+        readiness_state: 'made_to_order', min_processing_time: 3, max_processing_time: 5, processing_time_unit: 'days',
+      });
+      const one = created && (created.readiness_state_definition_id ?? created.readiness_state_id) != null
+        ? mapReadiness([created])
+        : mapReadiness((await getShopReadinessStateDefinitions(shopClient, shopId).catch(() => ({ results: [] }))).results);
+      readinessStates = one;
+    } catch { /* shops_w may be missing — surfaced as a clear error at create time */ }
+  }
+
   let taxonomyId = null;
   try {
     taxonomyId = await findTaxonomyId(shopClient, ['phone case'])
@@ -85,12 +115,17 @@ async function fetchShopListingSettings(shopClient, shopId) {
   const selectedShipping = pickShippingProfile(shippingProfiles);
   const selectedProfile = shippingProfiles.find((p) => p.shipping_profile_id === selectedShipping);
 
+  // Default processing profile: prefer one matching "made_to_order", else first.
+  const selectedReadiness =
+    readinessStates.find((r) => /made_to_order/i.test(r.readiness_state)) || readinessStates[0] || null;
+
   const defaults = {
     taxonomy_id: taxonomyId,
     shipping_profile_id: selectedShipping,
     return_policy_id: returnPolicies.length ? returnPolicies[0].return_policy_id : null,
     production_partner_ids: productionPartners.length ? [productionPartners[0].production_partner_id] : [],
     shop_section_id: pickSection(shopSections),
+    readiness_state_id: selectedReadiness ? selectedReadiness.readiness_state_id : null,
     who_made: 'someone_else',
     when_made: 'made_to_order',
     is_supply: false,
@@ -109,6 +144,7 @@ async function fetchShopListingSettings(shopClient, shopId) {
     return_policies: returnPolicies,
     production_partners: productionPartners,
     shop_sections: shopSections,
+    readiness_states: readinessStates,
     taxonomy_id: taxonomyId,
     defaults,
   };
@@ -131,8 +167,13 @@ async function getShopListingSettings({ db, shopClient, shopId, shopKey, force =
       const row = db.prepare('SELECT data_json, fetched_at FROM shop_listing_settings WHERE shop_key = ?').get(shopKey);
       if (row && (Date.now() - row.fetched_at) < CACHE_TTL_MS) {
         const cached = JSON.parse(row.data_json);
-        cached._cached = true;
-        return cached;
+        // Invalidate caches written before readiness states existed, so physical
+        // listings always get a readiness_state_id (now mandatory on Etsy).
+        const hasReadinessField = cached.defaults && 'readiness_state_id' in cached.defaults;
+        if (hasReadinessField) {
+          cached._cached = true;
+          return cached;
+        }
       }
     } catch { /* table may not exist yet — fall through to live fetch */ }
   }

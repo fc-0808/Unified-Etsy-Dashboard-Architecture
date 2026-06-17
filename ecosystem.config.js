@@ -36,7 +36,7 @@ module.exports = {
       max_restarts: 15,           // within min_uptime window before giving up
       restart_delay: 5000,        // base delay between restarts
       exp_backoff_restart_delay: 2000, // exponential backoff on repeated crashes
-      max_memory_restart: '700M', // restart if a leak pushes memory past this
+      max_memory_restart: '1536M', // headroom for base64 vision image payloads; restart only on a real leak
 
       watch: false,               // never auto-restart on file changes in prod
 

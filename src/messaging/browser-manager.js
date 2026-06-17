@@ -366,12 +366,24 @@ class BrowserManager {
       }
     }
 
-    // ── Mode B: Standalone Playwright headless ───────────────────────────────
+    // ── Mode B: Standalone Playwright ────────────────────────────────────────
+    // Old headless Chromium is trivially detected by Etsy's bot defense
+    // (HUMAN/PerimeterX). We use Chrome's NEW headless mode (--headless=new),
+    // which renders a full real browser and is far harder to fingerprint as a
+    // bot. The trick: set headless:false so Playwright doesn't inject the legacy
+    // `--headless` flag, then add `--headless=new` ourselves.
     const pw = this._getPlaywright();
 
     const launchOpts = {
-      headless: true,
-      args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'],
+      headless: false,
+      args: [
+        '--headless=new',
+        '--no-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--disable-dev-shm-usage',
+        '--window-size=1280,800',
+      ],
     };
     // Route through the group proxy so Etsy sees the same IP as the API calls.
     if (proxyUrl && proxyUrl !== 'direct') launchOpts.proxy = { server: proxyUrl };

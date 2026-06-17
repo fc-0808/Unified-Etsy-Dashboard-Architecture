@@ -22,6 +22,8 @@ const PROP_PHONE_MODEL = 513;
 const PROP_STYLES = 514;
 
 // 12 phone models — verbatim from Listings_automation VariationMatrix.default_y2kase().
+// These are the Etsy "Phone Model" variation VALUES (option1). "iPhone 14/13" is a
+// single combined offering.
 const PHONE_MODELS = [
   'iPhone 17 Pro Max',
   'iPhone 17 Pro',
@@ -36,6 +38,63 @@ const PHONE_MODELS = [
   'iPhone 14 Pro',
   'iPhone 14/13',
 ];
+
+// Display order for the model selector + sanitisation (same as PHONE_MODELS).
+const MODEL_ORDER = PHONE_MODELS.slice();
+
+// How each variation model expands into buyer-facing names for the listing
+// description's "Device Compatibility" section (the combined model splits in two).
+const MODEL_DESCRIPTION_NAMES = {
+  'iPhone 14/13': ['iPhone 14', 'iPhone 13'],
+};
+
+/**
+ * Coerce an arbitrary {model: truthy} map into a clean boolean map over the 12
+ * known models. If the input enables NOTHING (or is empty/missing), every model
+ * is enabled — a listing must always offer at least one phone model, and the
+ * default behaviour is "all models available".
+ */
+function normaliseEnabledModels(input) {
+  if (!input || typeof input !== 'object' || !Object.keys(input).length) {
+    const all = {};
+    for (const m of MODEL_ORDER) all[m] = true;
+    return all;
+  }
+  const out = {};
+  let anyOn = false;
+  for (const m of MODEL_ORDER) {
+    out[m] = Boolean(input[m]);
+    if (out[m]) anyOn = true;
+  }
+  if (!anyOn) for (const m of MODEL_ORDER) out[m] = true; // never ship an empty model list
+  return out;
+}
+
+/** The enabled variation models, in display order. */
+function enabledModelList(enabledModels) {
+  const norm = normaliseEnabledModels(enabledModels);
+  return MODEL_ORDER.filter((m) => norm[m]);
+}
+
+/** Buyer-facing description model names for the enabled models (14/13 expands). */
+function compatibilityNamesFor(enabledModels) {
+  const out = [];
+  for (const m of enabledModelList(enabledModels)) {
+    const names = MODEL_DESCRIPTION_NAMES[m] || [m];
+    for (const n of names) out.push(n);
+  }
+  return out;
+}
+
+/** Every possible buyer-facing description model name (across all 12 models). */
+const ALL_DESCRIPTION_NAMES = (() => {
+  const out = [];
+  for (const m of MODEL_ORDER) {
+    const names = MODEL_DESCRIPTION_NAMES[m] || [m];
+    for (const n of names) out.push(n);
+  }
+  return out;
+})();
 
 // Internal style key → buyer-facing label (matches the pricing sheet variants).
 const STYLES = [
@@ -52,17 +111,39 @@ const STYLES = [
  * @param {object[]} imageAnalysis
  * @returns {Record<string, boolean>} style key → enabled
  */
-function computeEnabledStyles(imageAnalysis = []) {
-  const hasGrip = imageAnalysis.some((i) => i.has_grip);
-  const hasCharm = imageAnalysis.some((i) => i.has_charm);
+function enabledStylesFor(hasGrip, hasCharm) {
+  const g = Boolean(hasGrip);
+  const c = Boolean(hasCharm);
   return {
-    'Case Only': true,
-    'Grip Only': hasGrip,
-    'Charm Only': hasCharm,
-    'Case+Grip': hasGrip,
-    'Case+Charm': hasCharm,
-    'Case+Grip+Charm': hasGrip && hasCharm,
+    'Case Only': true,        // always offered
+    'Grip Only': g,
+    'Charm Only': c,
+    'Case+Grip': g,
+    'Case+Charm': c,
+    'Case+Grip+Charm': g && c,
   };
+}
+
+function computeEnabledStyles(imageAnalysis = []) {
+  return enabledStylesFor(
+    imageAnalysis.some((i) => i.has_grip),
+    imageAnalysis.some((i) => i.has_charm),
+  );
+}
+
+// Style keys, in display order. Case Only is always available.
+const STYLE_ORDER = ['Case+Grip+Charm', 'Case+Grip', 'Case+Charm', 'Case Only', 'Grip Only', 'Charm Only'];
+
+/**
+ * Coerce an arbitrary {styleKey: truthy} map into a clean boolean map over the
+ * 6 known styles. "Case Only" is forced on (a listing must always offer the
+ * bare case), so the operator can never ship an empty listing.
+ */
+function normaliseEnabledStyles(input = {}) {
+  const out = {};
+  for (const key of STYLE_ORDER) out[key] = Boolean(input[key]);
+  out['Case Only'] = true;
+  return out;
 }
 
 /**
@@ -76,9 +157,18 @@ function computeEnabledStyles(imageAnalysis = []) {
  * @returns {{ body:object, enabledStyles:Record<string,boolean>, minPrice:number, listingQuantity:number }}
  */
 function buildInventory(args = {}) {
-  const { prices = {}, imageAnalysis = [], restockQuantity = 3 } = args;
-  const models = args.models && args.models.length ? args.models : PHONE_MODELS;
-  const enabledStyles = computeEnabledStyles(imageAnalysis);
+  const { prices = {}, imageAnalysis = [], restockQuantity = 3, readinessStateId = null } = args;
+  // Model availability: an explicit list override wins; otherwise honour the
+  // enabledModels map (default = all 12). Disabled models are OMITTED entirely so
+  // buyers never see an unavailable model in the dropdown.
+  const models = args.models && args.models.length
+    ? args.models
+    : enabledModelList(args.enabledModels);
+  // An explicit enabledStyles override (operator-adjusted) wins; otherwise derive
+  // from the AI image analysis. Always sanitised to the 6 known style keys.
+  const enabledStyles = args.enabledStyles && Object.keys(args.enabledStyles).length
+    ? normaliseEnabledStyles(args.enabledStyles)
+    : computeEnabledStyles(imageAnalysis);
 
   const products = [];
   let minPrice = Infinity;
@@ -94,12 +184,15 @@ function buildInventory(args = {}) {
         minPrice = Math.min(minPrice, price);
         listingQuantity += quantity;
       }
+      const offering = { price, quantity, is_enabled: enabled };
+      // Etsy requires a processing profile on every offering of a physical listing.
+      if (readinessStateId != null) offering.readiness_state_id = readinessStateId;
       products.push({
         property_values: [
           { property_id: PROP_PHONE_MODEL, property_name: 'Phone Model', values: [model], value_ids: [] },
           { property_id: PROP_STYLES,      property_name: 'Styles',      values: [style.label], value_ids: [] },
         ],
-        offerings: [{ price, quantity, is_enabled: enabled }],
+        offerings: [offering],
       });
     }
   }
@@ -152,8 +245,17 @@ module.exports = {
   PROP_PHONE_MODEL,
   PROP_STYLES,
   PHONE_MODELS,
+  MODEL_ORDER,
+  MODEL_DESCRIPTION_NAMES,
+  ALL_DESCRIPTION_NAMES,
   STYLES,
+  STYLE_ORDER,
   computeEnabledStyles,
+  enabledStylesFor,
+  normaliseEnabledStyles,
+  normaliseEnabledModels,
+  enabledModelList,
+  compatibilityNamesFor,
   buildInventory,
   buildVariationImages,
 };
