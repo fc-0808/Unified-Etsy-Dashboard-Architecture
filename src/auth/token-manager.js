@@ -85,13 +85,40 @@ class TokenManager {
    */
   storeTokens(shopId, tokenData) {
     const now = Date.now();
+    const prev = this._store[shopId] || {};
+    // Record the granted scopes when supplied (initial OAuth). Etsy's refresh
+    // response does NOT echo scope, so on refresh we PRESERVE the previously
+    // recorded scopes — this lets us pre-flight permission errors (e.g. a token
+    // authorised before listings_w was added) before a run instead of failing
+    // every listing one by one.
+    let scopes = prev.scopes || null;
+    if (Array.isArray(tokenData.scopes)) scopes = tokenData.scopes;
+    else if (typeof tokenData.scope === 'string' && tokenData.scope.trim()) scopes = tokenData.scope.trim().split(/\s+/);
     this._store[shopId] = {
       access_token: tokenData.access_token,
       refresh_token: tokenData.refresh_token,
       access_token_expires_at: now + ((tokenData.expires_in ?? 3600) * 1000),
       refresh_token_obtained_at: now,
+      ...(scopes ? { scopes } : {}),
     };
     this._save();
+  }
+
+  /** Recorded granted scopes for a shop (or null if unknown — legacy tokens). */
+  getScopes(shopId) {
+    const s = this._store[shopId];
+    return s && Array.isArray(s.scopes) ? s.scopes : null;
+  }
+
+  /**
+   * Whether the shop's token is known to have a scope. Returns true when the
+   * scope set is unknown (legacy) so we never block on incomplete data — the
+   * runtime error handler still catches a genuine missing scope.
+   */
+  hasScope(shopId, scope) {
+    const scopes = this.getScopes(shopId);
+    if (!scopes) return true; // unknown → don't pre-block
+    return scopes.includes(scope);
   }
 
   /**

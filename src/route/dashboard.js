@@ -30,7 +30,11 @@ const fs   = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const { getProductMapByNorm, getManualItems, upsertRouteAssignment } = require('../db/setup');
+const {
+  getProductMapByNorm, getManualItems,
+  getCharmLibrary, getCharmShopDirectory,
+  getOpenIssueMap,
+} = require('../db/setup');
 const enginePaths = require('./engine-paths');
 
 /** Valid component purchase statuses — mirror of OSP's STATUS_OPTIONS. */
@@ -186,6 +190,10 @@ function parseVariations(variations) {
  * @param {boolean}[filters.enrich_supplier] - look up supplier shop/stall from OSP catalog
  * @param {boolean}[filters.include_dismissed] - include lines the operator removed
  *        from the dashboard (default false — they are hidden from view + generation)
+ * @param {boolean}[filters.include_issues] - include line-items that have an OPEN
+ *        fulfilment issue (out of production / model unavailable). Default false —
+ *        such lines are held out of the purchasing dashboard + route generation so
+ *        a product the buyer may cancel/swap is never bought.
  * @returns {Array<object>} one row per order line-item
  */
 function buildRouteRows(db, config, filters = {}) {
@@ -292,15 +300,11 @@ function buildRouteRows(db, config, filters = {}) {
       params.shop_id = filters.shop_id;
     }
 
-    // Archived orders are parked OUT of every active workflow (the Orders tab
-    // hides them too). They must never appear in the purchasing Route — not even
-    // via the needs-purchase OR-branch — so exclude them as a hard top-level AND
-    // that wraps the entire scope. This is defense-in-depth: the write paths now
-    // keep archived + needs_purchase mutually exclusive, and this guarantees a
-    // stale/legacy archived row can still never leak into route generation.
-    const archivedClause = ' AND r.archived_at IS NULL';
-
-    whereClause = `r.is_paid = 1 AND ${scopeClause}${shopClause}${archivedClause}`;
+    // NOTE: line-items with an OPEN fulfilment issue (out of production / model
+    // unavailable) are held out of the purchasing Route — but that is enforced
+    // per line in emitRow via the open-issue map, not here, so the order's other
+    // products keep flowing.
+    whereClause = `r.is_paid = 1 AND ${scopeClause}${shopClause}`;
   }
 
   // De-dupe linked manual orders. A manual order created from the Route tab has
@@ -355,6 +359,11 @@ function buildRouteRows(db, config, filters = {}) {
     });
   } catch { /* table may not exist before first restart */ }
 
+  // Open fulfilment issues, keyed by `${receipt_id}\x00${item_key}`. Any line with
+  // an open issue is held out of the purchasing route (we must never buy a product
+  // the buyer may cancel or swap) — unless the caller explicitly opts in.
+  const issueMap = getOpenIssueMap(db);
+
   // Authoritative product map from Excel "Product Map" sheet, keyed by title_norm.
   // Priority: route_assignments > product_assignments > excel_product_map > OSP catalog.
   const excelProductMap = getProductMapByNorm(db);
@@ -397,6 +406,13 @@ function buildRouteRows(db, config, filters = {}) {
     // them (the "Show removed" view), so the operator can review / restore.
     const isDismissed = !!saved.dismissed_at;
     if (isDismissed && !filters.include_dismissed) return;
+
+    // Open fulfilment issue (out of production / model unavailable). Such a line
+    // is held out of purchasing entirely — buying it would waste money on a
+    // product the buyer may cancel or swap. Materialised only when the caller
+    // opts in (e.g. an audit view), and always tagged so the UI can flag it.
+    const issue = issueMap.get(`${meta.receipt_id}\x00${key}`) || null;
+    if (issue && !filters.include_issues) return;
 
     let supplier = null;
     if (cat) {
@@ -496,6 +512,11 @@ function buildRouteRows(db, config, filters = {}) {
       // in the result when filters.include_dismissed was requested.
       dismissed:    isDismissed ? 1 : 0,
       dismissed_at: saved.dismissed_at || null,
+      // Open fulfilment issue (only present when filters.include_issues was set,
+      // since open-issue lines are otherwise withheld from the route entirely).
+      has_issue:    issue ? 1 : 0,
+      issue_id:     issue ? issue.id : null,
+      issue_type:   issue ? issue.issue_type : null,
       // True when every component this line has is Purchased — the line is done
       // shopping. Used by the dashboard to drop it from the "to shop" counts and
       // the active queue without ever altering the underlying assignment.
@@ -849,6 +870,115 @@ function closeOspCatalog() {
   _ospCatalog = null;
 }
 
+/**
+ * Push the dashboard's authoritative charm mappings into the route-engine DB.
+ *
+ * ── Why this exists (root-cause fix) ──────────────────────────────────────
+ * The dashboard owns TWO authoritative tables the operator edits in-app:
+ *   • charm_library         — charm code → default_charm_shop (e.g. CH-00037 → 小艾飾品)
+ *   • charm_shop_directory  — charm shop → stall              (e.g. 小艾飾品 → 2D41-43)
+ * These drive the "购物路线" dashboard cells the operator sees.
+ *
+ * The Python generator, however, does NOT read those tables. It reads its OWN
+ * copies — `charm_library` + `charm_shops` inside route-engine/data/etsy_orders.db
+ * — and then FORCES them onto every resolved line via
+ * apply_canonical_charm_fields_to_resolved(). Those engine copies are seeded
+ * only once (from charm_manifest.json) and are never updated when the operator
+ * edits a charm in the UI, so they drift out of sync. The result: the dashboard
+ * shows CH-00037 → 小艾飾品 · 2D41-43 while the generated Excel shows the stale
+ * 壳引力 · A2-33 for the same code.
+ *
+ * Mirroring the dashboard tables into the engine DB immediately before each
+ * generation makes both outputs read the SAME source of truth, eliminating the
+ * divergence for the reported code and every other drifted code.
+ *
+ * Upsert semantics (never destructive):
+ *   • charm_library  — update default_charm_shop + sku for existing codes,
+ *                      insert codes the engine is missing. The `photo` BLOB is
+ *                      left untouched (charm photos are sourced from the on-disk
+ *                      data/charm_images/<code>.* override anyway), and engine
+ *                      rows with no dashboard counterpart are preserved.
+ *   • charm_shops    — update stall for existing shops, insert missing shops.
+ *
+ * @param {import('better-sqlite3').Database} db dashboard SQLite handle
+ * @param {object} config
+ * @returns {{ok: boolean, reason?: string, charms: number, shops: number}}
+ */
+function syncCharmTablesToEngine(db, config) {
+  const dbPath = enginePaths.catalogDbPath(config);
+  if (!dbPath) return { ok: false, reason: 'engine database path not resolved', charms: 0, shops: 0 };
+  try { fs.statSync(dbPath); }
+  catch { return { ok: false, reason: 'engine database not found', charms: 0, shops: 0 }; }
+
+  const lib   = getCharmLibrary(db);          // [{code, sku, default_charm_shop, ...}]
+  const shops = getCharmShopDirectory(db);    // [{shop_name, stall, notes, ...}]
+
+  let eng;
+  try {
+    eng = new Database(dbPath, { fileMustExist: true });
+    eng.pragma('busy_timeout = 5000');
+
+    // Older engine databases may predate these tables — create on demand so the
+    // sync (and the subsequent generation) never crashes on a fresh install.
+    eng.exec(`
+      CREATE TABLE IF NOT EXISTS charm_library (
+        code               TEXT PRIMARY KEY,
+        sku                TEXT NOT NULL DEFAULT '',
+        default_charm_shop TEXT NOT NULL DEFAULT '',
+        notes              TEXT NOT NULL DEFAULT '',
+        photo              BLOB
+      );
+      CREATE TABLE IF NOT EXISTS charm_shops (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        shop_name TEXT UNIQUE NOT NULL,
+        stall     TEXT NOT NULL DEFAULT '',
+        notes     TEXT NOT NULL DEFAULT ''
+      );
+    `);
+
+    const upLib = eng.prepare(`
+      INSERT INTO charm_library (code, sku, default_charm_shop)
+      VALUES (@code, @sku, @default_charm_shop)
+      ON CONFLICT(code) DO UPDATE SET
+        sku                = excluded.sku,
+        default_charm_shop = excluded.default_charm_shop
+    `);
+    const upShop = eng.prepare(`
+      INSERT INTO charm_shops (shop_name, stall)
+      VALUES (@shop_name, @stall)
+      ON CONFLICT(shop_name) DO UPDATE SET
+        stall = excluded.stall
+    `);
+
+    const tx = eng.transaction(() => {
+      let nC = 0, nS = 0;
+      for (const c of lib) {
+        const code = String(c.code || '').trim();
+        if (!code) continue;
+        upLib.run({
+          code,
+          sku:                String(c.sku || '').trim(),
+          default_charm_shop: String(c.default_charm_shop || '').trim(),
+        });
+        nC++;
+      }
+      for (const s of shops) {
+        const shop_name = String(s.shop_name || '').trim();
+        if (!shop_name) continue;
+        upShop.run({ shop_name, stall: String(s.stall || '').trim() });
+        nS++;
+      }
+      return { nC, nS };
+    });
+    const { nC, nS } = tx();
+    return { ok: true, charms: nC, shops: nS };
+  } catch (err) {
+    return { ok: false, reason: err.message, charms: 0, shops: 0 };
+  } finally {
+    if (eng) { try { eng.close(); } catch { /* ignore */ } }
+  }
+}
+
 /** Run OSP's FTS5 candidate query (AND then OR fallback). */
 function _ftsCandidates(cat, norm, limit = 15) {
   if (!cat.ftsOk) return [];
@@ -1006,119 +1136,27 @@ function writeStatusCache(outputDir, rows) {
   return { path: cachePath, count: Object.keys(cache).length };
 }
 
-/**
- * Reconcile per-line charm `status_charm` from the authoritative
- * `charm_purchase_progress` store (the "Charms to Buy" stepper count) so the
- * generated route Excel's charm section matches the dashboard exactly.
+/*
+ * REMOVED (intentionally): reconcileCharmStatusesFromProgress.
+ * ----------------------------------------------------------------------------
+ * A previous version re-derived every line's `status_charm` at generation time
+ * from a SECOND, independently-stored counter (`charm_purchase_progress`, the
+ * "Charms to Buy" stepper) and persisted the result back over the per-line
+ * statuses. The two stores inevitably drifted: the counter kept a stale value
+ * (e.g. `0` once a charm had ever been toggled to Pending in the modal, which
+ * POSTs purchased_qty=0), so the reconcile reset to Pending every charm the
+ * operator had just marked Purchased via the per-line dropdown — the status
+ * "came back" after each route generation, and the same revert surfaced in the
+ * Orders tab (which reads the same per-line column).
  *
- * WHY THIS EXISTS
- * ----------------
- * The dashboard's "Charms to Buy" modal shows "<n> still to buy" per charm code
- * derived from `charm_purchase_progress` (how many physical pieces of that code
- * are already bought). The generated Excel, however, derives its entire charm
- * section from per-line `status_charm` alone (via {@link writeStatusCache} →
- * route_statuses_cache.json → the Python generator's per-line charm filter).
+ * Root-cause fix: per-line `route_assignments.status_charm` is now the SINGLE
+ * SOURCE OF TRUTH for charm purchase state. The stepper writes through to those
+ * per-line statuses directly (client `_syncCharmStatusFromQty`), and the
+ * generator + dashboard both read them verbatim — there is no second store to
+ * drift from and nothing silently overwrites an explicit operator edit.
  *
- * Those two stores were only kept in sync *optimistically in the browser*
- * (`_syncCharmStatusFromQty`), which runs when the operator drags the stepper.
- * If that sync never ran, partially failed to persist, or the order set changed
- * afterwards, the per-line statuses drift from the stepper count — so a charm
- * the dashboard reports as "1 of 2 · 1 still to buy" still has BOTH order lines
- * marked Pending in the DB, and the Excel prints the full quantity (2) instead
- * of the remaining 1. That is the exact defect this fixes.
- *
- * THE FIX
- * --------
- * Treat `charm_purchase_progress` as the single source of truth at generation
- * time. For every charm code that has a stored progress count, allocate exactly
- * that many pieces as "Purchased" (oldest order first — the most urgent to
- * fulfil), leaving the remainder "Pending". This is byte-for-byte the same
- * allocation the client performs in `_syncCharmStatusFromQty`, so the Purchased
- * flag lands on the SAME order lines the dashboard would choose.
- *
- * Terminal statuses set deliberately via the dropdown (Out of Stock / Out of
- * Production) are never touched and are skipped by the allocation, identical to
- * the client. Codes with no stored progress are left exactly as-is (the per-line
- * statuses already drive both views consistently in that case).
- *
- * Rows are mutated in place AND the changes are persisted to `route_assignments`
- * so the dashboard's per-line view permanently converges with the Excel.
- *
- * @param {import('better-sqlite3').Database} db
- * @param {Array<object>} rows     - buildRouteRows output (mutated in place)
- * @param {Record<string, number>} progress - charm_code → purchased pieces
- * @returns {{ changed: number, codes: number }}
+ * Do NOT re-introduce a generation-time reconcile against a separate counter.
  */
-function reconcileCharmStatusesFromProgress(db, rows, progress) {
-  if (!progress || typeof progress !== 'object' || !Array.isArray(rows)) {
-    return { changed: 0, codes: 0 };
-  }
-
-  // Group charm-bearing, non-excluded, code-assigned lines by charm code —
-  // this mirrors the dashboard's `_charmPurchaseScopeRows()` + `_aggregateCharms`.
-  const byCode = new Map();
-  for (const r of rows) {
-    if (!r.has_charm || r.excluded || !r.charm_code) continue;
-    if (!byCode.has(r.charm_code)) byCode.set(r.charm_code, []);
-    byCode.get(r.charm_code).push(r);
-  }
-
-  const changed = [];
-  let codesTouched = 0;
-
-  for (const [code, lines] of byCode) {
-    // Only reconcile codes the operator has an explicit progress count for.
-    // Without one, the per-line statuses are already authoritative for both views.
-    if (!Object.prototype.hasOwnProperty.call(progress, code)) continue;
-    codesTouched++;
-
-    // Oldest order first so the Purchased allocation is deterministic and
-    // matches the client (most-urgent-first) exactly.
-    lines.sort((a, b) =>
-      (a.order_date || 0) - (b.order_date || 0) || (a.receipt_id - b.receipt_id));
-
-    let remaining = Math.max(0, Math.floor(Number(progress[code]) || 0));
-
-    for (const r of lines) {
-      const st = r.status_charm || DEFAULT_STATUS;
-      // Never clobber terminal statuses set deliberately via the dropdown; they
-      // are also excluded from the allocation budget (same as the client).
-      if (st === 'Out of Stock' || st === 'Out of Production') continue;
-
-      const lineQty = r.quantity || 1;
-      const target = remaining >= lineQty ? 'Purchased' : 'Pending';
-      if (target === 'Purchased') remaining -= lineQty;
-
-      if (st !== target) {
-        r.status_charm = target;
-        changed.push(r);
-      }
-    }
-  }
-
-  // Persist so the dashboard's per-line view converges with the Excel. Best
-  // effort: the in-memory rows are already corrected for this generation run,
-  // so a DB hiccup never blocks route output.
-  if (changed.length) {
-    try {
-      const persist = db.transaction((items) => {
-        for (const r of items) {
-          upsertRouteAssignment(db, {
-            receipt_id:   r.receipt_id,
-            item_key:     r.item_key,
-            title:        r.title,
-            status_charm: r.status_charm,
-          });
-        }
-      });
-      persist(changed);
-    } catch (err) {
-      console.warn(`[route] charm status persist failed (non-fatal): ${err.message}`);
-    }
-  }
-
-  return { changed: changed.length, codes: codesTouched };
-}
 
 /**
  * Group flat route rows into the OSP --import-json order payload, carrying the
@@ -1314,10 +1352,10 @@ module.exports = {
   loadCharmCatalog,
   resolveCharmImagePath,
   writeStatusCache,
-  reconcileCharmStatusesFromProgress,
   rowsToImportOrders,
   openOspCatalog,
   closeOspCatalog,
+  syncCharmTablesToEngine,
   matchSupplier,
   stallFloor,
 };

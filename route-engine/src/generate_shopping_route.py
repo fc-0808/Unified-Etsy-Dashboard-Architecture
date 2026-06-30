@@ -1966,6 +1966,41 @@ _CHARM_GROUP_FILLS  = [
     PatternFill("solid", fgColor="F8F0FD"),   # very light lavender (odd rows)
     PatternFill("solid", fgColor="FFFFFF"),   # white                (even rows)
 ]
+# Per-charm-shop row tints: every charm that ships from the SAME supplier gets
+# the SAME background colour, so a shopper can see at a glance which rows belong
+# to one stall. A palette of soft, readable pastels is cycled in first-seen
+# order; unassigned charms (no shop) stay neutral white. These are base fills —
+# the Purchased / Out-of-Stock / Out-of-Production status colours are applied on
+# top via conditional formatting and still win for already-handled rows.
+_CHARM_SHOP_FILLS = [
+    PatternFill("solid", fgColor="EDE3FB"),   # lavender
+    PatternFill("solid", fgColor="DDEBF7"),   # blue
+    PatternFill("solid", fgColor="E2EFDA"),   # green
+    PatternFill("solid", fgColor="FFF2CC"),   # yellow
+    PatternFill("solid", fgColor="FCE4EC"),   # pink
+    PatternFill("solid", fgColor="FCE5CD"),   # peach
+    PatternFill("solid", fgColor="D9F2EF"),   # teal
+    PatternFill("solid", fgColor="E8E8F4"),   # grey-lavender
+]
+_CHARM_SHOP_NEUTRAL_FILL = PatternFill("solid", fgColor="FFFFFF")   # no shop yet
+
+
+def _charm_shop_fill(shop_name: str, mapping: dict) -> PatternFill:
+    """Return a stable background fill for a charm shop.
+
+    Same supplier → same colour. Colours are handed out in first-seen order and
+    cycle through ``_CHARM_SHOP_FILLS``; charms with no assigned shop get a
+    neutral fill so they are not mistaken for a coloured supplier group.
+
+    ``mapping`` is a per-section dict the caller threads through the row loop so
+    each generated section starts its own palette from the top.
+    """
+    key = (shop_name or "").strip()
+    if not key:
+        return _CHARM_SHOP_NEUTRAL_FILL
+    if key not in mapping:
+        mapping[key] = _CHARM_SHOP_FILLS[len(mapping) % len(_CHARM_SHOP_FILLS)]
+    return mapping[key]
 _CHARM_NA_HDR_FONT  = Font("Calibri", bold=True, color="CCAACC", size=11)  # muted for N/A hdr cells
 _CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 _WRAP   = Alignment(vertical="center", wrap_text=True)
@@ -2699,11 +2734,13 @@ def _sheet_route(ws, items: list[ResolvedItem],
                 key=lambda c: (_charm_agg[c]["charm_shop"] or "\uffff", c),
             )
 
+            _shop_fill_map: dict = {}   # charm shop → stable row tint (this section)
             for cidx, code in enumerate(sorted_codes):
                 agg  = _charm_agg[code]
-                fill = _CHARM_GROUP_FILLS[cidx % 2]
 
                 _cs_name = agg["charm_shop"] or agg["default_shop"]
+                # Same supplier → same colour (rows are already grouped by shop).
+                fill = _charm_shop_fill(_cs_name, _shop_fill_map)
                 _cs_obj  = charm_shop_lookup.get(_cs_name)
                 if _cs_obj:
                     shop_display  = _cs_obj.shop_name
@@ -3692,11 +3729,13 @@ def _sheet_route_simple(
             _charm_agg,
             key=lambda c: (_charm_agg[c]["charm_shop"] or "\uffff", c),
         )
+        _shop_fill_map: dict = {}   # charm shop → stable row tint (this section)
         for cidx, code in enumerate(sorted_codes):
             agg  = _charm_agg[code]
-            fill = _CHARM_GROUP_FILLS[cidx % 2]
 
             _cs_name = agg["charm_shop"] or agg["default_shop"]
+            # Same supplier → same colour (rows are already grouped by shop).
+            fill = _charm_shop_fill(_cs_name, _shop_fill_map)
             _cs_obj  = _cshops_lookup.get(_cs_name)
             if _cs_obj:
                 shop_disp  = _cs_obj.shop_name

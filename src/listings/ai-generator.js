@@ -101,8 +101,19 @@ const PHASE1_SCHEMA = {
 					case_primary_color: { type: 'string' },
 					case_secondary_color: { type: 'string' },
 					design_features: { type: 'string' },
+					// The concrete, specific design SUBJECT — the thing a shopper would
+					// search for when there is NO licensed character (e.g. "Strawberry",
+					// "Cherry Bow", "Heart", "Daisy"). 1-3 words, Title Case, "" if a
+					// licensed character dominates and there's no distinct motif.
+					design_subject: { type: 'string' },
+					// Every distinct visual motif on the case (lowercase nouns): e.g.
+					// ["strawberry", "polka dots", "pink bow", "lace"]. Drives specific
+					// SEO keywords in the title, tags, and description.
+					design_motifs: { type: 'array', items: { type: 'string' } },
+					// One-word dominant aesthetic if obvious: coquette|kawaii|y2k|fairycore|cottagecore|gothic|preppy|"".
+					design_aesthetic: { type: 'string' },
 				},
-				required: ['character_evidence', 'character_name', 'character_franchise', 'character_confidence', 'character_alternatives', 'case_primary_color', 'case_secondary_color', 'design_features'],
+				required: ['character_evidence', 'character_name', 'character_franchise', 'character_confidence', 'character_alternatives', 'case_primary_color', 'case_secondary_color', 'design_features', 'design_subject', 'design_motifs', 'design_aesthetic'],
 			},
 			image_classifications: {
 				type: 'array',
@@ -297,11 +308,12 @@ async function callStructured(client, { messages, schema, maxTokens, temperature
 	const openaiReasoning = isReasoningModel(useModel)
 	const externalReasoning = isExternalReasoningModel(useModel)
 
-	// Models that reason internally (Qwen3.7-Plus etc.) burn a chunk of the output
-	// budget on chain-of-thought before emitting JSON. Give them enough headroom to
-	// finish the (small) JSON, but not so much that the provider's upfront cost
-	// reservation is large; the truncation-retry below grows it only when needed.
-	const baseBudget = externalReasoning ? Math.max(maxTokens, 12000) : maxTokens
+	// Models that reason internally (Qwen3.7-Plus etc.) burn output tokens on
+	// chain-of-thought before JSON. Use the caller's budget as-is — do NOT force a
+	// high floor (OpenRouter rejects upfront when input images + max_tokens exceed
+	// your credit balance). Truncation retries grow the budget only when needed.
+	const ceiling = config.openai.visionMaxTokensCeiling
+	const baseBudget = externalReasoning ? Math.min(maxTokens, ceiling) : maxTokens
 
 	const build = (mt) => {
 		const body = {
@@ -368,7 +380,7 @@ async function callStructured(client, { messages, schema, maxTokens, temperature
 				lastErr = err
 				// Truncated mid-JSON → grow the budget and retry.
 				if (finish === 'length' && attempt < MAX_ATTEMPTS) {
-					mt = Math.min(mt * 2, 60000)
+					mt = Math.min(mt * 2, ceiling)
 					continue
 				}
 				throw new Error(`Model "${useModel}" returned unparsable JSON (finish_reason=${finish}): ${String(content).slice(0, 200)}`)
@@ -378,7 +390,7 @@ async function callStructured(client, { messages, schema, maxTokens, temperature
 		// Empty content — retry (budget consumed by reasoning, or transient gap).
 		lastErr = new Error(`Model "${useModel}" returned an empty response (finish_reason=${finish}).`)
 		if (attempt < MAX_ATTEMPTS) {
-			if (finish === 'length') mt = Math.min(mt * 2, 60000)
+			if (finish === 'length') mt = Math.min(mt * 2, ceiling)
 			await sleep(600 * attempt)
 			continue
 		}
@@ -467,6 +479,11 @@ ${catalogPromptBlock()}
   "case_primary_color"    dominant case body color — EXACTLY one of: ${ETSY_COLORS.join(', ')}.
   "case_secondary_color"  second most visible color — EXACTLY one of the same list.
   "design_features"       notable visual details for SEO (clear back, glitter, 3D, MagSafe ring, grip theme, charm bead colors). Empty string if none.
+  "design_motifs"         EVERY distinct visual motif printed/shown on the case, as lowercase nouns — e.g. ["strawberry","polka dots","pink bow","cherry","heart","daisy","lace","star","butterfly","checkerboard"]. Be SPECIFIC about fruits, flowers, shapes, and patterns. Empty array only if truly plain.
+  "design_subject"        the SINGLE most prominent, search-worthy NON-character subject in 1-3 words, Title Case — the thing a shopper would type when there is no licensed character (e.g. "Strawberry", "Cherry Bow", "Polka Dot Heart", "Daisy"). If a licensed character clearly dominates and there is no standout motif, use "".
+  "design_aesthetic"      the dominant aesthetic in ONE lowercase word if obvious: coquette | kawaii | y2k | fairycore | cottagecore | gothic | preppy | "".
+
+CRITICAL FOR SEO: be CONCRETE about the actual design. "strawberry", "cherry", "polka dot", "bow", "heart" are far stronger keywords than vague words like "cute" or "character". Always capture the real motifs.
 
 Return only the structured JSON.`
 }
@@ -559,7 +576,7 @@ async function phase1Classify(client, images) {
 		},
 		{ role: 'user', content },
 	]
-	const parsed = await callStructured(client, { messages, schema: PHASE1_SCHEMA, maxTokens: 16000, model: config.openai.visionModel })
+	const parsed = await callStructured(client, { messages, schema: PHASE1_SCHEMA, maxTokens: config.openai.visionMaxTokens, model: config.openai.visionModel })
 	const imageAnalysis = applyBooleanCorrection(parsed.image_classifications || [])
 	return { imageAnalysis, productSummary: parsed.product_summary || {} }
 }
@@ -625,7 +642,7 @@ async function identifyOnce(client, { images, imageAnalysis, productSummary, tem
 		{ role: 'system', content: 'You are a meticulous licensed-character identification specialist for kawaii / Y2K merchandise. Judge ONLY by visual evidence against the catalog. Never invent a character. Return only valid JSON matching the schema.' },
 		{ role: 'user', content },
 	]
-	return callStructured(client, { messages, schema: IDENTIFY_SCHEMA, maxTokens: 6000, temperature, model: config.openai.visionModel, reasoningEffort: config.openai.reasoningEffort })
+	return callStructured(client, { messages, schema: IDENTIFY_SCHEMA, maxTokens: Math.min(6000, config.openai.visionMaxTokens), temperature, model: config.openai.visionModel, reasoningEffort: config.openai.reasoningEffort })
 }
 
 /**
@@ -734,7 +751,7 @@ async function analyzeAccessoriesOnce(client, { images, temperature }) {
 		{ role: 'system', content: 'You are a meticulous product-QA analyst deciding whether a phone case ships with a physical grip, a physical charm, and/or a real MagSafe magnet ring. Judge ONLY by clear visual evidence. Treat clear/printed cases as NON-MagSafe unless a dedicated magnet ring is unmistakably visible. When unsure, answer false. Return only valid JSON matching the schema.' },
 		{ role: 'user', content },
 	]
-	return callStructured(client, { messages, schema: ACCESSORY_SCHEMA, maxTokens: 6000, temperature, model: config.openai.visionModel, reasoningEffort: config.openai.reasoningEffort })
+	return callStructured(client, { messages, schema: ACCESSORY_SCHEMA, maxTokens: Math.min(6000, config.openai.visionMaxTokens), temperature, model: config.openai.visionModel, reasoningEffort: config.openai.reasoningEffort })
 }
 
 /**
@@ -834,7 +851,7 @@ async function analyzeMagsafeOnce(client, { images, temperature }) {
 		{ role: 'system', content: 'You are a meticulous product-spec analyst who determines whether a phone case is MagSafe-compatible (has a built-in magnet ring). You weigh BOTH a visible magnet ring AND any printed "MagSafe/magnetic" wording or magnet graphics. You never confuse the camera or decorative art for the magnet ring. Return only valid JSON matching the schema.' },
 		{ role: 'user', content },
 	]
-	return callStructured(client, { messages, schema: MAGSAFE_SCHEMA, maxTokens: 6000, temperature, model: config.openai.visionModel, reasoningEffort: config.openai.reasoningEffort })
+	return callStructured(client, { messages, schema: MAGSAFE_SCHEMA, maxTokens: Math.min(6000, config.openai.visionMaxTokens), temperature, model: config.openai.visionModel, reasoningEffort: config.openai.reasoningEffort })
 }
 
 /**
@@ -974,7 +991,7 @@ async function resolveCharacter(client, { images, imageAnalysis, productSummary 
 
 // ── Phase 2 ─────────────────────────────────────────────────────────────────
 
-function buildPhase2System(shopName, brandTags, hasMagsafe, enabledStyles, enabledModels, attributeMenu) {
+function buildPhase2System(shopName, brandTags, hasMagsafe, enabledStyles, enabledModels, attributeMenu, subjectInfo) {
 	const tagsDisplay = brandTags && brandTags.length ? brandTags.map((t) => `"${t}"`).join(', ') : '"y2kase"'
 
 	// Grip/charm presence is derived from the OFFERED bundles (operator's matrix),
@@ -982,6 +999,23 @@ function buildPhase2System(shopName, brandTags, hasMagsafe, enabledStyles, enabl
 	const hasGrip = stylesHaveGrip(enabledStyles)
 	const hasCharm = stylesHaveCharm(enabledStyles)
 	const devicePhrase = titleDevicePhrase(enabledModels)
+
+	// SUBJECT: when there's a real licensed character, lead with it. When generic,
+	// lead with the SPECIFIC design motif (strawberry, cherry, bow…) — NEVER the
+	// vague word "Character". This is the single biggest title-SEO lever.
+	const si = subjectInfo || {}
+	const motifs = (si.motifs || []).filter(Boolean)
+	const motifList = motifs.join(', ')
+	const titleCase = (s) => String(s || '').replace(/\b\w/g, (c) => c.toUpperCase())
+	let subjectClause
+	if (!si.isGeneric && si.characterName) {
+		subjectClause = `SUBJECT: this case features the licensed character "${si.characterName}" — LEAD the title with that character name (the strongest query), then color/aesthetic. Still weave the design motifs (${motifList || 'n/a'}) into tags + description.`
+	} else {
+		const lead = (si.designSubject && si.designSubject.trim()) || (motifs[0] ? titleCase(motifs[0]) : '')
+		subjectClause = lead
+			? `SUBJECT: there is NO licensed character. NEVER use the words "Character", "Kawaii Character", or a generic placeholder as the subject. LEAD the title with the SPECIFIC design subject "${lead}" + the primary color (e.g. "${lead} Pink Clear Phone Case…"). Build the whole listing around the real motifs: ${motifList || lead}.`
+			: `SUBJECT: there is no licensed character and no standout motif — LEAD with the primary color + aesthetic (e.g. "Pink Y2K Clear Phone Case…"). NEVER write the word "Character".`
+	}
 
 	// Build the "feature section" attribute instructions from the taxonomy menu.
 	const menu = attributeMenu || {}
@@ -1036,11 +1070,13 @@ SHOP BRAND TAGS (MANDATORY — include ALL of these exactly in your tags output)
 
 Return ONLY a JSON object with keys: "title", "description", "tags", "primary_color", "secondary_color", "attributes".
 
-TITLE (EXACTLY 130-140 chars — use the space, every char is SEO real estate): front-load the highest-volume buyer keywords first. Structure: [Character] [Primary Color] [MAGSAFE if confirmed] Case [with Accessory], [Aesthetic] [Style] Cover for ${devicePhrase}, [Gift Intent] Gift. Lead with the CHARACTER NAME + "phone case" / "iPhone case" (the strongest query), then color, then aesthetics (Kawaii, Y2K, Coquette, Cute), then the device string. CRITICAL: the device coverage in the title MUST be EXACTLY "${devicePhrase}" — do NOT add model numbers that are not in that string (only the offered models are listed). Use natural buyer phrasing, not keyword soup. Only use each of % : & + at most once. ${titleMagsafe}
+${subjectClause}
 
-DESCRIPTION (minimum 500 words, keyword-rich but human and persuasive): start with an emoji + a desire hook line packed with the top keywords (character, "kawaii phone case", "Y2K aesthetic", "cute iPhone case") — NOT a header. Then: Paragraph 1 (aesthetic & emotional desire — who it's for, the vibe, gift appeal); ${descMagsafe} ${gripPara} ${charmPara} Then sections: "✨ Key Features" (5-7 bullets, ONLY confirmed features — never list a grip, charm, or MagSafe feature that is not confirmed, each on its own line), ${compatClause}, ${bundlesClause}, "❤️ The ${shopName} Promise", and "🚚 Shipping & Processing" (ready to ship in 3-5 business days, worldwide tracked). Weave long-tail buyer phrases naturally throughout (e.g. "aesthetic phone case", "gift for her", character + "merch", "protective clear case").
+TITLE (EXACTLY 130-140 chars — use the space, every char is SEO real estate): front-load the highest-volume buyer keywords first. Structure: [Subject = character OR specific design motif] [Primary Color] [MAGSAFE if confirmed] Case [with Accessory], [Aesthetic] [Style] Cover for ${devicePhrase}, [Gift Intent] Gift. Lead with the SUBJECT defined above + "phone case" / "iPhone case", then color, then aesthetics (Kawaii, Y2K, Coquette, Cute), then the device string. CRITICAL: the device coverage in the title MUST be EXACTLY "${devicePhrase}" — do NOT add model numbers that are not in that string (only the offered models are listed). Use natural buyer phrasing, not keyword soup. Only use each of % : & + at most once. ${titleMagsafe}
 
-TAGS: EXACTLY 13 tags, each <=20 chars including spaces, all lowercase, MAXIMUM SEO coverage — every tag a distinct real buyer search term (no near-duplicates, no single repeated words across tags). Must include ALL brand tags above, the universal tags "kawaii phone case", "cute iphone case", "y2k phone case", ${tagsMagsafe}two iPhone model tags (e.g. "iphone 17 case", "iphone 16 pro max"). Fill remaining slots with a SPREAD of: the character name (+ a character variant like "<char> case"), the dominant aesthetic, the accessory (only if confirmed), a color term, and gift-intent ("gift for her", "bestie gift"). Prefer 2-3 word long-tail phrases over single words.
+DESCRIPTION (minimum 500 words, keyword-rich but human and persuasive): start with an emoji + a desire hook line packed with the top keywords (the SUBJECT defined above — character OR specific design motif like "strawberry" — plus "kawaii phone case", "Y2K aesthetic", "cute iPhone case") — NOT a header. Then: Paragraph 1 (aesthetic & emotional desire — describe the actual design motifs by name, who it's for, the vibe, gift appeal); ${descMagsafe} ${gripPara} ${charmPara} Then sections: "✨ Key Features" (5-7 bullets, ONLY confirmed features — never list a grip, charm, or MagSafe feature that is not confirmed, each on its own line), ${compatClause}, ${bundlesClause}, "❤️ The ${shopName} Promise", and "🚚 Shipping & Processing" (ready to ship in 3-5 business days, worldwide tracked). Weave long-tail buyer phrases naturally throughout (e.g. "aesthetic phone case", "gift for her", character + "merch", "protective clear case").
+
+TAGS: EXACTLY 13 tags, each <=20 chars including spaces, all lowercase, MAXIMUM SEO coverage — every tag a distinct real buyer search term (no near-duplicates, no single repeated words across tags). Must include ALL brand tags above, the universal tags "kawaii phone case", "cute iphone case", "y2k phone case", ${tagsMagsafe}two iPhone model tags (e.g. "iphone 17 case", "iphone 16 pro max"). Fill remaining slots with a SPREAD of: ${motifs.length ? `the SPECIFIC design motifs (${motifList}) as buyer phrases (e.g. "strawberry phone case", "polka dot case"), ` : ''}the subject (character name OR design motif + " case"), the dominant aesthetic, the accessory (only if confirmed), a color term, and gift-intent ("gift for her", "bestie gift"). Prefer concrete motif/long-tail phrases over vague words like "cute character".
 
 ${attributesClause}
 
@@ -1127,6 +1163,27 @@ function titleDevicePhrase(enabledModels) {
 }
 
 /**
+ * Rewrite the iPhone model RANGE inside an existing title to match a new model
+ * selection — WITHOUT re-running the AI. Targets the device-compatibility run (the
+ * "iPhone 17 16 15 14 13 Pro Max" segment with the most model numbers), leaving
+ * incidental single mentions (e.g. "iphone 17 case") untouched. Used by bulk
+ * model updates so the title stays in sync with the offered models.
+ */
+function retitleForModels(title, enabledModels) {
+	if (!title) return title
+	const phrase = titleDevicePhrase(enabledModels)
+	const re = /iPhone(?:\s+\d+){1,6}(?:\s+Pro\s+Max|\s+Pro)?/gi
+	let best = null
+	let m
+	while ((m = re.exec(title))) {
+		const count = (m[0].match(/\d+/g) || []).length
+		if (!best || count > best.count) best = { text: m[0], index: m.index, count }
+	}
+	if (!best) return title
+	return title.slice(0, best.index) + phrase + title.slice(best.index + best.text.length)
+}
+
+/**
  * Safety net: strip any "Device Compatibility" bullet for a model that isn't
  * offered, so the description can never advertise an unavailable iPhone model.
  * Matches a bullet's leading label EXACTLY against a known model name (so
@@ -1158,7 +1215,18 @@ function buildPhase2User(meta, brandTags, imageAnalysis, productSummary) {
 		lines.push(`BRAND IDENTITY TAGS (include ALL exactly as written): ${brandTags.map((t) => `"${t}"`).join(', ')}`)
 	}
 	if (productSummary) {
-		lines.push('', '=== PRODUCT SUMMARY (from Phase 1 vision — use directly) ===', `Character: ${productSummary.character_name || 'kawaii character'}`, `Primary Color: ${productSummary.case_primary_color || ''}`, `Secondary Color: ${productSummary.case_secondary_color || ''}`, `Design Features: ${productSummary.design_features || ''}`)
+		const motifs = Array.isArray(productSummary.design_motifs) ? productSummary.design_motifs.filter(Boolean) : []
+		lines.push(
+			'',
+			'=== PRODUCT SUMMARY (from Phase 1 vision — use directly) ===',
+			`Character: ${productSummary.character_name || 'kawaii character'}`,
+			`Design Subject (specific, non-character): ${productSummary.design_subject || ''}`,
+			`Design Motifs: ${motifs.length ? motifs.join(', ') : '(none)'}`,
+			`Design Aesthetic: ${productSummary.design_aesthetic || ''}`,
+			`Primary Color: ${productSummary.case_primary_color || ''}`,
+			`Secondary Color: ${productSummary.case_secondary_color || ''}`,
+			`Design Features: ${productSummary.design_features || ''}`,
+		)
 	}
 	if (imageAnalysis && imageAnalysis.length) {
 		const hasGrip = imageAnalysis.some((i) => i.has_grip)
@@ -1381,8 +1449,17 @@ async function runPhase2(client, { shopName, brandTags, imageAnalysis, productSu
 	const styles = (enabledStyles && Object.keys(enabledStyles).length)
 		? normaliseEnabledStyles(enabledStyles)
 		: enabledStylesFor(ia.some((i) => i.has_grip), ia.some((i) => i.has_charm))
+	// Subject for the title: the licensed character if specific, else the concrete
+	// design motif (strawberry, cherry, bow…) — never the vague word "Character".
+	const subjectInfo = {
+		characterName: productSummary.character_name || '',
+		isGeneric: isGenericName(productSummary.character_name),
+		designSubject: productSummary.design_subject || '',
+		motifs: Array.isArray(productSummary.design_motifs) ? productSummary.design_motifs : [],
+		aesthetic: productSummary.design_aesthetic || '',
+	}
 	const messages = [
-		{ role: 'system', content: buildPhase2System(shopName, brandTags, hasMagsafe, styles, models, attributeMenu) },
+		{ role: 'system', content: buildPhase2System(shopName, brandTags, hasMagsafe, styles, models, attributeMenu, subjectInfo) },
 		{ role: 'user', content: buildPhase2User({ shopName }, brandTags, imageAnalysis, productSummary) },
 	]
 	const parsed = await callStructured(client, { messages, schema: PHASE2_SCHEMA, maxTokens: 16000 })
@@ -1446,7 +1523,12 @@ async function generateCopyFromAnalysis(args = {}) {
 		? normaliseEnabledStyles(args.enabledStyles)
 		: enabledStylesFor(imageAnalysis.some((i) => i.has_grip), imageAnalysis.some((i) => i.has_charm))
 	const copy = await runPhase2(textClient, { shopName, brandTags, imageAnalysis, productSummary, enabledStyles, enabledModels, attributeMenu: args.attributeMenu })
-	return { ...copy, ...character, enabledModels, styleImageMapping: deriveStyleMapping(imageAnalysis), imageAnalysis, productSummary }
+	// Copy regeneration NEVER changes the variation-image links — preserve the
+	// operator's saved mapping; only auto-derive when none was supplied.
+	const styleImageMapping = (args.styleImageMapping && Object.keys(args.styleImageMapping).length)
+		? args.styleImageMapping
+		: deriveStyleMapping(imageAnalysis)
+	return { ...copy, ...character, enabledStyles, enabledModels, styleImageMapping, imageAnalysis, productSummary }
 }
 
 module.exports = {
@@ -1456,6 +1538,7 @@ module.exports = {
 	deriveStyleMapping,
 	applyBooleanCorrection,
 	filterModelsInDescription,
+	retitleForModels,
 	ETSY_COLORS,
 	isReasoningModel,
 }

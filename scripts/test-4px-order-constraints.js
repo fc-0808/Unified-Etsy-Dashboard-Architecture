@@ -19,6 +19,7 @@
 
 const {
   enforceConsigneeName,
+  orderConsigneeNameFor4px,
   enforceSenderStreet,
   resolveRecipientState,
   generateRecipientPhone,
@@ -82,6 +83,35 @@ console.log('4PX order field-constraint regression test\n');
 
   // Over-long names are capped at 30 while staying a valid two-part name.
   assertValid('over-long name', enforceConsigneeName('Maximiliana Alexandrina', 'Featherstonehaughxxxxx'));
+}
+
+// 1b. Consignee print order — 4PX prints `${last_name} ${first_name}` (surname-first),
+//     so the (given, surname) pair must be mapped into those slots such that the label
+//     reads in natural Western order. Guards against the "Norton Julia" reversal bug.
+{
+  // The renderer used by the 4PX label/portal: surname-first concatenation.
+  const printed = (fields) => `${fields.last_name} ${fields.first_name}`.trim();
+
+  // "Julia Norton" (UI dumps the whole name into first_name) must print "Julia Norton".
+  const julia = orderConsigneeNameFor4px(enforceConsigneeName('Julia Norton', ''));
+  assert(printed(julia) === 'Julia Norton',
+    `"Julia Norton" prints in natural order (got "${printed(julia)}")`);
+
+  // Explicit given/surname fields must also print given-first.
+  const charlotte = orderConsigneeNameFor4px(enforceConsigneeName('Charlotte', 'Wong'));
+  assert(printed(charlotte) === 'Charlotte Wong',
+    `"Charlotte Wong" prints in natural order (got "${printed(charlotte)}")`);
+
+  // Multi-token given name keeps the trailing word as the surname, printed last.
+  const mj = orderConsigneeNameFor4px(enforceConsigneeName('Mary Jane', 'Watson'));
+  assert(printed(mj) === 'Mary Jane Watson',
+    `"Mary Jane Watson" prints in natural order (got "${printed(mj)}")`);
+
+  // Both fields stay non-empty and ≥2 letters (rule 010101005) after the swap.
+  assert(!!julia.first_name && !!julia.last_name &&
+    (julia.first_name.match(/\p{L}/gu) || []).length >= 2 &&
+    (julia.last_name.match(/\p{L}/gu) || []).length >= 2,
+    'swapped fields remain rule-010101005 compliant (both ≥2 letters)');
 }
 
 // 2. Default recipient phone.

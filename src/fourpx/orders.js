@@ -436,6 +436,34 @@ function enforceConsigneeName(firstName, lastName = '') {
 }
 
 /**
+ * Arrange a (given, surname) consignee into 4PX's recipient_info name fields so the
+ * printed label reads in natural Western order ("Julia Norton"), not reversed.
+ *
+ * WHY THIS EXISTS — the bug it permanently fixes:
+ *   4PX renders the consignee name in the Chinese 姓+名 (surname-first) convention:
+ *   it prints `${last_name} ${first_name}`. enforceConsigneeName() correctly returns
+ *   the GIVEN name as .first_name and the SURNAME as .last_name, so sending those
+ *   straight through made labels read "Norton Julia" (surname first). To make 4PX
+ *   print "Julia Norton" we must put the GIVEN name in the slot 4PX prints FIRST
+ *   (last_name) and the SURNAME in the slot it prints SECOND (first_name).
+ *
+ *   This deliberate swap lives in ONE place (with a regression test) so the recipient
+ *   name can never silently revert to surname-first on any flow — single or bulk.
+ *
+ * Both returned parts stay non-empty and rule-010101005 compliant (each ≥2 letters),
+ * because enforceConsigneeName guarantees that for its inputs.
+ *
+ * @param {{ first_name: string, last_name: string }} consignee  Output of enforceConsigneeName.
+ * @returns {{ first_name: string, last_name: string }}  Ready for 4PX recipient_info.
+ */
+function orderConsigneeNameFor4px(consignee) {
+  return {
+    first_name: consignee.last_name,   // SURNAME  → 4PX prints this SECOND
+    last_name:  consignee.first_name,  // GIVEN    → 4PX prints this FIRST
+  };
+}
+
+/**
  * Enforce 4PX's shipper-street length rule (10–90 chars).
  *
  * Postal products to some destinations (e.g. US POSTLINK) don't validate the
@@ -639,9 +667,13 @@ async function createShipOrder(appKey, appSecret, input) {
     decodeHtml(recipient.state || ''),
     decodeHtml(recipient.city || '')
   );
+  // 4PX prints the consignee surname-first (`${last_name} ${first_name}`), so map the
+  // given/surname into its print slots to keep the label in natural order ("Julia
+  // Norton" rather than "Norton Julia"). See orderConsigneeNameFor4px for the full why.
+  const consigneeFields = orderConsigneeNameFor4px(consignee);
   const recipientPayload = {
-    first_name:  consignee.first_name,
-    last_name:   consignee.last_name,   // always present — 4PX 010101005 requires a surname
+    first_name:  consigneeFields.first_name,   // surname (4PX prints 2nd)
+    last_name:   consigneeFields.last_name,    // given name (4PX prints 1st); always present per 010101005
     ...(recipient.company   && { company:    decodeHtml(recipient.company)   }),
     phone:       recipientPhone,
     // email: required by 4PX for Etsy-origin shipments and mandatory for some
@@ -798,6 +830,294 @@ async function getShipOrder(appKey, appSecret, requestNo) {
   return callApi(appKey, appSecret, 'ds.xms.order.get', { request_no: requestNo });
 }
 
+// ── Freight / shipping-cost retrieval ───────────────────────────────────────────
+//
+// 4PX bills shipping per consignment. The actual freight is only finalized AFTER
+// 4PX physically weighs the parcel at their warehouse, so the cost lifecycle is:
+//
+//   pending  → order created, 4PX has not yet computed/settled a freight charge
+//   billed   → 4PX has computed the freight (ds.xms.order.getFreight returns it)
+//
+// Method: ds.xms.order.getFreight ("Queries order fee information"). Reference:
+//   https://open.4px.com/v2/doc  →  Direct Shipping Order API → ds.xms.order.getFreight
+//
+// IMPORTANT — undocumented field names:
+// The public docs list the method but not its exact request/response field names
+// (the full schema lives behind the authenticated 4PX portal, and 4PX's responses
+// are notoriously inconsistent between snake_case and camelCase, and sometimes
+// nest the per-order fee inside a list). Rather than hard-code one guess, the
+// normalizer below scans every plausible key. Run `node scripts/diag-4px-freight.js
+// <consignmentNo>` once against a real billed order to confirm the live shape; the
+// normalizer already tolerates the variants we have seen in the wild.
+
+/**
+ * @typedef {object} FreightFeeItem
+ * @property {string|null} type      Fee type code (e.g. "FREIGHT", "FUEL", "REMOTE")
+ * @property {string|null} name      Human-readable fee name
+ * @property {number|null} amount    Fee amount in `currency`
+ * @property {string|null} currency  ISO currency code for this line
+ */
+
+/**
+ * @typedef {object} FreightResult
+ * @property {'billed'|'pending'} status    'billed' once 4PX returns a real charge.
+ * @property {number|null} totalFee         Total freight charge (headline cost).
+ * @property {string|null} currency         ISO currency of `totalFee` (e.g. "USD", "CNY").
+ * @property {number|null} billedWeightG    Chargeable weight 4PX billed, in grams (best-effort).
+ * @property {string|null} weightRaw        Raw weight value as returned (with original unit).
+ * @property {FreightFeeItem[]} feeItems    Itemized fee breakdown (may be empty).
+ * @property {object} raw                   The raw 4PX `data` payload, for diagnostics.
+ */
+
+// Candidate keys, ordered by preference, for each field 4PX may use.
+// The PRIMARY names are the ones verified against the live API + the official 4PX
+// Go SDK model (model/ds.fee.go → FreightData): total_fee, charge_weight, currency,
+// and the itemized list under `subs` (FreightSubItem{fee_amount, fee_name, currency}).
+// The remaining aliases are defensive fallbacks for other documented variants.
+const _FREIGHT_TOTAL_KEYS    = ['total_fee', 'totalFee', 'total_freight', 'freight_fee', 'freightFee', 'freight', 'total_amount', 'totalAmount', 'settle_fee', 'settleFee', 'sale_fee', 'amount', 'fee', 'total_charge', 'charge'];
+const _FREIGHT_CURRENCY_KEYS = ['currency', 'fee_currency', 'feeCurrency', 'currency_code', 'currencyCode', 'settle_currency', 'settleCurrency', 'sale_currency', 'charge_currency'];
+const _FREIGHT_WEIGHT_KEYS   = ['charge_weight', 'chargeWeight', 'billing_weight', 'billingWeight', 'chargeable_weight', 'chargeableWeight', 'settle_weight', 'settleWeight', 'weight'];
+const _FREIGHT_WEIGHTUNIT_KEYS = ['weight_unit', 'weightUnit', 'billing_weight_unit'];
+const _FREIGHT_ITEMS_KEYS    = ['subs', 'fee_detail', 'feeDetail', 'fee_details', 'fee_list', 'feeList', 'charge_detail', 'chargeDetail', 'fees', 'charges', 'details', 'detail'];
+const _FREIGHT_LIST_KEYS     = ['freight_list', 'freightList', 'freightInfoList', 'freight_info_list', 'list', 'orderFreightList', 'order_freight_list', 'feeInfoList', 'data_list'];
+
+/** Coerce a 4PX numeric field (which may be a string like "12.34") to a finite number, else null. */
+function _toNum(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = typeof v === 'number' ? v : Number(String(v).replace(/[^0-9.\-]/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
+/** First present (non-null/non-empty) value among `keys` on `obj`. */
+function _pick(obj, keys) {
+  if (!obj || typeof obj !== 'object') return undefined;
+  for (const k of keys) {
+    const v = obj[k];
+    if (v !== null && v !== undefined && v !== '') return v;
+  }
+  return undefined;
+}
+
+/**
+ * Best-effort conversion of a weight value to grams.
+ * 4PX usually reports billed weight in kilograms (e.g. "0.12"), occasionally in
+ * grams. Heuristic: an explicit unit wins; otherwise a value < 100 with a decimal
+ * point is treated as kg, a large integer (≥100) as grams.
+ *
+ * @param {*} value  Raw weight value
+ * @param {string|null} unit  Unit hint ('g'|'kg'|...) when present
+ * @returns {number|null}  Weight in grams, rounded, or null when unparseable.
+ */
+function _weightToGrams(value, unit) {
+  const n = _toNum(value);
+  if (n === null) return null;
+  const u = (unit || '').toString().trim().toLowerCase();
+  if (u === 'g' || u === 'gram' || u === 'grams') return Math.round(n);
+  if (u === 'kg' || u === 'kgs' || u === 'kilogram' || u === 'kilograms') return Math.round(n * 1000);
+  // No explicit unit: infer. 4PX kg values are typically < 100 and fractional.
+  if (n > 0 && n < 100) return Math.round(n * 1000);
+  return Math.round(n);
+}
+
+/**
+ * Normalize whatever ds.xms.order.getFreight returns into a stable FreightResult.
+ *
+ * Handles three observed response shapes:
+ *   1. A flat fee object:          { total_fee, currency, weight, fee_detail:[...] }
+ *   2. A wrapper with a list:      { freight_list: [ {ref_no, total_fee, ...} ] }
+ *   3. A bare array:               [ {ds_consignment_no, total_fee, ...} ]
+ * When a list is present, the entry whose ref/consignment/tracking matches
+ * `requestNo` is selected; otherwise the first (and usually only) entry is used.
+ *
+ * @param {object|Array} data        Raw `.data` from callApi.
+ * @param {string} [requestNo]       The consignment/tracking/ref we queried, for list matching.
+ * @returns {FreightResult}
+ */
+function normalizeFreightResponse(data, requestNo) {
+  const empty = {
+    status: 'pending', totalFee: null, currency: null,
+    billedWeightG: null, weightRaw: null, feeItems: [], raw: data ?? null,
+  };
+
+  // 4PX double-encodes the `data` field for this method: an unbilled order comes
+  // back as the STRING "{}" (verified live), so a billed one will arrive as a JSON
+  // string like '{"total_fee":...}'. Parse one level of string-encoding before we
+  // inspect it; a plain "{}" / "" / "null" collapses to the pending result.
+  if (typeof data === 'string') {
+    const trimmed = data.trim();
+    if (!trimmed || trimmed === '{}' || trimmed === '[]' || trimmed === 'null') return empty;
+    try { data = JSON.parse(trimmed); }
+    catch { return empty; }
+  }
+  if (!data || typeof data !== 'object') return empty;
+
+  // 1. Resolve the per-order fee record from any of the three shapes.
+  let rec = data;
+  if (Array.isArray(data)) {
+    rec = _matchFreightEntry(data, requestNo) ?? data[0] ?? {};
+  } else {
+    const list = _pick(data, _FREIGHT_LIST_KEYS);
+    if (Array.isArray(list) && list.length) {
+      rec = _matchFreightEntry(list, requestNo) ?? list[0];
+    }
+  }
+  if (!rec || typeof rec !== 'object') return empty;
+
+  // 2. Extract the itemized breakdown first — when no top-level total is present
+  //    we can still derive it by summing the line items.
+  const itemsRaw = _pick(rec, _FREIGHT_ITEMS_KEYS);
+  const feeItems = (Array.isArray(itemsRaw) ? itemsRaw : []).map((it) => ({
+    type:     _pick(it, ['fee_type', 'feeType', 'type', 'fee_code', 'feeCode', 'charge_type']) ?? null,
+    name:     _pick(it, ['fee_name', 'feeName', 'name', 'fee_desc', 'feeDesc', 'charge_name']) ?? null,
+    amount:   _toNum(_pick(it, _FREIGHT_TOTAL_KEYS) ?? it.fee_amount ?? it.feeAmount ?? it.amount),
+    currency: _pick(it, _FREIGHT_CURRENCY_KEYS) ?? null,
+  }));
+
+  // 3. Total fee: prefer an explicit total; else sum the itemized lines.
+  let totalFee = _toNum(_pick(rec, _FREIGHT_TOTAL_KEYS));
+  if (totalFee === null && feeItems.length) {
+    const sum = feeItems.reduce((acc, f) => acc + (f.amount ?? 0), 0);
+    totalFee = feeItems.some((f) => f.amount !== null) ? +sum.toFixed(4) : null;
+  }
+
+  const currency =
+    _pick(rec, _FREIGHT_CURRENCY_KEYS) ??
+    feeItems.find((f) => f.currency)?.currency ??
+    null;
+
+  const weightVal  = _pick(rec, _FREIGHT_WEIGHT_KEYS);
+  const weightUnit = _pick(rec, _FREIGHT_WEIGHTUNIT_KEYS) ?? null;
+
+  return {
+    status:        totalFee !== null ? 'billed' : 'pending',
+    totalFee,
+    currency:      currency ? String(currency).toUpperCase() : null,
+    billedWeightG: _weightToGrams(weightVal, weightUnit),
+    weightRaw:     weightVal !== undefined ? `${weightVal}${weightUnit ? ' ' + weightUnit : ''}` : null,
+    feeItems,
+    raw:           rec,
+  };
+}
+
+/** Find the list entry that matches `requestNo` across the usual id fields. */
+function _matchFreightEntry(list, requestNo) {
+  if (!requestNo) return null;
+  const want = String(requestNo).trim();
+  const idKeys = ['ds_consignment_no', 'dsConsignmentNo', '4px_tracking_no', 'tracking_no', 'trackingNo', 'ref_no', 'refNo', 'request_no', 'requestNo'];
+  return list.find((e) => idKeys.some((k) => e && String(e[k] ?? '').trim() === want)) ?? null;
+}
+
+/**
+ * Fetch the actual billed shipping cost (freight) for an existing 4PX order.
+ *
+ * @param {string} appKey
+ * @param {string} appSecret
+ * @param {string} requestNo   ds_consignment_no (preferred), 4px_tracking_no, or ref_no
+ * @param {object} [opts]
+ * @param {number} [opts.timeoutMs]
+ * @returns {Promise<FreightResult>}
+ */
+async function getOrderFreight(appKey, appSecret, requestNo, opts = {}) {
+  if (!requestNo?.toString().trim()) throw new Error('requestNo is required to query freight');
+  // request_no is the field every sibling ds.xms.* method (label.get, order.get,
+  // order.cancel) uses to address a single consignment, so we send it the same way.
+  const data = await callApi(
+    appKey, appSecret, 'ds.xms.order.getFreight',
+    { request_no: String(requestNo).trim() },
+    { timeoutMs: opts.timeoutMs },
+  );
+  return normalizeFreightResponse(data, requestNo);
+}
+
+// ── Estimated shipping cost (live rate-card lookup) ─────────────────────────────
+//
+// ds.xms.estimated_cost.get is a live rate calculator: given a destination country,
+// a parcel weight, and (optionally) a logistics product, it returns the lump-sum
+// freight 4PX would charge — the SAME number their merchant portal shows the moment
+// a parcel is measured. Unlike getFreight (which only returns AFTER 4PX financially
+// settles the order), this is available immediately, so it's our primary cost source
+// with getFreight used later to reconcile to the truly-billed amount.
+//
+// VERIFIED LIVE (params + response):
+//   request : { country_code:"US", weight:100, logistics_product_code:"S5058" }
+//             - country_code  ISO-2 destination (REQUIRED)
+//             - weight        grams, POSITIVE INTEGER < 1,000,000 (REQUIRED)
+//             - logistics_product_code  optional; omit to get every lane for the country
+//   response: [ { logistics_product_code, lump_sum_fee:"32.60", charge_weight:"0.100",
+//                 estimated_time:"7-12", logistics_channel_no, is_volume_cargo, ... } ]
+// The fee is denominated in the account's settlement currency (CNY/RMB for 4PX CN).
+
+/**
+ * @typedef {object} EstimatedCostResult
+ * @property {number|null} fee            lump_sum_fee as a number, or null if unavailable.
+ * @property {string}      currency       Settlement currency of `fee` (default 'CNY').
+ * @property {number|null} chargeWeightG  charge_weight 4PX would bill, in grams.
+ * @property {string|null} productCode    The logistics_product_code the fee is for.
+ * @property {string|null} estimatedTime  Transit-time hint, e.g. "7-12" (days).
+ * @property {Array}       all            Every priced lane returned (for product pickers).
+ */
+
+/**
+ * Look up the live estimated shipping cost for a lane.
+ *
+ * @param {string} appKey
+ * @param {string} appSecret
+ * @param {object} input
+ * @param {string} input.countryCode            ISO-2 destination country (required).
+ * @param {number} input.weightG                Parcel weight in grams (required; rounded to int).
+ * @param {string} [input.productCode]          Logistics product to price; omit for all lanes.
+ * @param {string} [input.currency='CNY']       Currency label to stamp on the result.
+ * @param {object} [opts]
+ * @param {number} [opts.timeoutMs]
+ * @returns {Promise<EstimatedCostResult>}
+ */
+async function getEstimatedCost(appKey, appSecret, input, opts = {}) {
+  const { countryCode, weightG, productCode, currency = 'CNY' } = input || {};
+  if (!countryCode) throw new Error('countryCode is required for an estimated cost lookup');
+  const w = Math.max(1, Math.round(Number(weightG) || 0));
+  if (!w) throw new Error('a positive weightG is required for an estimated cost lookup');
+
+  // Query ALL lanes for the country+weight (omit the product filter) and SELECT the
+  // requested product from the result below. This guarantees a price even when the
+  // stored/guessed product isn't valid for the destination (we fall back to the
+  // cheapest lane), which matters for historical orders priced from a default product.
+  const body = { country_code: String(countryCode).toUpperCase(), weight: w };
+
+  let data = await callApi(
+    appKey, appSecret, 'ds.xms.estimated_cost.get', body, { timeoutMs: opts.timeoutMs },
+  );
+
+  // 4PX double-encodes the `data` field inconsistently — it may arrive as a real
+  // array/object OR as a JSON STRING (e.g. "[{...}]"). Parse one level of string
+  // encoding so both forms are handled identically.
+  if (typeof data === 'string') {
+    const t = data.trim();
+    try { data = t ? JSON.parse(t) : []; } catch { data = []; }
+  }
+
+  const list = Array.isArray(data) ? data : (Array.isArray(data?.list) ? data.list : []);
+  const empty = { fee: null, currency, chargeWeightG: null, productCode: productCode ?? null, estimatedTime: null, all: list };
+  if (!list.length) return empty;
+
+  // Prefer the exact product requested; otherwise the cheapest priced lane.
+  const priced = list
+    .map((p) => ({ ...p, _fee: _toNum(p.lump_sum_fee ?? p.lumpSumFee ?? p.total_fee) }))
+    .filter((p) => p._fee !== null);
+  if (!priced.length) return empty;
+
+  const chosen = (productCode && priced.find((p) => (p.logistics_product_code ?? p.logisticsProductCode) === productCode))
+    || priced.sort((a, b) => a._fee - b._fee)[0];
+
+  return {
+    fee:           chosen._fee,
+    currency,
+    chargeWeightG: _weightToGrams(chosen.charge_weight ?? chosen.chargeWeight, null),
+    productCode:   chosen.logistics_product_code ?? chosen.logisticsProductCode ?? productCode ?? null,
+    estimatedTime: chosen.estimated_time ?? chosen.estimatedTime ?? null,
+    all:           list,
+  };
+}
+
 /**
  * Sanitize a buyer name into a filesystem-safe base name (WITHOUT extension).
  *
@@ -850,9 +1170,13 @@ module.exports = {
   getShipLabel,
   cancelShipOrder,
   getShipOrder,
+  getOrderFreight,
+  getEstimatedCost,
+  normalizeFreightResponse,
   safeLabelBaseName,
   assignUniqueLabelNames,
   enforceConsigneeName,
+  orderConsigneeNameFor4px,
   CONSIGNEE_NAME_MIN,
   CONSIGNEE_NAME_MAX,
   CONSIGNEE_PART_MIN_LETTERS,

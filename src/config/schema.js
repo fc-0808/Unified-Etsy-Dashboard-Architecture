@@ -335,6 +335,54 @@ function loadConfig() {
     fourpx_warehouse_code:   raw.fourpx_warehouse_code   ?? null,
     fourpx_default_product:  raw.fourpx_default_product  ?? null,
 
+    // ── 4PX shipping-cost (freight) sync ───────────────────────────────────────
+    // The sync worker polls ds.xms.order.getFreight for every 4PX order until 4PX
+    // bills it, then surfaces the per-order/per-shop shipping cost in the dashboard.
+    // fourpx_freight_sync:          set false to disable the extra API traffic.
+    // fourpx_freight_recheck_hours: how often an as-yet-unbilled order is re-queried
+    //                               (4PX only bills after weighing the parcel).
+    fourpx_freight_sync:     raw.fourpx_freight_sync === false ? false : true,
+    fourpx_freight_recheck_hours: typeof raw.fourpx_freight_recheck_hours === 'number' && raw.fourpx_freight_recheck_hours > 0
+                               ? raw.fourpx_freight_recheck_hours : 6,
+    // Fallback parcel weight (grams) used to price a 4PX order via the rate card
+    // (ds.xms.estimated_cost.get) when the order has no stored declared weight
+    // (e.g. orders created before weight capture). 100 g suits small phone cases.
+    fourpx_default_weight_g: typeof raw.fourpx_default_weight_g === 'number' && raw.fourpx_default_weight_g > 0
+                               ? Math.round(raw.fourpx_default_weight_g) : 100,
+    // Currency 4PX settles freight in (CN accounts: CNY/RMB). Stamped on estimated
+    // costs and used as the conversion source for the Earnings "true net" view.
+    fourpx_settlement_currency: (raw.fourpx_settlement_currency && String(raw.fourpx_settlement_currency).trim().toUpperCase()) || 'CNY',
+
+    // ── Shipping-label printing (thermal label printer) ────────────────────────
+    // The "Print label" button rasterizes the 4PX label PDF to a pure 1-bit
+    // black/white bitmap at the printer's NATIVE resolution and prints it 1:1.
+    // This is the only way to keep the dense barcode crisp/scannable: any
+    // grayscale/anti-aliased resample (what Adobe "Fit" and the browser do)
+    // softens the bars into fuzzy grey and can make them unreadable.
+    //
+    // label_print_mode:
+    //   'auto'   → silent direct-to-printer on Windows when label_printer_name
+    //              resolves to an installed printer; otherwise open the PDF in
+    //              the OS default app (Adobe) so the operator can print manually.
+    //   'silent' → always print directly (errors if the printer is missing).
+    //   'open'   → always just open the PDF in the default app (no direct print).
+    label_print_mode:    ['auto', 'silent', 'open'].includes(raw.label_print_mode)
+                           ? raw.label_print_mode : 'auto',
+    // Exact Windows printer name (Control Panel → Devices and Printers).
+    label_printer_name:  (raw.label_printer_name && String(raw.label_printer_name).trim()) || 'Deli DL-720W',
+    // Physical label media size in millimetres (the printer's loaded stock).
+    label_width_mm:      typeof raw.label_width_mm  === 'number' && raw.label_width_mm  > 0 ? raw.label_width_mm  : 80,
+    label_height_mm:     typeof raw.label_height_mm === 'number' && raw.label_height_mm > 0 ? raw.label_height_mm : 80,
+    // Printer head resolution in dots-per-inch (Deli DL-720W = 203 dpi / 8 dpmm).
+    label_dpi:           typeof raw.label_dpi === 'number' && raw.label_dpi >= 96 ? Math.floor(raw.label_dpi) : 203,
+    // Binarisation cutoff (0–255): pixels darker than this become solid black.
+    // Higher = bolder bars/text. 160 keeps thin barcode bars solid without bleed.
+    label_print_threshold: typeof raw.label_print_threshold === 'number'
+                           ? Math.min(255, Math.max(1, Math.floor(raw.label_print_threshold))) : 160,
+    // Copies per print job.
+    label_print_copies:  typeof raw.label_print_copies === 'number' && raw.label_print_copies >= 1
+                           ? Math.floor(raw.label_print_copies) : 1,
+
     // ── EU IOSS / VAT compliance ───────────────────────────────────────────────
     // fourpx_ioss_no:  Import One-Stop Shop (IOSS) registration number used for
     //                  EU-bound parcels with a declared value ≤ €150. 4PX maps it

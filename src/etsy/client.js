@@ -41,7 +41,7 @@
  *
  * ─── RATE BUDGET MATH ────────────────────────────────────────────────────────
  *
- * Shops per key varies: up to 5 on proxied keys, 1 on the direct key (CuteCasesOnly).
+ * Shops per key varies: up to 5 on proxied keys, fewer on a direct (no-proxy) key.
  * ~5 API calls per shop per sync (resolveShopId + 2 receipt passes + listing images).
  *
  * 5 shops/key, 60-min interval: 5 × 5 × 24 =  600 calls/day → 12% of 5K QPD
@@ -64,57 +64,224 @@ const { TokenExpiredError } = require('../auth/token-manager');
 const PERSONAL_ACCESS_QPD = 5000; // verified from user's developer portal screenshot
 const QPD_SAFETY_BUFFER   = 4900; // leave 100 calls headroom for manual/ad-hoc use
 
+// When Etsy reports the budget as spent but gives us no `retry-after` to act on
+// (e.g. a zero-remaining header on a success response), wait this long before the
+// next attempt rather than hammering the key. The sliding window frees budget
+// gradually, so a short, bounded cooldown lets us resume as soon as a bucket rolls
+// off instead of stalling for a full day. After it elapses we send a single
+// "half-open" probe to re-learn the real budget from Etsy's headers.
+const DEFAULT_QPD_COOLDOWN_MS = 10 * 60 * 1000;
+
+// Headroom (in calls) that low-priority BACKGROUND traffic (receipt sync, listing
+// counts, inventory polling, image fetches, ledger backfills…) must always leave
+// untouched. This guarantees high-priority, operator-initiated writes — shipping
+// and completing orders, editing tracking — are NEVER locked out by a batch job
+// that ran the key down. ~6% of the 5K/day budget; negligible for background work,
+// but always enough for a human to fulfil orders.
+const QPD_BACKGROUND_RESERVE = 300;
+
+// Call priorities. 'critical' is reserved for user-initiated order fulfilment and
+// is never gated locally — Etsy alone decides (a real 429 still surfaces). Anything
+// else must respect the background reserve above.
+const PRIORITY_CRITICAL = 'critical';
+
+/**
+ * Thrown when an API key's QPD (queries-per-day) budget is exhausted, or when a
+ * 429 persists through every retry. Identifiable via `code === 'ETSY_QPD_EXHAUSTED'`.
+ *
+ * This is a TRANSIENT, self-resolving condition: Etsy's QPD is a sliding 24h
+ * window, so budget frees up continuously. Callers should treat it as a
+ * "back off and resume on the next cycle" signal — never as a hard failure that
+ * needs human action.
+ */
+class QpdExhaustedError extends Error {
+  constructor(message, { resetInSeconds = null, keyId = null } = {}) {
+    super(message);
+    this.name = 'QpdExhaustedError';
+    this.code = 'ETSY_QPD_EXHAUSTED';
+    this.resetInSeconds = resetInSeconds;
+    this.resetAt = resetInSeconds != null ? Date.now() + resetInSeconds * 1000 : null;
+    this.keyId = keyId;
+    this.retryable = true; // resolves on its own as the sliding window advances
+  }
+}
+
+/** True when an error represents Etsy QPD exhaustion (or a persistent 429). */
+function isQpdExhaustedError(err) {
+  return !!err && err.code === 'ETSY_QPD_EXHAUSTED';
+}
+
+/**
+ * Per-API-key budget guard for Etsy's sliding 24h QPD window.
+ *
+ * Etsy enforces QPD at the API-KEY level (not per shop), so one limiter is shared
+ * by every shop on the same keystring. The guard combines two signals:
+ *   1. A local sliding-window counter (defensive, works before the first response).
+ *   2. The server-authoritative `x-remaining-today` header, which always wins.
+ * On a 429 it honors Etsy's `retry-after` exactly, and short-circuits further
+ * calls until the cooldown elapses so a spent key is never stormed.
+ */
+// Maximum snapshots to keep per API key (ring-buffer; older entries are evicted).
+// One entry == one Etsy call, and a full sync cycle makes dozens of calls, so keep
+// a generous window so the operator can see a meaningful breakdown of recent reasons.
+const HISTORY_RING_SIZE = 200;
+
 class RateLimiter {
-  constructor(maxCallsPer24h = QPD_SAFETY_BUFFER) {
+  constructor(maxCallsPer24h = QPD_SAFETY_BUFFER, keyId = 'default') {
     this._max = maxCallsPer24h;
     this._window = 24 * 60 * 60 * 1000; // sliding 24h window (Etsy uses bucket-based sliding window)
     this._calls = [];
-    this._serverRemaining = null; // updated from x-remaining-today response header
+    this._serverRemaining = null;       // updated from x-remaining-today response header
+    this._keyId = keyId;                // masked keystring, for human-readable logs
+    this._blockedUntil = 0;             // ms epoch; while in the future, check() short-circuits
+    /**
+     * Ring-buffer of authoritative budget snapshots from Etsy headers.
+     * Each entry: { ts: <ms epoch>, remaining: <number>, delta: <number|null> }
+     * delta = how many calls were consumed since the previous snapshot (negative = dropped).
+     * Capped at HISTORY_RING_SIZE; oldest entries are evicted first.
+     */
+    this._history = [];
   }
 
   /**
-   * Check before making an API call. Throws if over budget.
-   * @throws {Error} if QPD budget exhausted
+   * Pre-flight gate, called before every Etsy request on this key.
+   *
+   * @param {'critical'|'normal'} [priority='normal']
+   *   'critical' — operator-initiated order fulfilment (ship/complete/edit tracking).
+   *   Never gated locally: we let Etsy be the sole authority so a human is never
+   *   locked out of shipping by our own conservative counter. A genuine Etsy 429
+   *   still surfaces (with its retry-after) through withRetry.
+   * @throws {QpdExhaustedError} when no budget is available for this priority.
    */
-  check() {
+  check(priority = 'normal') {
     const now = Date.now();
     this._calls = this._calls.filter((t) => now - t < this._window);
 
-    // Prefer the server-authoritative count if available and lower than our local count
+    // Critical user actions bypass the local guard entirely — Etsy decides.
+    if (priority === PRIORITY_CRITICAL) {
+      this._calls.push(now);
+      return;
+    }
+
+    // Half-open: once a cooldown elapses, forget the stale "zero remaining" and
+    // let the next background call probe Etsy to re-learn the real budget. A
+    // success refreshes the count and resumes us; a 429 re-arms the cooldown via
+    // the response interceptor. Without this we'd self-block indefinitely on a
+    // stale count (no requests → no headers → never recover).
+    if (this._blockedUntil && now >= this._blockedUntil) {
+      this._blockedUntil = 0;
+      this._serverRemaining = null;
+    }
+
+    // Honor an active cooldown so we don't fire requests guaranteed to be rejected.
+    if (this._blockedUntil > now) {
+      throw this._exhausted(Math.ceil((this._blockedUntil - now) / 1000));
+    }
+
+    // The server count always wins when present; the local counter is a fallback
+    // for the window before the first response arrives.
     const localRemaining = this._max - this._calls.length;
     const effectiveRemaining =
       this._serverRemaining !== null
         ? Math.min(localRemaining, this._serverRemaining)
         : localRemaining;
 
-    if (effectiveRemaining <= 0) {
-      const oldest = this._calls[0];
-      const resetIn = oldest
-        ? Math.ceil((oldest + this._window - now) / 60000)
-        : 60;
-      throw new Error(
-        `Etsy API QPD budget exhausted (${PERSONAL_ACCESS_QPD}/day limit). ` +
-          `Resets in approximately ${resetIn} minutes. Increase sync_interval_minutes in config.json.`
-      );
+    if (effectiveRemaining <= QPD_BACKGROUND_RESERVE) {
+      if (effectiveRemaining <= 0) {
+        // Genuinely out of budget. Recovery time depends on the binding limit:
+        //   • server-bound (Etsy says 0) → sliding window frees gradually and the
+        //     exact moment is unknown, so re-probe on a short bounded cadence.
+        //   • local-bound (our own counter) → frees precisely when the oldest
+        //     in-window call ages out.
+        const serverBinding = this._serverRemaining !== null && this._serverRemaining <= 0;
+        const coolSec = Math.ceil(DEFAULT_QPD_COOLDOWN_MS / 1000);
+        const oldest = this._calls[0];
+        const resetSec = serverBinding
+          ? coolSec
+          : (oldest ? Math.max(1, Math.ceil((oldest + this._window - now) / 1000)) : coolSec);
+        // Cap the block at the probe cadence so we always re-check Etsy soon,
+        // even if the local estimate is large — never self-block for ~24h.
+        this._blockedUntil = now + Math.min(resetSec, coolSec) * 1000;
+        throw this._exhausted(resetSec);
+      }
+      // Budget still exists but is the protected reserve for critical actions.
+      // Do NOT arm a cooldown — the budget is intact, just withheld from batch work.
+      throw this._exhausted(Math.ceil(DEFAULT_QPD_COOLDOWN_MS / 1000), { reserved: true });
     }
 
     this._calls.push(now);
   }
 
+  /** Build a QpdExhaustedError with an honest, accurate reset estimate. */
+  _exhausted(resetSec, { reserved = false } = {}) {
+    const mins = Math.max(1, Math.round(resetSec / 60));
+    if (reserved) {
+      return new QpdExhaustedError(
+        `Etsy API budget for key ${this._keyId} is low — the remaining ${QPD_BACKGROUND_RESERVE} ` +
+          `call(s) are reserved for order fulfilment. Background sync resumes in ~${mins} min; ` +
+          `shipping/completing orders still works.`,
+        { resetInSeconds: resetSec, keyId: this._keyId }
+      );
+    }
+    return new QpdExhaustedError(
+      `Etsy daily API budget exhausted for key ${this._keyId} ` +
+        `(${PERSONAL_ACCESS_QPD}/day, sliding 24h window). ` +
+        `Auto-resumes in ~${mins} min as the window advances — no action needed.`,
+      { resetInSeconds: resetSec, keyId: this._keyId }
+    );
+  }
+
   /**
-   * Update the server-side remaining count from response headers.
-   * Called by the axios response interceptor in createShopClient.
-   * @param {import('http').IncomingMessage} headers
+   * Record an explicit cooldown, e.g. from a 429 `retry-after` (seconds) or a
+   * zero `x-remaining-today` header. Extends (never shortens) any existing block.
+   * @param {number|null} retryAfterSec
    */
-  updateFromHeaders(headers) {
+  noteCooldown(retryAfterSec) {
+    const sec = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+      ? retryAfterSec
+      : Math.ceil(DEFAULT_QPD_COOLDOWN_MS / 1000);
+    this._blockedUntil = Math.max(this._blockedUntil, Date.now() + sec * 1000);
+    this._serverRemaining = 0;
+  }
+
+  /**
+   * Update budget state from response headers (success OR error path).
+   * @param {import('http').IncomingHttpHeaders} headers
+   * @param {string} [op] Human-readable label for the call that produced these
+   *   headers (e.g. "Fetch orders"), recorded in the history so the operator can
+   *   see WHY each call was spent. Defaults to 'API call' when unknown.
+   */
+  updateFromHeaders(headers, op = 'API call') {
+    if (!headers) return;
     const remaining = headers['x-remaining-today'];
     if (remaining !== undefined) {
-      this._serverRemaining = parseInt(remaining, 10);
+      const n = parseInt(remaining, 10);
+      if (Number.isFinite(n)) {
+        const prev = this._serverRemaining;
+        this._serverRemaining = n;
+
+        // Record a history snapshot every time Etsy tells us the real budget.
+        // Each response interceptor fire == exactly one Etsy call, so `op` names
+        // precisely what this call was for.
+        // delta: how many calls Etsy says were consumed since the last snapshot.
+        // Negative delta means the sliding window released some old calls back to us.
+        const delta = prev !== null ? prev - n : null;
+        const snap = { ts: Date.now(), remaining: n, delta, op };
+        this._history.push(snap);
+        if (this._history.length > HISTORY_RING_SIZE) this._history.shift();
+
+        if (n <= 0) {
+          const ra = parseInt(headers['retry-after'], 10);
+          this.noteCooldown(Number.isFinite(ra) ? ra : null);
+        } else if (this._blockedUntil) {
+          // Budget came back (a bucket rolled off) — clear any stale cooldown.
+          this._blockedUntil = 0;
+        }
+      }
     }
-    // Log a warning when budget is running low
-    if (this._serverRemaining !== null && this._serverRemaining < 200) {
+    if (this._serverRemaining !== null && this._serverRemaining > 0 && this._serverRemaining < 200) {
       console.warn(
-        `[etsy/client] Rate limit warning: only ${this._serverRemaining} API calls remaining today.`
+        `[etsy/client] Rate limit warning: key ${this._keyId} has only ${this._serverRemaining} call(s) left in the current 24h window.`
       );
     }
   }
@@ -129,9 +296,14 @@ class RateLimiter {
   get serverRemaining() {
     return this._serverRemaining;
   }
+
+  /** Milliseconds until this key is usable again (0 when not blocked). */
+  get blockedForMs() {
+    return Math.max(0, this._blockedUntil - Date.now());
+  }
 }
 
-/** @type {Map<string, RateLimiter>} api_key → RateLimiter */
+/** @type {Map<string, RateLimiter>} keystring → RateLimiter */
 const _rateLimiters = new Map();
 
 /**
@@ -155,7 +327,7 @@ async function resolveShopId(shopClient, shopIdOrName) {
   if (/^\d+$/.test(str)) return str;                // already numeric — no lookup needed
   if (_shopIdCache.has(str)) return _shopIdCache.get(str); // cached from a previous call
 
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   const { data } = await shopClient.get('/application/shops', {
     params: { shop_name: str, limit: 1 },
   });
@@ -179,9 +351,75 @@ function getRateLimiter(shopClient) {
     ?? 'default';
   const keystring = rawKey.split(':')[0]; // extract just the keystring from "keystring:secret"
   if (!_rateLimiters.has(keystring)) {
-    _rateLimiters.set(keystring, new RateLimiter());
+    // Mask the keystring for logs: keep the first 6 chars only.
+    const keyId = keystring && keystring !== 'default'
+      ? `${keystring.slice(0, 6)}…`
+      : 'default';
+    _rateLimiters.set(keystring, new RateLimiter(QPD_SAFETY_BUFFER, keyId));
   }
   return _rateLimiters.get(keystring);
+}
+
+/**
+ * Pre-flight budget gate for a request on this client. Honors the priority that
+ * was stamped on the client at creation (buildShopClient({ priority })). Clients
+ * built for operator-initiated order fulfilment are 'critical' and bypass the
+ * local guard; everything else respects the background reserve.
+ * @param {import('axios').AxiosInstance} shopClient
+ */
+function gateClient(shopClient) {
+  const priority = shopClient?.defaults?.__etsyPriority || 'normal';
+  return getRateLimiter(shopClient).check(priority);
+}
+
+/**
+ * Map an Etsy request (method + path) to a short, human-readable reason so the
+ * budget history can explain WHY each call was spent. Ordered most-specific first.
+ *
+ * @param {string} [method] HTTP verb (any case)
+ * @param {string} [url] Request path, e.g. "/application/shops/123/receipts"
+ * @returns {string} A friendly label like "Fetch orders" or "Inventory check".
+ */
+function classifyEtsyOp(method, url) {
+  const m = String(method || 'get').toUpperCase();
+  const u = String(url || '');
+
+  // Order fulfilment (operator-initiated, highest value)
+  if (/\/receipts\/[^/]+\/tracking/.test(u)) return 'Ship / complete order';
+  if (/\/receipts\/[^/]+\/transactions/.test(u)) return 'Order line items';
+  if (/\/receipts\/[^/]+$/.test(u)) return 'Order details';
+  if (/\/receipts(\?|$)/.test(u)) return 'Fetch orders';
+
+  // Inventory & listings
+  if (/\/listings\/[^/]+\/inventory/.test(u)) return m === 'PUT' ? 'Restock inventory' : 'Inventory check';
+  if (/\/listings\/batch/.test(u)) return 'Order images';
+  if (/\/listings\/active/.test(u)) return 'Active listings';
+  if (/\/listings\/[^/]+\/images/.test(u)) return 'Upload listing image';
+  if (/\/listings\/[^/]+\/videos/.test(u)) return 'Upload listing video';
+  if (/\/listings\/[^/]+\/variation-images/.test(u)) return 'Set variation images';
+  if (/\/shops\/[^/]+\/listings\/[^/]+/.test(u)) return 'Update listing';
+  if (/\/shops\/[^/]+\/listings/.test(u)) return m === 'POST' ? 'Create listing' : 'Listing count';
+  if (/\/listings\/[^/]+$/.test(u) && m === 'DELETE') return 'Delete listing';
+
+  // Finance
+  if (/\/payment-account\/ledger-entries/.test(u)) return 'Finance / ledger sync';
+  if (/\/payments/.test(u)) return 'Payments sync';
+
+  // Shop metadata / listing-creation prerequisites
+  if (/\/shipping-profiles/.test(u)) return 'Shipping profiles';
+  if (/\/policies\/return/.test(u)) return 'Return policy';
+  if (/\/production-partners/.test(u)) return 'Production partners';
+  if (/\/sections/.test(u)) return 'Shop sections';
+  if (/\/readiness-state-definitions/.test(u)) return 'Readiness states';
+  if (/\/seller-taxonomy\/nodes\/[^/]+\/properties/.test(u)) return 'Taxonomy properties';
+  if (/\/seller-taxonomy\/nodes/.test(u)) return 'Taxonomy lookup';
+
+  // Shop core
+  if (/\/openapi-ping/.test(u)) return 'Connection check';
+  if (/\/shops\/[^/]+$/.test(u)) return m === 'PUT' ? 'Update shop' : 'Shop info';
+  if (/\/shops(\?|$)/.test(u)) return 'Shop lookup';
+
+  return 'API call';
 }
 
 /**
@@ -194,10 +432,26 @@ function attachRateLimitInterceptor(instance) {
   instance.interceptors.response.use(
     (response) => {
       const limiter = getRateLimiter(instance);
-      limiter.updateFromHeaders(response.headers);
+      const op = classifyEtsyOp(response.config?.method, response.config?.url);
+      limiter.updateFromHeaders(response.headers, op);
       return response;
     },
-    (error) => Promise.reject(error)
+    (error) => {
+      // Error responses carry the same budget headers — and a 429 carries the
+      // authoritative `retry-after`. Capture both so the next check() can
+      // short-circuit instead of stampeding a spent key.
+      const resp = error?.response;
+      if (resp) {
+        const limiter = getRateLimiter(instance);
+        const op = classifyEtsyOp(error.config?.method, error.config?.url);
+        limiter.updateFromHeaders(resp.headers, op);
+        if (resp.status === 429) {
+          const ra = parseInt(resp.headers?.['retry-after'], 10);
+          limiter.noteCooldown(Number.isFinite(ra) ? ra : null);
+        }
+      }
+      return Promise.reject(error);
+    }
   );
 }
 
@@ -286,6 +540,19 @@ async function withRetry(fn, maxRetries = 3) {
     }
   }
 
+  // A 429 that survived every retry means the QPD/QPS budget is genuinely spent.
+  // Surface it as a typed, self-resolving error so callers can back off cleanly
+  // (the response interceptor has already recorded the retry-after cooldown).
+  if (lastError?.response?.status === 429) {
+    const ra = parseInt(lastError.response.headers?.['retry-after'], 10);
+    const sec = Number.isFinite(ra) && ra > 0 ? ra : 60;
+    throw new QpdExhaustedError(
+      `Etsy API rate limit (429) persisted after ${maxRetries} retries. ` +
+        `Backing off ~${sec}s before resuming.`,
+      { resetInSeconds: sec }
+    );
+  }
+
   throw lastError;
 }
 
@@ -305,9 +572,15 @@ async function withRetry(fn, maxRetries = 3) {
  * @param {string} apiKey        - Etsy app keystring
  * @param {string} sharedSecret  - Etsy app shared secret
  * @param {string} accessToken   - Current OAuth access token (e.g. "12345678.token")
+ * @param {Function} [getToken]  - Optional fresh-token provider for long-lived clients
+ * @param {object} [options]
+ * @param {'critical'|'normal'} [options.priority='normal'] - Budget priority for all
+ *        requests on this client. Use 'critical' for operator-initiated order
+ *        fulfilment (ship/complete/edit tracking) so it is never gated by the
+ *        background reserve. Defaults to 'normal' (respects the reserve).
  * @returns {import('axios').AxiosInstance}
  */
-function buildShopClient(groupProxyClient, apiKey, sharedSecret, accessToken, getToken) {
+function buildShopClient(groupProxyClient, apiKey, sharedSecret, accessToken, getToken, options = {}) {
   // Use axios.create() — Object.create() on an axios instance does not propagate
   // defaults into the actual request headers (axios merges from instance.defaults
   // at request time, which requires a real instance, not a prototype clone).
@@ -324,6 +597,8 @@ function buildShopClient(groupProxyClient, apiKey, sharedSecret, accessToken, ge
       Authorization:  `Bearer ${accessToken}`,
     },
   });
+  // Stamp the budget priority so gateClient() can honor it on every request.
+  instance.defaults.__etsyPriority = options.priority === PRIORITY_CRITICAL ? PRIORITY_CRITICAL : 'normal';
   attachRateLimitInterceptor(instance);
 
   // Etsy access tokens expire after 1 hour. For long-lived clients (e.g. a bulk
@@ -377,7 +652,7 @@ function buildShopClient(groupProxyClient, apiKey, sharedSecret, accessToken, ge
  */
 async function getShop(shopClient, shopId) {
   const numericId = await resolveShopId(shopClient, shopId);
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const { data } = await shopClient.get(`/application/shops/${numericId}`);
     return data;
@@ -406,7 +681,7 @@ async function getShop(shopClient, shopId) {
  */
 async function getReceipts(shopClient, shopId, options = {}) {
   const numericId = await resolveShopId(shopClient, shopId);
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
 
   const params = {
     limit: Math.min(options.limit ?? 100, 100),
@@ -433,7 +708,7 @@ async function getReceipts(shopClient, shopId, options = {}) {
  */
 async function getReceipt(shopClient, shopId, receiptId) {
   const numericId = await resolveShopId(shopClient, shopId);
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const { data } = await shopClient.get(
       `/application/shops/${numericId}/receipts/${receiptId}`
@@ -461,7 +736,7 @@ async function getReceipt(shopClient, shopId, receiptId) {
  * @param {string|number} listingId
  */
 async function getListingInventory(shopClient, listingId) {
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const { data } = await shopClient.get(`/application/listings/${listingId}/inventory`);
     return data;
@@ -485,7 +760,7 @@ async function getListingInventory(shopClient, listingId) {
  * @param {object} inventory   — full inventory object from getListingInventory
  */
 async function updateListingInventory(shopClient, listingId, inventory) {
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     // Etsy's PUT endpoint only accepts a strict subset of fields.
     // The GET response includes read-only fields (product_id, is_deleted, offering_id)
@@ -564,7 +839,7 @@ async function* paginateListings(shopClient, shopId, opts = {}) {
   let offset = 0;
   const limit = 100;
   while (true) {
-    getRateLimiter(shopClient).check();
+    gateClient(shopClient);
     const { data } = await withRetry(() =>
       shopClient.get(`/application/shops/${shopId}/listings`, {
         params: { limit, offset, state, includes: 'Images', sort_on: 'updated', sort_order: 'desc' },
@@ -589,7 +864,7 @@ async function* paginateListings(shopClient, shopId, opts = {}) {
  * @param {object} fields - { title, description, price, quantity, tags, state }
  */
 async function updateListing(shopClient, shopId, listingId, fields) {
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const { data } = await shopClient.patch(
       `/application/shops/${shopId}/listings/${listingId}`,
@@ -609,7 +884,7 @@ async function updateListing(shopClient, shopId, listingId, fields) {
  * @param {object} body - { quantity, title, description, price, who_made, when_made, taxonomy_id, ... }
  */
 async function createDraftListing(shopClient, shopId, body) {
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const { data } = await shopClient.post(`/application/shops/${shopId}/listings`, body);
     return data;
@@ -621,7 +896,7 @@ async function createDraftListing(shopClient, shopId, body) {
  * Scope: listings_d
  */
 async function deleteListing(shopClient, listingId) {
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     await shopClient.delete(`/application/listings/${listingId}`);
   });
@@ -645,7 +920,7 @@ async function deleteListing(shopClient, listingId) {
  * @param {number}  [opts.ship_date]    - Unix epoch seconds; defaults to today
  */
 async function createReceiptShipment(shopClient, shopId, receiptId, opts = {}) {
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const body = {
       tracking_code:  opts.tracking_code,
@@ -716,13 +991,96 @@ async function* paginateReceipts(shopClient, shopId, options = {}) {
  */
 async function getReceiptTransactions(shopClient, shopId, receiptId) {
   const numericId = await resolveShopId(shopClient, shopId);
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const { data } = await shopClient.get(
       `/application/shops/${numericId}/receipts/${receiptId}/transactions`
     );
     return data;
   });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Payment account ledger & payments — requires transactions_r scope
+//
+// The ledger is Etsy's authoritative financial record: every sale posting, fee,
+// tax, refund and disbursement, denominated in the shop's PAYOUT currency. It is
+// the only reliable source for "what you actually earned" per order — the
+// per-receipt /payments amounts are known to be mislabeled/unreliable, so we use
+// the ledger for money and /payments ONLY to map payment_id → receipt_id.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Async generator that pages through a shop's payment-account ledger entries
+ * within a [minCreated, maxCreated] window (both required by Etsy).
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string} shopId
+ * @param {object} opts
+ * @param {number} opts.minCreated  - Unix seconds, inclusive lower bound
+ * @param {number} opts.maxCreated  - Unix seconds, inclusive upper bound
+ * @param {number} [opts.pageSize=100]
+ * @yields {object[]} a page of PaymentAccountLedgerEntry objects
+ */
+async function* paginateLedgerEntries(shopClient, shopId, opts = {}) {
+  const numericId = await resolveShopId(shopClient, shopId);
+  const pageSize  = opts.pageSize ?? 100;
+  const minCreated = opts.minCreated;
+  const maxCreated = opts.maxCreated;
+  let offset = 0;
+
+  while (true) {
+    gateClient(shopClient);
+    const data = await withRetry(async () => {
+      const { data } = await shopClient.get(
+        `/application/shops/${numericId}/payment-account/ledger-entries`,
+        { params: { min_created: minCreated, max_created: maxCreated, limit: pageSize, offset } }
+      );
+      return data;
+    });
+    const results = data.results || [];
+    if (results.length === 0) break;
+    yield results;
+    offset += results.length;
+    if (results.length < pageSize) break;
+    await new Promise((r) => setTimeout(r, 250)); // polite pause between pages
+  }
+}
+
+/**
+ * Fetch payments by their numeric IDs, returning a Map of payment_id → receipt_id.
+ * The /payments money fields are unreliable, but the receipt_id linkage is solid,
+ * which is all we need to attribute gross/processing-fee ledger entries to orders.
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string} shopId
+ * @param {Array<string|number>} paymentIds
+ * @returns {Promise<Map<string,number>>}
+ */
+async function getPaymentReceiptMap(shopClient, shopId, paymentIds) {
+  const numericId = await resolveShopId(shopClient, shopId);
+  const out = new Map();
+  const unique = [...new Set(paymentIds.map(String).filter(Boolean))];
+  const BATCH = 100;
+
+  for (let i = 0; i < unique.length; i += BATCH) {
+    const batch = unique.slice(i, i + BATCH);
+    gateClient(shopClient);
+    const data = await withRetry(async () => {
+      const { data } = await shopClient.get(
+        `/application/shops/${numericId}/payments`,
+        { params: { payment_ids: batch.join(',') } }
+      );
+      return data;
+    });
+    for (const p of (data.results || [])) {
+      if (p.payment_id != null && p.receipt_id != null) {
+        out.set(String(p.payment_id), Number(p.receipt_id));
+      }
+    }
+    if (i + BATCH < unique.length) await new Promise((r) => setTimeout(r, 250));
+  }
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -735,7 +1093,7 @@ async function getReceiptTransactions(shopClient, shopId, receiptId) {
  */
 async function getActiveListings(shopClient, shopId, options = {}) {
   const numericId = await resolveShopId(shopClient, shopId);
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const { data } = await shopClient.get(`/application/shops/${numericId}/listings/active`, {
       params: { limit: options.limit ?? 50, offset: options.offset ?? 0 },
@@ -770,7 +1128,7 @@ async function getListingImagesBatch(shopClient, listingIds) {
   const result = new Map();
 
   for (const chunk of chunks) {
-    getRateLimiter(shopClient).check();
+    gateClient(shopClient);
     try {
       await withRetry(async () => {
         // Build URLSearchParams manually so repeated keys are serialised correctly:
@@ -850,6 +1208,44 @@ function getRemainingBudget(shopClient) {
 }
 
 /**
+ * Return the process-local QPD budget snapshot for every API key this process has
+ * seen. This is intentionally read-only and does NOT call Etsy: every Etsy call
+ * costs quota, so the dashboard should display the last known budget from
+ * response headers instead of spending calls to ask how many calls are left.
+ *
+ * @returns {Array<{
+ *   keystring: string,
+ *   key_id: string,
+ *   remaining: number,
+ *   server_remaining: number | null,
+ *   max: number,
+ *   percent_used: number,
+ *   blocked_for_ms: number,
+ *   known: boolean
+ * }>}
+ */
+function getBudgetSnapshots() {
+  return [..._rateLimiters.entries()].map(([keystring, limiter]) => ({
+    keystring,
+    key_id: limiter._keyId,
+    // Primary display value: Etsy's actual header when known. The local guard is
+    // deliberately more conservative (4,900 safety cap + fulfilment reserve), so
+    // keep it separate from the user's "how many Etsy calls are left?" number.
+    remaining: limiter.serverRemaining !== null ? limiter.serverRemaining : limiter.remaining,
+    guard_remaining: limiter.remaining,
+    server_remaining: limiter.serverRemaining,
+    max: PERSONAL_ACCESS_QPD,
+    guard_max: QPD_SAFETY_BUFFER,
+    percent_used: Math.max(0, Math.min(100, Math.round((1 - (limiter.serverRemaining !== null ? limiter.serverRemaining : limiter.remaining) / PERSONAL_ACCESS_QPD) * 100))),
+    blocked_for_ms: limiter.blockedForMs,
+    known: limiter.serverRemaining !== null,
+    // History ring-buffer: last ≤50 budget snapshots from Etsy's x-remaining-today header.
+    // Each entry: { ts (ms epoch), remaining, delta (calls consumed since previous snapshot; null for first) }.
+    history: limiter._history.slice(),
+  }));
+}
+
+/**
  * Update a shop's properties. Commonly used to set sale_message.
  * Scope: shops_w
  *
@@ -859,145 +1255,11 @@ function getRemainingBudget(shopClient) {
  */
 async function updateShop(shopClient, shopId, fields) {
   const numericId = await resolveShopId(shopClient, shopId);
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const { data } = await shopClient.put(`/application/shops/${numericId}`, fields);
     return data;
   });
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Conversations — undocumented Etsy v3 internal endpoints
-//
-// Etsy's public v3 API does not expose conversation/messaging endpoints.
-// However, Etsy's own web app (etsy.com/your/messages) calls private v3
-// endpoints that are accessible with valid OAuth tokens carrying the
-// conversations_r / conversations_w scopes.
-//
-// IMPORTANT: These endpoints are NOT in the public OpenAPI spec. They may
-// change without notice. All methods include explicit 403/404 error handling
-// so a missing scope or endpoint removal degrades gracefully without crashing
-// the rest of the sync pipeline.
-//
-// Required OAuth access: standard auth token (no special scope needed for these
-// internal endpoints — Etsy does not expose conversation scopes publicly).
-// The endpoints work when Etsy's web app session is replicated via OAuth token,
-// but may return 403 if Etsy restricts access to third-party keys.
-// All methods handle 403/404 gracefully and log a clear warning.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * List conversation threads for a shop.
- * GET /v3/application/shops/{shop_id}/conversations
- * Scope: conversations_r
- *
- * @param {import('axios').AxiosInstance} shopClient
- * @param {string|number} shopId
- * @param {object} [options]
- * @param {number} [options.limit=25]
- * @param {number} [options.offset=0]
- * @returns {Promise<{ count: number, results: object[] }>}
- */
-async function getConversations(shopClient, shopId, options = {}) {
-  const numericId = await resolveShopId(shopClient, shopId);
-  getRateLimiter(shopClient).check();
-  return withRetry(async () => {
-    const { data } = await shopClient.get(
-      `/application/shops/${numericId}/conversations`,
-      { params: { limit: options.limit ?? 25, offset: options.offset ?? 0 } }
-    );
-    return data;
-  });
-}
-
-/**
- * Get a single conversation thread with all its messages.
- * GET /v3/application/shops/{shop_id}/conversations/{convo_id}
- * Scope: conversations_r
- *
- * @param {import('axios').AxiosInstance} shopClient
- * @param {string|number} shopId
- * @param {string|number} convoId
- */
-async function getConversation(shopClient, shopId, convoId) {
-  const numericId = await resolveShopId(shopClient, shopId);
-  getRateLimiter(shopClient).check();
-  return withRetry(async () => {
-    const { data } = await shopClient.get(
-      `/application/shops/${numericId}/conversations/${convoId}`
-    );
-    return data;
-  });
-}
-
-/**
- * Send a reply to a conversation thread.
- * POST /v3/application/shops/{shop_id}/conversations/{convo_id}
- * Scope: conversations_w
- *
- * @param {import('axios').AxiosInstance} shopClient
- * @param {string|number} shopId
- * @param {string|number} convoId
- * @param {string} messageBody  - Plain text message content
- */
-async function replyToConversation(shopClient, shopId, convoId, messageBody) {
-  const numericId = await resolveShopId(shopClient, shopId);
-  getRateLimiter(shopClient).check();
-  return withRetry(async () => {
-    const { data } = await shopClient.post(
-      `/application/shops/${numericId}/conversations/${convoId}`,
-      { message: messageBody }
-    );
-    return data;
-  });
-}
-
-/**
- * Mark a conversation as read on Etsy.
- * PUT /v3/application/shops/{shop_id}/conversations/{convo_id}
- * Scope: conversations_w
- *
- * @param {import('axios').AxiosInstance} shopClient
- * @param {string|number} shopId
- * @param {string|number} convoId
- */
-async function markConversationReadOnEtsy(shopClient, shopId, convoId) {
-  const numericId = await resolveShopId(shopClient, shopId);
-  getRateLimiter(shopClient).check();
-  return withRetry(async () => {
-    const { data } = await shopClient.put(
-      `/application/shops/${numericId}/conversations/${convoId}`,
-      { is_read: true }
-    );
-    return data;
-  });
-}
-
-/**
- * Async generator: paginate all conversations for a shop.
- * Yields batches of conversation objects.
- *
- * @param {import('axios').AxiosInstance} shopClient
- * @param {string|number} shopId
- * @param {object} [opts]
- * @param {number} [opts.maxTotal=100]
- */
-async function* paginateConversations(shopClient, shopId, opts = {}) {
-  const limit    = 25;
-  const maxTotal = opts.maxTotal ?? 100;
-  let offset     = 0;
-  let fetched    = 0;
-
-  while (fetched < maxTotal) {
-    const page = await getConversations(shopClient, shopId, { limit, offset });
-    const results = page.results ?? [];
-    if (!results.length) break;
-    yield results;
-    fetched += results.length;
-    offset  += results.length;
-    if (results.length < limit) break;
-    await new Promise((r) => setTimeout(r, 300));
-  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1052,7 +1314,7 @@ function _toFormUrlEncoded(body) {
  * @param {boolean} [opts.legacy]
  */
 async function createDraftListingForm(shopClient, shopId, body, opts = {}) {
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   const params = _toFormUrlEncoded(body);
   const query = opts.legacy ? '?legacy=true' : '';
   return withRetry(async () => {
@@ -1082,7 +1344,7 @@ async function createDraftListingForm(shopClient, shopId, body, opts = {}) {
  * @param {boolean} [opts.overwrite]
  */
 async function uploadListingImage(shopClient, shopId, listingId, opts = {}) {
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const form = new FormData();
     form.append('image', opts.buffer, { filename: opts.filename || 'image.jpg' });
@@ -1115,7 +1377,7 @@ async function uploadListingImage(shopClient, shopId, listingId, opts = {}) {
  * @param {string} opts.filename  video file name (Etsy requires the `name` field)
  */
 async function uploadListingVideo(shopClient, shopId, listingId, opts = {}) {
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const form = new FormData();
     const filename = opts.filename || 'video.mp4';
@@ -1148,7 +1410,7 @@ async function uploadListingVideo(shopClient, shopId, listingId, opts = {}) {
  * @param {object} body  { products, price_on_property, quantity_on_property, sku_on_property }
  */
 async function putListingInventory(shopClient, listingId, body) {
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const { data } = await shopClient.put(`/application/listings/${listingId}/inventory`, body);
     return data;
@@ -1168,7 +1430,7 @@ async function putListingInventory(shopClient, listingId, body) {
  * @param {Array<{property_id:number,value_id:number,image_id:number}>} variationImages
  */
 async function updateVariationImages(shopClient, shopId, listingId, variationImages) {
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const { data } = await shopClient.post(
       `/application/shops/${shopId}/listings/${listingId}/variation-images`,
@@ -1185,7 +1447,7 @@ async function updateVariationImages(shopClient, shopId, listingId, variationIma
 /** GET /application/shops/{shop_id}/shipping-profiles — scope shops_r */
 async function getShopShippingProfiles(shopClient, shopId) {
   const numericId = await resolveShopId(shopClient, shopId);
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const { data } = await shopClient.get(`/application/shops/${numericId}/shipping-profiles`);
     return data;
@@ -1195,7 +1457,7 @@ async function getShopShippingProfiles(shopClient, shopId) {
 /** GET /application/shops/{shop_id}/policies/return — scope none */
 async function getShopReturnPolicies(shopClient, shopId) {
   const numericId = await resolveShopId(shopClient, shopId);
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const { data } = await shopClient.get(`/application/shops/${numericId}/policies/return`);
     return data;
@@ -1205,7 +1467,7 @@ async function getShopReturnPolicies(shopClient, shopId) {
 /** GET /application/shops/{shop_id}/production-partners — scope shops_r */
 async function getShopProductionPartners(shopClient, shopId) {
   const numericId = await resolveShopId(shopClient, shopId);
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const { data } = await shopClient.get(`/application/shops/${numericId}/production-partners`);
     return data;
@@ -1215,7 +1477,7 @@ async function getShopProductionPartners(shopClient, shopId) {
 /** GET /application/shops/{shop_id}/sections — scope none */
 async function getShopSections(shopClient, shopId) {
   const numericId = await resolveShopId(shopClient, shopId);
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const { data } = await shopClient.get(`/application/shops/${numericId}/sections`);
     return data;
@@ -1230,7 +1492,7 @@ async function getShopSections(shopClient, shopId) {
  */
 async function getShopReadinessStateDefinitions(shopClient, shopId) {
   const numericId = await resolveShopId(shopClient, shopId);
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const { data } = await shopClient.get(`/application/shops/${numericId}/readiness-state-definitions`);
     return data;
@@ -1247,7 +1509,7 @@ async function createShopReadinessStateDefinition(shopClient, shopId, {
   readiness_state = 'made_to_order', min_processing_time = 3, max_processing_time = 5, processing_time_unit = 'days',
 } = {}) {
   const numericId = await resolveShopId(shopClient, shopId);
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const params = new URLSearchParams();
     params.append('readiness_state', readiness_state);
@@ -1273,7 +1535,7 @@ let _taxonomyNodesCache = null;
 /** GET /application/seller-taxonomy/nodes — scope none */
 async function getSellerTaxonomyNodes(shopClient) {
   if (_taxonomyNodesCache) return _taxonomyNodesCache;
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   const data = await withRetry(async () => {
     const res = await shopClient.get('/application/seller-taxonomy/nodes');
     return res.data;
@@ -1291,7 +1553,7 @@ const _taxonomyPropsCache = new Map();
 async function getPropertiesByTaxonomyId(shopClient, taxonomyId) {
   const key = String(taxonomyId);
   if (_taxonomyPropsCache.has(key)) return _taxonomyPropsCache.get(key);
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   const data = await withRetry(async () => {
     const res = await shopClient.get(`/application/seller-taxonomy/nodes/${taxonomyId}/properties`);
     return res.data;
@@ -1307,7 +1569,7 @@ async function getPropertiesByTaxonomyId(shopClient, taxonomyId) {
  */
 async function updateListingProperty(shopClient, shopId, listingId, propertyId, body) {
   const numericId = await resolveShopId(shopClient, shopId);
-  getRateLimiter(shopClient).check();
+  gateClient(shopClient);
   return withRetry(async () => {
     const { data } = await shopClient.put(
       `/application/shops/${numericId}/listings/${listingId}/properties/${propertyId}`,
@@ -1371,6 +1633,8 @@ module.exports = {
   createReceiptShipment,
   paginateReceipts,
   getReceiptTransactions,
+  paginateLedgerEntries,
+  getPaymentReceiptMap,
   getListingImagesBatch,
   getActiveListings,
   paginateListings,
@@ -1382,12 +1646,9 @@ module.exports = {
   ping,
   pingShop,
   getRemainingBudget,
+  getBudgetSnapshots,
   RateLimiter,
+  QpdExhaustedError,
+  isQpdExhaustedError,
   PERSONAL_ACCESS_QPD,
-  // Conversations (undocumented Etsy internal API)
-  getConversations,
-  getConversation,
-  replyToConversation,
-  markConversationReadOnEtsy,
-  paginateConversations,
 };

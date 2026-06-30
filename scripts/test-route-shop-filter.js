@@ -86,7 +86,7 @@ const TX = JSON.stringify([
 function seed(db) {
   const now = Math.floor(Date.now() / 1000);
   db.prepare('INSERT INTO shops (shop_id, shop_name) VALUES (?,?)').run('SHOP_A', 'LUVKASEofficial');
-  db.prepare('INSERT INTO shops (shop_id, shop_name) VALUES (?,?)').run('SHOP_B', 'CuteCasesOnly');
+  db.prepare('INSERT INTO shops (shop_id, shop_name) VALUES (?,?)').run('SHOP_B', 'Y2KASEshop');
 
   const ins = db.prepare(`
     INSERT INTO receipts

@@ -19,7 +19,7 @@ const path = require('path');
 const { scanInputRoot, scanProductFolder } = require('./scanner');
 const { getPricesForCurrency, STYLE_KEYS } = require('./pricing');
 const { resolveDefaultPrices } = require('./shop-prices');
-const { generateListingCopy, generateCopyFromAnalysis, filterModelsInDescription } = require('./ai-generator');
+const { generateListingCopy, generateCopyFromAnalysis, filterModelsInDescription, retitleForModels } = require('./ai-generator');
 const { getShopListingSettings } = require('./shop-settings');
 const { createListingForProduct, repriceListing } = require('./etsy-create');
 const { getTaxonomyAttributes } = require('./attributes');
@@ -119,9 +119,21 @@ class BulkJobManager {
   getJob(jobId) {
     return this.db.prepare('SELECT * FROM bulk_jobs WHERE job_id = ?').get(jobId);
   }
-  /** Whether a job (or its publish/reprice task) is executing in this process. */
+  /** Whether a job (or its publish/reprice/regenerate task) is executing in this process. */
   isActive(jobId) {
-    return this._running.has(jobId) || this._running.has('publish:' + jobId) || this._running.has('prices:' + jobId) || this._running.has('models:' + jobId);
+    return this._running.has(jobId) || this._running.has('publish:' + jobId) || this._running.has('prices:' + jobId) || this._running.has('models:' + jobId) || this.activeRegenSeqs(jobId).length > 0;
+  }
+  /** Item seqs currently regenerating copy (background) for this job. */
+  activeRegenSeqs(jobId) {
+    const prefix = 'regen:' + jobId + ':';
+    const out = [];
+    for (const key of this._running) {
+      if (key.startsWith(prefix)) {
+        const seq = Number(key.slice(prefix.length));
+        if (Number.isFinite(seq)) out.push(seq);
+      }
+    }
+    return out;
   }
   /** Delete a saved run and all its items. Refuses while it is actively executing. */
   deleteJob(jobId) {
@@ -452,12 +464,12 @@ class BulkJobManager {
       preview.enabledModels = normaliseEnabledModels(enabledModels);
       ai.enabledModels = preview.enabledModels; // honoured by the real create
       aiModelsDirty = true;
-      // Keep the description's "Device Compatibility" consistent with the offered
-      // models (cheap, no AI) — strips bullets for models no longer available.
-      if (preview.description) {
-        preview.description = filterModelsInDescription(preview.description, preview.enabledModels);
-        if (ai.description) ai.description = filterModelsInDescription(ai.description, preview.enabledModels);
-      }
+      // Keep the description's "Device Compatibility" AND the title's device range
+      // consistent with the offered models (cheap, no AI re-run).
+      if (preview.description) preview.description = filterModelsInDescription(preview.description, preview.enabledModels);
+      if (ai.description) ai.description = filterModelsInDescription(ai.description, preview.enabledModels);
+      if (preview.title) preview.title = retitleForModels(preview.title, preview.enabledModels);
+      if (ai.title) ai.title = retitleForModels(ai.title, preview.enabledModels);
     } else if (!preview.enabledModels || !Object.keys(preview.enabledModels).length) {
       preview.enabledModels = normaliseEnabledModels(ai.enabledModels);
     }
@@ -478,6 +490,7 @@ class BulkJobManager {
     this._updateItem(jobId, item.product_folder, {
       preview_json: JSON.stringify(preview),
       ...(aiDirty || aiModelsDirty ? { ai_json: JSON.stringify(ai) } : {}),
+      ...(aiModelsDirty && preview.title ? { title: preview.title } : {}),
     });
 
     let pushed = false;
@@ -485,6 +498,15 @@ class BulkJobManager {
       const { shopClient, numericShopId } = await this.resolveShopClient(job.shop_name);
       let checkpoint = {};
       try { checkpoint = item.checkpoint_json ? JSON.parse(item.checkpoint_json) : {}; } catch { checkpoint = {}; }
+      // If the model change rewrote the title/description, push them to the live listing.
+      if (aiModelsDirty) {
+        try {
+          const patch = {};
+          if (preview.title) patch.title = preview.title;
+          if (preview.description) patch.description = preview.description;
+          if (Object.keys(patch).length) await updateListing(shopClient, numericShopId, item.listing_id, patch);
+        } catch { /* non-fatal */ }
+      }
       await repriceListing({
         shopClient, shopId: numericShopId, listingId: item.listing_id,
         prices: preview.stylePrices || {},
@@ -499,8 +521,8 @@ class BulkJobManager {
       pushed = true;
     }
     const enabledCount = STYLE_ORDER.filter((k) => preview.enabledStyles[k]).length;
-    this._emit(jobId, { type: 'prices', folder: item.product_folder, seq: item.seq, stylePrices: preview.stylePrices, minPrice: preview.minPrice, enabledStyles: preview.enabledStyles, enabledModels: preview.enabledModels, pushed });
-    return { ok: true, pushed, enabledStyles: preview.enabledStyles, enabledModels: preview.enabledModels, stylePrices: preview.stylePrices, minPrice: preview.minPrice, enabledCount, styleImageMapping: preview.styleImageMapping || {} };
+    this._emit(jobId, { type: 'prices', folder: item.product_folder, seq: item.seq, stylePrices: preview.stylePrices, minPrice: preview.minPrice, enabledStyles: preview.enabledStyles, enabledModels: preview.enabledModels, title: aiModelsDirty ? preview.title : undefined, pushed });
+    return { ok: true, pushed, enabledStyles: preview.enabledStyles, enabledModels: preview.enabledModels, stylePrices: preview.stylePrices, minPrice: preview.minPrice, enabledCount, styleImageMapping: preview.styleImageMapping || {}, title: preview.title, description: preview.description };
   }
 
   /**
@@ -607,12 +629,18 @@ class BulkJobManager {
 
           preview.enabledModels = models;
           ai.enabledModels = models;
+          // Keep BOTH the description compatibility list AND the title's device
+          // range in sync with the new models — no AI re-run needed.
           if (preview.description) preview.description = filterModelsInDescription(preview.description, models);
           if (ai.description) ai.description = filterModelsInDescription(ai.description, models);
+          if (preview.title) preview.title = retitleForModels(preview.title, models);
+          if (ai.title) ai.title = retitleForModels(ai.title, models);
 
+          const newTitle = preview.title || ai.title || item.title;
           this._updateItem(jobId, item.product_folder, {
             preview_json: JSON.stringify(preview),
             ai_json: JSON.stringify(ai),
+            ...(newTitle ? { title: newTitle } : {}),
           });
           updated++;
 
@@ -632,10 +660,16 @@ class BulkJobManager {
               enabledModels: models,
               readinessStateId: (preview.settings && preview.settings.readiness_state_id) || null,
             });
-            try { await updateListing(shopCtx.shopClient, shopCtx.numericShopId, item.listing_id, { description: preview.description }); } catch { /* non-fatal */ }
+            // Push the updated title + description to the live listing.
+            try {
+              const patch = {};
+              if (preview.description) patch.description = preview.description;
+              if (newTitle) patch.title = newTitle;
+              if (Object.keys(patch).length) await updateListing(shopCtx.shopClient, shopCtx.numericShopId, item.listing_id, patch);
+            } catch { /* non-fatal */ }
             pushed++;
           }
-          this._emit(jobId, { type: 'bulk_models_item', folder: item.product_folder, seq: item.seq, enabledModels: models, done: updated });
+          this._emit(jobId, { type: 'bulk_models_item', folder: item.product_folder, seq: item.seq, enabledModels: models, title: newTitle, done: updated });
         } catch (err) {
           failed++;
           this._emit(jobId, { type: 'bulk_models_item_failed', folder: item.product_folder, seq: item.seq, error: err.response?.data?.error || err.message });
@@ -651,15 +685,53 @@ class BulkJobManager {
 
   // ── Character correction (human-in-the-loop) ───────────────────────────────────
   /**
-   * Regenerate a single product's copy (Phase-2 only) — optionally with a human-
-   * corrected character name. Updates the cached copy + preview, and for a
-   * created (real) listing pushes the new title/description/tags to Etsy.
+   * Kick off a single product's copy regeneration as a DETACHED background task
+   * (Phase-2 only). Validates synchronously (so the caller still gets 404/400/409
+   * errors), then returns immediately with `{ started: true }`. The actual AI
+   * work + Etsy push runs independently of the HTTP request and streams its
+   * result over SSE (`regen_start` / `item` / `regen_done` / `regen_failed`), so
+   * the operator can leave the page and the regeneration still completes.
    */
-  async regenerateItemCopy(jobId, seq, { characterName, magsafe, enabledModels, enabledStyles } = {}) {
+  startRegenerateItemCopy(jobId, seq, opts = {}) {
     const job = this.getJob(jobId);
     if (!job) { const e = new Error('Job not found'); e.status = 404; throw e; }
     const item = this.getItemBySeq(jobId, seq);
     if (!item) { const e = new Error('Item not found'); e.status = 404; throw e; }
+
+    // Quick precheck: there must be something to regenerate from.
+    let ai = {};
+    try { ai = item.ai_json ? JSON.parse(item.ai_json) : {}; } catch { ai = {}; }
+    let preview = {};
+    try { preview = item.preview_json ? JSON.parse(item.preview_json) : {}; } catch { preview = {}; }
+    const imageAnalysis = ai.imageAnalysis || preview.imageAnalysis || [];
+    if (!imageAnalysis.length && !opts.characterName) {
+      const e = new Error('No cached image analysis to regenerate from.'); e.status = 400; throw e;
+    }
+
+    // Per-item guard: allow different items to regenerate in parallel, but block
+    // a duplicate regeneration of the SAME item.
+    const key = 'regen:' + jobId + ':' + item.seq;
+    if (this._running.has(key)) { const e = new Error('This listing is already regenerating.'); e.status = 409; throw e; }
+    this._running.add(key);
+
+    this._runRegenerateItemCopy(jobId, item, job, opts)
+      .catch((err) => this._emit(jobId, {
+        type: 'regen_failed', folder: item.product_folder, seq: item.seq,
+        error: err.response?.data?.error || err.message,
+      }))
+      .finally(() => this._running.delete(key));
+
+    return { started: true, seq: item.seq };
+  }
+
+  /**
+   * Regenerate a single product's copy (Phase-2 only) — optionally with a human-
+   * corrected character name. Updates the cached copy + preview, and for a
+   * created (real) listing pushes the new title/description/tags to Etsy.
+   * Runs detached from the HTTP request; emits SSE progress events.
+   */
+  async _runRegenerateItemCopy(jobId, item, job, { characterName, magsafe, enabledModels, enabledStyles, styleImageMapping } = {}) {
+    this._emit(jobId, { type: 'regen_start', folder: item.product_folder, seq: item.seq });
 
     let ai = {};
     try { ai = item.ai_json ? JSON.parse(item.ai_json) : {}; } catch { ai = {}; }
@@ -667,9 +739,6 @@ class BulkJobManager {
     try { preview = item.preview_json ? JSON.parse(item.preview_json) : {}; } catch { preview = {}; }
     const imageAnalysis = ai.imageAnalysis || preview.imageAnalysis || [];
     const productSummary = ai.productSummary || {};
-    if (!imageAnalysis.length && !characterName) {
-      const e = new Error('No cached image analysis to regenerate from.'); e.status = 400; throw e;
-    }
 
     // Resolve which iPhone models to advertise: an explicit override wins,
     // otherwise reuse the item's existing selection (default all 12).
@@ -704,9 +773,19 @@ class BulkJobManager {
       }
     } catch { attributeMenu = null; }
 
+    // Preserve the operator's manually-linked variation images across a copy
+    // regeneration (regenerate only rewrites text — it must NOT re-derive links).
+    // Precedence: explicit request mapping (latest UI state) > saved preview > ai.
+    const explicitImages = (styleImageMapping && typeof styleImageMapping === 'object' && Object.keys(styleImageMapping).length)
+      ? this._sanitizeStyleImageMapping(styleImageMapping, preview)
+      : null;
+    const savedStyleImages = explicitImages
+      || (preview.styleImageMapping && Object.keys(preview.styleImageMapping).length ? preview.styleImageMapping : (ai.styleImageMapping || null));
+
     const copy = await generateCopyFromAnalysis({
       imageAnalysis, productSummary, characterOverride: characterName,
-      shopName: job.shop_name, brandTags, enabledModels: modelsForCopy, enabledStyles: stylesForCopy, attributeMenu,
+      shopName: job.shop_name, brandTags, enabledModels: modelsForCopy, enabledStyles: stylesForCopy,
+      styleImageMapping: savedStyleImages, attributeMenu,
     });
     // Persist the (possibly overridden) image analysis so the corrected MagSafe
     // state sticks for future regenerations and the real create.
@@ -742,6 +821,10 @@ class BulkJobManager {
       pushed = true;
     }
     this._emit(jobId, { type: 'item', folder: item.product_folder, seq: item.seq, status: item.status, title: copy.title });
+    this._emit(jobId, {
+      type: 'regen_done', folder: item.product_folder, seq: item.seq,
+      title: copy.title, character: copy.characterName, characterConfidence: copy.characterConfidence, pushed,
+    });
     return { ok: true, pushed, title: copy.title, character: copy.characterName, characterConfidence: copy.characterConfidence };
   }
   _updateJob(jobId, fields) {
@@ -954,7 +1037,19 @@ class BulkJobManager {
       this._emit(jobId, { type: 'job', state: 'running' });
 
       // Resolve shop client + settings once per run.
-      const { shopClient, numericShopId, shopCfg } = await this.resolveShopClient(job.shop_name);
+      const { shopClient, numericShopId, shopCfg, scopes } = await this.resolveShopClient(job.shop_name);
+
+      // Pre-flight: a real (non-dry) run creates/edits listings, which needs the
+      // listings_w OAuth scope. If the token is KNOWN to lack it, fail the whole
+      // run ONCE with a clear, actionable message instead of failing every item.
+      if (job.dry_run !== 1 && Array.isArray(scopes) && !scopes.includes('listings_w')) {
+        const e = new Error(
+          `This shop's Etsy token is missing the "listings_w" permission, so listings cannot be created. ` +
+          `Re-authorise ${job.shop_name}: run "npm run oauth:setup", pick this shop, and approve ALL scopes (incl. "List and edit listings"). Then retry.`,
+        );
+        e.status = 403;
+        throw e;
+      }
       const settings = await getShopListingSettings({
         db: this.db, shopClient, shopId: numericShopId, shopKey: job.shop_key, force: false,
       });
@@ -1084,7 +1179,11 @@ class BulkJobManager {
             listing_id: result.listing_id, url: result.url, title: copy.title,
           });
         } catch (err) {
-          const msg = err.response?.data?.error || err.response?.data?.error_description || err.message;
+          let msg = err.response?.data?.error || err.response?.data?.error_description || err.message;
+          // Make the "missing scope" failure actionable instead of cryptic.
+          if (/lacks scope|requires scope|listings_w/i.test(msg || '')) {
+            msg = `Etsy token is missing the "listings_w" permission — re-run "npm run oauth:setup" for ${job.shop_name} and approve ALL scopes, then retry.`;
+          }
           this._updateItem(jobId, item.product_folder, { status: 'failed', error: msg });
           failed++;
           this._emit(jobId, { type: 'item', folder: item.product_folder, status: 'failed', error: msg });

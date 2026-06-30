@@ -17,6 +17,7 @@
 const Database = require('better-sqlite3');
 const fs = require('fs');
 const path = require('path');
+const { deriveVariationLabels } = require('../inventory/helpers');
 
 /** @type {Database.Database | null} */
 let _db = null;
@@ -99,10 +100,42 @@ function initDb(dbPath) {
 
   const db = new Database(dbPath);
 
-  // WAL mode: allows concurrent reads while a write is in progress.
-  // Critical for the sync worker writing while the UI reads.
+  // WAL mode: concurrent reads while writes are in progress (server + sync worker).
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+
+  // ── Performance PRAGMAs ────────────────────────────────────────────────────
+  // busy_timeout: retry for up to 5 s before throwing SQLITE_BUSY when two
+  //   processes race to write. Without this the server throws immediately if
+  //   the sync worker holds the write lock, causing "database is locked" errors
+  //   on route-assignment saves, manual-order creates, etc.
+  db.pragma('busy_timeout = 5000');
+
+  // synchronous = NORMAL: safe for WAL mode (power-failure can only lose the
+  //   last committed transaction, never corrupt the file), and 3-5× faster
+  //   than the default FULL because it skips the expensive pre-write fsync.
+  db.pragma('synchronous = NORMAL');
+
+  // cache_size = -65536: 64 MB page cache (default is -2000 = 2 MB).
+  //   Keeping the receipt + listing pages hot in memory cuts read latency for
+  //   the Orders and Listings tabs from ~20 ms to <1 ms after the first load.
+  db.pragma('cache_size = -65536');
+
+  // mmap_size = 256 MB: memory-mapped I/O.  Reads bypass pread() syscalls and
+  //   go straight from the OS page cache to the process address space — a
+  //   meaningful win on Windows where syscall overhead is higher than on Linux.
+  db.pragma('mmap_size = 268435456');
+
+  // temp_store = MEMORY: sort / index-build temp tables live in RAM, not the
+  //   temp-file directory.  Avoids extra I/O during ORDER BY / GROUP BY on the
+  //   large receipts table.
+  db.pragma('temp_store = MEMORY');
+
+  // wal_autocheckpoint = 10000: checkpoint the WAL into the main DB file every
+  //   10 000 pages (≈ 40 MB) rather than the default 1 000 pages.  Reduces
+  //   checkpoint overhead during heavy sync cycles; the WAL stays small and
+  //   readable-by-readers throughout.
+  db.pragma('wal_autocheckpoint = 10000');
 
   db.exec(`
     -- ─────────────────────────────────────────────
@@ -179,6 +212,43 @@ function initDb(dbPath) {
     CREATE INDEX IF NOT EXISTS idx_transactions_receipt ON transactions(receipt_id);
 
     -- ─────────────────────────────────────────────
+    -- Payment-account ledger entries — the authoritative financial record.
+    -- One row per Etsy ledger entry (sale posting, fee, tax, refund, payout).
+    -- Amounts are integer minor units (cents) in the shop's PAYOUT currency.
+    -- receipt_id is our resolved attribution (NULL for shop-level entries like
+    -- subscriptions, listing renewals, Etsy Ads, and disbursements).
+    -- ─────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS ledger_entries (
+      entry_id        INTEGER PRIMARY KEY,
+      shop_id         TEXT NOT NULL,
+      sequence_number INTEGER,
+      amount_cents    INTEGER NOT NULL,
+      currency        TEXT,
+      ledger_type     TEXT,
+      reference_type  TEXT,
+      reference_id    TEXT,
+      description     TEXT,
+      balance_cents   INTEGER,
+      create_date     INTEGER,
+      receipt_id      INTEGER,
+      category        TEXT,
+      synced_at       INTEGER DEFAULT (strftime('%s', 'now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ledger_shop_date ON ledger_entries(shop_id, create_date DESC);
+    CREATE INDEX IF NOT EXISTS idx_ledger_receipt   ON ledger_entries(receipt_id);
+    CREATE INDEX IF NOT EXISTS idx_ledger_category  ON ledger_entries(shop_id, category);
+
+    -- payment_id → receipt_id map (the /payments money fields are unreliable, but
+    -- this linkage is solid; used to attribute gross & processing-fee entries).
+    CREATE TABLE IF NOT EXISTS etsy_payments (
+      payment_id INTEGER PRIMARY KEY,
+      shop_id    TEXT,
+      receipt_id INTEGER,
+      synced_at  INTEGER DEFAULT (strftime('%s', 'now'))
+    );
+
+    -- ─────────────────────────────────────────────
     -- Sync log: audit trail of every sync attempt
     -- ─────────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS sync_log (
@@ -194,6 +264,22 @@ function initDb(dbPath) {
     );
 
     CREATE INDEX IF NOT EXISTS idx_sync_log_shop ON sync_log(shop_id, started_at DESC);
+
+    -- ─────────────────────────────────────────────
+    -- App-wide advisory locks (cross-process mutex)
+    -- Used to guarantee that only ONE process runs a given background job at a
+    -- time — even if several copies of the server/worker are accidentally
+    -- launched at once (PM2 + a stray IDE/terminal instance, the standalone
+    -- sync worker alongside the embedded scheduler, etc.).
+    -- A lock is "held" while heartbeat_at is within its TTL; a crashed holder's
+    -- lock is reclaimed automatically once the heartbeat goes stale.
+    -- ─────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS app_locks (
+      name         TEXT PRIMARY KEY,
+      owner        TEXT,
+      acquired_at  INTEGER,
+      heartbeat_at INTEGER
+    );
 
     -- ─────────────────────────────────────────────
     -- Listing image cache: listing_id → thumbnail URL
@@ -280,45 +366,6 @@ function initDb(dbPath) {
     );
     CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_events_type    ON events(event_type);
-
-    -- ─────────────────────────────────────────────
-    -- Conversations: Etsy buyer/seller message threads
-    -- Populated by the conversation sync pass (server cron + manual trigger).
-    -- NOTE: Etsy's public v3 API does not expose conversations.
-    -- These are synced via Etsy's undocumented internal v3 endpoints,
-    -- which require the conversations_r / conversations_w OAuth scopes.
-    -- ─────────────────────────────────────────────
-    CREATE TABLE IF NOT EXISTS conversations (
-      convo_id          TEXT    PRIMARY KEY,
-      shop_id           TEXT    NOT NULL REFERENCES shops(shop_id),
-      group_id          TEXT    NOT NULL,
-      buyer_user_id     INTEGER,
-      buyer_name        TEXT,
-      subject           TEXT,
-      status            TEXT    DEFAULT 'unread',
-      unread_count      INTEGER DEFAULT 0,
-      last_message_at   INTEGER,
-      linked_receipt_id INTEGER,
-      synced_at         INTEGER DEFAULT (strftime('%s', 'now'))
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_convos_shop_time ON conversations(shop_id, last_message_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_convos_status    ON conversations(status);
-
-    -- ─────────────────────────────────────────────
-    -- Conversation messages: individual messages within a thread
-    -- ─────────────────────────────────────────────
-    CREATE TABLE IF NOT EXISTS conversation_messages (
-      message_id   TEXT    PRIMARY KEY,
-      convo_id     TEXT    NOT NULL REFERENCES conversations(convo_id),
-      shop_id      TEXT    NOT NULL,
-      sender_type  TEXT    NOT NULL,  -- 'buyer' | 'seller'
-      body         TEXT,
-      created_at   INTEGER,
-      read_at      INTEGER
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_convo_msgs_convo ON conversation_messages(convo_id, created_at);
 
     -- ─────────────────────────────────────────────
     -- Route assignments — the human-in-the-loop layer for the Shopping Route
@@ -576,6 +623,61 @@ function initDb(dbPath) {
       payload_json    TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_purchase_sync_runs_created ON purchase_sync_runs(created_at DESC);
+
+    -- ─────────────────────────────────────────────────────────────────
+    -- order_issues: structured fulfilment-exception workflow for orders whose
+    --   product can no longer be supplied as the buyer ordered it. Replaces the
+    --   ad-hoc "archive with a reason" overload for two concrete situations:
+    --
+    --     • out_of_production — the manufacturer discontinued the product, so the
+    --                           whole listing must be removed from Etsy and the
+    --                           buyer asked to switch design or take a refund.
+    --     • model_unavailable — the supplier no longer offers the phone model the
+    --                           buyer chose, so that model must be removed from the
+    --                           Etsy listing and the buyer asked to switch or refund.
+    --     • other             — any other operator-defined blocker.
+    --
+    --   One row per AFFECTED LINE-ITEM, keyed by (receipt_id, item_key) — the SAME
+    --   listing-scoped key route/dashboard.lineItemKey(title, listing_id) uses — so
+    --   an open issue maps 1:1 onto its Route-tab row and ONLY that product is held
+    --   out of the purchasing Route (the order's other products keep flowing).
+    --
+    --   Lifecycle (status): 'open' → 'resolved'. While OPEN the line is excluded
+    --   from the Route's purchasing dashboard + generation (we must never buy a
+    --   product the buyer may cancel/swap). RESOLVED issues are kept for the record
+    --   and stop excluding the line.
+    --
+    --   Operator workflow checklist (each step stamps an epoch when done):
+    --     buyer_notified_at  — operator messaged the buyer on Etsy (Etsy API v3 has
+    --                          no messaging endpoint, so this records a manual send).
+    --     listing_handled_at — the Etsy listing action was carried out, recorded in
+    --                          listing_action: 'deleted' | 'model_removed' | 'none'.
+    --     resolved_at        — issue closed; resolution: 'switched' | 'refunded' |
+    --                          'cancelled' | 'other'.
+    --
+    --   Purely local/operational; never overwritten by upsertReceipt re-syncs.
+    -- ─────────────────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS order_issues (
+      id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+      receipt_id         INTEGER NOT NULL,
+      item_key           TEXT    NOT NULL,
+      listing_id         INTEGER,
+      title              TEXT,
+      phone_model        TEXT,
+      issue_type         TEXT    NOT NULL,
+      status             TEXT    NOT NULL DEFAULT 'open',
+      note               TEXT,
+      buyer_notified_at  INTEGER,
+      listing_handled_at INTEGER,
+      listing_action     TEXT,
+      resolution         TEXT,
+      created_at         INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      updated_at         INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      resolved_at        INTEGER,
+      UNIQUE(receipt_id, item_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_order_issues_receipt ON order_issues(receipt_id);
+    CREATE INDEX IF NOT EXISTS idx_order_issues_status  ON order_issues(status);
   `);
 
   // ── Migrations ────────────────────────────────────────────────────────────
@@ -585,6 +687,21 @@ function initDb(dbPath) {
   const syncLogCols = db.pragma('table_info(sync_log)').map((c) => c.name);
   if (!syncLogCols.includes('egress_ip')) {
     db.exec(`ALTER TABLE sync_log ADD COLUMN egress_ip TEXT`);
+  }
+
+  // Persisted active-listing count per shop (Overview "Active Listings" column).
+  // Cached here so the Overview renders a real number instantly and reliably,
+  // independent of any live Etsy round-trip. Refreshed on every sync via getShop.
+  const shopCols = db.pragma('table_info(shops)').map((c) => c.name);
+  if (!shopCols.includes('listing_active_count')) {
+    db.exec(`ALTER TABLE shops ADD COLUMN listing_active_count INTEGER`);
+  }
+  if (!shopCols.includes('listing_count_synced_at')) {
+    db.exec(`ALTER TABLE shops ADD COLUMN listing_count_synced_at INTEGER`);
+  }
+  // High-water mark (max ledger create_date synced) for incremental earnings sync.
+  if (!shopCols.includes('ledger_synced_at')) {
+    db.exec(`ALTER TABLE shops ADD COLUMN ledger_synced_at INTEGER`);
   }
 
   // Shipping address + product columns on receipts — added after initial release.
@@ -645,6 +762,42 @@ function initDb(dbPath) {
     ['fourpx_order_status',    'TEXT'],
     // Unix epoch when the 4PX order was created via the dashboard. Immutable once set.
     ['fourpx_created_at',      'INTEGER'],
+
+    // ── 4PX Shipping Cost (freight) ───────────────────────────────────────────
+    // Populated by the freight sync pass (src/workers/sync.js → runFreightSyncPass)
+    // and the on-demand endpoints, which call ds.xms.order.getFreight for orders
+    // that have a 4PX consignment. 4PX only finalizes (bills) the freight AFTER it
+    // physically weighs the parcel, so the cost has a lifecycle:
+    //   NULL/'pending' = consignment exists but 4PX hasn't computed a charge yet.
+    //   'billed'       = 4PX returned a real freight charge (authoritative cost).
+    //   'error'        = the last freight query failed (see fourpx_freight_fetched_at).
+
+    // Total billed freight charge — the headline shipping cost for this order.
+    ['fourpx_freight_amount',   'REAL'],
+    // ISO currency of fourpx_freight_amount as returned by 4PX (e.g. 'USD', 'CNY').
+    ['fourpx_freight_currency', 'TEXT'],
+    // Chargeable/billed weight 4PX used to compute the freight, in GRAMS (best-effort).
+    ['fourpx_billed_weight_g',  'INTEGER'],
+    // JSON array of the itemized fee breakdown ([{type,name,amount,currency}, …]).
+    // Stored so the UI can show "freight + fuel + remote-area surcharge" detail.
+    ['fourpx_freight_breakdown','TEXT'],
+    // Cost lifecycle status:
+    //   'pending'   = consignment exists, no cost resolved yet.
+    //   'estimated' = live rate-card cost from ds.xms.estimated_cost.get (available
+    //                 immediately; what the 4PX portal shows at measurement time).
+    //   'billed'    = truly-settled cost from ds.xms.order.getFreight (authoritative;
+    //                 supersedes an estimate once 4PX financially settles the order).
+    //   'error'     = the last cost query failed.
+    ['fourpx_freight_status',   'TEXT'],
+    // Unix epoch of the last successful (or attempted) freight query for this order.
+    // Used to rate-limit re-queries in the sync worker. NULL = never queried.
+    ['fourpx_freight_fetched_at','INTEGER'],
+    // The logistics_product_code used for this shipment (e.g. 'S5058'), captured at
+    // order-creation time. Needed to price the order via ds.xms.estimated_cost.get.
+    ['fourpx_product_code',     'TEXT'],
+    // The DECLARED parcel weight (grams) sent at order-creation time. Used as the
+    // weight input to the estimated-cost lookup until 4PX returns a billed charge weight.
+    ['fourpx_weight_g',         'INTEGER'],
 
     // ── Operator Archive (stuck pre-transit orders) ───────────────────────────
     // Sometimes a shipping label is created with the WRONG tracking number, so the
@@ -802,10 +955,13 @@ function initDb(dbPath) {
 
   // If shipment_notified_at already exists but wasn't populated during the backfill
   // (e.g., column existed but was NULL), backfill it from raw_json now.
+  // Note: the LIKE '%shipment_notification_timestamp%' was removed — it caused a
+  // full table scan on raw_json (O(n) text match) on every startup.  The index on
+  // shipment_notified_at + is_shipped is fast enough; the inner loop only parses
+  // JSON for rows that actually need a value set, so there's no extra overhead.
   const nullNotified = db.prepare(`
     SELECT COUNT(*) as cnt FROM receipts
     WHERE shipment_notified_at IS NULL AND is_shipped = 1
-    AND raw_json LIKE '%shipment_notification_timestamp%'
   `).get();
   if (nullNotified.cnt > 0) {
     const rows = db.prepare(`
@@ -827,6 +983,27 @@ function initDb(dbPath) {
     });
     fill();
     console.log(`[db] Backfilled shipment_notified_at for ${nullNotified.cnt} receipt(s)`);
+  }
+
+  // Repair locally-completed orders that never got a shipment_notification_timestamp
+  // from Etsy (they were shipped/completed from the dashboard while the receipt
+  // sync was paused/rate-limited, so raw_json has no shipment yet). Without a
+  // shipment_notified_at they fail the Pre-transit / Ready-to-pack filters and are
+  // wrongly treated as In-transit, vanishing from the pack queue. Stamp an ACCURATE
+  // proxy ship time (when the 4PX shipment / order was last touched) — never "now",
+  // so the pre_transit_days window stays correct: genuinely old orders still read as
+  // In-transit, recent ones correctly read as Pre-transit / Ready-to-pack. Idempotent
+  // and effectively one-time: new local completions stamp the field themselves.
+  const repaired = db.prepare(`
+    UPDATE receipts
+    SET shipment_notified_at = COALESCE(fourpx_created_at, etsy_updated_at, synced_at)
+    WHERE shipment_notified_at IS NULL
+      AND is_shipped = 1
+      AND tracking_code IS NOT NULL
+      AND COALESCE(fourpx_created_at, etsy_updated_at, synced_at) IS NOT NULL
+  `).run();
+  if (repaired.changes > 0) {
+    console.log(`[db] Repaired shipment_notified_at for ${repaired.changes} locally-completed order(s) (restores Ready-to-pack/Pre-transit)`);
   }
 
   // ── route_assignments migrations ─────────────────────────────────────────
@@ -920,12 +1097,67 @@ function initDb(dbPath) {
   // assignments bleeding across different products that share a title prefix).
   migrateRouteKeysToListingScope(db);
 
+  // One-time migration of the retired "Archive" feature into the Issues system.
+  // Out-of-production archives become open per-line Issues; everything else is
+  // restored to the active views. Idempotent (it only ever looks at still-archived
+  // rows, and clears archived_at as it goes).
+  migrateArchivedOrdersToIssues(db);
+
   // Synthetic shop/group that owns every manual order (must exist before any
   // manual receipt is inserted, to satisfy the receipts→shops foreign key).
   seedManualOrderShop(db);
 
+  // Backfill the transactions table from already-stored receipts.raw_json so
+  // per-order earnings attribution (transaction-fee → receipt) works for the
+  // full order history without spending any Etsy API calls. Idempotent.
+  backfillTransactionsFromReceipts(db);
+
+  // Self-heal ledger categories against the current rules (e.g. so disbursements
+  // are always treated as transfers and excluded from net earnings). Cheap and
+  // idempotent — only rewrites rows whose category actually changed.
+  recategorizeLedgerEntries(db);
+
   _db = db;
   return db;
+}
+
+/**
+ * Populate the `transactions` table from each receipt's stored raw_json.
+ * Etsy includes the full `transactions[]` array in the receipt payload we
+ * already cache, so this is a pure local reshape — no network calls.
+ * Only runs work when there are receipts that have no transactions row yet.
+ *
+ * @param {Database.Database} db
+ */
+function backfillTransactionsFromReceipts(db) {
+  try {
+    const pending = db.prepare(`
+      SELECT r.receipt_id, r.shop_id, r.raw_json
+      FROM receipts r
+      WHERE r.raw_json IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.receipt_id = r.receipt_id)
+    `).all();
+    if (!pending.length) return;
+
+    let inserted = 0;
+    const run = db.transaction((rows) => {
+      for (const row of rows) {
+        let parsed;
+        try { parsed = JSON.parse(row.raw_json); } catch { continue; }
+        const txs = Array.isArray(parsed?.transactions) ? parsed.transactions : [];
+        for (const tx of txs) {
+          if (tx && tx.transaction_id) {
+            upsertTransaction(db, row.shop_id, { ...tx, receipt_id: tx.receipt_id ?? row.receipt_id });
+            inserted++;
+          }
+        }
+      }
+    });
+    run(pending);
+    if (inserted) console.log(`[db] Backfilled ${inserted} transaction(s) from ${pending.length} receipt(s) for earnings attribution`);
+  } catch (err) {
+    console.error('[db] transaction backfill failed (non-fatal):', err.message);
+  }
 }
 
 // Local copies of the dashboard's key helpers. Duplicated here (instead of
@@ -1122,22 +1354,92 @@ function upsertShop(db, shop) {
 }
 
 /**
+ * Reconcile the DB against config.json by removing shops (and now-empty groups)
+ * that were deleted from config — making config.json the single source of truth.
+ *
+ * SAFETY: this NEVER destroys order history. A shop is pruned only when it has
+ * zero rows in EVERY table that references it (receipts, transactions, events,
+ * listings, sync_log, route assignments, etc.). If any dependent
+ * data exists, the shop is kept and a warning is logged so the operator can
+ * decide what to do. The synthetic "Manual Orders" shop/group is always
+ * protected. The set of dependent tables is discovered dynamically from the
+ * schema, so it stays correct as new shop_id-bearing tables are added.
+ *
+ * @param {Database.Database} db
+ * @param {Set<string>} configShopIds   - shop_ids present in config.json
+ * @param {Set<string>} configGroupIds  - group_ids present in config.json
+ */
+function pruneRemovedShops(db, configShopIds, configGroupIds) {
+  // Tables (other than `shops` itself) that carry a shop_id column.
+  const dependentTables = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT IN ('shops', 'sqlite_sequence')`)
+    .all()
+    .map((r) => r.name)
+    .filter((name) =>
+      db.prepare(`PRAGMA table_info("${name}")`).all().some((col) => col.name === 'shop_id')
+    );
+
+  const dbShops = db.prepare('SELECT shop_id, group_id FROM shops').all();
+  for (const { shop_id: shopId } of dbShops) {
+    if (shopId === MANUAL_SHOP_ID) continue;       // never prune the synthetic shop
+    if (configShopIds.has(shopId)) continue;       // still in config — keep
+
+    let dependentRows = 0;
+    for (const table of dependentTables) {
+      dependentRows += db.prepare(`SELECT COUNT(*) AS n FROM "${table}" WHERE shop_id = ?`).get(shopId).n;
+      if (dependentRows > 0) break;
+    }
+
+    if (dependentRows > 0) {
+      console.warn(
+        `[config-sync] Shop "${shopId}" was removed from config.json but still has ` +
+        `data in the database — keeping it to preserve history. Delete its data ` +
+        `manually if you intend to remove it permanently.`
+      );
+      continue;
+    }
+
+    db.prepare('DELETE FROM shops WHERE shop_id = ?').run(shopId);
+    console.log(`[config-sync] Pruned shop "${shopId}" (removed from config.json, no data).`);
+  }
+
+  // Prune now-empty groups that no longer exist in config (except the synthetic one).
+  const dbGroups = db.prepare('SELECT group_id FROM groups').all();
+  for (const { group_id: groupId } of dbGroups) {
+    if (groupId === MANUAL_GROUP_ID) continue;
+    if (configGroupIds.has(groupId)) continue;
+    const remaining = db.prepare('SELECT COUNT(*) AS n FROM shops WHERE group_id = ?').get(groupId).n;
+    if (remaining === 0) {
+      db.prepare('DELETE FROM groups WHERE group_id = ?').run(groupId);
+      console.log(`[config-sync] Pruned empty group "${groupId}" (removed from config.json).`);
+    }
+  }
+}
+
+/**
  * Sync config groups and shops into the database on startup.
- * Ensures DB reflects any changes made to config.json.
+ * Ensures DB reflects any changes made to config.json — additions and updates
+ * are upserted, and shops/groups removed from config are pruned (when safe) so
+ * config.json remains the single source of truth.
  *
  * @param {Database.Database} db
  * @param {import('../config/schema').AppConfig} config
  */
 function syncConfigToDb(db, config) {
-  const upsertAll = db.transaction(() => {
+  const sync = db.transaction(() => {
+    const configShopIds = new Set();
+    const configGroupIds = new Set();
     for (const group of config.groups) {
+      configGroupIds.add(group.group_id);
       upsertGroup(db, group);
       for (const shop of group.shops) {
+        configShopIds.add(shop.shop_id);
         upsertShop(db, { ...shop, group_id: group.group_id });
       }
     }
+    pruneRemovedShops(db, configShopIds, configGroupIds);
   });
-  upsertAll();
+  sync();
 }
 
 /**
@@ -1293,7 +1595,11 @@ function upsertReceipt(db, shopId, groupId, receipt) {
  * @param {object} transaction - Raw transaction object from Etsy API
  */
 function upsertTransaction(db, shopId, transaction) {
-  const money = (obj) => (obj ? obj.amount / Math.pow(10, obj.divisor || 2) : null);
+  // Etsy Money objects: { amount: integer, divisor: integer, currency_code: string }
+  // divisor is the ACTUAL divisor (e.g. 100 → divide by 100 to get dollars),
+  // NOT a decimal exponent. Using Math.pow(10, divisor) is wrong: for USD
+  // divisor=100 that yields 10^100 (a googol), storing prices as ~0.
+  const money = (obj) => (obj && obj.divisor ? obj.amount / obj.divisor : null);
   const currency = (obj) => (obj ? obj.currency_code : null);
 
   db.prepare(`
@@ -1325,6 +1631,403 @@ function upsertTransaction(db, shopId, transaction) {
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Earnings / payment-account ledger
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Normalize an Etsy ledger entry into a coarse accounting category used by the
+ * Finance tab's breakdown. Driven by ledger_type (falling back to description).
+ * @param {string} ledgerType
+ * @param {string} [description]
+ * @returns {'sales'|'processing_fee'|'transaction_fee'|'tax'|'ads'|'listing_fee'|'subscription'|'refund'|'shipping_label'|'transfer'|'other'}
+ */
+function categorizeLedgerEntry(ledgerType, description, referenceType) {
+  const t  = String(ledgerType || description || '').toLowerCase();
+  const rt = String(referenceType || '').toLowerCase();
+
+  // ── Transfers / funding events — money moving between the Etsy balance and the
+  // seller's bank/card, NOT earnings. These MUST be excluded from net, or the
+  // total collapses to just the current undisbursed balance.
+  // Detected primarily by reference_type because Etsy's ledger_type strings vary
+  // (e.g. the disbursement type is "DISBURSE2", not "disbursement").
+  if (rt === 'disbursement' || rt === 'recoupment' || rt === 'billing_payment' ||
+      t.includes('disburse') || t.includes('recoup') ||
+      t.includes('bill_payment') || t.includes('billing_payment') ||
+      t.includes('deposit') || t.includes('withdrawal') || t.includes('payout')) {
+    return 'transfer';
+  }
+
+  if (t.includes('payment_gross') || t === 'payment')          return 'sales';
+  if (t.includes('processing_fee'))                            return 'processing_fee'; // incl. vat_on_processing_fees
+  if (t.includes('regulatory'))                                return 'regulatory_fee';
+  if (t.includes('shipping_transaction') || t.includes('transaction')) return 'transaction_fee';
+  if (t.includes('shipping_label') || t.includes('postage'))   return 'shipping_label';
+  if (t.includes('sales_tax') || t.includes('vat'))            return 'tax';
+  if (t.includes('prolist') || t.includes('offsite') || t.includes('etsy_ads') || t.includes('ads')) return 'ads';
+  if (t.includes('subscription') || t.includes('tier_') || t.includes('etsy_plus')) return 'subscription';
+  if (t.includes('renew') || t.includes('listing') || t.includes('publish')) return 'listing_fee';
+  if (t.includes('refund'))                                    return 'refund';
+  if (t.includes('misc') || t.includes('credit'))             return 'credit';
+  return 'other';
+}
+
+/**
+ * Resolve which receipt a ledger entry belongs to, using the entry's reference
+ * fields plus our local payment→receipt and transaction→receipt maps.
+ * Returns null for shop-level entries (subscriptions, ads, payouts, …).
+ */
+function resolveLedgerReceiptId(db, entry) {
+  const refType = String(entry.reference_type || '').toLowerCase();
+  const refId   = entry.reference_id != null ? String(entry.reference_id) : null;
+  if (!refId) return null;
+
+  if (refType === 'receipt') return Number(refId);
+
+  if (refType === 'shop_payment' || refType === 'processing_fee' || refType === 'payment') {
+    const row = db.prepare('SELECT receipt_id FROM etsy_payments WHERE payment_id = ?').get(refId);
+    return row?.receipt_id ?? null;
+  }
+
+  if (refType === 'transaction') {
+    const row = db.prepare('SELECT receipt_id FROM transactions WHERE transaction_id = ?').get(refId);
+    return row?.receipt_id ?? null;
+  }
+
+  return null;
+}
+
+/** Upsert a payment_id → receipt_id mapping row. */
+function upsertEtsyPayment(db, shopId, paymentId, receiptId) {
+  if (paymentId == null || receiptId == null) return;
+  db.prepare(`
+    INSERT INTO etsy_payments (payment_id, shop_id, receipt_id, synced_at)
+    VALUES (@payment_id, @shop_id, @receipt_id, strftime('%s','now'))
+    ON CONFLICT(payment_id) DO UPDATE SET
+      receipt_id = excluded.receipt_id,
+      synced_at  = excluded.synced_at
+  `).run({ payment_id: Number(paymentId), shop_id: shopId, receipt_id: Number(receiptId) });
+}
+
+/**
+ * Upsert one ledger entry, computing its category and resolved receipt_id.
+ * @param {Database.Database} db
+ * @param {string} shopId
+ * @param {object} e - raw PaymentAccountLedgerEntry from Etsy
+ * @returns {number} the resolved receipt_id, or 0/NULL-ish if shop-level
+ */
+function upsertLedgerEntry(db, shopId, e) {
+  const category   = categorizeLedgerEntry(e.ledger_type, e.description, e.reference_type);
+  const receiptId  = resolveLedgerReceiptId(db, e);
+  db.prepare(`
+    INSERT INTO ledger_entries (
+      entry_id, shop_id, sequence_number, amount_cents, currency,
+      ledger_type, reference_type, reference_id, description,
+      balance_cents, create_date, receipt_id, category, synced_at
+    ) VALUES (
+      @entry_id, @shop_id, @sequence_number, @amount_cents, @currency,
+      @ledger_type, @reference_type, @reference_id, @description,
+      @balance_cents, @create_date, @receipt_id, @category, strftime('%s','now')
+    )
+    ON CONFLICT(entry_id) DO UPDATE SET
+      amount_cents   = excluded.amount_cents,
+      balance_cents  = excluded.balance_cents,
+      description    = excluded.description,
+      receipt_id     = COALESCE(excluded.receipt_id, ledger_entries.receipt_id),
+      category       = excluded.category,
+      synced_at      = excluded.synced_at
+  `).run({
+    entry_id:        Number(e.entry_id),
+    shop_id:         shopId,
+    sequence_number: e.sequence_number ?? null,
+    amount_cents:    Math.round(Number(e.amount) || 0),
+    currency:        e.currency ?? null,
+    ledger_type:     e.ledger_type ?? null,
+    reference_type:  e.reference_type ?? null,
+    reference_id:    e.reference_id != null ? String(e.reference_id) : null,
+    description:     e.description ?? null,
+    balance_cents:   e.balance != null ? Math.round(Number(e.balance)) : null,
+    create_date:     e.create_date ?? e.created_timestamp ?? null,
+    receipt_id:      receiptId,
+    category,
+  });
+  return receiptId;
+}
+
+/**
+ * Recompute the stored `category` for every ledger row using the current
+ * categorization logic. Categories are a pure function of (ledger_type,
+ * reference_type), so this is a fast local reshape (no API calls) that
+ * self-heals historical rows whenever the rules change. Idempotent.
+ * @returns {number} rows updated
+ */
+function recategorizeLedgerEntries(db) {
+  let pairs;
+  try {
+    pairs = db.prepare('SELECT DISTINCT ledger_type, reference_type FROM ledger_entries').all();
+  } catch { return 0; }
+  if (!pairs.length) return 0;
+
+  const upd = db.prepare(`
+    UPDATE ledger_entries SET category = @cat
+    WHERE ledger_type IS @lt AND reference_type IS @rt AND category IS NOT @cat
+  `);
+  let changed = 0;
+  const run = db.transaction(() => {
+    for (const p of pairs) {
+      const cat = categorizeLedgerEntry(p.ledger_type, null, p.reference_type);
+      changed += upd.run({ cat, lt: p.ledger_type, rt: p.reference_type }).changes;
+    }
+  });
+  run();
+  if (changed) console.log(`[db] Re-categorized ${changed} ledger entr${changed === 1 ? 'y' : 'ies'} to current rules`);
+  return changed;
+}
+
+/**
+ * Re-resolve receipt_id for ledger rows that are still unattributed but now
+ * have a payment/transaction mapping available. Returns the number updated.
+ */
+function reattributeLedgerEntries(db, shopId) {
+  const rows = db.prepare(`
+    SELECT entry_id, reference_type, reference_id
+    FROM ledger_entries
+    WHERE shop_id = ? AND receipt_id IS NULL AND reference_id IS NOT NULL
+  `).all(shopId);
+  let updated = 0;
+  const upd = db.prepare('UPDATE ledger_entries SET receipt_id = ? WHERE entry_id = ?');
+  const run = db.transaction(() => {
+    for (const r of rows) {
+      const rid = resolveLedgerReceiptId(db, r);
+      if (rid != null) { upd.run(rid, r.entry_id); updated++; }
+    }
+  });
+  run();
+  return updated;
+}
+
+/** Update a shop's ledger high-water mark (max create_date synced). */
+function updateShopLedgerSyncTime(db, shopId, epoch) {
+  db.prepare('UPDATE shops SET ledger_synced_at = ? WHERE shop_id = ?')
+    .run(Math.trunc(epoch), shopId);
+}
+
+/**
+ * Earnings summary grouped by shop and currency for a date window.
+ * Net excludes 'transfer' (disbursements/payouts) since those move the balance
+ * out to the bank rather than representing earnings.
+ *
+ * @param {Database.Database} db
+ * @param {object} opts
+ * @param {number} [opts.from] - unix seconds inclusive
+ * @param {number} [opts.to]   - unix seconds inclusive
+ * @param {string} [opts.shopId] - limit to one shop
+ * @returns {{ byShop: object[], byCurrency: object[], byCategory: object[] }}
+ */
+function getEarningsSummary(db, opts = {}) {
+  // Columns are qualified with the `l.` (ledger_entries) alias because byShop
+  // joins the shops table, which also has a shop_id column — an unqualified
+  // reference would be "ambiguous column name: shop_id".
+  const where = ['1=1'];
+  const params = {};
+  if (opts.from != null) { where.push('l.create_date >= @from'); params.from = opts.from; }
+  if (opts.to   != null) { where.push('l.create_date <= @to');   params.to   = opts.to; }
+  if (opts.shopId)       { where.push('l.shop_id = @shopId');     params.shopId = opts.shopId; }
+  const W = where.join(' AND ');
+
+  const byShop = db.prepare(`
+    SELECT l.shop_id, s.shop_name, l.currency,
+      SUM(CASE WHEN l.category='sales'    THEN l.amount_cents ELSE 0 END) AS gross_cents,
+      SUM(CASE WHEN l.category IN ('processing_fee','transaction_fee','regulatory_fee','ads','listing_fee','subscription','shipping_label','credit','other') THEN l.amount_cents ELSE 0 END) AS fees_cents,
+      SUM(CASE WHEN l.category='tax'      THEN l.amount_cents ELSE 0 END) AS tax_cents,
+      SUM(CASE WHEN l.category='refund'   THEN l.amount_cents ELSE 0 END) AS refund_cents,
+      SUM(CASE WHEN l.category<>'transfer' THEN l.amount_cents ELSE 0 END) AS net_cents,
+      COUNT(*) AS entries
+    FROM ledger_entries l
+    LEFT JOIN shops s ON s.shop_id = l.shop_id
+    WHERE ${W}
+    GROUP BY l.shop_id, l.currency
+    ORDER BY net_cents DESC
+  `).all(params);
+
+  const byCurrency = db.prepare(`
+    SELECT l.currency,
+      SUM(CASE WHEN l.category='sales' THEN l.amount_cents ELSE 0 END) AS gross_cents,
+      SUM(CASE WHEN l.category<>'transfer' THEN l.amount_cents ELSE 0 END) AS net_cents,
+      SUM(CASE WHEN l.category NOT IN ('sales','transfer','tax','refund') THEN l.amount_cents ELSE 0 END) AS fees_cents,
+      SUM(CASE WHEN l.category='tax' THEN l.amount_cents ELSE 0 END) AS tax_cents,
+      SUM(CASE WHEN l.category='refund' THEN l.amount_cents ELSE 0 END) AS refund_cents
+    FROM ledger_entries l
+    WHERE ${W}
+    GROUP BY l.currency
+  `).all(params);
+
+  const byCategory = db.prepare(`
+    SELECT l.currency, l.category,
+      SUM(l.amount_cents) AS amount_cents, COUNT(*) AS entries
+    FROM ledger_entries l
+    WHERE ${W}
+    GROUP BY l.currency, l.category
+    ORDER BY l.currency, amount_cents
+  `).all(params);
+
+  return { byShop, byCurrency, byCategory };
+}
+
+/**
+ * Net profit for the current calendar month, per currency.
+ *
+ * Etsy's "Activity summary" headlines the month-to-date net profit ("Your
+ * current net profit on Etsy for this month is …"), independent of any custom
+ * date range the seller has chosen. We surface the same figure so the dashboard
+ * reconciles 1:1 with what Etsy shows, regardless of the Earnings tab's range
+ * filter. The month boundary is computed in the server's local time — the same
+ * frame Etsy uses for the seller's shop — and the window is open-ended on the
+ * upper side so it always means "month start → now".
+ *
+ * @param {Database.Database} db
+ * @param {object} opts
+ * @param {string} [opts.shopId] - limit to one shop
+ * @param {number} [opts.now]    - unix seconds, for deterministic testing
+ * @returns {{ from: number, label: string,
+ *             byCurrency: { currency: string, gross_cents: number,
+ *               net_cents: number, marketing_cents: number }[] }}
+ */
+function getCurrentMonthNet(db, opts = {}) {
+  const now = opts.now != null ? new Date(opts.now * 1000) : new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+  const from = Math.floor(start.getTime() / 1000);
+  const label = start.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+
+  const where = ['l.create_date >= @from'];
+  const params = { from };
+  if (opts.shopId) { where.push('l.shop_id = @shopId'); params.shopId = opts.shopId; }
+  const W = where.join(' AND ');
+
+  const byCurrency = db.prepare(`
+    SELECT l.currency,
+      SUM(CASE WHEN l.category='sales' THEN l.amount_cents ELSE 0 END) AS gross_cents,
+      SUM(CASE WHEN l.category<>'transfer' THEN l.amount_cents ELSE 0 END) AS net_cents,
+      SUM(CASE WHEN l.category='ads' THEN l.amount_cents ELSE 0 END) AS marketing_cents
+    FROM ledger_entries l
+    WHERE ${W}
+    GROUP BY l.currency
+  `).all(params);
+
+  return { from, label, byCurrency };
+}
+
+/**
+ * Per-order earnings for a date window: groups attributed ledger entries by
+ * receipt and joins order metadata. Offsite-Ads (ads) entries are shop-level
+ * and not included per order.
+ */
+function getPerOrderEarnings(db, opts = {}) {
+  const where = ['l.receipt_id IS NOT NULL'];
+  const params = {};
+  if (opts.from != null) { where.push('l.create_date >= @from'); params.from = opts.from; }
+  if (opts.to   != null) { where.push('l.create_date <= @to');   params.to   = opts.to; }
+  if (opts.shopId)       { where.push('l.shop_id = @shopId');     params.shopId = opts.shopId; }
+  params.limit  = Math.min(opts.limit ?? 500, 2000);
+  params.offset = opts.offset ?? 0;
+  const W = where.join(' AND ');
+
+  const rows = db.prepare(`
+    SELECT
+      l.receipt_id, l.shop_id, l.currency,
+      s.shop_name,
+      r.name AS buyer_name, r.etsy_created_at,
+      r.grandtotal_amount, r.grandtotal_currency,
+      -- 4PX shipment identity + resolved freight (estimate → billed). These are 1:1
+      -- with the receipt, so MAX() just satisfies the GROUP BY deterministically.
+      -- The public 4PX number is fourpx_tracking_no when the shipment was created in
+      -- the dashboard, else the 4PX tracking_code synced from Etsy.
+      MAX(COALESCE(r.fourpx_tracking_no, CASE WHEN r.tracking_code LIKE '4PX%' THEN r.tracking_code END)) AS fourpx_tracking_no,
+      MAX(r.fourpx_consignment_no)  AS fourpx_consignment_no,
+      MAX(r.fourpx_freight_amount)  AS fourpx_freight_amount,
+      MAX(r.fourpx_freight_currency) AS fourpx_freight_currency,
+      MAX(r.fourpx_freight_status)  AS fourpx_freight_status,
+      MAX(r.carrier_confirmed_at)   AS carrier_confirmed_at,
+      SUM(CASE WHEN l.category='sales'  THEN l.amount_cents ELSE 0 END) AS gross_cents,
+      SUM(CASE WHEN l.category='tax'    THEN l.amount_cents ELSE 0 END) AS tax_cents,
+      SUM(CASE WHEN l.category='refund' THEN l.amount_cents ELSE 0 END) AS refund_cents,
+      SUM(CASE WHEN l.category IN ('processing_fee','transaction_fee','listing_fee','shipping_label','other') THEN l.amount_cents ELSE 0 END) AS fees_cents,
+      SUM(CASE WHEN l.category<>'transfer' THEN l.amount_cents ELSE 0 END) AS net_cents,
+      MAX(l.create_date) AS posted_date
+    FROM ledger_entries l
+    LEFT JOIN shops s    ON s.shop_id    = l.shop_id
+    LEFT JOIN receipts r ON r.receipt_id = l.receipt_id
+    WHERE ${W}
+    GROUP BY l.receipt_id, l.currency
+    ORDER BY posted_date DESC
+    LIMIT @limit OFFSET @offset
+  `).all(params);
+
+  const total = db.prepare(`
+    SELECT COUNT(*) AS n FROM (
+      SELECT l.receipt_id FROM ledger_entries l
+      WHERE ${W} GROUP BY l.receipt_id, l.currency
+    )
+  `).get(params).n;
+
+  return { rows, total };
+}
+
+/** Quick per-shop ledger coverage stats for the UI (counts + last synced). */
+function getLedgerStats(db) {
+  return db.prepare(`
+    SELECT shop_id,
+      COUNT(*) AS entries,
+      MIN(create_date) AS first_date,
+      MAX(create_date) AS last_date
+    FROM ledger_entries GROUP BY shop_id
+  `).all();
+}
+
+/**
+ * Current payment-account balance per shop + currency.
+ *
+ * Etsy's `balance_cents` on each ledger entry is the running balance of the
+ * payment account immediately AFTER that entry posts (like a bank statement's
+ * running total). The current balance is therefore the balance on the most
+ * recent entry. "Most recent" is the row with the greatest (create_date,
+ * entry_id) — create_date is always present and entry_id is a monotonic PK, so
+ * this tiebreak is deterministic even when several entries share a timestamp.
+ *
+ * Balances are point-in-time, so they are intentionally NOT filtered by a date
+ * window — only (optionally) by shop. Currency is the shop's payout currency;
+ * a shop only ever has one, but we group defensively in case Etsy ever returns
+ * mixed-currency rows. Returns one row per shop+currency.
+ *
+ * @param {Database.Database} db
+ * @param {object} opts
+ * @param {string} [opts.shopId] - limit to one shop
+ * @returns {{ shop_id: string, shop_name: string|null, currency: string|null,
+ *             balance_cents: number, create_date: number|null }[]}
+ */
+function getShopBalances(db, opts = {}) {
+  const where = ['l.balance_cents IS NOT NULL'];
+  const params = {};
+  if (opts.shopId) { where.push('l.shop_id = @shopId'); params.shopId = opts.shopId; }
+  const W = where.join(' AND ');
+
+  return db.prepare(`
+    SELECT l.shop_id, s.shop_name, l.currency, l.balance_cents, l.create_date
+    FROM ledger_entries l
+    LEFT JOIN shops s ON s.shop_id = l.shop_id
+    WHERE ${W}
+      AND NOT EXISTS (
+        SELECT 1 FROM ledger_entries l2
+        WHERE l2.shop_id = l.shop_id
+          AND l2.currency IS l.currency
+          AND l2.balance_cents IS NOT NULL
+          AND ( l2.create_date > l.create_date
+                OR (l2.create_date = l.create_date AND l2.entry_id > l.entry_id) )
+      )
+    ORDER BY l.shop_id
+  `).all(params);
+}
+
 /**
  * Write a sync log entry and return its inserted row ID.
  * @param {Database.Database} db
@@ -1342,10 +2045,16 @@ function startSyncLog(db, shopId, groupId, egressIp = null) {
 }
 
 /**
- * Mark a sync log entry as completed or failed.
+ * Mark a sync log entry as completed, failed, or paused.
+ *
+ * 'rate_limited' is a transient, self-resolving state: the shop's API key hit
+ * Etsy's daily (QPD) budget. It is recorded distinctly from 'error' so the UI
+ * can surface it as an amber "will resume automatically" notice rather than a
+ * red failure that looks like it needs human action.
+ *
  * @param {Database.Database} db
  * @param {number} logId
- * @param {'success'|'error'} status
+ * @param {'success'|'error'|'rate_limited'} status
  * @param {number} [receiptsSynced=0]
  * @param {string|null} [errorMessage=null]
  */
@@ -1360,6 +2069,74 @@ function finishSyncLog(db, logId, status, receiptsSynced = 0, errorMessage = nul
   `).run({ id: logId, status, receipts_synced: receiptsSynced, error_message: errorMessage });
 }
 
+// ─── Cross-process advisory lock ──────────────────────────────────────────────
+//
+// A tiny mutex stored in SQLite so multiple OS processes that share the same DB
+// file (PM2-managed server, a stray IDE instance, the standalone sync worker…)
+// can coordinate. Only the holder whose heartbeat is fresh "owns" the lock;
+// once the heartbeat goes stale (holder crashed or was killed) any other process
+// may reclaim it. Acquisition is atomic via a single conditional UPDATE/INSERT
+// inside an IMMEDIATE transaction, so two racing processes can never both win.
+
+/**
+ * Try to acquire a named advisory lock.
+ *
+ * @param {Database.Database} db
+ * @param {string} name      - Lock name (e.g. 'sync_cycle')
+ * @param {string} owner     - Unique owner id for this process (e.g. `${host}:${pid}`)
+ * @param {number} ttlSec    - Seconds after which an un-renewed lock is considered stale
+ * @returns {boolean} true if the lock was acquired by this owner
+ */
+function acquireLock(db, name, owner, ttlSec) {
+  const txn = db.transaction(() => {
+    const now = Math.floor(Date.now() / 1000);
+    const staleBefore = now - ttlSec;
+    const row = db.prepare('SELECT owner, heartbeat_at FROM app_locks WHERE name = ?').get(name);
+
+    if (!row) {
+      db.prepare(`INSERT INTO app_locks (name, owner, acquired_at, heartbeat_at)
+                  VALUES (?, ?, ?, ?)`).run(name, owner, now, now);
+      return true;
+    }
+
+    // Already ours, or the previous holder's heartbeat is stale → (re)claim it.
+    if (row.owner === owner || (row.heartbeat_at ?? 0) < staleBefore) {
+      db.prepare(`UPDATE app_locks SET owner = ?, acquired_at = ?, heartbeat_at = ?
+                  WHERE name = ?`).run(owner, now, now, name);
+      return true;
+    }
+
+    return false; // held by a live owner
+  });
+
+  try {
+    return txn.immediate();
+  } catch {
+    // If two processes race the same write, SQLite raises SQLITE_BUSY for the
+    // loser — treat that as "did not acquire" rather than throwing.
+    return false;
+  }
+}
+
+/**
+ * Refresh the heartbeat on a lock this process holds, so long-running jobs
+ * keep the lock alive past its TTL. No-op if we are not the current owner.
+ * @returns {boolean} true if the heartbeat was refreshed (we still hold it)
+ */
+function renewLock(db, name, owner) {
+  const now = Math.floor(Date.now() / 1000);
+  const res = db.prepare(`UPDATE app_locks SET heartbeat_at = ? WHERE name = ? AND owner = ?`)
+    .run(now, name, owner);
+  return res.changes > 0;
+}
+
+/**
+ * Release a lock we hold. No-op if another process now owns it.
+ */
+function releaseLock(db, name, owner) {
+  db.prepare('DELETE FROM app_locks WHERE name = ? AND owner = ?').run(name, owner);
+}
+
 /**
  * Update the shop's last_synced_at and total_orders count.
  * @param {Database.Database} db
@@ -1372,6 +2149,24 @@ function updateShopSyncTime(db, shopId) {
       total_orders   = (SELECT COUNT(*) FROM receipts WHERE shop_id = @shop_id)
     WHERE shop_id = @shop_id
   `).run({ shop_id: shopId });
+}
+
+/**
+ * Persist a shop's active-listing count (from the Etsy Shop object).
+ * Stored on the shops table so the Overview can render it instantly without a
+ * live API call, and stamped with the fetch time so the UI can flag staleness.
+ * @param {Database.Database} db
+ * @param {string} shopId
+ * @param {number} count
+ */
+function updateShopListingCount(db, shopId, count) {
+  if (count == null || Number.isNaN(Number(count))) return;
+  db.prepare(`
+    UPDATE shops SET
+      listing_active_count    = @count,
+      listing_count_synced_at = strftime('%s', 'now')
+    WHERE shop_id = @shop_id
+  `).run({ shop_id: shopId, count: Math.trunc(Number(count)) });
 }
 
 /**
@@ -1497,17 +2292,10 @@ function upsertListing(db, shopId, listing) {
 function upsertListingInventory(db, listingId, product, offering) {
   const propValues = product.property_values || [];
 
-  // Extract the 'Style' property value (case-insensitive match)
-  const styleProp = propValues.find(
-    (p) => p.property_name && p.property_name.toLowerCase() === 'style'
-  );
-  // Extract the secondary property (everything except Style)
-  const secondaryProp = propValues.find(
-    (p) => p.property_name && p.property_name.toLowerCase() !== 'style'
-  );
-
-  const styleVal     = styleProp?.values?.[0] || propValues.map(p => p.values?.[0]).filter(Boolean).join(' / ') || null;
-  const secondaryVal = secondaryProp?.values?.[0] || null;
+  // Robustly split the variation into its style vs. model dimensions so the
+  // stored style_value is always the clean, restock-relevant label (model
+  // stripped) regardless of how the shop named its properties.
+  const { styleVal, secondaryVal } = deriveVariationLabels(propValues);
 
   db.prepare(`
     INSERT INTO listing_inventory
@@ -1625,108 +2413,185 @@ function upsertFourpxShipment(db, receiptId, {
 }
 
 /**
- * Upsert a conversation thread from Etsy's undocumented conversations API.
- * Safe to call on re-sync — updates status and last_message_at.
+ * Persist the logistics product + declared weight chosen when a 4PX shipment is
+ * created, so the order can later be priced via ds.xms.estimated_cost.get.
  *
  * @param {import('better-sqlite3').Database} db
- * @param {string} shopId
- * @param {string} groupId
- * @param {object} convo  - Raw conversation object from Etsy internal API
+ * @param {number|string} receiptId
+ * @param {object} opts
+ * @param {string|null} [opts.productCode]  logistics_product_code (e.g. 'S5058').
+ * @param {number|null} [opts.weightG]      Declared parcel weight in grams.
  */
-function upsertConversation(db, shopId, groupId, convo) {
-  // Resolve the last message timestamp from either a dedicated field or message array
-  const msgs = Array.isArray(convo.messages) ? convo.messages : [];
-  const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
-  const lastMsgAt = convo.last_message_at
-    ?? convo.create_timestamp
-    ?? lastMsg?.created_timestamp
-    ?? null;
-
+function recordFourpxShipmentInputs(db, receiptId, { productCode = null, weightG = null } = {}) {
   db.prepare(`
-    INSERT INTO conversations (
-      convo_id, shop_id, group_id,
-      buyer_user_id, buyer_name, subject,
-      status, unread_count, last_message_at,
-      linked_receipt_id, synced_at
-    ) VALUES (
-      @convo_id, @shop_id, @group_id,
-      @buyer_user_id, @buyer_name, @subject,
-      @status, @unread_count, @last_message_at,
-      @linked_receipt_id, strftime('%s','now')
-    )
-    ON CONFLICT(convo_id) DO UPDATE SET
-      buyer_name        = excluded.buyer_name,
-      subject           = excluded.subject,
-      status            = excluded.status,
-      unread_count      = excluded.unread_count,
-      last_message_at   = excluded.last_message_at,
-      linked_receipt_id = COALESCE(excluded.linked_receipt_id, linked_receipt_id),
-      synced_at         = strftime('%s','now')
+    UPDATE receipts SET
+      fourpx_product_code = COALESCE(@productCode, fourpx_product_code),
+      fourpx_weight_g     = COALESCE(@weightG,     fourpx_weight_g)
+    WHERE receipt_id = @receiptId
   `).run({
-    convo_id:          String(convo.conversation_id ?? convo.convo_id),
-    shop_id:           shopId,
-    group_id:          groupId,
-    buyer_user_id:     convo.buyer_user_id   ?? null,
-    buyer_name:        convo.buyer_name      ?? convo.buyer?.login_name ?? null,
-    subject:           convo.subject         ?? convo.title ?? null,
-    status:            convo.is_read === false ? 'unread' : (convo.status ?? 'read'),
-    unread_count:      convo.unread_count    ?? (convo.is_read === false ? 1 : 0),
-    last_message_at:   lastMsgAt,
-    linked_receipt_id: convo.receipt_id      ?? null,
+    receiptId,
+    productCode: productCode || null,
+    weightG: Number.isFinite(weightG) ? Math.round(weightG) : null,
   });
 }
 
 /**
- * Upsert a single message within a conversation thread.
+ * Persist a resolved 4PX shipping cost for one receipt.
+ *
+ * Implements the estimate→billed lifecycle. Read-then-write so the rules are
+ * explicit and a weaker result never overwrites a stronger one:
+ *   - 'billed'    : authoritative — always written; supersedes any estimate.
+ *   - 'estimated' : written only when the order is not already 'billed'.
+ *   - 'pending' / 'error' : only the status + fetched_at change; any previously
+ *                   resolved amount is preserved (we never blank a known cost).
+ * fourpx_freight_fetched_at is always stamped so the sync worker can rate-limit.
  *
  * @param {import('better-sqlite3').Database} db
- * @param {string} convoId
- * @param {string} shopId
- * @param {object} msg   - Raw message object from Etsy internal API
+ * @param {number|string} receiptId
+ * @param {object} opts
+ * @param {'pending'|'estimated'|'billed'|'error'} opts.status
+ * @param {number|null} [opts.totalFee]        Total freight charge / estimate.
+ * @param {string|null} [opts.currency]        Currency of totalFee (e.g. 'CNY', 'USD').
+ * @param {number|null} [opts.billedWeightG]   Billed/charge weight in grams.
+ * @param {Array|null}  [opts.feeItems]        Itemized fee breakdown (serialized to JSON).
  */
-function upsertConversationMessage(db, convoId, shopId, msg) {
-  // Determine sender: the message is from the buyer unless it's from the shop owner
-  const senderType = (msg.sender_user_id && msg.seller_user_id &&
-    String(msg.sender_user_id) === String(msg.seller_user_id))
-    ? 'seller'
-    : 'buyer';
-
-  db.prepare(`
-    INSERT INTO conversation_messages (
-      message_id, convo_id, shop_id,
-      sender_type, body, created_at
-    ) VALUES (
-      @message_id, @convo_id, @shop_id,
-      @sender_type, @body, @created_at
-    )
-    ON CONFLICT(message_id) DO UPDATE SET
-      body       = excluded.body,
-      created_at = excluded.created_at
-  `).run({
-    message_id:  String(msg.message_id ?? msg.id),
-    convo_id:    convoId,
-    shop_id:     shopId,
-    sender_type: senderType,
-    body:        msg.message_text ?? msg.body ?? msg.text ?? null,
-    created_at:  msg.created_timestamp ?? msg.create_date ?? null,
-  });
-}
-
-/**
- * Mark a conversation as read locally (does not call the Etsy API).
- * The API call to Etsy is made separately in the server route.
- *
- * @param {import('better-sqlite3').Database} db
- * @param {string} convoId
- */
-function markConversationReadLocal(db, convoId) {
+function recordFourpxFreight(db, receiptId, {
+  status,
+  totalFee      = null,
+  currency      = null,
+  billedWeightG = null,
+  feeItems      = null,
+} = {}) {
   const now = Math.floor(Date.now() / 1000);
-  db.prepare(`
-    UPDATE conversations SET status = 'read', unread_count = 0 WHERE convo_id = @convo_id
-  `).run({ convo_id: convoId });
-  db.prepare(`
-    UPDATE conversation_messages SET read_at = @now WHERE convo_id = @convo_id AND read_at IS NULL
-  `).run({ convo_id: convoId, now });
+  const cur = db.prepare('SELECT fourpx_freight_status AS s FROM receipts WHERE receipt_id = ?').get(receiptId);
+  const curStatus = cur ? cur.s : null;
+
+  const hasAmount = totalFee !== null && totalFee !== undefined;
+  // Decide whether to overwrite the stored amount fields.
+  const writeAmount =
+    (status === 'billed' && hasAmount) ||
+    (status === 'estimated' && hasAmount && curStatus !== 'billed');
+
+  // Decide the status to store. Never downgrade billed→estimated/pending, and never
+  // overwrite an existing estimate with a bare 'pending' (keep the useful estimate).
+  let writeStatus = status;
+  if (curStatus === 'billed' && status !== 'billed') writeStatus = 'billed';
+  else if (curStatus === 'estimated' && (status === 'pending')) writeStatus = 'estimated';
+
+  if (writeAmount) {
+    db.prepare(`
+      UPDATE receipts SET
+        fourpx_freight_amount    = @totalFee,
+        fourpx_freight_currency  = @currency,
+        fourpx_billed_weight_g   = @billedWeightG,
+        fourpx_freight_breakdown = @breakdown,
+        fourpx_freight_status    = @status,
+        fourpx_freight_fetched_at = @now
+      WHERE receipt_id = @receiptId
+    `).run({
+      receiptId,
+      totalFee,
+      currency: currency ?? null,
+      billedWeightG: billedWeightG ?? null,
+      breakdown: Array.isArray(feeItems) && feeItems.length ? JSON.stringify(feeItems) : null,
+      status: writeStatus,
+      now,
+    });
+  } else {
+    // Status / timestamp only — preserve any previously resolved amount.
+    db.prepare(`
+      UPDATE receipts SET
+        fourpx_freight_status    = @status,
+        fourpx_freight_fetched_at = @now
+      WHERE receipt_id = @receiptId
+    `).run({ receiptId, status: writeStatus, now });
+  }
+}
+
+/**
+ * Aggregate 4PX shipping cost per shop for the finance/earnings views.
+ *
+ * Groups by shop + currency (4PX may bill different lanes in different currencies,
+ * though CN accounts settle in CNY) and reports the resolved total plus how the
+ * cost was sourced (billed vs estimated) so the UI can flag estimate confidence.
+ *
+ * The window is applied on the ORDER date (etsy_created_at), not the label-creation
+ * date, so the shipping cost is matched to the revenue period of the sale it belongs
+ * to (COGS-style matching) and the totals track the Earnings date range. Filtering
+ * by label-creation date would make every range that covers the (recent) period in
+ * which the 4PX feature was used return an identical total.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {object} [opts]
+ * @param {number} [opts.from]    Unix epoch lower bound on the order date.
+ * @param {number} [opts.to]      Unix epoch upper bound on the order date.
+ * @param {string} [opts.shopId]  Restrict to one shop.
+ * @returns {{rows: Array, byShop: object}}
+ */
+function getFourpxShippingSummary(db, { from, to, shopId } = {}) {
+  // A 4PX shipment is any receipt with a dashboard-created consignment OR a 4PX
+  // tracking number synced from Etsy (covers shipments made directly on the portal).
+  const clauses = ["(r.fourpx_consignment_no IS NOT NULL OR r.tracking_code LIKE '4PX%')", "COALESCE(r.fourpx_order_status,'') != 'cancelled'"];
+  const params = {};
+  // COALESCE so manual orders (which may lack etsy_created_at) fall back to their
+  // 4PX label-creation date rather than dropping out of every window.
+  if (from) { clauses.push('COALESCE(r.etsy_created_at, r.fourpx_created_at) >= @from'); params.from = from; }
+  if (to)   { clauses.push('COALESCE(r.etsy_created_at, r.fourpx_created_at) <= @to');   params.to = to; }
+  if (shopId) { clauses.push('r.shop_id = @shopId'); params.shopId = shopId; }
+  const where = `WHERE ${clauses.join(' AND ')}`;
+
+  // Resolved cost per shop + currency (only rows that actually have an amount).
+  const rows = db.prepare(`
+    SELECT r.shop_id, s.shop_name,
+           COALESCE(r.fourpx_freight_currency, 'CNY') AS currency,
+           COUNT(*)                                                              AS priced_orders,
+           SUM(CASE WHEN r.fourpx_freight_status = 'billed'    THEN 1 ELSE 0 END) AS billed_orders,
+           SUM(CASE WHEN r.fourpx_freight_status = 'estimated' THEN 1 ELSE 0 END) AS estimated_orders,
+           SUM(r.fourpx_freight_amount)                                          AS total_cost
+    FROM receipts r
+    JOIN shops s ON s.shop_id = r.shop_id
+    ${where} AND r.fourpx_freight_amount IS NOT NULL
+    GROUP BY r.shop_id, currency
+    ORDER BY s.shop_name
+  `).all(params);
+
+  // Lifecycle counts per shop (how many shipments still await any cost at all).
+  const counts = db.prepare(`
+    SELECT r.shop_id, s.shop_name,
+           COUNT(*) AS total_orders,
+           SUM(CASE WHEN r.fourpx_freight_status = 'billed'    THEN 1 ELSE 0 END) AS billed,
+           SUM(CASE WHEN r.fourpx_freight_status = 'estimated' THEN 1 ELSE 0 END) AS estimated,
+           SUM(CASE WHEN r.fourpx_freight_amount IS NULL THEN 1 ELSE 0 END)       AS unpriced
+    FROM receipts r
+    JOIN shops s ON s.shop_id = r.shop_id
+    ${where}
+    GROUP BY r.shop_id
+    ORDER BY s.shop_name
+  `).all(params);
+
+  const byShop = {};
+  for (const c of counts) {
+    byShop[c.shop_id] = {
+      shop_id: c.shop_id,
+      shop_name: c.shop_name,
+      total_orders: c.total_orders,
+      billed: c.billed,
+      estimated: c.estimated,
+      unpriced: c.unpriced,
+      totals: {}, // currency → { amount, orders, billed, estimated }
+    };
+  }
+  for (const r of rows) {
+    const shop = byShop[r.shop_id];
+    if (!shop) continue;
+    shop.totals[r.currency] = {
+      amount: +(r.total_cost ?? 0).toFixed(2),
+      orders: r.priced_orders,
+      billed: r.billed_orders,
+      estimated: r.estimated_orders,
+    };
+  }
+  return { rows, byShop };
 }
 
 // ─── Route assignments ────────────────────────────────────────────────────────
@@ -1932,6 +2797,188 @@ function getAllProductAssignments(db) {
     });
   } catch { /* table may not exist on first run before server restart */ }
   return map;
+}
+
+// ─── Product Catalog ⇄ Route assignment consistency ─────────────────────────
+//
+// Supplier + charm for a product are stored, by design, in TWO denormalised
+// tables that buildRouteRows() merges by priority:
+//
+//   • product_assignments — keyed by the listing-scoped key
+//       `normalizeTitle(title)[:50]#L{listing_id}`. Written when the operator
+//       edits a supplier/charm in the Orders Sorting Dashboard (Route tab).
+//       These act as per-product defaults for every future order of the product.
+//   • product_map          — keyed by the FULL `title_norm`
+//       (`normalizeTitle(title)`, no slice, no `#L`). This is what the Product
+//       Catalog modal reads and writes, and what Excel import populates.
+//
+// Historically there was NO sync between the two: an edit in the Route tab
+// updated product_assignments only, so the Product Catalog (which reads
+// product_map) never reflected it — products looked "Not set" even after the
+// operator had assigned a supplier. The three helpers below keep the two views
+// consistent at the PRODUCT level, in both directions, so the catalog always
+// shows the effective supplier/charm that route generation will actually use.
+//
+// Per-ORDER overrides (route_assignments.supplier_*_override) are intentionally
+// NOT touched — those are deliberate one-off exceptions for a single order.
+
+/**
+ * Write product-level supplier/charm into the Product Catalog (product_map),
+ * keyed by the full normalised title. Merge semantics:
+ *   • a field left `undefined` is preserved (never clobbered),
+ *   • a field given as a string (including '') is written verbatim.
+ * Creates the catalog row when the product isn't catalogued yet, so a supplier
+ * assigned in the Route tab makes the product appear — and be "filled" — in the
+ * Product Catalog immediately.
+ *
+ * @param {Database.Database} db
+ * @param {{ title: string, supplier_shop?: string, supplier_stall?: string,
+ *           charm_code?: string, charm_shop?: string }} patch
+ * @returns {{ id: number, title_norm: string, changed: boolean } | null}
+ */
+function mergeProductMapSupplierCharm(db, patch) {
+  const title = String(patch.title || '').trim();
+  if (!title) return null;
+  const titleNorm = _normTitleForKey(title);
+  if (!titleNorm) return null;
+
+  const now = Math.floor(Date.now() / 1000);
+  // undefined → keep previous; defined → use the trimmed provided value (incl. '')
+  const choose = (next, prev) => (next === undefined ? (prev ?? '') : String(next ?? '').trim());
+
+  const existing = db.prepare('SELECT * FROM product_map WHERE title_norm = ?').get(titleNorm);
+
+  if (existing) {
+    const next = {
+      id:         existing.id,
+      shop_name:  choose(patch.supplier_shop,  existing.shop_name),
+      stall:      choose(patch.supplier_stall, existing.stall),
+      charm_shop: choose(patch.charm_shop,     existing.charm_shop),
+      charm_code: choose(patch.charm_code,     existing.charm_code),
+      updated_at: now,
+    };
+    const unchanged =
+      next.shop_name  === (existing.shop_name  ?? '') &&
+      next.stall      === (existing.stall      ?? '') &&
+      next.charm_shop === (existing.charm_shop ?? '') &&
+      next.charm_code === (existing.charm_code ?? '');
+    if (unchanged) return { id: existing.id, title_norm: titleNorm, changed: false };
+
+    db.prepare(`
+      UPDATE product_map
+      SET shop_name = @shop_name, stall = @stall,
+          charm_shop = @charm_shop, charm_code = @charm_code, updated_at = @updated_at
+      WHERE id = @id
+    `).run(next);
+    return { id: existing.id, title_norm: titleNorm, changed: true };
+  }
+
+  const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM product_map').get().m;
+  const info = db.prepare(`
+    INSERT INTO product_map (title_norm, title, shop_name, stall, charm_shop, charm_code, sort_order, updated_at)
+    VALUES (@title_norm, @title, @shop_name, @stall, @charm_shop, @charm_code, @sort_order, @updated_at)
+  `).run({
+    title_norm: titleNorm,
+    title,
+    shop_name:  choose(patch.supplier_shop,  ''),
+    stall:      choose(patch.supplier_stall, ''),
+    charm_shop: choose(patch.charm_shop,     ''),
+    charm_code: choose(patch.charm_code,     ''),
+    sort_order: maxOrder + 1,
+    updated_at: now,
+  });
+  return { id: info.lastInsertRowid, title_norm: titleNorm, changed: true };
+}
+
+/**
+ * Push a Product Catalog edit out to every matching product_assignments row, so
+ * a change made in the catalog modal takes immediate effect on the Route tab
+ * (where product_assignments outranks product_map). Matches by the listing-
+ * scoped key family `${base}` / `${base}#L{listing_id}` where
+ * base = full title_norm sliced to 50 chars. The catalog is treated as
+ * authoritative here, so values (including clears) are written verbatim.
+ *
+ * Does NOT create new product_assignments rows — when none exist, buildRouteRows
+ * already falls back to product_map, so the edit is honoured anyway.
+ *
+ * @param {Database.Database} db
+ * @param {{ title: string, shop_name?: string, stall?: string,
+ *           charm_shop?: string, charm_code?: string }} row
+ * @returns {number} number of product_assignments rows updated
+ */
+function syncProductMapToAssignments(db, row) {
+  const titleNorm = _normTitleForKey(row.title || '');
+  if (!titleNorm) return 0;
+  const base = titleNorm.slice(0, 50);
+
+  const info = db.prepare(`
+    UPDATE product_assignments
+    SET supplier_shop = @supplier_shop, supplier_stall = @supplier_stall,
+        charm_shop = @charm_shop, charm_code = @charm_code, updated_at = @updated_at
+    WHERE item_key = @base OR item_key LIKE @like
+  `).run({
+    supplier_shop:  String(row.shop_name  || '').trim(),
+    supplier_stall: String(row.stall      || '').trim(),
+    charm_shop:     String(row.charm_shop || '').trim(),
+    charm_code:     String(row.charm_code || '').trim(),
+    base,
+    like: base + '#L%',
+    updated_at: Math.floor(Date.now() / 1000),
+  });
+  return info.changes;
+}
+
+/**
+ * One-time/idempotent reconciliation that backfills product_map from every
+ * supplier/charm the operator has already saved in product_assignments. Run at
+ * startup so historical Route-tab edits (made before write-through existed)
+ * become visible in the Product Catalog. Last write wins when several listing-
+ * scoped assignments collapse onto the same product title (ordered by updated_at).
+ *
+ * Only fields the operator actually set are propagated: an assignment that has a
+ * supplier but no charm never blanks an existing catalog charm, and vice-versa.
+ *
+ * @param {Database.Database} db
+ * @returns {{ ok: boolean, filled: number, created: number }}
+ */
+function reconcileAssignmentsToProductMap(db) {
+  let rows = [];
+  try {
+    rows = db.prepare(`
+      SELECT item_key, title, supplier_shop, supplier_stall, charm_code, charm_shop, updated_at
+      FROM product_assignments
+      ORDER BY updated_at ASC, item_key ASC
+    `).all();
+  } catch { return { ok: false, filled: 0, created: 0 }; }
+
+  let filled = 0, created = 0;
+  const tx = db.transaction(() => {
+    for (const a of rows) {
+      const title = String(a.title || '').trim();
+      if (!title) continue;
+
+      const hasSupplier = !!(a.supplier_shop || a.supplier_stall);
+      const hasCharm    = !!(a.charm_code || a.charm_shop);
+      if (!hasSupplier && !hasCharm) continue;
+
+      const patch = { title };
+      if (hasSupplier) {
+        patch.supplier_shop  = a.supplier_shop  || '';
+        patch.supplier_stall = a.supplier_stall || '';
+      }
+      if (hasCharm) {
+        patch.charm_code = a.charm_code || '';
+        patch.charm_shop = a.charm_shop || '';
+      }
+
+      const existedBefore = db.prepare('SELECT 1 FROM product_map WHERE title_norm = ?')
+        .get(_normTitleForKey(title));
+      const r = mergeProductMapSupplierCharm(db, patch);
+      if (r && r.changed) { existedBefore ? filled++ : created++; }
+    }
+  });
+  tx();
+  return { ok: true, filled, created };
 }
 
 /**
@@ -2724,6 +3771,218 @@ function insertManualItem(db, row) {
   return tx();
 }
 
+// ─── Order issues (fulfilment-exception workflow) ───────────────────────────
+
+/** Issue types the workflow understands. */
+const ISSUE_TYPES = ['out_of_production', 'model_unavailable', 'other'];
+/** Listing actions recorded when the Etsy listing has been handled. */
+const ISSUE_LISTING_ACTIONS = ['deleted', 'model_removed', 'none'];
+/** Resolutions recorded when an issue is closed. */
+const ISSUE_RESOLUTIONS = ['switched', 'refunded', 'cancelled', 'other'];
+
+/**
+ * Map of `${receipt_id}\x00${item_key}` → issue row, for ONLY open issues.
+ * Used by the Route dashboard to hold affected line-items out of purchasing.
+ * @param {Database.Database} db
+ * @returns {Map<string, object>}
+ */
+function getOpenIssueMap(db) {
+  const map = new Map();
+  try {
+    db.prepare("SELECT * FROM order_issues WHERE status = 'open'").all()
+      .forEach((r) => map.set(`${r.receipt_id}\x00${r.item_key}`, r));
+  } catch { /* table may not exist yet on first run */ }
+  return map;
+}
+
+/**
+ * All issues for a set of receipts (open + resolved), keyed by receipt_id.
+ * @param {Database.Database} db
+ * @param {Array<number>} receiptIds
+ * @returns {Object<number, Array<object>>}
+ */
+function getIssuesForReceipts(db, receiptIds) {
+  const out = {};
+  const ids = (receiptIds || []).map(Number).filter(Number.isInteger);
+  if (!ids.length) return out;
+  try {
+    const ph = ids.map(() => '?').join(',');
+    db.prepare(`SELECT * FROM order_issues WHERE receipt_id IN (${ph})`)
+      .all(ids)
+      .forEach((r) => { (out[r.receipt_id] ||= []).push(r); });
+  } catch { /* table may not exist yet */ }
+  return out;
+}
+
+/** All issues for one receipt (open + resolved), newest first. */
+function getIssuesForReceipt(db, receiptId) {
+  try {
+    return db.prepare('SELECT * FROM order_issues WHERE receipt_id = ? ORDER BY created_at DESC, id DESC').all(Number(receiptId));
+  } catch { return []; }
+}
+
+/** Fetch one issue by id, or null. */
+function getIssueById(db, id) {
+  try { return db.prepare('SELECT * FROM order_issues WHERE id = ?').get(Number(id)) || null; }
+  catch { return null; }
+}
+
+/**
+ * Create or update (re-open) the issue for a line-item. Keyed by
+ * (receipt_id, item_key); re-flagging an existing line updates its type/note
+ * and re-opens it (clearing any prior resolution) so the workflow restarts.
+ *
+ * @param {Database.Database} db
+ * @param {object} p - { receipt_id, item_key, listing_id?, title?, phone_model?, issue_type, note? }
+ * @returns {object} the upserted issue row
+ */
+function upsertOrderIssue(db, p) {
+  const now = Math.floor(Date.now() / 1000);
+  const issueType = ISSUE_TYPES.includes(p.issue_type) ? p.issue_type : 'other';
+  db.prepare(`
+    INSERT INTO order_issues
+      (receipt_id, item_key, listing_id, title, phone_model, issue_type, status, note, created_at, updated_at)
+    VALUES
+      (@receipt_id, @item_key, @listing_id, @title, @phone_model, @issue_type, 'open', @note, @now, @now)
+    ON CONFLICT(receipt_id, item_key) DO UPDATE SET
+      listing_id  = COALESCE(excluded.listing_id, listing_id),
+      title       = COALESCE(excluded.title, title),
+      phone_model = COALESCE(excluded.phone_model, phone_model),
+      issue_type  = excluded.issue_type,
+      note        = COALESCE(excluded.note, note),
+      status      = 'open',
+      resolution  = NULL,
+      resolved_at = NULL,
+      updated_at  = excluded.updated_at
+  `).run({
+    receipt_id:  Number(p.receipt_id),
+    item_key:    String(p.item_key),
+    listing_id:  p.listing_id != null ? Number(p.listing_id) : null,
+    title:       p.title != null ? String(p.title) : null,
+    phone_model: p.phone_model != null ? String(p.phone_model) : null,
+    issue_type:  issueType,
+    note:        p.note != null ? String(p.note) : null,
+    now,
+  });
+  return db.prepare('SELECT * FROM order_issues WHERE receipt_id = ? AND item_key = ?')
+    .get(Number(p.receipt_id), String(p.item_key));
+}
+
+/**
+ * Patch workflow fields on an issue (notify / handle-listing / resolve / reopen).
+ * Only the provided keys are written. Returns the updated row, or null if absent.
+ *
+ * @param {Database.Database} db
+ * @param {number} id
+ * @param {object} patch - any of { buyer_notified_at, listing_handled_at,
+ *   listing_action, status, resolution, resolved_at, note }
+ * @returns {object|null}
+ */
+function patchOrderIssue(db, id, patch) {
+  const existing = getIssueById(db, id);
+  if (!existing) return null;
+  const allowed = ['buyer_notified_at', 'listing_handled_at', 'listing_action',
+    'status', 'resolution', 'resolved_at', 'note'];
+  const sets = [];
+  const params = { id: Number(id), now: Math.floor(Date.now() / 1000) };
+  for (const k of allowed) {
+    if (Object.prototype.hasOwnProperty.call(patch, k)) {
+      sets.push(`${k} = @${k}`);
+      params[k] = patch[k];
+    }
+  }
+  if (!sets.length) return existing;
+  sets.push('updated_at = @now');
+  db.prepare(`UPDATE order_issues SET ${sets.join(', ')} WHERE id = @id`).run(params);
+  return getIssueById(db, id);
+}
+
+/** Permanently delete an issue. Returns true when a row was removed. */
+function deleteOrderIssue(db, id) {
+  try { return db.prepare('DELETE FROM order_issues WHERE id = ?').run(Number(id)).changes > 0; }
+  catch { return false; }
+}
+
+/**
+ * One-time migration that retires the old "Archive" feature in favour of the
+ * Issues / on-hold system.
+ *
+ * For every still-archived receipt (archived_at IS NOT NULL):
+ *   • If its archive_reason indicates the product is OUT OF PRODUCTION, open a
+ *     per-line-item Issue (issue_type='out_of_production') for each transaction,
+ *     so the line is held out of the purchasing Route exactly as a freshly-flagged
+ *     issue would be. Existing issues for a line are left untouched (no clobber).
+ *   • Then clear archived_at so the order returns to the active views and the row
+ *     is never reprocessed on a later startup. archive_reason is intentionally
+ *     LEFT in place as a dormant historical breadcrumb (the column is retired,
+ *     not dropped).
+ *
+ * Idempotent: once archived_at has been cleared the WHERE filter excludes the row,
+ * so re-running does nothing (and never re-opens an issue the operator resolved).
+ *
+ * @param {Database.Database} db
+ */
+function migrateArchivedOrdersToIssues(db) {
+  let archived;
+  try {
+    archived = db.prepare(
+      "SELECT receipt_id, archive_reason, all_transactions FROM receipts WHERE archived_at IS NOT NULL"
+    ).all();
+  } catch { return; } // archived_at column absent (fresh DB) → nothing to do
+  if (!archived.length) return;
+
+  // Lazy require to avoid a circular top-level dependency (route/dashboard pulls
+  // from this module). By migration time both modules are fully loaded.
+  let lineItemKey, parseVariations;
+  try {
+    ({ lineItemKey, parseVariations } = require('../route/dashboard'));
+  } catch { /* fall back below */ }
+
+  const OUT_OF_PROD_RE = /out of production/i;
+  let migratedOrders = 0, createdIssues = 0;
+
+  const tx = db.transaction(() => {
+    for (const r of archived) {
+      const reason = String(r.archive_reason || '');
+      if (OUT_OF_PROD_RE.test(reason) && lineItemKey) {
+        let txs = [];
+        try { txs = JSON.parse(r.all_transactions || '[]'); } catch { txs = []; }
+        if (!Array.isArray(txs)) txs = [];
+        for (const t of txs) {
+          const title = (t.title || '').trim();
+          if (!title) continue;
+          const itemKey = lineItemKey(title, t.listing_id);
+          // Don't clobber an issue the operator may already have created.
+          const exists = db.prepare(
+            'SELECT 1 FROM order_issues WHERE receipt_id = ? AND item_key = ?'
+          ).get(r.receipt_id, itemKey);
+          if (exists) continue;
+          let phoneModel = '';
+          try { phoneModel = parseVariations ? (parseVariations(t.variations).phoneModel || '') : ''; } catch {}
+          upsertOrderIssue(db, {
+            receipt_id:  r.receipt_id,
+            item_key:    itemKey,
+            listing_id:  t.listing_id || null,
+            title,
+            phone_model: phoneModel || null,
+            issue_type:  'out_of_production',
+            note:        'Migrated from Archive: ' + reason.slice(0, 200),
+          });
+          createdIssues++;
+        }
+      }
+      // Restore to active views; keep archive_reason as a dormant breadcrumb.
+      db.prepare('UPDATE receipts SET archived_at = NULL WHERE receipt_id = ?').run(r.receipt_id);
+      migratedOrders++;
+    }
+  });
+  tx();
+
+  if (migratedOrders) {
+    console.log(`[db] Retired Archive → Issues: processed ${migratedOrders} archived order(s), opened ${createdIssues} issue(s).`);
+  }
+}
+
 /**
  * Return all manual route items (metadata only — no image BLOB), newest first.
  * @param {Database.Database} db
@@ -3056,6 +4315,74 @@ function setManualOrderShipped(db, receiptId, shipped) {
   return info.changes > 0;
 }
 
+/**
+ * Attach (or clear) a tracking number on a manual order so its package can be
+ * tracked, without going through the integrated "Ship with 4PX" flow. Use this
+ * when the parcel already has a 4PX (or other carrier) tracking number obtained
+ * outside the dashboard.
+ *
+ * Setting a number mirrors it into BOTH `tracking_code` (which drives pre-transit
+ * detection and the live-route tracking link in the UI) and `fourpx_tracking_no`
+ * — the latter only when it is a genuine 4PX number, so the 4PX label-download /
+ * tracking integrations are offered for it but never for an unrelated carrier.
+ * It also marks the order locally shipped (manual orders never touch Etsy) and
+ * stamps `shipment_notified_at` so the order behaves exactly like a 4PX-shipped
+ * one. Passing an empty tracking number clears it and reverts the order to the
+ * local "needs shipping" state.
+ *
+ * @param {Database.Database} db
+ * @param {number} receiptId
+ * @param {object} [opts]
+ * @param {string} [opts.tracking_code]  Tracking number; empty/omitted clears it.
+ * @param {string} [opts.carrier_name='4PX']
+ * @returns {boolean} true when updated
+ */
+function setManualOrderTracking(db, receiptId, opts = {}) {
+  const rid = Number(receiptId);
+  const existing = db.prepare('SELECT source FROM receipts WHERE receipt_id = ?').get(rid);
+  if (!existing) { const e = new Error('Order not found.'); e.code = 'NOT_FOUND'; throw e; }
+  if (existing.source !== 'manual') {
+    const e = new Error('Only manual orders can have a tracking number set this way.');
+    e.code = 'FORBIDDEN';
+    throw e;
+  }
+
+  const tracking = String(opts.tracking_code || '').trim();
+  const carrier  = String(opts.carrier_name  || '').trim() || '4PX';
+  const now = Math.floor(Date.now() / 1000);
+
+  // Clearing the tracking number reverts the manual order to "needs shipping".
+  if (!tracking) {
+    const info = db.prepare(`
+      UPDATE receipts SET
+        tracking_code        = NULL,
+        carrier_name         = NULL,
+        fourpx_tracking_no   = NULL,
+        shipment_notified_at = NULL,
+        is_shipped           = 0,
+        status               = 'Paid'
+      WHERE receipt_id = ? AND source = 'manual'
+    `).run(rid);
+    return info.changes > 0;
+  }
+
+  // Only treat it as a 4PX number (and so light up the 4PX label/route features)
+  // when it actually is one — by carrier or by the "4PX…" tracking prefix.
+  const is4px = /4px/i.test(carrier) || /^4PX/i.test(tracking);
+
+  const info = db.prepare(`
+    UPDATE receipts SET
+      tracking_code        = @tracking,
+      carrier_name         = @carrier,
+      fourpx_tracking_no   = @fourpxTracking,
+      is_shipped           = 1,
+      status               = 'Completed',
+      shipment_notified_at = COALESCE(shipment_notified_at, @now)
+    WHERE receipt_id = @rid AND source = 'manual'
+  `).run({ tracking, carrier, fourpxTracking: is4px ? tracking : null, now, rid });
+  return info.changes > 0;
+}
+
 // ─── Purchase-sync version history ──────────────────────────────────────────
 
 /**
@@ -3144,9 +4471,22 @@ module.exports = {
   replaceCharmShopDirectory,
   replaceProductMap,
   getProductMap,
+  mergeProductMapSupplierCharm,
+  syncProductMapToAssignments,
+  reconcileAssignmentsToProductMap,
   upsertProductMapRow,
   updateProductMapRowById,
   deleteProductMapRow,
+  ISSUE_TYPES,
+  ISSUE_LISTING_ACTIONS,
+  ISSUE_RESOLUTIONS,
+  getOpenIssueMap,
+  getIssuesForReceipts,
+  getIssuesForReceipt,
+  getIssueById,
+  upsertOrderIssue,
+  patchOrderIssue,
+  deleteOrderIssue,
   insertManualItem,
   getManualItems,
   getManualItemImage,
@@ -3157,6 +4497,7 @@ module.exports = {
   deleteManualOrder,
   purgeManualOrder,
   setManualOrderShipped,
+  setManualOrderTracking,
   seedManualOrderShop,
   MANUAL_SHOP_ID,
   MANUAL_GROUP_ID,
@@ -3193,9 +4534,25 @@ module.exports = {
   updateCarrierStatus,
   startSyncLog,
   finishSyncLog,
+  acquireLock,
+  renewLock,
+  releaseLock,
   updateShopSyncTime,
+  updateShopListingCount,
+  updateShopLedgerSyncTime,
+  upsertLedgerEntry,
+  upsertEtsyPayment,
+  reattributeLedgerEntries,
+  recategorizeLedgerEntries,
+  categorizeLedgerEntry,
+  getEarningsSummary,
+  getCurrentMonthNet,
+  getPerOrderEarnings,
+  getLedgerStats,
+  getShopBalances,
+  backfillTransactionsFromReceipts,
   upsertFourpxShipment,
-  upsertConversation,
-  upsertConversationMessage,
-  markConversationReadLocal,
+  recordFourpxFreight,
+  recordFourpxShipmentInputs,
+  getFourpxShippingSummary,
 };

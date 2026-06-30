@@ -12,6 +12,8 @@ const {
   hasRecentEvent,
   logZeroStockIfNeeded,
   orderCheckPriority,
+  deriveVariationLabels,
+  formatStyleLabel,
 } = require('../src/inventory/helpers');
 const { initDb, upsertListingInventory, logEvent } = require('../src/db/setup');
 
@@ -47,6 +49,38 @@ console.log('\n── listingHasLiveZero ──');
 assert(listingHasLiveZero({ products: [{ offerings: [{ quantity: 0, is_enabled: true }] }] }), 'detects zero');
 assert(!listingHasLiveZero({ products: [{ offerings: [{ quantity: 3, is_enabled: true }] }] }), 'ignores in-stock');
 assert(!listingHasLiveZero({ products: [{ offerings: [{ quantity: 0, is_enabled: false }] }] }), 'ignores disabled');
+
+console.log('\n── deriveVariationLabels (style vs. model dimension) ──');
+// "Style" (singular) + "Phone Model" — already-clean listing
+const a = deriveVariationLabels([
+  { property_name: 'Phone Model', values: ['iPhone 17 Pro Max'] },
+  { property_name: 'Style', values: ['Case+Charm'] },
+]);
+assert(a.styleVal === 'Case+Charm' && a.secondaryVal === 'iPhone 17 Pro Max', 'extracts style from "Style" + "Phone Model"');
+// "Styles" (plural) + "iPhone Model" — the previously-broken case
+const b = deriveVariationLabels([
+  { property_name: 'iPhone Model', values: ['iPhone 14/13'] },
+  { property_name: 'Styles', values: ['Case+Grip+Charm'] },
+]);
+assert(b.styleVal === 'Case+Grip+Charm' && b.secondaryVal === 'iPhone 14/13', 'extracts style from "Styles" + "iPhone Model" (plural fix)');
+// Property order should not matter
+const c = deriveVariationLabels([
+  { property_name: 'Styles', values: ['Grip Only'] },
+  { property_name: 'iPhone Model', values: ['iPhone 16'] },
+]);
+assert(c.styleVal === 'Grip Only', 'model-first vs style-first order is irrelevant');
+// Single-dimension (style only)
+const d = deriveVariationLabels([{ property_name: 'Style', values: ['Case Only'] }]);
+assert(d.styleVal === 'Case Only' && d.secondaryVal === null, 'single-dimension listing keeps style, null model');
+// Empty / missing
+assert(deriveVariationLabels([]).styleVal === null, 'empty property_values → null');
+
+console.log('\n── formatStyleLabel (consistent, deduped) ──');
+assert(formatStyleLabel(['Case+Charm']) === 'Case+Charm', 'single style');
+assert(formatStyleLabel(['Case+Charm', 'Case+Charm']) === 'Case+Charm', 'dedupes repeats');
+assert(formatStyleLabel(['Case Only', 'Case+Charm']) === 'Case Only, Case+Charm', 'joins distinct styles');
+assert(formatStyleLabel([]) === 'unknown variation(s)', 'empty → placeholder');
+assert(formatStyleLabel([' Case Only ', '']) === 'Case Only', 'trims and drops blanks');
 
 console.log('\n── getZeroStylesForListing ──');
 seedInventory(1001, [

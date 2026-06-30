@@ -19,7 +19,20 @@
  */
 
 const path = require('path');
+const os   = require('os');
 const cron = require('node-cron');
+
+// ─── Cross-process sync lock ──────────────────────────────────────────────────
+// Identifies THIS process when acquiring the shared 'sync_cycle' advisory lock.
+// Guarantees only one process ever runs a receipt-sync cycle at a time, even if
+// two dashboards (PM2 + a stray instance) or the embedded scheduler + the
+// standalone `npm run sync` worker are running against the same database.
+const SYNC_LOCK_NAME  = 'sync_cycle';
+const SYNC_LOCK_OWNER = `${os.hostname()}:${process.pid}`;
+// TTL must comfortably exceed one full cycle (≈10 min for a dozen shops). The
+// heartbeat is renewed between groups, so a healthy holder never goes stale;
+// a crashed holder's lock is reclaimable after this window.
+const SYNC_LOCK_TTL_SEC = 20 * 60;
 
 const { loadConfig, getAllShops }   = require('../config/schema');
 const { TokenManager, TokenExpiredError } = require('../auth/token-manager');
@@ -29,11 +42,13 @@ const {
   buildShopClient,
   paginateReceipts,
   resolveShopId,
+  getShop,
   getListingImagesBatch,
   getListingInventory,
   updateListingInventory,
-  paginateConversations,
-  getConversation,
+  paginateLedgerEntries,
+  getPaymentReceiptMap,
+  isQpdExhaustedError,
 } = require('../etsy/client');
 const {
   initDb,
@@ -42,23 +57,43 @@ const {
   upsertListingImage,
   upsertListingInventory,
   updateCarrierStatus,
+  recordFourpxFreight,
   logEvent,
   startSyncLog,
   finishSyncLog,
+  acquireLock,
+  renewLock,
+  releaseLock,
   updateShopSyncTime,
-  upsertConversation,
-  upsertConversationMessage,
+  updateShopListingCount,
+  updateShopLedgerSyncTime,
+  upsertTransaction,
+  upsertLedgerEntry,
+  upsertEtsyPayment,
+  reattributeLedgerEntries,
 } = require('../db/setup');
 const { checkTrackingStatus } = require('../tracking/checker');
+const { resolveReceiptFreight } = require('../fourpx/freight');
 const {
   getZeroStylesForListing,
   listingHasLiveZero,
   raiseOfferingsToTarget,
   logZeroStockIfNeeded,
   orderCheckPriority,
+  formatStyleLabel,
 } = require('../inventory/helpers');
 
 const TOKENS_PATH = path.resolve(__dirname, '../../tokens.json');
+
+// ─── API-call frugality knobs ─────────────────────────────────────────────────
+// Etsy's QPD is precious (5,000/key/day, shared across up to 5 shops). The active
+// listing count is cosmetic (the "Active Listings" column) and barely changes, so
+// we refresh it at most once per shop per this interval instead of every sync —
+// saving one GET /shops call per shop per cycle. In-memory: a process restart
+// simply refreshes it once on the next cycle.
+const LISTING_COUNT_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+/** @type {Map<string, number>} shop_id → last listing-count refresh (ms epoch) */
+const _lastListingCountRefresh = new Map();
 
 // ─── Jitter helpers ───────────────────────────────────────────────────────────
 
@@ -125,13 +160,43 @@ async function checkAndRestockForOrders(listingIds, shopClient, shop, config, db
   const label       = `[order-restock] ${shop.shop_name}`;
   const twoHoursAgo = Math.floor(Date.now() / 1000) - 7200;
 
-  // ── Phase 1: rank by cache signals; always live-check (never skip on stale qty) ─
+  // ── Phase 1: rank by cache signals, then skip redundant re-checks ──────────
+  // Frugality: a listing whose live inventory was already refreshed within the
+  // last sync interval AND is currently healthy (no cached zero offering) does
+  // not need another GET this cycle — the order window collects each listing for
+  // ~2 intervals, so without this we'd re-GET healthy listings every cycle for no
+  // gain. Listings that are zero/low OR whose cache is stale are NEVER skipped,
+  // so we never miss a real out-of-stock. The periodic inventory watch is a
+  // further safety net.
   const MAX_CHECKS_PER_CYCLE = 10;
-  const ranked = [...listingIds]
+  const intervalSec        = (config.sync_interval_minutes ?? 60) * 60;
+  const recentCheckCutoff  = Math.floor(Date.now() / 1000) - intervalSec;
+  const cacheStmt = db.prepare(
+    'SELECT MAX(synced_at) AS last, MIN(quantity) AS minq FROM listing_inventory WHERE listing_id = ? AND is_enabled = 1'
+  );
+
+  let skippedFresh = 0;
+  const candidates = [...listingIds].filter((lid) => {
+    const c = cacheStmt.get(lid);
+    const checkedRecently = c && c.last != null && c.last >= recentCheckCutoff;
+    const healthy         = c && c.minq != null && c.minq > 0;
+    if (checkedRecently && healthy) { skippedFresh++; return false; }
+    return true;
+  });
+
+  const ranked = candidates
     .map((lid) => ({ lid, priority: orderCheckPriority(db, lid, twoHoursAgo) }))
     .sort((a, b) => b.priority - a.priority);
 
   const toCheck = ranked.slice(0, MAX_CHECKS_PER_CYCLE).map((r) => r.lid);
+
+  if (skippedFresh > 0) {
+    console.log(`${label}: skipped ${skippedFresh} listing(s) already live-checked & healthy within the last ${Math.round(intervalSec / 60)}m (saved ${skippedFresh} API call(s))`);
+  }
+
+  if (!toCheck.length) {
+    return; // everything ordered recently is already fresh & healthy — 0 API calls
+  }
 
   if (listingIds.size > MAX_CHECKS_PER_CYCLE) {
     console.warn(
@@ -165,7 +230,7 @@ async function checkAndRestockForOrders(listingIds, shopClient, shop, config, db
         continue;
       }
 
-      const styleLabel = zeroArr.length ? zeroArr.join(', ') : 'unknown variation(s)';
+      const styleLabel = formatStyleLabel(zeroArr);
 
       if (!autoRestock) {
         logZeroStockIfNeeded(db, {
@@ -203,6 +268,13 @@ async function checkAndRestockForOrders(listingIds, shopClient, shop, config, db
       });
 
     } catch (err) {
+      // Out of daily budget — stop the post-sync inventory sweep entirely rather
+      // than logging a failure for every remaining listing. The receipts were
+      // already synced above; restocks resume on the next cycle once budget frees.
+      if (isQpdExhaustedError(err)) {
+        console.warn(`${label}: inventory check paused — ${err.message}`);
+        throw err; // bubble to syncShop so the cycle marks this key rate-limited
+      }
       // A transport-level failure (e.g. "socket hang up") never reaches Etsy, so
       // there is no HTTP response/status. Don't mislabel it as a server 500 —
       // surface it as a network error so it isn't mistaken for an Etsy outage.
@@ -249,8 +321,15 @@ async function checkAndRestockForOrders(listingIds, shopClient, shop, config, db
  * @param {object} proxyClient - Axios instance for this group's proxy chain
  * @param {TokenManager} tokenManager
  * @param {import('better-sqlite3').Database} db
+ * @param {string|null} [egressIp]
+ * @param {object} [options]
+ * @param {boolean}  [options.fullBackfill=false] - Paginate the shop's ENTIRE
+ *        order history (first order → today) instead of just the newest page.
+ * @param {(progress:{written:number,shop_id:string})=>void} [options.onProgress]
+ *        Called after every written batch so callers can stream live progress.
  */
-async function syncShop(shop, group, config, proxyClient, tokenManager, db, egressIp = null) {
+async function syncShop(shop, group, config, proxyClient, tokenManager, db, egressIp = null, options = {}) {
+  const { fullBackfill = false, onProgress = null } = options;
   const label = `[sync] ${shop.shop_name} (${group.group_id})`;
   const logId = startSyncLog(db, shop.shop_id, group.group_id, egressIp);
 
@@ -300,9 +379,34 @@ async function syncShop(shop, group, config, proxyClient, tokenManager, db, egre
     // ── 3. Resolve shop name → numeric ID (cached after first call) ───────────
     const numericId = await resolveShopId(shopClient, shop.shop_id);
 
+    // ── 3b. Refresh the persisted active-listing count (THROTTLED) ────────────
+    // The Etsy Shop object exposes listing_active_count directly, but it's a
+    // cosmetic figure that barely moves — so we refresh it at most once per
+    // LISTING_COUNT_TTL_MS per shop rather than burning a GET /shops on every
+    // sync cycle. Non-fatal: a failure here must never abort the receipt sync.
+    const lastCount = _lastListingCountRefresh.get(shop.shop_id) ?? 0;
+    if (Date.now() - lastCount >= LISTING_COUNT_TTL_MS) {
+      try {
+        const shopData = await getShop(shopClient, shop.shop_id);
+        if (shopData && shopData.listing_active_count != null) {
+          updateShopListingCount(db, shop.shop_id, shopData.listing_active_count);
+          console.log(`${label} Active listings: ${shopData.listing_active_count}`);
+        }
+        _lastListingCountRefresh.set(shop.shop_id, Date.now());
+      } catch (err) {
+        console.warn(`${label} Listing-count refresh failed (non-fatal): ${err.message}`);
+      }
+    }
+
     // ── 4. Paginate receipts ──────────────────────────────────────────────────
-    const maxPerSync = config.max_orders_per_sync ?? 100;
-    console.log(`${label} Fetching up to ${maxPerSync} receipts...`);
+    // Regular sync: only the newest `max_orders_per_sync` receipts.
+    // Full backfill: every receipt from the shop's first order to today.
+    const maxPerSync = fullBackfill ? Infinity : (config.max_orders_per_sync ?? 100);
+    console.log(
+      fullBackfill
+        ? `${label} FULL BACKFILL — fetching ALL receipts (first order → today)...`
+        : `${label} Fetching up to ${maxPerSync} receipts...`
+    );
 
     // Prepare a fast lookup: which listing_ids already have cached images?
     const cachedImgCheck = db.prepare('SELECT 1 FROM listing_images WHERE listing_id = ?');
@@ -313,6 +417,14 @@ async function syncShop(shop, group, config, proxyClient, tokenManager, db, egre
         for (const receipt of batch) {
           upsertReceipt(db, shop.shop_id, group.group_id, receipt);
           receiptsWritten++;
+
+          // Persist line-item transactions so earnings can attribute the 6.5%
+          // transaction fee (ledger ref_type=transaction) back to this receipt.
+          for (const tx of (receipt.transactions ?? [])) {
+            if (tx && tx.transaction_id) {
+              upsertTransaction(db, shop.shop_id, { ...tx, receipt_id: tx.receipt_id ?? receipt.receipt_id });
+            }
+          }
 
           // Collect listing IDs from recent orders for the post-sync inventory check.
           // Pass A receipts are sorted newest-first; only collect those created within
@@ -326,6 +438,10 @@ async function syncShop(shop, group, config, proxyClient, tokenManager, db, egre
       });
       insertBatch();
       console.log(`${label} Wrote batch of ${batch.length} receipts (total so far: ${receiptsWritten})`);
+      if (typeof onProgress === 'function') {
+        try { onProgress({ shop_id: shop.shop_id, written: receiptsWritten }); }
+        catch { /* progress reporting must never break the sync */ }
+      }
 
       const uncachedIds = [...new Set(
         batch.flatMap((r) => (r.transactions ?? []).map((t) => t.listing_id))
@@ -345,25 +461,38 @@ async function syncShop(shop, group, config, proxyClient, tokenManager, db, egre
       }
     };
 
-    // Pass A: newest N receipts by creation date (always)
-    for await (const batch of paginateReceipts(shopClient, numericId, { maxTotal: maxPerSync })) {
+    // Pass A: receipts by creation date (newest first).
+    // Regular sync caps at maxPerSync; full backfill walks every page to the
+    // shop's very first order. upsertReceipt is an UPSERT, so re-running a
+    // backfill safely refreshes existing rows and adds any missing ones.
+    for await (const batch of paginateReceipts(shopClient, numericId, {
+      maxTotal: maxPerSync,
+      sort_on: 'created',
+      sort_order: 'desc',
+    })) {
       await writeBatch(batch);
     }
 
     // Pass B: receipts updated in the last 14 days — catches tracking status
     // transitions for recently shipped orders and ensures orders in the full
     // pre_transit_days window (default 14 days) have fresh data.
-    // Extended from 7 to 14 days to match pre_transit_days default, ensuring
-    // any Etsy-side updates to orders in the pre-transit window are synced.
-    const fourteenDaysAgo = Math.floor(Date.now() / 1000) - 14 * 24 * 3600;
-    console.log(`${label} Fetching recently-updated receipts (last 14 days)...`);
-    for await (const batch of paginateReceipts(shopClient, numericId, {
-      maxTotal: 200,
-      min_last_modified: fourteenDaysAgo,
-      sort_on: 'updated',
-      sort_order: 'desc',
-    })) {
-      await writeBatch(batch);
+    // Skipped during a full backfill because Pass A already pulled every order.
+    if (!fullBackfill) {
+      const fourteenDaysAgo = Math.floor(Date.now() / 1000) - 14 * 24 * 3600;
+      console.log(`${label} Fetching recently-updated receipts (last 14 days)...`);
+      // One page (100) instead of two: this pass only refreshes Etsy-side changes
+      // (refunds, address/message edits) for recently-updated orders. Carrier
+      // status is handled separately by the 4PX tracking poller (Pass D) and local
+      // completion now stamps shipment_notified_at itself, so a second page is
+      // rarely needed and not worth the extra QPD on every cycle.
+      for await (const batch of paginateReceipts(shopClient, numericId, {
+        maxTotal: 100,
+        min_last_modified: fourteenDaysAgo,
+        sort_on: 'updated',
+        sort_order: 'desc',
+      })) {
+        await writeBatch(batch);
+      }
     }
 
     // ── 5. Order-triggered inventory check ───────────────────────────────────
@@ -380,11 +509,131 @@ async function syncShop(shop, group, config, proxyClient, tokenManager, db, egre
     updateShopSyncTime(db, shop.shop_id);
     finishSyncLog(db, logId, 'success', receiptsWritten);
     console.log(`${label} Done — ${receiptsWritten} receipts synced`);
+    return { status: 'success', shop_id: shop.shop_id, api_key: shop.api_key };
 
   } catch (err) {
+    // QPD exhaustion is a transient, self-resolving budget condition shared by
+    // every shop on the same API key — NOT a per-shop failure. Record it as a
+    // distinct, non-alarming 'rate_limited' status (rendered amber, not red) and
+    // tell the caller so it can skip the remaining shops on this key for the
+    // rest of the cycle instead of stampeding a key that's already spent.
+    if (isQpdExhaustedError(err)) {
+      console.warn(`${label} Skipped — ${err.message}`);
+      finishSyncLog(db, logId, 'rate_limited', receiptsWritten, err.message);
+      return {
+        status: 'rate_limited',
+        shop_id: shop.shop_id,
+        api_key: shop.api_key,
+        resetAt: err.resetAt ?? null,
+      };
+    }
     console.error(`${label} Sync failed: ${err.message}`);
     finishSyncLog(db, logId, 'error', receiptsWritten, err.message);
+    return { status: 'error', shop_id: shop.shop_id, api_key: shop.api_key };
   }
+}
+
+// ─── Earnings: payment-account ledger sync ────────────────────────────────────
+
+/**
+ * Sync a shop's payment-account ledger into the local DB so the Finance tab can
+ * report exact, per-shop earnings in the shop's payout currency.
+ *
+ * Strategy:
+ *   1. Window: full backfill walks from `since` (default ~2015) → now; an
+ *      incremental run starts a few days before the last high-water mark.
+ *   2. Stream ledger pages, buffering entries and collecting the payment_ids
+ *      referenced by gross/processing-fee entries.
+ *   3. Resolve those payment_ids → receipt_ids via /payments and persist the map
+ *      FIRST, so each ledger entry can attribute to its order on upsert.
+ *   4. Upsert all entries, then re-attribute any stragglers and advance the
+ *      high-water mark.
+ *
+ * @returns {Promise<{ entries: number, attributed: number }>}
+ */
+async function syncLedgerForShop(shop, group, config, proxyClient, tokenManager, db, options = {}) {
+  const { fullBackfill = false, onProgress = null } = options;
+  const label = `[ledger] ${shop.shop_name}`;
+
+  const accessToken = await tokenManager.getAccessToken(
+    shop.shop_id, shop.api_key, shop.refresh_token ?? null, proxyClient
+  );
+  const getToken = async (force) => {
+    if (force) tokenManager.invalidate(shop.shop_id);
+    return tokenManager.getAccessToken(shop.shop_id, shop.api_key, shop.refresh_token ?? null, proxyClient);
+  };
+  const shopClient = buildShopClient(proxyClient, shop.api_key, shop.shared_secret, accessToken, getToken);
+  await resolveShopId(shopClient, shop.shop_id);
+
+  const now = Math.floor(Date.now() / 1000);
+  // Etsy rejects ledger windows that span too long (HTTP 400), so we walk the
+  // history in fixed chunks. Bound the start to the shop's earliest order
+  // (minus a buffer) so we never scan years before the shop existed.
+  const CHUNK = 30 * 86400; // 30-day windows — safely inside Etsy's span limit
+  const EARLIEST = 1420070400; // 2015-01-01 hard floor
+
+  let minCreated;
+  if (fullBackfill) {
+    const firstReceipt = db.prepare('SELECT MIN(etsy_created_at) AS m FROM receipts WHERE shop_id = ?').get(shop.shop_id)?.m;
+    minCreated = firstReceipt ? Math.max(EARLIEST, firstReceipt - 7 * 86400) : now - 3 * 365 * 86400;
+  } else {
+    const hw = db.prepare('SELECT ledger_synced_at FROM shops WHERE shop_id = ?').get(shop.shop_id)?.ledger_synced_at;
+    minCreated = hw ? Math.max(EARLIEST, hw - 5 * 86400) : now - 3 * 365 * 86400; // 5-day overlap
+  }
+
+  console.log(`${label} ${fullBackfill ? 'FULL' : 'incremental'} ledger sync from ${new Date(minCreated * 1000).toISOString().slice(0, 10)} in ${Math.ceil((now - minCreated) / CHUNK)} window(s)…`);
+
+  const buffer = [];
+  const paymentIds = new Set();
+  let maxDate = minCreated;
+
+  for (let winStart = minCreated; winStart <= now; winStart += CHUNK) {
+    const winEnd = Math.min(winStart + CHUNK - 1, now);
+    for await (const page of paginateLedgerEntries(shopClient, shop.shop_id, { minCreated: winStart, maxCreated: winEnd })) {
+      for (const e of page) {
+        buffer.push(e);
+        const rt = String(e.reference_type || '').toLowerCase();
+        if ((rt === 'shop_payment' || rt === 'processing_fee' || rt === 'payment') && e.reference_id != null) {
+          paymentIds.add(String(e.reference_id));
+        }
+        const d = e.create_date ?? e.created_timestamp ?? 0;
+        if (d > maxDate) maxDate = d;
+      }
+      if (typeof onProgress === 'function') {
+        try { onProgress({ shop_id: shop.shop_id, entries: buffer.length }); } catch { /* ignore */ }
+      }
+    }
+  }
+
+  // Resolve payment_id → receipt_id and persist BEFORE upserting entries so
+  // gross/processing-fee rows attribute on insert.
+  if (paymentIds.size > 0) {
+    try {
+      const map = await getPaymentReceiptMap(shopClient, shop.shop_id, [...paymentIds]);
+      const saveMap = db.transaction(() => {
+        for (const [pid, rid] of map) upsertEtsyPayment(db, shop.shop_id, pid, rid);
+      });
+      saveMap();
+      console.log(`${label} mapped ${map.size}/${paymentIds.size} payment(s) → receipts`);
+    } catch (err) {
+      console.warn(`${label} payment→receipt mapping failed (non-fatal): ${err.message}`);
+    }
+  }
+
+  const saveEntries = db.transaction(() => {
+    for (const e of buffer) upsertLedgerEntry(db, shop.shop_id, e);
+  });
+  saveEntries();
+
+  const reattributed = reattributeLedgerEntries(db, shop.shop_id);
+  if (maxDate > minCreated) updateShopLedgerSyncTime(db, shop.shop_id, maxDate);
+
+  const attributed = db.prepare(
+    'SELECT COUNT(*) AS n FROM ledger_entries WHERE shop_id = ? AND receipt_id IS NOT NULL'
+  ).get(shop.shop_id).n;
+
+  console.log(`${label} done — ${buffer.length} entr${buffer.length === 1 ? 'y' : 'ies'} synced, ${reattributed} re-attributed, ${attributed} order-linked`);
+  return { entries: buffer.length, attributed };
 }
 
 // ─── Per-group sync cycle ─────────────────────────────────────────────────────
@@ -442,12 +691,39 @@ async function syncGroup(group, shopsInGroup, config, tokenManager, db) {
   const windowMs    = 60  * 1000; // stable hash offset: 0–60 seconds
   const maxJitterMs = 30  * 1000; // random jitter on top: 0–30 seconds
 
+  // QPD is enforced per API key. Once a key's daily budget is spent, every shop
+  // sharing that key would fail identically — so we record the spent key and
+  // skip its remaining shops for the rest of this cycle. This turns a wall of
+  // red "budget exhausted" errors (one per shop) into a single amber notice and
+  // avoids stampeding a key that's already over budget. The next cycle retries
+  // automatically once the sliding window has freed budget.
+  const exhaustedKeys = new Set();
+
   for (const shop of shopsInGroup) {
+    if (exhaustedKeys.has(shop.api_key)) {
+      console.log(
+        `${label} Skipping ${shop.shop_name} — daily API budget for its key is exhausted this cycle; will resume next cycle.`
+      );
+      continue;
+    }
+
     const delayMs = stableOffset(shop.shop_id, windowMs) + jitter(maxJitterMs);
     const delaySec = Math.round(delayMs / 1000);
     console.log(`${label} Scheduling ${shop.shop_name} in ~${delaySec}s`);
     await sleep(delayMs);
-    await syncShop(shop, group, config, proxyClient, tokenManager, db, egressIp);
+
+    const result = await syncShop(shop, group, config, proxyClient, tokenManager, db, egressIp);
+
+    if (result?.status === 'rate_limited' && shop.api_key) {
+      exhaustedKeys.add(shop.api_key);
+      const siblings = shopsInGroup.filter(
+        (s) => s.api_key === shop.api_key && s.shop_id !== shop.shop_id
+      ).length;
+      console.warn(
+        `${label} API key for ${shop.shop_name} is rate-limited` +
+          (siblings ? ` — pausing ${siblings} more shop(s) on that key until the window resets.` : '.')
+      );
+    }
   }
 }
 
@@ -557,194 +833,162 @@ async function runTrackingCheckPass(db, config) {
   );
 }
 
-// ─── Conversation sync pass ───────────────────────────────────────────────────
+// ─── Pass E: 4PX freight (shipping-cost) sync ─────────────────────────────────
 
 /**
- * Sync conversation threads and messages for a single shop.
+ * Resolve the 4PX shipping cost for every order that has a consignment but isn't
+ * yet billed. Each order is priced immediately from the rate card
+ * (ds.xms.estimated_cost.get) and reconciled to the authoritative billed amount
+ * (ds.xms.order.getFreight) once 4PX settles it. See src/fourpx/freight.js.
  *
- * Uses Etsy's undocumented internal v3 conversation endpoints — the same ones
- * that power etsy.com/your/messages. Uses existing OAuth tokens (no special
- * scope required, as Etsy does not expose conversation scopes publicly).
- * Returns skipped:true with a clear warning if Etsy returns 403 or 404.
+ * Mirrors runTrackingCheckPass's rate-limiting discipline:
+ *   - Orders never priced (fourpx_freight_fetched_at IS NULL) are prioritized.
+ *   - 'estimated'/'pending' orders are re-checked at most once every
+ *     FREIGHT_RECHECK_HOURS (to upgrade an estimate to the billed amount).
+ *   - 'billed' orders are skipped entirely (cost is immutable).
+ *   - At most MAX_FREIGHT_CHECKS_PER_CYCLE API calls per cycle, paced by a short sleep.
  *
- * Rate budget: ~1 call per 25 convos + 1 call per new thread detail.
- * Run at most every 20 minutes per shop to stay within QPD budget.
+ * Requires authenticated credentials (fourpx_app_key + fourpx_app_secret); no-ops
+ * without them. Tolerant of partial failure — one bad order never aborts the pass.
  *
- * @param {object}   shop          - Shop config entry
- * @param {object}   group         - Group config entry
- * @param {object}   config        - Full app config
- * @param {object}   proxyClient   - Proxy-isolated axios base client for the group
- * @param {TokenManager} tokenManager
  * @param {import('better-sqlite3').Database} db
- * @param {function} [notifyFn]    - Optional callback(newUnreadCount) for SSE push
- * @returns {Promise<{ synced: number, newUnread: number, skipped: boolean }>}
+ * @param {object} config
  */
-async function syncConversationsForShop(shop, group, config, proxyClient, tokenManager, db, notifyFn) {
-  const label = `[convos] ${shop.shop_name}`;
-
-  // Rate gate: skip if synced within the last 18 minutes (leave 2-min buffer vs 20-min cron)
-  const CONVO_SYNC_MIN_INTERVAL_S = 18 * 60;
-  const lastSyncRow = db.prepare(`
-    SELECT MAX(synced_at) AS last FROM conversations WHERE shop_id = ?
-  `).get(shop.shop_id);
-  const lastSyncAt = lastSyncRow?.last ?? 0;
-  const nowEpoch = Math.floor(Date.now() / 1000);
-  if (nowEpoch - lastSyncAt < CONVO_SYNC_MIN_INTERVAL_S) {
-    return { synced: 0, newUnread: 0, skipped: true };
+async function runFreightSyncPass(db, config) {
+  const appKey    = config.fourpx_app_key    ?? null;
+  const appSecret = config.fourpx_app_secret ?? null;
+  if (!appKey || !appSecret) {
+    console.log('[freight] 4PX credentials not configured — skipping freight sync.');
+    return;
+  }
+  // Operator kill-switch: lets a heavy account disable the extra API traffic.
+  if (config.fourpx_freight_sync === false) {
+    console.log('[freight] Disabled via config.fourpx_freight_sync=false — skipping.');
+    return;
   }
 
-  let accessToken;
-  try {
-    accessToken = await tokenManager.getAccessToken(
-      shop.shop_id, shop.api_key, shop.refresh_token ?? null, proxyClient
-    );
-  } catch {
-    return { synced: 0, newUnread: 0, skipped: true };
+  const FREIGHT_RECHECK_HOURS       = Number.isFinite(config.fourpx_freight_recheck_hours)
+                                        ? config.fourpx_freight_recheck_hours : 6;
+  const MAX_FREIGHT_CHECKS_PER_CYCLE = 150;
+  const INTER_REQUEST_MS             = 150;
+
+  const recheckCutoff = Math.floor(Date.now() / 1000) - FREIGHT_RECHECK_HOURS * 3600;
+
+  // Candidates: orders with a 4PX consignment that aren't 'billed' yet (or never
+  // priced), and weren't re-queried within the recheck window. Pull the fields the
+  // resolver needs to compute an estimate (destination + product + declared weight).
+  const candidates = db.prepare(`
+    SELECT receipt_id, source, tracking_code, fourpx_consignment_no, fourpx_tracking_no,
+           shipping_country_iso, fourpx_product_code, fourpx_weight_g, fourpx_freight_status
+    FROM receipts
+    WHERE (fourpx_consignment_no IS NOT NULL OR tracking_code LIKE '4PX%')
+      AND COALESCE(fourpx_order_status, '') != 'cancelled'
+      AND COALESCE(fourpx_freight_status, 'pending') != 'billed'
+      AND (fourpx_freight_fetched_at IS NULL OR fourpx_freight_fetched_at < ?)
+    ORDER BY
+      CASE WHEN fourpx_freight_fetched_at IS NULL THEN 0 ELSE 1 END ASC,
+      COALESCE(fourpx_created_at, etsy_created_at) DESC
+    LIMIT ?
+  `).all(recheckCutoff, MAX_FREIGHT_CHECKS_PER_CYCLE);
+
+  if (!candidates.length) {
+    console.log('[freight] No orders need a cost query this cycle.');
+    return;
   }
 
-  const shopClient = buildShopClient(proxyClient, shop.api_key, shop.shared_secret, accessToken);
+  console.log(`[freight] Pricing ${candidates.length} order(s) via 4PX (estimate + reconcile)…`);
 
-  let synced    = 0;
-  let newUnread = 0;
+  let billed = 0, estimated = 0, pending = 0, errored = 0;
 
-  try {
-    for await (const batch of paginateConversations(shopClient, shop.shop_id, { maxTotal: 50 })) {
-      const writeBatch = db.transaction(() => {
-        for (const convo of batch) {
-          const convoId = String(convo.conversation_id ?? convo.convo_id);
-
-          // Track if this conversation was previously read so we can detect new unreads
-          const prev = db.prepare('SELECT status FROM conversations WHERE convo_id = ?').get(convoId);
-          const wasRead = prev?.status === 'read' || prev?.status === 'replied';
-
-          upsertConversation(db, shop.shop_id, group.group_id, convo);
-          synced++;
-
-          if (convo.is_read === false && wasRead !== false) {
-            newUnread++;
-          }
-
-          // Upsert any messages embedded directly in the conversation list response
-          const msgs = Array.isArray(convo.messages) ? convo.messages : [];
-          for (const msg of msgs) {
-            if (msg.message_id || msg.id) {
-              upsertConversationMessage(db, convoId, shop.shop_id, {
-                ...msg,
-                seller_user_id: convo.seller_user_id ?? null,
-              });
-            }
-          }
-        }
-      });
-      writeBatch();
-
-      // For conversations with unread messages that don't have embedded message bodies,
-      // fetch the full thread detail (one API call per unread convo, capped at 5/cycle)
-      let detailFetched = 0;
-      for (const convo of batch) {
-        if (detailFetched >= 5) break;
-        const convoId = String(convo.conversation_id ?? convo.convo_id);
-        const msgs    = Array.isArray(convo.messages) ? convo.messages : [];
-        const hasBody = msgs.some(m => m.message_text || m.body || m.text);
-        if (!hasBody) {
-          try {
-            await sleep(300);
-            const full = await getConversation(shopClient, shop.shop_id, convoId);
-            const fullMsgs = Array.isArray(full.messages) ? full.messages : [];
-            const saveDetail = db.transaction(() => {
-              for (const msg of fullMsgs) {
-                if (msg.message_id || msg.id) {
-                  upsertConversationMessage(db, convoId, shop.shop_id, {
-                    ...msg,
-                    seller_user_id: full.seller_user_id ?? convo.seller_user_id ?? null,
-                  });
-                }
-              }
-            });
-            saveDetail();
-            detailFetched++;
-          } catch (err) {
-            // Non-fatal — missing detail is cosmetic
-            console.warn(`${label} Detail fetch for convo ${convoId} failed: ${err.message}`);
-          }
-        }
-      }
+  for (const [idx, order] of candidates.entries()) {
+    if (idx > 0) await sleep(INTER_REQUEST_MS);
+    try {
+      const r = await resolveReceiptFreight({ db, config, appKey, appSecret, receipt: order });
+      if (r.status === 'billed') billed++;
+      else if (r.status === 'estimated') estimated++;
+      else if (r.status === 'error') errored++;
+      else pending++;
+    } catch (err) {
+      errored++;
+      console.warn(`[freight] receipt ${order.receipt_id} failed: ${err.message}`);
     }
-
-    console.log(`${label} Conversation sync complete — ${synced} threads, ${newUnread} new unread`);
-
-    if (newUnread > 0 && typeof notifyFn === 'function') {
-      const totalUnread = db.prepare(
-        `SELECT COUNT(*) AS c FROM conversations WHERE shop_id = ? AND status = 'unread'`
-      ).get(shop.shop_id).c;
-      notifyFn(totalUnread);
-    }
-
-    return { synced, newUnread, skipped: false };
-
-  } catch (err) {
-    const status = err.response?.status;
-    if (status === 403) {
-      console.warn(
-        `${label} Conversation sync skipped — 403 Forbidden. ` +
-        `Etsy does not allow third-party access to conversation endpoints for this app key. ` +
-        `Use the "Open on Etsy" link in the Messages tab to read/reply directly.`
-      );
-    } else if (status === 404) {
-      console.warn(
-        `${label} Conversation sync skipped — 404. ` +
-        `Etsy's internal conversation endpoint may be unavailable or the path has changed.`
-      );
-    } else {
-      console.error(`${label} Conversation sync failed: ${err.message}`);
-    }
-    return { synced: 0, newUnread: 0, skipped: true };
   }
+
+  console.log(`[freight] Done — ${billed} billed, ${estimated} estimated, ${pending} pending, ${errored} error(s).`);
 }
 
 // ─── Main sync cycle ──────────────────────────────────────────────────────────
 
 async function runSyncCycle(config, tokenManager, db) {
-  console.log(`\n${'─'.repeat(60)}`);
-  console.log(`[sync] Cycle started at ${new Date().toISOString()}`);
-  console.log('─'.repeat(60));
-
-  const allShops = getAllShops(config);
-  const shopsWithTokens = allShops.filter((s) => tokenManager.hasTokens(s.shop_id));
-
-  if (shopsWithTokens.length === 0) {
-    console.warn('[sync] No shops have tokens. Run: npm run oauth:setup');
+  // ── Cross-process guard ─────────────────────────────────────────────────────
+  // Only one process may run a sync cycle at a time. If another live process
+  // already holds the lock (e.g. a stray duplicate dashboard, or the standalone
+  // worker running alongside the embedded scheduler), bail out immediately so we
+  // never double-sync shops or burn double the Etsy API budget.
+  if (!acquireLock(db, SYNC_LOCK_NAME, SYNC_LOCK_OWNER, SYNC_LOCK_TTL_SEC)) {
+    console.warn(
+      '[sync] Another process is already running a sync cycle (lock held) — skipping this trigger. ' +
+      'This is expected if a duplicate dashboard/worker is running; close the extra instance to stop double syncs.'
+    );
     return;
   }
 
-  console.log(`[sync] ${shopsWithTokens.length}/${allShops.length} shops have tokens — syncing those`);
+  console.log(`\n${'─'.repeat(60)}`);
+  console.log(`[sync] Cycle started at ${new Date().toISOString()} (owner ${SYNC_LOCK_OWNER})`);
+  console.log('─'.repeat(60));
 
-  // Group shops by group_id for proxy-isolated processing
-  const byGroup = new Map();
-  for (const shop of shopsWithTokens) {
-    if (!byGroup.has(shop.group_id)) byGroup.set(shop.group_id, []);
-    byGroup.get(shop.group_id).push(shop);
-  }
-
-  // Sync each group sequentially (each has its own proxy; no shared HTTP state)
-  for (const [groupId, shops] of byGroup) {
-    const group = config.groups.find((g) => g.group_id === groupId);
-    if (!group) continue;
-    await syncGroup(group, shops, config, tokenManager, db);
-  }
-
-  // Pass D: carrier tracking check for all recently shipped unconfirmed orders.
-  // Runs after ALL shops are synced so it covers every shop in one pass.
-  // Uses 4PX's public tracking API to determine if the carrier has physically
-  // picked up each package, enabling precise Pre-transit vs In-transit detection.
   try {
-    await runTrackingCheckPass(db, config);
-  } catch (err) {
-    console.error(`[tracking] Tracking check pass failed: ${err.message}`);
-  }
+    const allShops = getAllShops(config);
+    const shopsWithTokens = allShops.filter((s) => tokenManager.hasTokens(s.shop_id));
 
-  const totalReceipts = db.prepare('SELECT COUNT(*) AS c FROM receipts').get().c;
-  console.log(`\n[sync] Cycle complete — ${totalReceipts} total receipts in DB`);
+    if (shopsWithTokens.length === 0) {
+      console.warn('[sync] No shops have tokens. Run: npm run oauth:setup');
+      return;
+    }
+
+    console.log(`[sync] ${shopsWithTokens.length}/${allShops.length} shops have tokens — syncing those`);
+
+    // Group shops by group_id for proxy-isolated processing
+    const byGroup = new Map();
+    for (const shop of shopsWithTokens) {
+      if (!byGroup.has(shop.group_id)) byGroup.set(shop.group_id, []);
+      byGroup.get(shop.group_id).push(shop);
+    }
+
+    // Sync each group sequentially (each has its own proxy; no shared HTTP state)
+    for (const [groupId, shops] of byGroup) {
+      const group = config.groups.find((g) => g.group_id === groupId);
+      if (!group) continue;
+      renewLock(db, SYNC_LOCK_NAME, SYNC_LOCK_OWNER); // keep the lock fresh across long cycles
+      await syncGroup(group, shops, config, tokenManager, db);
+    }
+
+    // Pass D: carrier tracking check for all recently shipped unconfirmed orders.
+    // Runs after ALL shops are synced so it covers every shop in one pass.
+    // Uses 4PX's public tracking API to determine if the carrier has physically
+    // picked up each package, enabling precise Pre-transit vs In-transit detection.
+    try {
+      renewLock(db, SYNC_LOCK_NAME, SYNC_LOCK_OWNER);
+      await runTrackingCheckPass(db, config);
+    } catch (err) {
+      console.error(`[tracking] Tracking check pass failed: ${err.message}`);
+    }
+
+    // Pass E: pull the actual billed shipping cost (freight) from 4PX for every
+    // order with a consignment that hasn't been billed yet. Runs after tracking
+    // so it shares the same once-per-cycle, post-sync cadence.
+    try {
+      renewLock(db, SYNC_LOCK_NAME, SYNC_LOCK_OWNER);
+      await runFreightSyncPass(db, config);
+    } catch (err) {
+      console.error(`[freight] Freight sync pass failed: ${err.message}`);
+    }
+
+    const totalReceipts = db.prepare('SELECT COUNT(*) AS c FROM receipts').get().c;
+    console.log(`\n[sync] Cycle complete — ${totalReceipts} total receipts in DB`);
+  } finally {
+    releaseLock(db, SYNC_LOCK_NAME, SYNC_LOCK_OWNER);
+  }
 }
 
 // ─── Periodic inventory watch (safety net) ───────────────────────────────────
@@ -798,7 +1042,7 @@ async function runInventoryWatchCycle(config, tokenManager, db) {
     for (const [, rows] of Object.entries(byListing)) {
       const { shop_id, listing_id, listing_title } = rows[0];
       const zeroStyles = [...new Set(rows.map((r) => r.style_value).filter(Boolean))];
-      const styleLabel = zeroStyles.length ? zeroStyles.join(', ') : 'unknown variation(s)';
+      const styleLabel = formatStyleLabel(zeroStyles);
       logZeroStockIfNeeded(db, {
         event_type:    'ZERO_STOCK',
         shop_name:      shop_id,
@@ -864,7 +1108,7 @@ async function runInventoryWatchCycle(config, tokenManager, db) {
 
       // Log ONE consolidated event per listing (not per model row)
       const { styles: zeroStyles } = getZeroStylesForListing(db, listingId);
-      const styleLabel = zeroStyles.length ? zeroStyles.join(', ') : 'unknown variation(s)';
+      const styleLabel = formatStyleLabel(zeroStyles);
       console.log(`[inventory-watch] ✓ Auto-restocked ${shopCfg.shop_id} listing ${listingId}: all offerings → qty ${RESTOCK_QTY}`);
 
       logEvent(db, {
@@ -878,6 +1122,12 @@ async function runInventoryWatchCycle(config, tokenManager, db) {
       });
 
     } catch (err) {
+      // Out of daily budget — stop the sweep here instead of logging a failure
+      // for every remaining zero-stock listing. It resumes on the next sweep.
+      if (isQpdExhaustedError(err)) {
+        console.warn(`[inventory-watch] Sweep paused — ${err.message}`);
+        break;
+      }
       // Transport-level failure (e.g. "socket hang up") never reached Etsy, so
       // there is no HTTP status — don't mislabel it as a server 500.
       const hasResponse = !!err.response;
@@ -900,7 +1150,7 @@ async function runInventoryWatchCycle(config, tokenManager, db) {
 
       // ONE consolidated failure event per listing
       const failStyles = [...new Set(rows.map((r) => r.style_value).filter(Boolean))];
-      const failLabel    = failStyles.length ? failStyles.join(', ') : 'unknown variation(s)';
+      const failLabel    = formatStyleLabel(failStyles);
       logEvent(db, {
         event_type:    'RESTOCK_FAILED',
         shop_name:      shop_id,
@@ -1015,5 +1265,5 @@ if (require.main === module) {
     process.exit(1);
   });
 } else {
-  module.exports = { syncShop, syncGroup, runSyncCycle, runTrackingCheckPass, checkAndRestockForOrders, runInventoryWatchCycle, syncConversationsForShop };
+  module.exports = { syncShop, syncGroup, runSyncCycle, runTrackingCheckPass, runFreightSyncPass, checkAndRestockForOrders, runInventoryWatchCycle, syncLedgerForShop };
 }

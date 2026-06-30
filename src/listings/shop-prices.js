@@ -37,7 +37,7 @@ function styleKeyFromProps(propsJson) {
 
 /**
  * @param {import('better-sqlite3').Database} db
- * @param {string} shopId   config/listings shop_id (e.g. "CuteCasesOnly")
+ * @param {string} shopId   config/listings shop_id (e.g. "Y2KASEofficial")
  * @returns {{ prices: Record<string,number>, counts: Record<string,number>,
  *             currency: string|null, listingCount: number, hasData: boolean }}
  */

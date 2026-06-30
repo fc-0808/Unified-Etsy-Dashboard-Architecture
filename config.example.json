@@ -35,6 +35,21 @@
   "fourpx_warehouse_code": "CNSZX01",
   "fourpx_default_product": "BDS",
 
+  "_fourpx_freight_comment": "4PX shipping-cost sync (shown in the Earnings tab). When 4PX credentials are set, the sync worker prices every 4PX order: an immediate rate-card ESTIMATE via ds.xms.estimated_cost.get (the cost the 4PX portal shows once a parcel is measured), reconciled to the BILLED amount via ds.xms.order.getFreight once 4PX settles it. fourpx_freight_sync: set false to disable the extra API traffic. fourpx_freight_recheck_hours: how often an unbilled/estimated order is re-priced (default 6). fourpx_default_weight_g: fallback parcel weight (grams) for orders with no stored declared weight (default 100). fourpx_settlement_currency: currency 4PX bills in (CN accounts: CNY).",
+  "fourpx_freight_sync": true,
+  "fourpx_freight_recheck_hours": 6,
+  "fourpx_default_weight_g": 100,
+  "fourpx_settlement_currency": "CNY",
+
+  "_label_print_comment": "Shipping-label printing. The 'Print label' button rasterizes the 4PX label PDF to a pure 1-bit bitmap at the printer's exact native resolution and prints it 1:1, keeping the barcode crisp/scannable (normal scaled printing blurs the bars into grey). label_print_mode: 'auto' = silent direct print on Windows when label_printer_name is installed, otherwise open the PDF in your default app; 'silent' = always direct print; 'open' = always open the PDF. label_printer_name: exact Windows printer name. label_width_mm/label_height_mm: loaded label media size. label_dpi: print-head resolution (Deli DL-720W = 203). label_print_threshold: 1-255 black/white cutoff (higher = bolder). label_print_copies: copies per click.",
+  "label_print_mode": "auto",
+  "label_printer_name": "Deli DL-720W",
+  "label_width_mm": 80,
+  "label_height_mm": 80,
+  "label_dpi": 203,
+  "label_print_threshold": 160,
+  "label_print_copies": 1,
+
   "_fourpx_ioss_comment": "EU VAT compliance. fourpx_ioss_no: your Import One-Stop Shop (IOSS) registration number — REQUIRED by 4PX for EU (EU27) destinations with a declared value <= EUR 150 (field 'ioss_no'). For marketplace sales (e.g. Etsy) use the platform's IOSS number. Format: 'IM' + 10 digits (12 chars, no spaces, no 'IOSS' prefix). The server attaches it automatically to every EU27 order. fourpx_vat_no / fourpx_eori_no: optional EU VAT / EORI identifiers, attached to EU orders when set. Leave null to omit.",
   "fourpx_ioss_no": "IM0000000000",
   "fourpx_vat_no": null,

@@ -393,13 +393,13 @@ async function getFullTrackingEvents(trackingCode, apiCredentials = {}) {
     // valid terminal statuses — only transient errors trigger the fallback.
     const FALLBACK_STATUSES = new Set(['error', 'network_error', 'timeout', 'parse_error']);
     if (!FALLBACK_STATUSES.has(official.status)) {
-      return official;
+      return _withHealth(official);
     }
     // Official API failed — use public tracking endpoint which is more permissive
     // and returns richer location data even for pre-transit parcels.
     console.log(`[4px/track] Official API failed (${official.status}) for ${trackingCode}, falling back to public API`);
   }
-  return _publicTrackFull(trackingCode);
+  return _publicTrackFull(trackingCode).then(_withHealth);
 }
 
 /**
@@ -543,4 +543,121 @@ function _publicTrackFull(trackingCode) {
   });
 }
 
-module.exports = { checkTrackingStatus, getFullTrackingEvents };
+// ── Tracking health analysis (stuck / delayed parcel detection) ───────────────
+
+/** Normalize event text for duplicate detection (lowercase, collapse whitespace). */
+function _normEventText(s) {
+  return (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/** Parse 4PX "YYYY-MM-DD HH:mm:ss" timestamps (UTC+8) to Unix seconds. */
+function _parseTrackTime(timeStr) {
+  if (!timeStr) return null;
+  const d = new Date(String(timeStr).replace(' ', 'T') + '+08:00');
+  return isNaN(d.getTime()) ? null : Math.floor(d.getTime() / 1000);
+}
+
+const CUSTOMS_RE = /\bcustoms\b/i;
+const RELEASED_CUSTOMS_RE = /released from customs|customs cleared/i;
+
+/**
+ * Analyze a tracking timeline for signs of a stuck or delayed parcel.
+ *
+ * Heuristics (tuned for 4PX cross-border lanes):
+ *   - No scan update for N days while still in_transit
+ *   - Same event description repeated 3+ times (e.g. "Customs check" at LAX)
+ *   - Customs loop: multiple customs checks with no delivery progress
+ *   - Long time in transit since first physical scan
+ *
+ * @param {TrackingEvent[]} events  Newest-first
+ * @param {string}        status    Canonical status from classifyTrackingList
+ * @returns {{
+ *   isStuck: boolean,
+ *   severity: 'ok'|'warning'|'critical',
+ *   reasons: string[],
+ *   daysSinceLastUpdate: number|null,
+ *   daysInTransit: number|null,
+ *   repeatedEvents: Array<{ description: string, count: number }>,
+ * }}
+ */
+function analyzeTrackingHealth(events, status) {
+  const list = Array.isArray(events) ? events : [];
+  const reasons = [];
+  let severity = 'ok';
+
+  const bump = (level, msg) => {
+    reasons.push(msg);
+    if (level === 'critical') severity = 'critical';
+    else if (level === 'warning' && severity !== 'critical') severity = 'warning';
+  };
+
+  if (status === 'delivered') {
+    return { isStuck: false, severity: 'ok', reasons: [], daysSinceLastUpdate: null, daysInTransit: null, repeatedEvents: [] };
+  }
+
+  if (status === 'exception') {
+    bump('critical', 'Carrier reported a delivery exception — contact 4PX.');
+    return { isStuck: true, severity, reasons, daysSinceLastUpdate: null, daysInTransit: null, repeatedEvents: [] };
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const latestTs = _parseTrackTime(list[0]?.time);
+  const daysSinceLastUpdate = latestTs != null ? Math.floor((nowSec - latestTs) / 86400) : null;
+
+  // Oldest event with a parseable time → approximate transit duration.
+  let oldestTs = null;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const ts = _parseTrackTime(list[i]?.time);
+    if (ts != null) { oldestTs = ts; break; }
+  }
+  const daysInTransit = oldestTs != null ? Math.floor((nowSec - oldestTs) / 86400) : null;
+
+  // Repeated identical descriptions (common customs-loop signal).
+  const descCounts = new Map();
+  for (const e of list) {
+    const key = _normEventText(e.description);
+    if (!key || key.length < 8) continue;
+    descCounts.set(key, (descCounts.get(key) || 0) + 1);
+  }
+  const repeatedEvents = [...descCounts.entries()]
+    .filter(([, n]) => n >= 3)
+    .map(([description, count]) => ({ description, count }))
+    .sort((a, b) => b.count - a.count);
+
+  for (const { description, count } of repeatedEvents) {
+    const short = description.length > 48 ? description.slice(0, 45) + '…' : description;
+    bump('warning', `"${short}" repeated ${count}× — parcel may be stuck in a loop.`);
+  }
+
+  // Customs-specific: many customs scans without terminal delivery.
+  const customsCount = list.filter((e) => CUSTOMS_RE.test(e.description || '')).length;
+  const releasedCount = list.filter((e) => RELEASED_CUSTOMS_RE.test(e.description || '')).length;
+  if (customsCount >= 3 && status === 'in_transit') {
+    bump(customsCount >= 5 ? 'critical' : 'warning',
+      `${customsCount} customs scan${customsCount === 1 ? '' : 's'} with no delivery — likely held at customs.`);
+  }
+  if (customsCount >= 2 && releasedCount >= 2 && status === 'in_transit') {
+    bump('warning', 'Customs cleared multiple times but parcel still in transit — possible re-inspection.');
+  }
+
+  if (status === 'in_transit' && daysSinceLastUpdate != null) {
+    if (daysSinceLastUpdate >= 10) bump('critical', `No carrier update for ${daysSinceLastUpdate} days.`);
+    else if (daysSinceLastUpdate >= 5) bump('warning', `No carrier update for ${daysSinceLastUpdate} days.`);
+  }
+
+  if (status === 'in_transit' && daysInTransit != null && daysInTransit >= 21) {
+    bump('critical', `In transit for ${daysInTransit} days — well past typical delivery window.`);
+  } else if (status === 'in_transit' && daysInTransit != null && daysInTransit >= 14) {
+    bump('warning', `In transit for ${daysInTransit} days.`);
+  }
+
+  const isStuck = severity !== 'ok';
+  return { isStuck, severity, reasons, daysSinceLastUpdate, daysInTransit, repeatedEvents };
+}
+
+function _withHealth(result) {
+  const health = analyzeTrackingHealth(result.events ?? [], result.status ?? 'unknown');
+  return { ...result, health };
+}
+
+module.exports = { checkTrackingStatus, getFullTrackingEvents, analyzeTrackingHealth, _withHealth };

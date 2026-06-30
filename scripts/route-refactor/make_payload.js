@@ -6,14 +6,14 @@ const fs = require('fs');
 const path = require('path');
 const D = require('better-sqlite3');
 const routeDashboard = require('../../src/route/dashboard');
-let getCharmPurchaseProgress;
-try { ({ getCharmPurchaseProgress } = require('../../src/db/setup')); } catch {}
 
 const config = { pre_transit_days: 30 };
 const db = new D(path.join(__dirname, '../../data/etsy_dashboard.db'), { readonly: false });
 
+// Per-line route_assignments.status_charm is the single source of truth for
+// charm purchase state (matches POST /api/route/generate). No separate counter
+// reconciliation — buildRouteRows already returns the authoritative statuses.
 const rows = routeDashboard.buildRouteRows(db, config, { include_shipped: false, enrich_supplier: true });
-try { if (getCharmPurchaseProgress) routeDashboard.reconcileCharmStatusesFromProgress(db, rows, getCharmPurchaseProgress(db)); } catch {}
 const shoppingRows = rows.filter(r => !r.excluded && !routeDashboard.rowFullyPurchased(r));
 const exported = routeDashboard.rowsToImportOrders(shoppingRows);
 for (const o of exported) for (const it of o.items) { delete it._listing_id; delete it._manual_id; }

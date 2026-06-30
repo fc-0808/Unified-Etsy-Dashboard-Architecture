@@ -33,6 +33,11 @@
  *   listings_d      — delete listings
  */
 
+// Load .env so PORT (and any other overrides) match what the running server
+// uses — the post-OAuth hot-reload notification must hit the same port the
+// dashboard actually listens on.
+require('dotenv').config();
+
 const crypto = require('crypto');
 const http = require('http');
 const path = require('path');
@@ -218,7 +223,7 @@ async function verifyApiKeyActive(keystring, sharedSecret) {
       throw new Error(
         `Etsy rejected this app's API credentials (HTTP ${status}: ${detail}).\n\n` +
           `  This is why the browser shows "application is not recognized".\n\n` +
-          `  Check https://www.etsy.com/developers/your-apps for "cutecasesonly-inventory-sync":\n` +
+          `  Check https://www.etsy.com/developers/your-apps for this shop's app:\n` +
           `    1. Status must be Approved (not Pending Approval).\n` +
           `    2. Re-copy keystring + shared secret (eye icon) into config.json.\n` +
           `    3. Callback URL on THIS app must be exactly:\n` +
@@ -343,7 +348,13 @@ async function main() {
     process.exit(1);
   }
 
-  tokenManager.storeTokens(shop.shop_id, tokenData);
+  // Record the granted scopes (Etsy grants exactly what was approved here) so the
+  // app can pre-flight permission errors later. Prefer the scope echoed by Etsy,
+  // else the scopes we requested.
+  tokenManager.storeTokens(shop.shop_id, {
+    ...tokenData,
+    scopes: tokenData.scope ? String(tokenData.scope).trim().split(/\s+/) : REQUIRED_SCOPES.split(' '),
+  });
 
   console.log('\n  ═══════════════════════════════════════════════════════════');
   console.log('  SUCCESS — Tokens saved to tokens.json');
@@ -354,6 +365,34 @@ async function main() {
   console.log(`  Refresh token: valid for 90 days`);
   console.log(`\n  tokens.json is gitignored — it will never be committed.`);
   console.log(`\n  Run 'npm run oauth:setup' again to authenticate the next shop.\n`);
+
+  // Hot-reload the running server so it picks up the new token immediately,
+  // without requiring a PM2 restart. The dashboard listens on PORT (default
+  // 4000 — see src/server/index.js), so the notification MUST target the same
+  // port or the server keeps serving its stale in-memory token store.
+  const serverPort = Number(process.env.PORT) || 4000;
+  const reloaded = await new Promise((resolve) => {
+    const req = http.request(
+      { hostname: 'localhost', port: serverPort, path: '/api/admin/reload-tokens', method: 'POST', timeout: 3000 },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode >= 200 && res.statusCode < 300);
+      }
+    );
+    req.on('error', () => resolve(false)); // server not running — handled below
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+    req.end();
+  });
+
+  if (reloaded) {
+    console.log(`  ✓ Running server notified on port ${serverPort} — tokens reloaded, no restart needed.\n`);
+  } else {
+    console.log(
+      `  ⚠ Could not reach a running dashboard on port ${serverPort} to hot-reload tokens.\n` +
+      `    If the dashboard is open, restart it (or set PORT in .env to match) so it\n` +
+      `    picks up the new token. Newly-started servers load tokens.json automatically.\n`
+    );
+  }
 }
 
 main().catch((err) => {
