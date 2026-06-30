@@ -4294,7 +4294,7 @@ app.get('/api/4px/track/:tracking_no', async (req, res) => {
 		const receiptId = parseInt(req.query.receipt_id, 10)
 		if (Number.isFinite(receiptId)) {
 			const row = db.prepare(`
-				SELECT r.receipt_id, r.buyer_name, r.carrier_confirmed_at,
+				SELECT r.receipt_id, r.name AS buyer_name, r.carrier_confirmed_at,
 				       r.fourpx_tracking_no, r.fourpx_consignment_no,
 				       r.fourpx_freight_amount, r.fourpx_freight_currency, r.fourpx_freight_status,
 				       r.fourpx_billed_weight_g, r.fourpx_product_code,
@@ -4341,7 +4341,7 @@ app.get('/api/4px/stuck-shipments', (req, res) => {
 		const cutoff = Math.floor(Date.now() / 1000) - minDays * 86400
 
 		const rows = db.prepare(`
-			SELECT r.receipt_id, r.buyer_name, r.carrier_confirmed_at,
+			SELECT r.receipt_id, r.name AS buyer_name, r.carrier_confirmed_at,
 			       COALESCE(r.fourpx_tracking_no, r.tracking_code) AS tracking_no,
 			       r.fourpx_freight_amount, r.fourpx_freight_currency, r.fourpx_freight_status,
 			       s.shop_name
