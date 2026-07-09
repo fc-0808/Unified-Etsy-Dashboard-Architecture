@@ -53,6 +53,13 @@ const config = {
 		// Reasoning effort — only sent to OpenAI reasoning models (o-series, gpt-5.*).
 		// Ignored automatically for Qwen / non-OpenAI models.
 		reasoningEffort: (process.env.OPENAI_REASONING_EFFORT || 'low').toLowerCase(),
+
+		// Output-token budget for the vision passes. 0 = send NO explicit cap (let
+		// the provider use its default) — this avoids OpenRouter's upfront balance
+		// check rejecting large max_tokens. When a cap IS set, a truncated response
+		// (finish_reason=length) is retried with the budget doubled up to the ceiling.
+		visionMaxTokens: int(process.env.OPENAI_VISION_MAX_TOKENS, 0),
+		visionMaxTokensCeiling: int(process.env.OPENAI_VISION_MAX_TOKENS_CEILING, 16000),
 	},
 
 	bulk: {
@@ -75,9 +82,32 @@ const config = {
 	pricingWorkbookPath: process.env.PRICING_WORKBOOK_PATH || path.join(PROJECT_ROOT, 'Y2KASE_Pricing_Master_4_Currencies.xlsx'),
 }
 
+// ── Buyer-message model (AI messages for on-hold / fulfilment-issue orders) ────
+// These warm, human buyer messages are text-only and short, so they default to
+// the SAME OpenRouter provider the vision pipeline uses (Qwen), which is cheap
+// and writes natural copy. When no dedicated OpenRouter/vision provider is
+// configured we fall back to the main OpenAI text model. Every part can be
+// overridden independently with BUYER_MESSAGE_* env vars.
+const _hasOpenRouter = Boolean((process.env.VISION_API_KEY || '').trim() && config.openai.visionBaseUrl)
+config.buyerMessage = {
+	model: process.env.BUYER_MESSAGE_MODEL
+		|| (_hasOpenRouter ? (process.env.OPENAI_VISION_MODEL || 'qwen/qwen3.7-plus') : config.openai.model),
+	apiKey: process.env.BUYER_MESSAGE_API_KEY
+		|| (_hasOpenRouter ? config.openai.visionApiKey : config.openai.apiKey),
+	baseUrl: (process.env.BUYER_MESSAGE_BASE_URL || (_hasOpenRouter ? config.openai.visionBaseUrl : '')).trim(),
+	// OpenRouter attribution headers (shared with the vision provider config).
+	referer: config.openai.visionReferer,
+	title: config.openai.visionTitle,
+}
+
 /** @returns {boolean} true when an OpenAI key is configured */
 function hasOpenAiKey() {
 	return Boolean(config.openai.apiKey && config.openai.apiKey.trim())
 }
 
-module.exports = { config, hasOpenAiKey, bool, int }
+/** @returns {boolean} true when a provider key for buyer messages is configured */
+function hasBuyerMessageKey() {
+	return Boolean(config.buyerMessage.apiKey && config.buyerMessage.apiKey.trim())
+}
+
+module.exports = { config, hasOpenAiKey, hasBuyerMessageKey, bool, int }

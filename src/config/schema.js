@@ -72,6 +72,11 @@ function usesGroupProxy(group) {
  *                                                          is the true pre-transit signal. Default: 30 days.
  * @property {number}        tracking_edit_days           - Window (in days) during which Etsy permits editing the
  *                                                          tracking number of a shipped receipt. Default: 3 days.
+ * @property {number}        recently_packaged_days       - Look-back window (in days) for the packer's
+ *                                                          "Recently packaged" review queue: orders whose
+ *                                                          packaged_at falls within this window, newest first,
+ *                                                          so a mispacked parcel can be caught and fixed shortly
+ *                                                          after sealing. Default: 7 days.
  * @property {string}        db_path                      - Path to SQLite database file
  * @property {GroupConfig[]} groups                       - All shop groups
  * @property {boolean}       auto_restock_enabled         - Auto-restock zero-stock offerings (default true).
@@ -98,9 +103,10 @@ function usesGroupProxy(group) {
  * @property {string|null}   fourpx_warehouse_code        - 4PX warehouse/drop-off code for order creation,
  *                                                          e.g. "CNSZX01" for the Shenzhen warehouse.
  *                                                          Corresponds to deliver_type_info.warehouse_code.
- * @property {string|null}   fourpx_default_product       - Default logistics product code for new orders,
- *                                                          e.g. "BDS". Used to pre-select the dropdown in
- *                                                          the shipment drawer. Users can override per order.
+ * @property {string|null}   fourpx_default_product       - Fallback logistics product when
+ *                                                          POSTLINK-S5058 (S5058) is not offered
+ *                                                          for a destination (e.g. "QC").
+ *                                                          The UI always prefers S5058 when listed.
  */
 
 /**
@@ -292,6 +298,15 @@ function loadConfig() {
     // value is advisory on our side — Etsy remains the source of truth and any call
     // outside the window will still surface Etsy's own rejection. Default: 3 days.
     tracking_edit_days: raw.tracking_edit_days ?? 3,
+    // Look-back window (in days) for the packer's "Recently packaged" review queue.
+    // After sealing a parcel and marking it packaged, the operator has a short window
+    // to notice a mistake (wrong item, wrong buyer, wrong model) and correct it. This
+    // bounds that review list to genuinely recent work so it stays a fast, actionable
+    // audit view rather than an ever-growing archive. Sorted by packaged_at DESC.
+    // Default: 7 days (minimum 1). Raise it for a longer safety net.
+    recently_packaged_days: typeof raw.recently_packaged_days === 'number' && raw.recently_packaged_days >= 1
+      ? Math.floor(raw.recently_packaged_days)
+      : 7,
     db_path: raw.db_path
       ? path.resolve(path.dirname(CONFIG_PATH), raw.db_path)
       : path.resolve(__dirname, '../../data/etsy_dashboard.db'),
@@ -352,6 +367,10 @@ function loadConfig() {
     // Currency 4PX settles freight in (CN accounts: CNY/RMB). Stamped on estimated
     // costs and used as the conversion source for the Earnings "true net" view.
     fourpx_settlement_currency: (raw.fourpx_settlement_currency && String(raw.fourpx_settlement_currency).trim().toUpperCase()) || 'CNY',
+    // Shipping tab "stuck" threshold: an in-transit parcel with no new carrier scan
+    // for this many days is flagged as stuck (e.g. held at customs). Default 10.
+    fourpx_stuck_days: typeof raw.fourpx_stuck_days === 'number' && raw.fourpx_stuck_days > 0
+                               ? Math.round(raw.fourpx_stuck_days) : 10,
 
     // ── Shipping-label printing (thermal label printer) ────────────────────────
     // The "Print label" button rasterizes the 4PX label PDF to a pure 1-bit

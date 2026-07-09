@@ -27,12 +27,26 @@ const {
   updateListing,
   updateListingProperty,
 } = require('../etsy/client');
-const { buildInventory, buildVariationImages, PROP_STYLES } = require('./variation-builder');
+const { buildInventory, buildVariationImages, buildCustomVariationImages, normaliseCustomStyles, PROP_STYLES } = require('./variation-builder');
 const { getTaxonomyAttributes, resolveAttributes } = require('./attributes');
+const productTypes = require('./product-types');
+
+/** Dedupe a list of variation-image links by their Etsy value_id (first wins). */
+function dedupeByValueId(list) {
+  const seen = new Set();
+  const out = [];
+  for (const v of list) {
+    if (!v || v.value_id == null || seen.has(v.value_id)) continue;
+    seen.add(v.value_id);
+    out.push(v);
+  }
+  return out;
+}
 
 /** Build the createDraftListing request body from copy + resolved settings. */
-function buildCreateBody({ copy, settings, minPrice, listingQuantity }) {
+function buildCreateBody({ copy, settings, minPrice, listingQuantity, productType }) {
   const d = settings.defaults || settings;
+  const pt = productTypes.getProductType(productType);
   const body = {
     quantity: listingQuantity || 3,
     title: copy.title,
@@ -45,7 +59,7 @@ function buildCreateBody({ copy, settings, minPrice, listingQuantity }) {
     is_supply: d.is_supply === true,
     should_auto_renew: true,
     is_taxable: true,
-    materials: ['Silicone'],
+    materials: pt.materials || ['Silicone'],
     tags: copy.tags || [],
   };
   if (d.shipping_profile_id) body.shipping_profile_id = d.shipping_profile_id;
@@ -89,18 +103,28 @@ async function createListingForProduct(ctx) {
   const restockQuantity = options.restockQuantity ?? 3;
 
   const readinessStateId = (settings.defaults || settings).readiness_state_id ?? null;
+  // The product type parameterises the device-model dimension, allowed styles
+  // and materials. Prefer the explicit ctx value, then the cached copy's type.
+  const productType = ctx.productType || copy.productType || null;
+  // Operator-defined custom variation values (e.g. "Case1 + Charm1") fully
+  // replace the canonical bundle matrix for this listing when present.
+  const customStyles = normaliseCustomStyles(copy.customStyles);
   const { body: inventoryBody, minPrice, listingQuantity, enabledStyles } = buildInventory({
     prices,
     imageAnalysis: copy.imageAnalysis,
     // Prefer the dedicated accessory pass's verdict when present (more accurate
     // than the noisy per-image flags); otherwise derive from imageAnalysis.
     enabledStyles: copy.enabledStyles,
-    // Which iPhone models to offer (default all 12 when not specified).
+    // Which device models to offer (default all when not specified).
     enabledModels: copy.enabledModels,
+    customStyles,
+    // Operator's chosen display order for the "Styles" options (labels).
+    variationOrder: copy.variationOrder,
+    productType,
     restockQuantity,
     readinessStateId,
   });
-  const createBody = buildCreateBody({ copy, settings, minPrice, listingQuantity });
+  const createBody = buildCreateBody({ copy, settings, minPrice, listingQuantity, productType });
 
   // A self-contained inspection payload, persisted with the item so the UI can
   // render image order, copy, the full variation matrix and the resolved shop
@@ -128,6 +152,8 @@ async function createListingForProduct(ctx) {
     restockQuantity,
     enabledStyles,
     enabledModels: copy.enabledModels || null,
+    customStyles: customStyles.length ? customStyles : null,
+    productType: productType || copy.productType || null,
     stylePrices: prices,
     inventoryProducts: inventoryBody.products.length,
     images: (product.images || []).map((im) => ({ rank: im.rank, filename: im.filename })),
@@ -260,11 +286,17 @@ async function createListingForProduct(ctx) {
           }
         }
       }
-      const variationImages = buildVariationImages({
-        styleImageMapping: copy.styleImageMapping || {},
-        rankToImageId: uploadedRanks,
-        styleLabelToValueId,
-      });
+      // Canonical bundles use the AI-derived style→image mapping; custom values
+      // carry their own per-value image. Custom variations are ADDED on top, so
+      // link both sets (distinct value_ids, deduped for safety).
+      const variationImages = dedupeByValueId([
+        ...buildVariationImages({
+          styleImageMapping: copy.styleImageMapping || {},
+          rankToImageId: uploadedRanks,
+          styleLabelToValueId,
+        }),
+        ...(customStyles.length ? buildCustomVariationImages({ customStyles, rankToImageId: uploadedRanks, styleLabelToValueId }) : []),
+      ]);
       if (variationImages.length) {
         await updateVariationImages(shopClient, shopId, listingId, variationImages);
         onStep('variation_images', { linked: variationImages.length });
@@ -314,10 +346,11 @@ async function repriceListing(ctx) {
   const {
     shopClient, shopId, listingId, prices,
     imageAnalysis = [], restockQuantity = 3,
-    styleImageMapping = {}, rankToImageId, enabledStyles, enabledModels, readinessStateId,
+    styleImageMapping = {}, rankToImageId, enabledStyles, enabledModels, readinessStateId, productType, variationOrder,
   } = ctx;
 
-  const { body: inventoryBody, minPrice } = buildInventory({ prices, imageAnalysis, restockQuantity, enabledStyles, enabledModels, readinessStateId });
+  const customStyles = normaliseCustomStyles(ctx.customStyles);
+  const { body: inventoryBody, minPrice } = buildInventory({ prices, imageAnalysis, restockQuantity, enabledStyles, enabledModels, customStyles, variationOrder, readinessStateId, productType });
   await putListingInventory(shopClient, listingId, inventoryBody);
 
   // Re-link variation images (value_ids are re-issued by Etsy after a PUT).
@@ -335,7 +368,10 @@ async function repriceListing(ctx) {
           }
         }
       }
-      const variationImages = buildVariationImages({ styleImageMapping, rankToImageId: map, styleLabelToValueId });
+      const variationImages = dedupeByValueId([
+        ...buildVariationImages({ styleImageMapping, rankToImageId: map, styleLabelToValueId }),
+        ...(customStyles.length ? buildCustomVariationImages({ customStyles, rankToImageId: map, styleLabelToValueId }) : []),
+      ]);
       if (variationImages.length) await updateVariationImages(shopClient, shopId, listingId, variationImages);
     }
   } catch { /* variation-image relink is best-effort */ }

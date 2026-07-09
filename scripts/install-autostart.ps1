@@ -55,15 +55,22 @@ Write-Host '        Dashboard is running under PM2.'
 # -- 3. Register login auto-start (Startup folder, no admin needed) -------------
 Write-Host '  [3/6] Registering login auto-start...'
 
-$startupDir = [Environment]::GetFolderPath('Startup')
-$cmdPath    = Join-Path $startupDir 'EtsyDashboard-resurrect.cmd'
-$vbsPath    = Join-Path $startupDir 'EtsyDashboard.vbs'
+$startupDir  = [Environment]::GetFolderPath('Startup')
+$psExeEarly  = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+$resurrectPs = Join-Path $ProjectRoot 'scripts\resurrect.ps1'
 
-$cmdBody = "@echo off`r`ncd /d `"$ProjectRoot`"`r`ncall `"$pm2Cmd`" resurrect`r`n"
-Set-Content -Path $cmdPath -Value $cmdBody -Encoding ASCII
-
-$vbsBody = "Set sh = CreateObject(`"WScript.Shell`")`r`nsh.Run `"`"`"$cmdPath`"`"`", 0, False`r`n"
-Set-Content -Path $vbsPath -Value $vbsBody -Encoding ASCII
+# A hidden .lnk to resurrect.ps1 restores the PM2 dashboard on every sign-in.
+# (Using a .lnk — not a .cmd/.vbs — so it is not swept up by the legacy cleanup
+#  in step 5, and shows no console flash.)
+$ws  = New-Object -ComObject WScript.Shell
+$lnk = $ws.CreateShortcut((Join-Path $startupDir 'EtsyDashboard-resurrect.lnk'))
+$lnk.TargetPath       = $psExeEarly
+$lnk.Arguments        = "-WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File `"$resurrectPs`""
+$lnk.WorkingDirectory = $ProjectRoot
+$lnk.Description      = 'Restores the Etsy Dashboard (PM2) on login.'
+$lnk.WindowStyle      = 7
+$lnk.Save()
+[System.Runtime.InteropServices.Marshal]::ReleaseComObject($ws) | Out-Null
 
 # Also try a Scheduled Task (adds restart-on-failure). Non-fatal if admin required.
 $taskOk = $false

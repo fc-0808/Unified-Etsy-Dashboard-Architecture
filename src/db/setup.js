@@ -282,6 +282,21 @@ function initDb(dbPath) {
     );
 
     -- ─────────────────────────────────────────────
+    -- 4PX prepaid balance snapshot (single row, id=1).
+    -- 4PX does NOT expose account balance via its Open API, so the operator records
+    -- the balance from the b.4px.com portal here; the dashboard then estimates the
+    -- live remaining balance by subtracting 4PX shipping billed since the snapshot.
+    -- ─────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS fourpx_balance (
+      id          INTEGER PRIMARY KEY CHECK (id = 1),
+      amount      REAL,           -- balance as recorded from the portal
+      currency    TEXT,           -- e.g. 'CNY'
+      as_of       INTEGER,        -- unix epoch the balance was accurate as of
+      note        TEXT,
+      updated_at  INTEGER
+    );
+
+    -- ─────────────────────────────────────────────
     -- Listing image cache: listing_id → thumbnail URL
     -- Populated by the sync worker; avoids re-fetching on every cycle.
     -- ─────────────────────────────────────────────
@@ -597,6 +612,7 @@ function initDb(dbPath) {
       preview_json    TEXT,                            -- full inspection payload (copy + variations + image order + settings)
       published_at    INTEGER,                         -- epoch when the draft was published to Etsy
       reviewed_at     INTEGER,                         -- epoch when the operator marked the listing manually reviewed
+      excluded        INTEGER NOT NULL DEFAULT 0,      -- 1 = operator excluded this product from Etsy creation
       updated_at      INTEGER DEFAULT (strftime('%s','now')),
       PRIMARY KEY (job_id, product_folder)
     );
@@ -678,6 +694,62 @@ function initDb(dbPath) {
     );
     CREATE INDEX IF NOT EXISTS idx_order_issues_receipt ON order_issues(receipt_id);
     CREATE INDEX IF NOT EXISTS idx_order_issues_status  ON order_issues(status);
+
+    -- ─────────────────────────────────────────────────────────────────
+    -- order_exchanges: "wrong-model swap" workflow for line-items we ALREADY
+    --   physically hold, but in the WRONG phone model. The correct product
+    --   exists at the supplier — we simply carry the in-hand piece back to the
+    --   stall and swap it for the model the order actually needs.
+    --
+    --   Why this is its OWN concept (not "Purchased", not order_issues):
+    --     • It must NOT be bought again — we have the item — so it is held out of
+    --       the purchasing Route exactly like a fully-purchased line. Operators
+    --       used to fake this by marking the components "Purchased", which hid the
+    --       fact that a physical exchange is still owed and let staff ship the
+    --       WRONG model.
+    --     • It is NOT a fulfilment exception (order_issues): the buyer still gets
+    --       exactly what they ordered, so there is no buyer message / listing
+    --       delete / refund workflow. It is a shopping-trip task, not a customer
+    --       problem.
+    --
+    --   One row per affected LINE-ITEM, keyed by (receipt_id, item_key) — the same
+    --   listing-scoped key route/dashboard.lineItemKey(title, listing_id) uses — so
+    --   an open exchange maps 1:1 onto its Route-tab row.
+    --
+    --   have_model    — the model we currently hold (wrong), e.g. "iPhone 17 Pro".
+    --   need_model    — the model the order requires, e.g. "iPhone 17 Pro Max".
+    --   components    — comma list of the pieces to swap: any of case,grip,charm.
+    --   supplier_shop / supplier_stall — where to carry it for the swap (defaults
+    --                   captured from the route's supplier resolution at flag time).
+    --
+    --   Lifecycle (status): 'open' → 'done'. While OPEN the line is held out of the
+    --   purchasing Route (we have it) but surfaced in a dedicated "To exchange"
+    --   bucket so staff know to swap it on the next trip. Marking it done stamps
+    --   done_at; the server then flips the affected component statuses to Purchased
+    --   so the order becomes genuinely complete + ready to ship.
+    --
+    --   Purely local/operational; never overwritten by upsertReceipt re-syncs.
+    -- ─────────────────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS order_exchanges (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      receipt_id     INTEGER NOT NULL,
+      item_key       TEXT    NOT NULL,
+      listing_id     INTEGER,
+      title          TEXT,
+      have_model     TEXT,
+      need_model     TEXT,
+      components     TEXT    NOT NULL DEFAULT '',
+      supplier_shop  TEXT,
+      supplier_stall TEXT,
+      status         TEXT    NOT NULL DEFAULT 'open',
+      note           TEXT,
+      created_at     INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      updated_at     INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      done_at        INTEGER,
+      UNIQUE(receipt_id, item_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_order_exchanges_receipt ON order_exchanges(receipt_id);
+    CREATE INDEX IF NOT EXISTS idx_order_exchanges_status  ON order_exchanges(status);
   `);
 
   // ── Migrations ────────────────────────────────────────────────────────────
@@ -687,6 +759,17 @@ function initDb(dbPath) {
   const syncLogCols = db.pragma('table_info(sync_log)').map((c) => c.name);
   if (!syncLogCols.includes('egress_ip')) {
     db.exec(`ALTER TABLE sync_log ADD COLUMN egress_ip TEXT`);
+  }
+
+  // Persisted AI-drafted buyer message + its timestamp on a fulfilment issue, so
+  // an operator who generates a message once sees the same copy when they reopen
+  // the issue (instead of losing it or regenerating a different one every time).
+  const orderIssueCols = db.pragma('table_info(order_issues)').map((c) => c.name);
+  if (!orderIssueCols.includes('buyer_message')) {
+    db.exec(`ALTER TABLE order_issues ADD COLUMN buyer_message TEXT`);
+  }
+  if (!orderIssueCols.includes('buyer_message_at')) {
+    db.exec(`ALTER TABLE order_issues ADD COLUMN buyer_message_at INTEGER`);
   }
 
   // Persisted active-listing count per shop (Overview "Active Listings" column).
@@ -798,6 +881,34 @@ function initDb(dbPath) {
     // The DECLARED parcel weight (grams) sent at order-creation time. Used as the
     // weight input to the estimated-cost lookup until 4PX returns a billed charge weight.
     ['fourpx_weight_g',         'INTEGER'],
+
+    // ── 4PX parcel tracking snapshot (Shipping tab) ───────────────────────────
+    // Cached by the tracking sync pass so the Shipping tab can list every parcel's
+    // live status (and flag "stuck" ones) without making a 4PX API call per row.
+    // The authoritative, full event history is fetched on demand via /api/4px/track.
+
+    // Canonical lifecycle status from the carrier feed:
+    //   'pre_transit' | 'in_transit' | 'delivered' | 'exception' | 'unknown'
+    ['tracking_status',         'TEXT'],
+    // Human-readable description of the MOST RECENT tracking event (e.g.
+    // "Customs check" / "Released from customs: customs cleared.").
+    ['tracking_last_event',     'TEXT'],
+    // Unix epoch of the most recent tracking event. The Shipping tab uses
+    // (now - this) to compute "days since last update" and flag stuck parcels.
+    ['tracking_last_event_at',  'INTEGER'],
+    // Location string of the most recent event (e.g. "LAX", "Nancheng, China").
+    ['tracking_last_location',  'TEXT'],
+    // Unix epoch when the parcel was delivered (terminal). NULL until delivered.
+    ['tracking_delivered_at',   'INTEGER'],
+    // Stuck/delay verdict from analyzeTrackingHealth (which inspects the FULL event
+    // history: customs loops, repeated scans, no-movement, long transit). Persisted
+    // so the Shipping tab's "stuck" filter/cards match the timeline modal exactly,
+    // since the full-history heuristics can't be re-derived from a single SQL row.
+    //   'ok' | 'warning' | 'critical'   (NULL = not yet analysed)
+    ['tracking_health',         'TEXT'],
+    // Primary human-readable reason behind a non-ok health verdict (for the list
+    // tooltip), e.g. "7 customs scans with no delivery — likely held at customs."
+    ['tracking_health_reason',  'TEXT'],
 
     // ── Operator Archive (stuck pre-transit orders) ───────────────────────────
     // Sometimes a shipping label is created with the WRONG tracking number, so the
@@ -1062,6 +1173,11 @@ function initDb(dbPath) {
   // create-drafts confirmation guard.
   if (!bulkItemCols.includes('reviewed_at')) {
     db.exec('ALTER TABLE bulk_job_items ADD COLUMN reviewed_at INTEGER');
+  }
+  // excluded — operator flagged this product to be SKIPPED when the dry-run is
+  // promoted to real Etsy drafts (kept in the list for context, never created).
+  if (!bulkItemCols.includes('excluded')) {
+    db.exec('ALTER TABLE bulk_job_items ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0');
   }
   // auto_resume_count — how many times a job has been auto-resumed after an
   // interrupted (crashed/restarted) run without making fresh progress. Caps a
@@ -1940,9 +2056,9 @@ function getPerOrderEarnings(db, opts = {}) {
       r.grandtotal_amount, r.grandtotal_currency,
       -- 4PX shipment identity + resolved freight (estimate → billed). These are 1:1
       -- with the receipt, so MAX() just satisfies the GROUP BY deterministically.
-      -- The public 4PX number is fourpx_tracking_no when the shipment was created in
-      -- the dashboard, else the 4PX tracking_code synced from Etsy.
-      MAX(COALESCE(r.fourpx_tracking_no, CASE WHEN r.tracking_code LIKE '4PX%' THEN r.tracking_code END)) AS fourpx_tracking_no,
+      -- The public 4PX number is the Etsy-synced tracking_code (buyer-facing / the
+      -- parcel actually moving), falling back to a dashboard-created fourpx_tracking_no.
+      MAX(COALESCE(CASE WHEN r.tracking_code LIKE '4PX%' THEN r.tracking_code END, r.fourpx_tracking_no)) AS fourpx_tracking_no,
       MAX(r.fourpx_consignment_no)  AS fourpx_consignment_no,
       MAX(r.fourpx_freight_amount)  AS fourpx_freight_amount,
       MAX(r.fourpx_freight_currency) AS fourpx_freight_currency,
@@ -2592,6 +2708,249 @@ function getFourpxShippingSummary(db, { from, to, shopId } = {}) {
     };
   }
   return { rows, byShop };
+}
+
+// ─── 4PX parcel tracking (Shipping tab) ────────────────────────────────────────
+
+/**
+ * Persist a tracking snapshot for one receipt (from the tracking sync pass).
+ *
+ * Always stamps tracking_checked_at. Only overwrites the status fields when a
+ * meaningful snapshot is supplied, and never blanks a known delivered timestamp.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {number|string} receiptId
+ * @param {object} snap
+ * @param {string|null} [snap.status]         Canonical status.
+ * @param {number|null} [snap.firstScanAt]    Epoch of first carrier scan (→ carrier_confirmed_at).
+ * @param {number|null} [snap.lastEventAt]    Epoch of most recent event.
+ * @param {string|null} [snap.lastEvent]      Most recent event description.
+ * @param {string|null} [snap.lastLocation]   Most recent event location.
+ * @param {number|null} [snap.deliveredAt]    Epoch when delivered.
+ * @param {number}      [snap.checkedAt]      Epoch of this check (defaults to now).
+ */
+function updateTrackingDetail(db, receiptId, {
+  status = null,
+  firstScanAt = null,
+  lastEventAt = null,
+  lastEvent = null,
+  lastLocation = null,
+  deliveredAt = null,
+  health = null,        // analyzeTrackingHealth output { severity, reasons, ... }
+  checkedAt = Math.floor(Date.now() / 1000),
+} = {}) {
+  // Health is recomputed on every successful check (it's a function of the live
+  // timeline), so unlike the COALESCE'd fields it is written directly when provided.
+  const healthSeverity = health ? (health.severity || 'ok') : null;
+  const healthReason = health && Array.isArray(health.reasons) && health.reasons.length ? health.reasons[0] : null;
+  db.prepare(`
+    UPDATE receipts SET
+      tracking_status        = COALESCE(@status, tracking_status),
+      tracking_last_event    = COALESCE(@lastEvent, tracking_last_event),
+      tracking_last_event_at = COALESCE(@lastEventAt, tracking_last_event_at),
+      tracking_last_location = COALESCE(@lastLocation, tracking_last_location),
+      tracking_delivered_at  = COALESCE(tracking_delivered_at, @deliveredAt),
+      tracking_health        = COALESCE(@healthSeverity, tracking_health),
+      tracking_health_reason = CASE WHEN @healthSeverity IS NOT NULL THEN @healthReason ELSE tracking_health_reason END,
+      carrier_confirmed_at   = COALESCE(carrier_confirmed_at, @firstScanAt),
+      tracking_checked_at    = @checkedAt
+    WHERE receipt_id = @receiptId
+  `).run({
+    receiptId,
+    status,
+    lastEvent,
+    lastEventAt: lastEventAt ?? null,
+    lastLocation,
+    deliveredAt: deliveredAt ?? null,
+    healthSeverity,
+    healthReason,
+    firstScanAt: firstScanAt ?? null,
+    checkedAt,
+  });
+}
+
+/**
+ * SQL fragment that flags a parcel as "stuck/delayed". Primary signal is the
+ * persisted health verdict (analyzeTrackingHealth over the full event history:
+ * customs loops, repeated scans, long transit, no movement). As a safety net it
+ * also flags any in-transit parcel with no scan for `stuckDays` even if health
+ * hasn't been computed yet. Delivered parcels are never stuck (health = 'ok').
+ * Parameterised on @stuckCutoff (epoch).
+ */
+const STUCK_SQL = `(r.tracking_health = 'critical')`;
+
+/** SQL fragment for a "delayed" parcel (slow but not critically stuck). */
+const DELAYED_SQL = `(r.tracking_health = 'warning')`;
+
+/**
+ * List 4PX shipments for the Shipping tab with their cached tracking snapshot,
+ * freight cost, and a computed `is_stuck` flag. Supports filtering by canonical
+ * status, a "stuck" filter, shop, and a tracking-number/buyer search.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {object} [opts]
+ * @param {string} [opts.status]    Canonical status filter, or 'stuck'.
+ * @param {string} [opts.shopId]
+ * @param {string} [opts.q]         Search tracking number or buyer name.
+ * @param {number} [opts.stuckDays] Days of no movement to consider stuck (default 10).
+ * @param {number} [opts.limit]
+ * @param {number} [opts.offset]
+ * @returns {{rows: Array, total: number}}
+ */
+function getShipments(db, opts = {}) {
+  const where = ["(r.fourpx_consignment_no IS NOT NULL OR r.tracking_code LIKE '4PX%')"];
+  const params = { limit: Math.min(opts.limit ?? 100, 1000), offset: opts.offset ?? 0 };
+
+  if (opts.shopId) { where.push('r.shop_id = @shopId'); params.shopId = opts.shopId; }
+  // Ship-date range (COALESCE so parcels without an Etsy shipment timestamp fall
+  // back to the label-creation / order date rather than dropping out of the window).
+  if (opts.from != null) { where.push('COALESCE(r.shipment_notified_at, r.fourpx_created_at, r.etsy_created_at) >= @from'); params.from = opts.from; }
+  if (opts.to != null)   { where.push('COALESCE(r.shipment_notified_at, r.fourpx_created_at, r.etsy_created_at) <= @to');   params.to = opts.to; }
+  if (opts.q) {
+    where.push('(r.tracking_code LIKE @q OR r.fourpx_tracking_no LIKE @q OR r.name LIKE @q)');
+    params.q = `%${opts.q}%`;
+  }
+  if (opts.status === 'stuck') {
+    where.push(STUCK_SQL);
+  } else if (opts.status === 'delayed') {
+    where.push(DELAYED_SQL);
+  } else if (opts.status && opts.status !== 'all') {
+    where.push('COALESCE(r.tracking_status,\'unknown\') = @status');
+    params.status = opts.status;
+  }
+  const W = where.join(' AND ');
+
+  // Parcel identity: prefer the Etsy-synced 4PX tracking_code (what the buyer sees
+  // and what's actually moving) over a dashboard-created fourpx_tracking_no, because
+  // when they differ the dashboard label may have been abandoned/re-created. For the
+  // common case (dashboard label == Etsy tracking) the two are identical.
+  const trackingNoExpr = `COALESCE(CASE WHEN r.tracking_code LIKE '4PX%' THEN r.tracking_code END, r.fourpx_tracking_no)`;
+
+  const rows = db.prepare(`
+    SELECT
+      r.receipt_id, r.shop_id, s.shop_name, r.name AS buyer_name,
+      r.shipping_country_iso, r.etsy_created_at,
+      ${trackingNoExpr} AS tracking_no,
+      r.fourpx_consignment_no,
+      r.tracking_status, r.tracking_last_event, r.tracking_last_event_at,
+      r.tracking_last_location, r.tracking_delivered_at,
+      r.tracking_health, r.tracking_health_reason,
+      r.carrier_confirmed_at, r.tracking_checked_at,
+      r.shipment_notified_at,
+      r.fourpx_freight_amount, r.fourpx_freight_currency, r.fourpx_freight_status,
+      CASE WHEN ${STUCK_SQL} THEN 1 ELSE 0 END AS is_stuck
+    FROM receipts r
+    JOIN shops s ON s.shop_id = r.shop_id
+    WHERE ${W}
+    ORDER BY
+      CASE WHEN ${STUCK_SQL} THEN 0 ELSE 1 END ASC,
+      COALESCE(r.tracking_last_event_at, r.shipment_notified_at, r.etsy_created_at) DESC
+    LIMIT @limit OFFSET @offset
+  `).all(params);
+
+  const total = db.prepare(`SELECT COUNT(*) AS n FROM receipts r WHERE ${W}`).get(params).n;
+  return { rows, total };
+}
+
+/**
+ * Summary counts for the Shipping tab cards: total 4PX shipments plus a count per
+ * canonical status and the number currently stuck.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {object} [opts]
+ * @param {number} [opts.stuckDays]
+ * @param {string} [opts.shopId]
+ * @returns {{total:number, pre_transit:number, in_transit:number, delivered:number, exception:number, unknown:number, stuck:number}}
+ */
+function getShippingStats(db, opts = {}) {
+  const where = ["(r.fourpx_consignment_no IS NOT NULL OR r.tracking_code LIKE '4PX%')"];
+  const params = {};
+  if (opts.shopId) { where.push('r.shop_id = @shopId'); params.shopId = opts.shopId; }
+  if (opts.from != null) { where.push('COALESCE(r.shipment_notified_at, r.fourpx_created_at, r.etsy_created_at) >= @from'); params.from = opts.from; }
+  if (opts.to != null)   { where.push('COALESCE(r.shipment_notified_at, r.fourpx_created_at, r.etsy_created_at) <= @to');   params.to = opts.to; }
+  const W = where.join(' AND ');
+
+  return db.prepare(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN COALESCE(r.tracking_status,'unknown')='pre_transit' THEN 1 ELSE 0 END) AS pre_transit,
+      SUM(CASE WHEN r.tracking_status='in_transit' THEN 1 ELSE 0 END) AS in_transit,
+      SUM(CASE WHEN r.tracking_status='delivered'  THEN 1 ELSE 0 END) AS delivered,
+      SUM(CASE WHEN r.tracking_status='exception'  THEN 1 ELSE 0 END) AS exception,
+      SUM(CASE WHEN COALESCE(r.tracking_status,'unknown')='unknown' THEN 1 ELSE 0 END) AS unknown,
+      SUM(CASE WHEN ${STUCK_SQL} THEN 1 ELSE 0 END) AS stuck,
+      SUM(CASE WHEN ${DELAYED_SQL} THEN 1 ELSE 0 END) AS delayed
+    FROM receipts r
+    WHERE ${W}
+  `).get(params);
+}
+
+/**
+ * Record the operator's current 4PX prepaid balance (from the b.4px.com portal).
+ * Single-row upsert — the latest snapshot replaces the previous one.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {object} opts
+ * @param {number} opts.amount           Balance amount from the portal.
+ * @param {string} [opts.currency='CNY'] Currency of the amount.
+ * @param {number} [opts.asOf]           Epoch the balance is accurate as of (default now).
+ * @param {string} [opts.note]
+ */
+function setFourpxBalance(db, { amount, currency = 'CNY', asOf, note = null } = {}) {
+  const now = Math.floor(Date.now() / 1000);
+  db.prepare(`
+    INSERT INTO fourpx_balance (id, amount, currency, as_of, note, updated_at)
+    VALUES (1, @amount, @currency, @asOf, @note, @now)
+    ON CONFLICT(id) DO UPDATE SET
+      amount = @amount, currency = @currency, as_of = @asOf, note = @note, updated_at = @now
+  `).run({ amount, currency: (currency || 'CNY').toUpperCase(), asOf: asOf ?? now, note, now });
+}
+
+/**
+ * Current 4PX balance status: the recorded snapshot plus a checkbook-style estimate
+ * of the remaining balance = snapshot − 4PX shipping billed since the snapshot date.
+ *
+ * "Billed since" sums resolved freight (billed or estimated) for 4PX shipments whose
+ * ship/label date is on/after the snapshot's as_of, in the snapshot currency. This is
+ * an ESTIMATE (4PX has no balance API); the operator re-syncs the snapshot from the
+ * portal whenever they recharge or want an exact figure.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @returns {{ configured: boolean, amount: number|null, currency: string|null,
+ *   as_of: number|null, note: string|null, spent_since: number, billed_orders: number,
+ *   estimated_orders: number, estimated_remaining: number|null }}
+ */
+function getFourpxBalanceStatus(db) {
+  const snap = db.prepare('SELECT amount, currency, as_of, note FROM fourpx_balance WHERE id = 1').get();
+  if (!snap) {
+    return { configured: false, amount: null, currency: null, as_of: null, note: null,
+             spent_since: 0, billed_orders: 0, estimated_orders: 0, estimated_remaining: null };
+  }
+  const currency = snap.currency || 'CNY';
+  const spent = db.prepare(`
+    SELECT
+      COALESCE(SUM(r.fourpx_freight_amount), 0) AS spent,
+      SUM(CASE WHEN r.fourpx_freight_status = 'billed'    THEN 1 ELSE 0 END) AS billed_orders,
+      SUM(CASE WHEN r.fourpx_freight_status = 'estimated' THEN 1 ELSE 0 END) AS estimated_orders
+    FROM receipts r
+    WHERE (r.fourpx_consignment_no IS NOT NULL OR r.tracking_code LIKE '4PX%')
+      AND r.fourpx_freight_amount IS NOT NULL
+      AND COALESCE(r.fourpx_freight_currency, 'CNY') = @currency
+      AND COALESCE(r.shipment_notified_at, r.fourpx_created_at, r.etsy_created_at) >= @asOf
+  `).get({ currency, asOf: snap.as_of });
+
+  const spentSince = +(spent.spent || 0).toFixed(2);
+  return {
+    configured: true,
+    amount: snap.amount,
+    currency,
+    as_of: snap.as_of,
+    note: snap.note,
+    spent_since: spentSince,
+    billed_orders: spent.billed_orders || 0,
+    estimated_orders: spent.estimated_orders || 0,
+    estimated_remaining: +(snap.amount - spentSince).toFixed(2),
+  };
 }
 
 // ─── Route assignments ────────────────────────────────────────────────────────
@@ -3875,14 +4234,16 @@ function upsertOrderIssue(db, p) {
  * @param {Database.Database} db
  * @param {number} id
  * @param {object} patch - any of { buyer_notified_at, listing_handled_at,
- *   listing_action, status, resolution, resolved_at, note }
+ *   listing_action, status, resolution, resolved_at, note, buyer_message,
+ *   buyer_message_at }
  * @returns {object|null}
  */
 function patchOrderIssue(db, id, patch) {
   const existing = getIssueById(db, id);
   if (!existing) return null;
   const allowed = ['buyer_notified_at', 'listing_handled_at', 'listing_action',
-    'status', 'resolution', 'resolved_at', 'note'];
+    'status', 'resolution', 'resolved_at', 'note',
+    'buyer_message', 'buyer_message_at'];
   const sets = [];
   const params = { id: Number(id), now: Math.floor(Date.now() / 1000) };
   for (const k of allowed) {
@@ -3981,6 +4342,156 @@ function migrateArchivedOrdersToIssues(db) {
   if (migratedOrders) {
     console.log(`[db] Retired Archive → Issues: processed ${migratedOrders} archived order(s), opened ${createdIssues} issue(s).`);
   }
+}
+
+// ─── Order exchanges (wrong-model in-person swap workflow) ───────────────────
+
+/** Component pieces an exchange can cover. */
+const EXCHANGE_COMPONENTS = ['case', 'grip', 'charm'];
+
+/**
+ * Normalise a components input (array or comma string) to a clean, ordered,
+ * de-duplicated "case,grip,charm"-style string containing only valid pieces.
+ * @param {string|string[]|null|undefined} input
+ * @returns {string}
+ */
+function normalizeExchangeComponents(input) {
+  let parts = [];
+  if (Array.isArray(input)) parts = input;
+  else if (typeof input === 'string') parts = input.split(',');
+  const set = new Set(parts.map((p) => String(p).trim().toLowerCase()).filter(Boolean));
+  return EXCHANGE_COMPONENTS.filter((c) => set.has(c)).join(',');
+}
+
+/**
+ * Map of `${receipt_id}\x00${item_key}` → exchange row, for ONLY open exchanges.
+ * Used by the Route dashboard to hold affected line-items out of purchasing while
+ * surfacing them in the dedicated "To exchange" bucket.
+ * @param {Database.Database} db
+ * @returns {Map<string, object>}
+ */
+function getOpenExchangeMap(db) {
+  const map = new Map();
+  try {
+    db.prepare("SELECT * FROM order_exchanges WHERE status = 'open'").all()
+      .forEach((r) => map.set(`${r.receipt_id}\x00${r.item_key}`, r));
+  } catch { /* table may not exist yet on first run */ }
+  return map;
+}
+
+/**
+ * All exchanges for a set of receipts (open + done), keyed by receipt_id.
+ * @param {Database.Database} db
+ * @param {Array<number>} receiptIds
+ * @returns {Object<number, Array<object>>}
+ */
+function getExchangesForReceipts(db, receiptIds) {
+  const out = {};
+  const ids = (receiptIds || []).map(Number).filter(Number.isInteger);
+  if (!ids.length) return out;
+  try {
+    const ph = ids.map(() => '?').join(',');
+    db.prepare(`SELECT * FROM order_exchanges WHERE receipt_id IN (${ph})`)
+      .all(ids)
+      .forEach((r) => { (out[r.receipt_id] ||= []).push(r); });
+  } catch { /* table may not exist yet */ }
+  return out;
+}
+
+/** All exchanges for one receipt (open + done), newest first. */
+function getExchangesForReceipt(db, receiptId) {
+  try {
+    return db.prepare('SELECT * FROM order_exchanges WHERE receipt_id = ? ORDER BY created_at DESC, id DESC').all(Number(receiptId));
+  } catch { return []; }
+}
+
+/** Fetch one exchange by id, or null. */
+function getExchangeById(db, id) {
+  try { return db.prepare('SELECT * FROM order_exchanges WHERE id = ?').get(Number(id)) || null; }
+  catch { return null; }
+}
+
+/**
+ * Create or update (re-open) the wrong-model exchange for a line-item. Keyed by
+ * (receipt_id, item_key); re-flagging an existing line updates its details and
+ * re-opens it (clearing any prior done stamp) so the swap is owed again.
+ *
+ * @param {Database.Database} db
+ * @param {object} p - { receipt_id, item_key, listing_id?, title?, have_model?,
+ *   need_model?, components?, supplier_shop?, supplier_stall?, note? }
+ * @returns {object} the upserted exchange row
+ */
+function upsertOrderExchange(db, p) {
+  const now = Math.floor(Date.now() / 1000);
+  db.prepare(`
+    INSERT INTO order_exchanges
+      (receipt_id, item_key, listing_id, title, have_model, need_model,
+       components, supplier_shop, supplier_stall, status, note, created_at, updated_at)
+    VALUES
+      (@receipt_id, @item_key, @listing_id, @title, @have_model, @need_model,
+       @components, @supplier_shop, @supplier_stall, 'open', @note, @now, @now)
+    ON CONFLICT(receipt_id, item_key) DO UPDATE SET
+      listing_id     = COALESCE(excluded.listing_id, listing_id),
+      title          = COALESCE(excluded.title, title),
+      have_model     = COALESCE(excluded.have_model, have_model),
+      need_model     = COALESCE(excluded.need_model, need_model),
+      components     = excluded.components,
+      supplier_shop  = COALESCE(excluded.supplier_shop, supplier_shop),
+      supplier_stall = COALESCE(excluded.supplier_stall, supplier_stall),
+      note           = COALESCE(excluded.note, note),
+      status         = 'open',
+      done_at        = NULL,
+      updated_at     = excluded.updated_at
+  `).run({
+    receipt_id:     Number(p.receipt_id),
+    item_key:       String(p.item_key),
+    listing_id:     p.listing_id != null ? Number(p.listing_id) : null,
+    title:          p.title != null ? String(p.title) : null,
+    have_model:     p.have_model != null ? String(p.have_model) : null,
+    need_model:     p.need_model != null ? String(p.need_model) : null,
+    components:     normalizeExchangeComponents(p.components),
+    supplier_shop:  p.supplier_shop != null ? String(p.supplier_shop) : null,
+    supplier_stall: p.supplier_stall != null ? String(p.supplier_stall) : null,
+    note:           p.note != null ? String(p.note) : null,
+    now,
+  });
+  return db.prepare('SELECT * FROM order_exchanges WHERE receipt_id = ? AND item_key = ?')
+    .get(Number(p.receipt_id), String(p.item_key));
+}
+
+/**
+ * Patch workflow fields on an exchange (mark done / reopen / edit note).
+ * Only the provided keys are written. Returns the updated row, or null if absent.
+ *
+ * @param {Database.Database} db
+ * @param {number} id
+ * @param {object} patch - any of { status, done_at, note, have_model, need_model,
+ *   components, supplier_shop, supplier_stall }
+ * @returns {object|null}
+ */
+function patchOrderExchange(db, id, patch) {
+  const existing = getExchangeById(db, id);
+  if (!existing) return null;
+  const allowed = ['status', 'done_at', 'note', 'have_model', 'need_model',
+    'components', 'supplier_shop', 'supplier_stall'];
+  const sets = [];
+  const params = { id: Number(id), now: Math.floor(Date.now() / 1000) };
+  for (const k of allowed) {
+    if (Object.prototype.hasOwnProperty.call(patch, k)) {
+      sets.push(`${k} = @${k}`);
+      params[k] = k === 'components' ? normalizeExchangeComponents(patch[k]) : patch[k];
+    }
+  }
+  if (!sets.length) return existing;
+  sets.push('updated_at = @now');
+  db.prepare(`UPDATE order_exchanges SET ${sets.join(', ')} WHERE id = @id`).run(params);
+  return getExchangeById(db, id);
+}
+
+/** Permanently delete an exchange. Returns true when a row was removed. */
+function deleteOrderExchange(db, id) {
+  try { return db.prepare('DELETE FROM order_exchanges WHERE id = ?').run(Number(id)).changes > 0; }
+  catch { return false; }
 }
 
 /**
@@ -4487,6 +4998,15 @@ module.exports = {
   upsertOrderIssue,
   patchOrderIssue,
   deleteOrderIssue,
+  EXCHANGE_COMPONENTS,
+  normalizeExchangeComponents,
+  getOpenExchangeMap,
+  getExchangesForReceipts,
+  getExchangesForReceipt,
+  getExchangeById,
+  upsertOrderExchange,
+  patchOrderExchange,
+  deleteOrderExchange,
   insertManualItem,
   getManualItems,
   getManualItemImage,
@@ -4555,4 +5075,9 @@ module.exports = {
   recordFourpxFreight,
   recordFourpxShipmentInputs,
   getFourpxShippingSummary,
+  updateTrackingDetail,
+  getShipments,
+  getShippingStats,
+  setFourpxBalance,
+  getFourpxBalanceStatus,
 };

@@ -22,7 +22,20 @@ const fs = require('fs')
 const path = require('path')
 const { config, hasOpenAiKey } = require('./config')
 const { catalogPromptBlock, normaliseCharacter } = require('./character-catalog')
-const { enabledStylesFor, normaliseEnabledStyles, normaliseEnabledModels, compatibilityNamesFor, ALL_DESCRIPTION_NAMES } = require('./variation-builder')
+const { enabledStylesFor, normaliseEnabledStyles } = require('./variation-builder')
+const productTypes = require('./product-types')
+
+// Device-model helpers, resolved per product type (default iPhone). These wrap
+// the product-type registry so the copy pipeline stays device-agnostic.
+function compatibilityNamesFor(enabledModels, productType) {
+	return productTypes.compatibilityNamesFor(productType, enabledModels)
+}
+function allDescriptionNamesFor(productType) {
+	return productTypes.allDescriptionNames(productType)
+}
+function normaliseEnabledModels(input, productType) {
+	return productTypes.normaliseEnabledModels(productType, input)
+}
 
 let _OpenAI = null
 function getOpenAIClient() {
@@ -312,8 +325,13 @@ async function callStructured(client, { messages, schema, maxTokens, temperature
 	// chain-of-thought before JSON. Use the caller's budget as-is — do NOT force a
 	// high floor (OpenRouter rejects upfront when input images + max_tokens exceed
 	// your credit balance). Truncation retries grow the budget only when needed.
-	const ceiling = config.openai.visionMaxTokensCeiling
-	const baseBudget = externalReasoning ? Math.min(maxTokens, ceiling) : maxTokens
+	const ceiling = Number.isFinite(config.openai.visionMaxTokensCeiling) && config.openai.visionMaxTokensCeiling > 0
+		? config.openai.visionMaxTokensCeiling
+		: 16000
+	// A budget of 0/undefined means "no explicit cap" — send no max_tokens at all
+	// (avoids the provider's upfront balance rejection on large caps).
+	const wantBudget = Number.isFinite(maxTokens) && maxTokens > 0
+	const baseBudget = wantBudget ? (externalReasoning ? Math.min(maxTokens, ceiling) : maxTokens) : 0
 
 	const build = (mt) => {
 		const body = {
@@ -321,13 +339,14 @@ async function callStructured(client, { messages, schema, maxTokens, temperature
 			messages,
 			response_format: { type: 'json_schema', json_schema: schema },
 		}
+		const hasBudget = Number.isFinite(mt) && mt > 0
 		if (openaiReasoning) {
-			body.max_completion_tokens = mt
+			if (hasBudget) body.max_completion_tokens = mt
 			const effort = reasoningEffort || config.openai.reasoningEffort
 			if (effort && effort !== 'default') body.reasoning_effort = effort
 		} else {
 			body.temperature = temperature != null ? temperature : schema.name === 'phase1_classification' ? 0.0 : 0.4
-			body.max_tokens = mt
+			if (hasBudget) body.max_tokens = mt
 		}
 		return body
 	}
@@ -378,20 +397,25 @@ async function callStructured(client, { messages, schema, maxTokens, temperature
 				return JSON.parse(extractJson(content))
 			} catch (err) {
 				lastErr = err
-				// Truncated mid-JSON → grow the budget and retry.
-				if (finish === 'length' && attempt < MAX_ATTEMPTS) {
-					mt = Math.min(mt * 2, ceiling)
+				// Recoverable → retry. finish_reason:
+				//  • 'length' — output was truncated → grow the budget (if one is set).
+				//  • 'error'  — OpenRouter provider errored mid-generation; a retry
+				//               usually re-routes to a healthy provider and succeeds.
+				//  • other/null — malformed once; a fresh attempt typically parses.
+				if (attempt < MAX_ATTEMPTS) {
+					if ((finish === 'length' || finish === 'error') && Number.isFinite(mt) && mt > 0) mt = Math.min(mt * 2, ceiling)
+					await sleep(800 * attempt) // backoff: 0.8s, 1.6s, 2.4s
 					continue
 				}
-				throw new Error(`Model "${useModel}" returned unparsable JSON (finish_reason=${finish}): ${String(content).slice(0, 200)}`)
+				throw new Error(`Model "${useModel}" returned unparsable JSON (finish_reason=${finish}) after ${MAX_ATTEMPTS} attempts: ${String(content).slice(0, 200)}`)
 			}
 		}
 
-		// Empty content — retry (budget consumed by reasoning, or transient gap).
+		// Empty content (or a bare provider error) — retry with backoff.
 		lastErr = new Error(`Model "${useModel}" returned an empty response (finish_reason=${finish}).`)
 		if (attempt < MAX_ATTEMPTS) {
-			if (finish === 'length') mt = Math.min(mt * 2, ceiling)
-			await sleep(600 * attempt)
+			if ((finish === 'length' || finish === 'error') && Number.isFinite(mt) && mt > 0) mt = Math.min(mt * 2, ceiling)
+			await sleep(700 * attempt)
 			continue
 		}
 		break
@@ -445,8 +469,9 @@ async function encodeImage(imgPath, mime, detail) {
 
 // ── Phase 1 ─────────────────────────────────────────────────────────────────
 
-function buildPhase1Prompt(nImages) {
-	return `You are a precision visual QA analyst classifying ${nImages} phone case product images numbered IMAGE 1 to IMAGE ${nImages}.
+function buildPhase1Prompt(nImages, productType) {
+	const pt = productTypes.getProductType(productType)
+	return `You are a precision visual QA analyst classifying ${nImages} ${pt.deviceNoun} product images numbered IMAGE 1 to IMAGE ${nImages}.
 
 For EACH image produce one object with these fields:
   "index"               integer image number (1..${nImages})
@@ -563,8 +588,9 @@ function deriveStyleMapping(imageAnalysis) {
 	return mapping
 }
 
-async function phase1Classify(client, images) {
-	const content = [{ type: 'text', text: buildPhase1Prompt(images.length) }]
+async function phase1Classify(client, images, productType) {
+	const pt = productTypes.getProductType(productType)
+	const content = [{ type: 'text', text: buildPhase1Prompt(images.length, pt) }]
 	for (let i = 0; i < images.length; i++) {
 		content.push({ type: 'text', text: `\nIMAGE ${i + 1}:` })
 		content.push(await encodeImage(images[i].path, images[i].mime))
@@ -572,7 +598,7 @@ async function phase1Classify(client, images) {
 	const messages = [
 		{
 			role: 'system',
-			content: 'You are a precise visual QA analyst for e-commerce phone case products. Classify each image and summarise the product. Do NOT write marketing copy. Return only valid JSON matching the schema.',
+			content: `You are a precise visual QA analyst for e-commerce ${pt.deviceNoun} products. Classify each image and summarise the product. Do NOT write marketing copy. Return only valid JSON matching the schema.`,
 		},
 		{ role: 'user', content },
 	]
@@ -991,14 +1017,23 @@ async function resolveCharacter(client, { images, imageAnalysis, productSummary 
 
 // ── Phase 2 ─────────────────────────────────────────────────────────────────
 
-function buildPhase2System(shopName, brandTags, hasMagsafe, enabledStyles, enabledModels, attributeMenu, subjectInfo) {
+function buildPhase2System(shopName, brandTags, hasMagsafe, enabledStyles, enabledModels, attributeMenu, subjectInfo, productType, customStyles) {
+	const pt = productTypes.getProductType(productType)
+	const deviceNoun = pt.deviceNoun // e.g. "phone case" / "AirPods case"
+	const deviceShort = pt.deviceShort // e.g. "iPhone case" / "AirPods case"
 	const tagsDisplay = brandTags && brandTags.length ? brandTags.map((t) => `"${t}"`).join(', ') : '"y2kase"'
 
-	// Grip/charm presence is derived from the OFFERED bundles (operator's matrix),
-	// so manual corrections flow into the paragraphs + key features.
-	const hasGrip = stylesHaveGrip(enabledStyles)
-	const hasCharm = stylesHaveCharm(enabledStyles)
-	const devicePhrase = titleDevicePhrase(enabledModels)
+	// Custom variation values (e.g. "Case1 + Charm1") are ADDED on top of the
+	// canonical bundles; grip/charm copy reflects EITHER source.
+	const custom = Array.isArray(customStyles) && customStyles.length ? customStyles : null
+
+	// Grip/charm presence is derived from the OFFERED bundles (operator's matrix)
+	// OR any custom label that mentions them. MagSafe only applies to product types
+	// that support it (never AirPods cases).
+	const hasGrip = pt.supportsGrip && (stylesHaveGrip(enabledStyles) || (custom && custom.some((s) => /grip|popsocket|holder/i.test(s.label))))
+	const hasCharm = stylesHaveCharm(enabledStyles) || (custom && custom.some((s) => /charm|bead|strap|lanyard|keychain|clip/i.test(s.label)))
+	hasMagsafe = pt.supportsMagsafe && hasMagsafe
+	const devicePhrase = titleDevicePhrase(enabledModels, pt)
 
 	// SUBJECT: when there's a real licensed character, lead with it. When generic,
 	// lead with the SPECIFIC design motif (strawberry, cherry, bow…) — NEVER the
@@ -1007,14 +1042,15 @@ function buildPhase2System(shopName, brandTags, hasMagsafe, enabledStyles, enabl
 	const motifs = (si.motifs || []).filter(Boolean)
 	const motifList = motifs.join(', ')
 	const titleCase = (s) => String(s || '').replace(/\b\w/g, (c) => c.toUpperCase())
+	const titleCaseNoun = titleCase(deviceShort)
 	let subjectClause
 	if (!si.isGeneric && si.characterName) {
-		subjectClause = `SUBJECT: this case features the licensed character "${si.characterName}" — LEAD the title with that character name (the strongest query), then color/aesthetic. Still weave the design motifs (${motifList || 'n/a'}) into tags + description.`
+		subjectClause = `SUBJECT: this ${deviceNoun} features the licensed character "${si.characterName}" — LEAD the title with that character name (the strongest query), then color/aesthetic. Still weave the design motifs (${motifList || 'n/a'}) into tags + description.`
 	} else {
 		const lead = (si.designSubject && si.designSubject.trim()) || (motifs[0] ? titleCase(motifs[0]) : '')
 		subjectClause = lead
-			? `SUBJECT: there is NO licensed character. NEVER use the words "Character", "Kawaii Character", or a generic placeholder as the subject. LEAD the title with the SPECIFIC design subject "${lead}" + the primary color (e.g. "${lead} Pink Clear Phone Case…"). Build the whole listing around the real motifs: ${motifList || lead}.`
-			: `SUBJECT: there is no licensed character and no standout motif — LEAD with the primary color + aesthetic (e.g. "Pink Y2K Clear Phone Case…"). NEVER write the word "Character".`
+			? `SUBJECT: there is NO licensed character. NEVER use the words "Character", "Kawaii Character", or a generic placeholder as the subject. LEAD the title with the SPECIFIC design subject "${lead}" + the primary color (e.g. "${lead} Pink ${titleCaseNoun}…"). Build the whole listing around the real motifs: ${motifList || lead}.`
+			: `SUBJECT: there is no licensed character and no standout motif — LEAD with the primary color + aesthetic (e.g. "Pink Y2K ${titleCaseNoun}…"). NEVER write the word "Character".`
 	}
 
 	// Build the "feature section" attribute instructions from the taxonomy menu.
@@ -1032,20 +1068,20 @@ ${attrLines.length ? attrLines.join('\n') : '  - (no catalog options provided �
   - built_in_stand: true ONLY if a fold-out kickstand is visible, else false`
 
 	// Device compatibility must reflect ONLY the models this listing offers.
-	const compatNames = compatibilityNamesFor(enabledModels)
-	const unavailableNames = ALL_DESCRIPTION_NAMES.filter((n) => !compatNames.includes(n))
-	const compatClause = `"📱 Device Compatibility" — list EXACTLY these compatible models as bullets and NO others: ${compatNames.join(', ')}. Then add a note that these models are NOT available: ${[...unavailableNames, 'all Plus, Mini, Air and "e" models', 'iPhone 13 Pro / Pro Max'].join(', ')}.`
+	const compatNames = compatibilityNamesFor(enabledModels, pt)
+	const unavailableNames = allDescriptionNamesFor(pt).filter((n) => !compatNames.includes(n))
+	const compatClause = `"📱 Device Compatibility" — list EXACTLY these compatible models as bullets and NO others: ${compatNames.join(', ')}. Then add a note that these models are NOT available: ${[...unavailableNames, ...(pt.unavailableNote || [])].join(', ')}.`
 
-	// MagSafe is mentioned ONLY when the magnetic ring was confirmed in Phase 1.
+	// MagSafe is mentioned ONLY when supported by the product type AND confirmed.
 	const titleMagsafe = hasMagsafe
 		? `Include "MAGSAFE" right after the character+color (the magnetic ring IS confirmed).`
-		: `Do NOT include "MAGSAFE" anywhere in the title — this case has NO magnetic ring.`
+		: `Do NOT include "MAGSAFE" anywhere in the title — this product has NO magnetic ring.`
 	const descMagsafe = hasMagsafe
 		? `Paragraph 2 (product uniqueness — material, clear back, artwork, AND the confirmed MagSafe ring);`
-		: `Paragraph 2 (product uniqueness — material, clear back, artwork; this case has NO MagSafe — never mention MagSafe);`
+		: `Paragraph 2 (product uniqueness — material, design, artwork; this product has NO MagSafe — never mention MagSafe);`
 	const tagsMagsafe = hasMagsafe
 		? `the MagSafe tags "magsafe iphone case", "magsafe phone case", "magsafe case", `
-		: `(this case has NO MagSafe — do NOT output any tag containing the word "magsafe"; use relevant aesthetic/character/accessory tags for those slots instead) `
+		: `(this product has NO MagSafe — do NOT output any tag containing the word "magsafe"; use relevant aesthetic/character/accessory tags for those slots instead) `
 
 	// Accessory paragraphs must mirror what's physically included.
 	const gripPara = hasGrip
@@ -1057,14 +1093,21 @@ ${attrLines.length ? attrLines.join('\n') : '  - (no catalog options provided �
 
 	// "What's Included" must list EXACTLY the offered bundles — the operator's
 	// enabled variation matrix, NOT the raw AI detection.
+	// "What's Included" = the enabled canonical bundles PLUS any custom variation
+	// values (custom are added on top, the buyer picks one from the whole set).
 	const bundleLabels = enabledBundleLabels(enabledStyles)
+	const customLabels = custom ? custom.map((s) => s.label) : []
+	const allOffered = [...bundleLabels, ...customLabels]
 	const offeredKeys = new Set(BUNDLE_ORDER.filter((k) => enabledStyles && enabledStyles[k]))
 	const disabledNotes = BUNDLE_ORDER.filter((k) => !offeredKeys.has(k)).map((k) => `"${BUNDLE_DISPLAY[k]}"`)
-	const bundlesClause = `"📦 What's Included" — list EXACTLY these ${bundleLabels.length} bundle option(s) as bullets and NO others: ${bundleLabels.join(', ')}.${disabledNotes.length ? ` NEVER list any of these NOT-offered bundles: ${disabledNotes.join(', ')}.` : ''}`
+	const bundlesClause = `"📦 What's Included" — list EXACTLY these ${allOffered.length} option(s) as bullets and NO others: ${allOffered.join(', ')}.${disabledNotes.length ? ` NEVER list any of these NOT-offered bundles: ${disabledNotes.join(', ')}.` : ''}`
+
+	const universalTagList = (pt.universalTags || []).map((t) => `"${t}"`).join(', ')
+	const deviceTagExamples = (pt.deviceTagExamples || []).map((t) => `"${t}"`).join(', ')
 
 	return `OVERRIDE — TEXT-ONLY MODE: all image analysis was completed in Phase 1. Use the PRODUCT SUMMARY and PHASE 1 CLASSIFICATION facts in the user message directly. Trust them completely; never contradict them.
 
-You are an elite, world-class Etsy SEO expert and top-tier seller of kawaii Y2K phone cases for the ${shopName} brand. Your priority is deeply researched, intensely SEO-driven listings that rank on page one.
+You are an elite, world-class Etsy SEO expert and top-tier seller of kawaii Y2K ${deviceNoun}s for the ${shopName} brand. Your priority is deeply researched, intensely SEO-driven listings that rank on page one.
 
 SHOP BRAND TAGS (MANDATORY — include ALL of these exactly in your tags output): ${tagsDisplay}
 
@@ -1072,17 +1115,17 @@ Return ONLY a JSON object with keys: "title", "description", "tags", "primary_co
 
 ${subjectClause}
 
-TITLE (EXACTLY 130-140 chars — use the space, every char is SEO real estate): front-load the highest-volume buyer keywords first. Structure: [Subject = character OR specific design motif] [Primary Color] [MAGSAFE if confirmed] Case [with Accessory], [Aesthetic] [Style] Cover for ${devicePhrase}, [Gift Intent] Gift. Lead with the SUBJECT defined above + "phone case" / "iPhone case", then color, then aesthetics (Kawaii, Y2K, Coquette, Cute), then the device string. CRITICAL: the device coverage in the title MUST be EXACTLY "${devicePhrase}" — do NOT add model numbers that are not in that string (only the offered models are listed). Use natural buyer phrasing, not keyword soup. Only use each of % : & + at most once. ${titleMagsafe}
+TITLE (EXACTLY 130-140 chars — use the space, every char is SEO real estate): front-load the highest-volume buyer keywords first. Structure: [Subject = character OR specific design motif] [Primary Color] [MAGSAFE if confirmed] ${titleCaseNoun} [with Accessory], [Aesthetic] Cover for ${devicePhrase}, [Gift Intent] Gift. Lead with the SUBJECT defined above + "${deviceNoun}" / "${deviceShort}", then color, then aesthetics (Kawaii, Y2K, Coquette, Cute), then the device string. CRITICAL: the device coverage in the title MUST be EXACTLY "${devicePhrase}" — do NOT add model numbers that are not in that string (only the offered models are listed). Use natural buyer phrasing, not keyword soup. Only use each of % : & + at most once. ${titleMagsafe}
 
-DESCRIPTION (minimum 500 words, keyword-rich but human and persuasive): start with an emoji + a desire hook line packed with the top keywords (the SUBJECT defined above — character OR specific design motif like "strawberry" — plus "kawaii phone case", "Y2K aesthetic", "cute iPhone case") — NOT a header. Then: Paragraph 1 (aesthetic & emotional desire — describe the actual design motifs by name, who it's for, the vibe, gift appeal); ${descMagsafe} ${gripPara} ${charmPara} Then sections: "✨ Key Features" (5-7 bullets, ONLY confirmed features — never list a grip, charm, or MagSafe feature that is not confirmed, each on its own line), ${compatClause}, ${bundlesClause}, "❤️ The ${shopName} Promise", and "🚚 Shipping & Processing" (ready to ship in 3-5 business days, worldwide tracked). Weave long-tail buyer phrases naturally throughout (e.g. "aesthetic phone case", "gift for her", character + "merch", "protective clear case").
+DESCRIPTION (minimum 500 words, keyword-rich but human and persuasive): start with an emoji + a desire hook line packed with the top keywords (the SUBJECT defined above — character OR specific design motif like "strawberry" — plus ${universalTagList || `"${deviceNoun}"`}, "Y2K aesthetic") — NOT a header. Then: Paragraph 1 (aesthetic & emotional desire — describe the actual design motifs by name, who it's for, the vibe, gift appeal); ${descMagsafe} ${gripPara} ${charmPara} Then sections: "✨ Key Features" (5-7 bullets, ONLY confirmed features — never list a grip, charm, or MagSafe feature that is not confirmed, each on its own line), ${compatClause}, ${bundlesClause}, "❤️ The ${shopName} Promise", and "🚚 Shipping & Processing" (ready to ship in 3-5 business days, worldwide tracked). Weave long-tail buyer phrases naturally throughout (e.g. "aesthetic ${deviceNoun}", "gift for her", character + "merch").
 
-TAGS: EXACTLY 13 tags, each <=20 chars including spaces, all lowercase, MAXIMUM SEO coverage — every tag a distinct real buyer search term (no near-duplicates, no single repeated words across tags). Must include ALL brand tags above, the universal tags "kawaii phone case", "cute iphone case", "y2k phone case", ${tagsMagsafe}two iPhone model tags (e.g. "iphone 17 case", "iphone 16 pro max"). Fill remaining slots with a SPREAD of: ${motifs.length ? `the SPECIFIC design motifs (${motifList}) as buyer phrases (e.g. "strawberry phone case", "polka dot case"), ` : ''}the subject (character name OR design motif + " case"), the dominant aesthetic, the accessory (only if confirmed), a color term, and gift-intent ("gift for her", "bestie gift"). Prefer concrete motif/long-tail phrases over vague words like "cute character".
+TAGS: EXACTLY 13 tags, each <=20 chars including spaces, all lowercase, MAXIMUM SEO coverage — every tag a distinct real buyer search term (no near-duplicates, no single repeated words across tags). Must include ALL brand tags above, the universal tags ${universalTagList || `"${deviceNoun}"`}, ${tagsMagsafe}two device model tags (e.g. ${deviceTagExamples || `"${deviceShort}"`}). Fill remaining slots with a SPREAD of: ${motifs.length ? `the SPECIFIC design motifs (${motifList}) as buyer phrases (e.g. "strawberry ${deviceNoun}"), ` : ''}the subject (character name OR design motif + " case"), the dominant aesthetic, the accessory (only if confirmed), a color term, and gift-intent ("gift for her", "bestie gift"). Prefer concrete motif/long-tail phrases over vague words like "cute character".
 
 ${attributesClause}
 
 COLORS: primary_color and secondary_color MUST each be exactly one of: ${ETSY_COLORS.join(', ')}.
 
-PROHIBITIONS: ${hasMagsafe ? '' : 'NEVER mention MagSafe in the title, description, or tags (no magnetic ring was detected). '}${hasGrip ? '' : 'NEVER mention a grip, popsocket, ring holder, "Case + Grip" or "Grip Only" anywhere (no grip detected). '}${hasCharm ? '' : 'NEVER mention a charm, beads, strap, "Case + Charm" or "Charm Only" anywhere (no charm detected). '}never claim MagSafe unless confirmed in Phase 1; never list Plus/Mini/Air/"e" models or Samsung/Android; the Device Compatibility list must contain ONLY the compatible models named above; never fabricate accessories not confirmed in Phase 1; the "What's Included" bundle list must match exactly the offered bundles; never produce fewer or more than exactly 13 tags.`
+PROHIBITIONS: ${hasMagsafe ? '' : 'NEVER mention MagSafe in the title, description, or tags (not supported/ not detected). '}${hasGrip ? '' : 'NEVER mention a grip, popsocket, ring holder, "Case + Grip" or "Grip Only" anywhere (no grip). '}${hasCharm ? '' : 'NEVER mention a charm, beads, strap, "Case + Charm" or "Charm Only" anywhere (no charm detected). '}never claim MagSafe unless confirmed in Phase 1; never list device models not named above, and never list Samsung/Android; the Device Compatibility list must contain ONLY the compatible models named above; never fabricate accessories not confirmed in Phase 1; the "What's Included" bundle list must match exactly the offered bundles; never produce fewer or more than exactly 13 tags.`
 }
 
 // Bundle style metadata — the single source of truth for the "What's Included"
@@ -1146,32 +1189,24 @@ function filterBundlesInDescription(description, enabledStyles) {
 }
 
 /**
- * The device string for the TITLE, derived from the enabled iPhone models — e.g.
- * all models → "iPhone 17 16 15 14 13 Pro Max"; 15-17 only → "iPhone 17 16 15 Pro Max".
+ * The device string for the TITLE, derived from the enabled models. Product-type
+ * aware (e.g. iPhone "iPhone 17 16 15 Pro Max"; AirPods "AirPods Pro 3 2 1 & AirPods 4 3 2 1").
  */
-function titleDevicePhrase(enabledModels) {
-	const names = compatibilityNamesFor(enabledModels)
-	const nums = []
-	for (const n of names) {
-		const m = n.match(/iPhone (\d+)/)
-		if (m && !nums.includes(m[1])) nums.push(m[1])
-	}
-	nums.sort((a, b) => Number(b) - Number(a))
-	const anyProMax = names.some((n) => /pro max/i.test(n))
-	if (!nums.length) return 'iPhone'
-	return `iPhone ${nums.join(' ')}${anyProMax ? ' Pro Max' : ''}`
+function titleDevicePhrase(enabledModels, productType) {
+	return productTypes.titleDevicePhrase(productType, enabledModels)
 }
 
 /**
- * Rewrite the iPhone model RANGE inside an existing title to match a new model
- * selection — WITHOUT re-running the AI. Targets the device-compatibility run (the
- * "iPhone 17 16 15 14 13 Pro Max" segment with the most model numbers), leaving
- * incidental single mentions (e.g. "iphone 17 case") untouched. Used by bulk
- * model updates so the title stays in sync with the offered models.
+ * Rewrite the device model RANGE inside an existing title to match a new model
+ * selection — WITHOUT re-running the AI. Only attempted for iPhone, whose title
+ * carries a numeric "iPhone 17 16 …" run that is safe to swap; for other product
+ * types (AirPods) the title is left untouched (regenerate copy to change it).
  */
-function retitleForModels(title, enabledModels) {
+function retitleForModels(title, enabledModels, productType) {
 	if (!title) return title
-	const phrase = titleDevicePhrase(enabledModels)
+	const pt = productTypes.getProductType(productType)
+	if (pt.id !== 'iphone_case') return title
+	const phrase = titleDevicePhrase(enabledModels, pt)
 	const re = /iPhone(?:\s+\d+){1,6}(?:\s+Pro\s+Max|\s+Pro)?/gi
 	let best = null
 	let m
@@ -1189,10 +1224,10 @@ function retitleForModels(title, enabledModels) {
  * Matches a bullet's leading label EXACTLY against a known model name (so
  * "iPhone 14" never accidentally removes "iPhone 14 Pro").
  */
-function filterModelsInDescription(description, enabledModels) {
+function filterModelsInDescription(description, enabledModels, productType) {
 	if (!description) return description
-	const compat = new Set(compatibilityNamesFor(enabledModels).map((n) => n.toLowerCase()))
-	const known = new Set(ALL_DESCRIPTION_NAMES.map((n) => n.toLowerCase()))
+	const compat = new Set(compatibilityNamesFor(enabledModels, productType).map((n) => n.toLowerCase()))
+	const known = new Set(allDescriptionNamesFor(productType).map((n) => n.toLowerCase()))
 	const lines = String(description).split('\n')
 	const kept = lines.filter((line) => {
 		const m = line.match(/^\s*[-•*]\s*(.+?)\s*$/)
@@ -1209,8 +1244,9 @@ function filterModelsInDescription(description, enabledModels) {
 	return kept.join('\n')
 }
 
-function buildPhase2User(meta, brandTags, imageAnalysis, productSummary) {
-	const lines = ['Generate an SEO-optimized Etsy listing for this phone case product.', '', '=== PRODUCT FACTS ===', `Shop: ${meta.shopName || 'Y2KASEshop'}`, 'Product type: Kawaii Y2K phone case (possibly with accessories)', 'Material: Silicone']
+function buildPhase2User(meta, brandTags, imageAnalysis, productSummary, productType) {
+	const pt = productTypes.getProductType(productType)
+	const lines = [`Generate an SEO-optimized Etsy listing for this ${pt.deviceNoun} product.`, '', '=== PRODUCT FACTS ===', `Shop: ${meta.shopName || 'Y2KASEshop'}`, `Product type: Kawaii Y2K ${pt.deviceNoun} (possibly with accessories)`, `Material: ${(pt.materials || ['Silicone']).join(', ')}`]
 	if (brandTags && brandTags.length) {
 		lines.push(`BRAND IDENTITY TAGS (include ALL exactly as written): ${brandTags.map((t) => `"${t}"`).join(', ')}`)
 	}
@@ -1339,6 +1375,7 @@ async function generateListingCopy(product, opts = {}) {
 	const visionClient = getVisionClient()
 	const shopName = opts.shopName || 'Y2KASEshop'
 	const brandTags = opts.brandTags || []
+	const pt = productTypes.getProductType(opts.productType)
 	// Analyse the first 12 photos for vision (character/accessory) — enough signal
 	// without ballooning token cost. ALL of the product's images (up to 20, Etsy's
 	// cap) are still uploaded to the listing by the create flow.
@@ -1352,19 +1389,20 @@ async function generateListingCopy(product, opts = {}) {
 	// Phase 1 (with one retry on empty result)
 	let phase1
 	for (let attempt = 1; attempt <= 2; attempt++) {
-		phase1 = await phase1Classify(visionClient, images)
+		phase1 = await phase1Classify(visionClient, images, pt)
 		if (phase1.imageAnalysis.length) break
 	}
 	const imageAnalysis = phase1.imageAnalysis
 	const productSummary = phase1.productSummary
 
-	// Character + accessory (grip/charm) + a DEDICATED MagSafe pass run in parallel
-	// — all independent vision passes. MagSafe gets its own focused detector
-	// because a magnet ring is subtle on clear/printed cases.
+	// Character + accessory (grip/charm) + (for supported types) a dedicated
+	// MagSafe pass run in parallel. Grip and MagSafe passes are skipped for
+	// product types that don't support them (e.g. AirPods cases) — a charm
+	// (keychain/clip) still applies, so the accessory pass always runs.
 	const [character, accessories, magsafe] = await Promise.all([
 		resolveCharacter(visionClient, { images, imageAnalysis, productSummary }),
 		analyzeAccessories(visionClient, { images }).catch(() => null),
-		analyzeMagsafe(visionClient, { images }).catch(() => null),
+		pt.supportsMagsafe ? analyzeMagsafe(visionClient, { images }).catch(() => null) : Promise.resolve(null),
 	])
 
 	// Reconcile the noisy Phase-1 per-image grip/charm flags with the dedicated,
@@ -1394,9 +1432,21 @@ async function generateListingCopy(product, opts = {}) {
 		accessory.charmEvidence = accessories.charmEvidence
 	}
 
+	// Product types without a grip (e.g. AirPods cases) never offer one — force it
+	// off so no grip copy/variation is ever produced.
+	if (!pt.supportsGrip) {
+		hasGrip = false
+		accessory.hasGrip = false
+		for (const img of imageAnalysis) img.has_grip = false
+	}
+
 	// MagSafe is decided SOLELY by the dedicated detector (most accurate). Apply its
-	// verdict to every image flag so Phase-2 + attributes pick it up.
-	if (magsafe) {
+	// verdict to every image flag so Phase-2 + attributes pick it up. Skipped
+	// entirely for product types that don't support MagSafe.
+	if (!pt.supportsMagsafe) {
+		accessory.hasMagsafe = false
+		for (const img of imageAnalysis) img.has_magsafe_ring = false
+	} else if (magsafe) {
 		accessory.hasMagsafe = magsafe.hasMagsafe
 		accessory.magsafeConfidence = magsafe.confidence
 		accessory.magsafeEvidence = magsafe.evidence
@@ -1417,21 +1467,22 @@ async function generateListingCopy(product, opts = {}) {
 	}
 
 	const enabledStyles = enabledStylesFor(hasGrip, hasCharm)
-	// Model availability — defaults to all 12 models; an operator override may be
-	// supplied (and will be re-applied on regenerate).
-	const enabledModels = normaliseEnabledModels(opts.enabledModels)
+	// Model availability — defaults to all of the product type's models; an
+	// operator override may be supplied (and will be re-applied on regenerate).
+	const enabledModels = normaliseEnabledModels(opts.enabledModels, pt)
 
 	// Feed the *resolved* character into Phase 2 so the copy uses it.
 	productSummary.character_name = character.characterName
 	productSummary.character_franchise = character.characterFranchise
 
-	const copy = await runPhase2(textClient, { shopName, brandTags, imageAnalysis, productSummary, enabledStyles, enabledModels, attributeMenu: opts.attributeMenu })
+	const copy = await runPhase2(textClient, { shopName, brandTags, imageAnalysis, productSummary, enabledStyles, enabledModels, attributeMenu: opts.attributeMenu, productType: pt })
 	return {
 		...copy,
 		...character,
 		enabledStyles,
 		enabledModels,
 		accessory,
+		productType: pt.id,
 		styleImageMapping: deriveStyleMapping(imageAnalysis),
 		imageAnalysis,
 		productSummary,
@@ -1439,10 +1490,12 @@ async function generateListingCopy(product, opts = {}) {
 }
 
 /** Run the text-only Phase 2 (SEO copy) and post-process the result. */
-async function runPhase2(client, { shopName, brandTags, imageAnalysis, productSummary, enabledStyles, enabledModels, attributeMenu }) {
+async function runPhase2(client, { shopName, brandTags, imageAnalysis, productSummary, enabledStyles, enabledModels, attributeMenu, productType, customStyles }) {
+	const pt = productTypes.getProductType(productType)
+	const activeCustom = Array.isArray(customStyles) && customStyles.length ? customStyles : null
 	const ia = Array.isArray(imageAnalysis) ? imageAnalysis : []
-	const hasMagsafe = ia.some((i) => i.has_magsafe_ring)
-	const models = normaliseEnabledModels(enabledModels)
+	const hasMagsafe = pt.supportsMagsafe && ia.some((i) => i.has_magsafe_ring)
+	const models = normaliseEnabledModels(enabledModels, pt)
 	// The OFFERED bundles (operator's matrix) are the source of truth for the
 	// "What's Included" section + grip/charm copy. Fall back to AI detection only
 	// when no explicit selection is supplied.
@@ -1459,14 +1512,17 @@ async function runPhase2(client, { shopName, brandTags, imageAnalysis, productSu
 		aesthetic: productSummary.design_aesthetic || '',
 	}
 	const messages = [
-		{ role: 'system', content: buildPhase2System(shopName, brandTags, hasMagsafe, styles, models, attributeMenu, subjectInfo) },
-		{ role: 'user', content: buildPhase2User({ shopName }, brandTags, imageAnalysis, productSummary) },
+		{ role: 'system', content: buildPhase2System(shopName, brandTags, hasMagsafe, styles, models, attributeMenu, subjectInfo, pt, activeCustom) },
+		{ role: 'user', content: buildPhase2User({ shopName }, brandTags, imageAnalysis, productSummary, pt) },
 	]
 	const parsed = await callStructured(client, { messages, schema: PHASE2_SCHEMA, maxTokens: 16000 })
 	let tags = (parsed.tags || []).map(cleanTag).filter(Boolean).slice(0, 13)
 	tags = ensureShopTags(tags, brandTags, hasMagsafe)
+	// Custom variations are added on top of the bundles, so the canonical bundle
+	// filter still runs (it only strips NOT-offered canonical bundles; custom
+	// labels never match a canonical key and pass through untouched).
 	let description = filterBundlesInDescription(String(parsed.description || '').trim(), styles)
-	description = filterModelsInDescription(description, models)
+	description = filterModelsInDescription(description, models, pt)
 	return {
 		title: postProcessTitle(parsed.title, hasMagsafe),
 		description,
@@ -1494,6 +1550,7 @@ async function generateCopyFromAnalysis(args = {}) {
 	const textClient = getOpenAIClient()
 	const shopName = args.shopName || 'Y2KASEshop'
 	const brandTags = args.brandTags || []
+	const pt = productTypes.getProductType(args.productType)
 	const imageAnalysis = args.imageAnalysis || []
 	const productSummary = { ...(args.productSummary || {}) }
 
@@ -1517,18 +1574,19 @@ async function generateCopyFromAnalysis(args = {}) {
 
 	productSummary.character_name = character.characterName
 	productSummary.character_franchise = character.characterFranchise
-	const enabledModels = normaliseEnabledModels(args.enabledModels)
+	const enabledModels = normaliseEnabledModels(args.enabledModels, pt)
 	// Operator's corrected style matrix drives the bundle list; fall back to AI.
 	const enabledStyles = (args.enabledStyles && Object.keys(args.enabledStyles).length)
 		? normaliseEnabledStyles(args.enabledStyles)
-		: enabledStylesFor(imageAnalysis.some((i) => i.has_grip), imageAnalysis.some((i) => i.has_charm))
-	const copy = await runPhase2(textClient, { shopName, brandTags, imageAnalysis, productSummary, enabledStyles, enabledModels, attributeMenu: args.attributeMenu })
+		: enabledStylesFor(pt.supportsGrip && imageAnalysis.some((i) => i.has_grip), imageAnalysis.some((i) => i.has_charm))
+	const copy = await runPhase2(textClient, { shopName, brandTags, imageAnalysis, productSummary, enabledStyles, enabledModels, attributeMenu: args.attributeMenu, productType: pt, customStyles: args.customStyles })
 	// Copy regeneration NEVER changes the variation-image links — preserve the
 	// operator's saved mapping; only auto-derive when none was supplied.
 	const styleImageMapping = (args.styleImageMapping && Object.keys(args.styleImageMapping).length)
 		? args.styleImageMapping
 		: deriveStyleMapping(imageAnalysis)
-	return { ...copy, ...character, enabledStyles, enabledModels, styleImageMapping, imageAnalysis, productSummary }
+	const customStyles = Array.isArray(args.customStyles) && args.customStyles.length ? args.customStyles : null
+	return { ...copy, ...character, enabledStyles, enabledModels, customStyles, productType: pt.id, styleImageMapping, imageAnalysis, productSummary }
 }
 
 module.exports = {

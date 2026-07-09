@@ -286,10 +286,17 @@ function classifyTrackingList(trackingList) {
     return { status: 'pre_transit', firstScanAt: null, eventCount: count, lastEventCode, lastEventDesc };
   }
 
-  // Determine final status from the most recent event code prefix:
-  //   FPX_D_* = delivered, FPX_F_* = failed delivery
-  const isDelivered = lastEventCode?.startsWith('FPX_D_');
-  const isException = lastEventCode?.startsWith('FPX_F_') || lastEventCode?.startsWith('FPX_E_');
+  // Determine final status from the most recent event's DESCRIPTION, not its code
+  // prefix. 4PX's businessLinkCode prefixes are NOT a status taxonomy: e.g.
+  // FPX_F_ST = "Shipment in transit" (normal forward movement, F = forwarding, not
+  // "failed"), and FPX_E_* are export/customs events — both previously mis-flagged
+  // as exceptions, marking healthy parcels stuck. Keyword matching on the localized
+  // description is the reliable signal (the API returns English with language=en).
+  const desc = (lastEventDesc || '').toLowerCase();
+  const EXCEPTION_RE = /(delivery failed|failed delivery|failed attempt|unsuccessful|undeliverable|cannot be delivered|return(ed)?\s+to\s+sender|being returned|return to shipper|refused|rejected|seized|detained|confiscated|destroyed|lost|damaged|abnormal|exception|held\s+by\s+customs|customs\s+hold)/i;
+  const DELIVERED_RE = /(delivered|delivery (completed|success)|successfully delivered|signed for|item delivered|received by (the )?(recipient|customer)|投妥|签收)/i;
+  const isException = EXCEPTION_RE.test(desc);
+  const isDelivered = !isException && DELIVERED_RE.test(desc);
   const status      = isDelivered ? 'delivered' : isException ? 'exception' : 'in_transit';
 
   // firstScanAt = oldest non-label event (events are newest-first, so the last entry
@@ -612,15 +619,39 @@ function analyzeTrackingHealth(events, status) {
   }
   const daysInTransit = oldestTs != null ? Math.floor((nowSec - oldestTs) / 86400) : null;
 
-  // Repeated identical descriptions (common customs-loop signal).
+  // STALE GUARD — the single most important tuning for signal-to-noise.
+  // On economy China→US/EU lanes the carrier very often stops scanning after the
+  // final origin/destination customs event and NEVER posts a "delivered" scan, so a
+  // parcel can sit in "in_transit" forever. If there has been no update for a very
+  // long time, the parcel is overwhelmingly delivered/closed — NOT an actionable
+  // stuck parcel. Treat it as resolved so the Shipping tab stays focused on parcels
+  // that are genuinely in flight and stalled right now.
+  const STALE_DAYS = 45;
+  if (daysSinceLastUpdate != null && daysSinceLastUpdate > STALE_DAYS) {
+    return { isStuck: false, severity: 'ok', reasons: [], daysSinceLastUpdate, daysInTransit, repeatedEvents: [], stale: true };
+  }
+
+  // LAST-MILE GUARD — the second key signal-to-noise tuning. Once a parcel has been
+  // handed to the destination's local carrier (USPS / Royal Mail / etc.) or is out
+  // for delivery, going quiet means it was almost certainly delivered (4PX simply
+  // stops receiving last-mile scans), NOT stuck. The genuinely actionable stalls are
+  // upstream: held at customs, stuck at origin, or an explicit carrier exception. So
+  // "no movement" / "long transit" only count as stuck when the parcel has NOT yet
+  // reached last-mile.
+  const POSITIVE_LATE_RE = /out for delivery|delivered|delivery (centre|center)|regional facility|local (delivery|post|carrier)|handed (over|to)|loaded for transport|arrival to the destination|arrived at .*destination|final delivery|usps|royal mail/i;
+  const reachedLastMile = POSITIVE_LATE_RE.test(list[0]?.description || '');
+
+  // Repeated CUSTOMS events specifically (a real customs-loop signal). We ignore
+  // repeats of normal forward-movement scans (facility transfers, "out for delivery"),
+  // which are healthy progress, not a loop.
   const descCounts = new Map();
   for (const e of list) {
     const key = _normEventText(e.description);
-    if (!key || key.length < 8) continue;
+    if (!key || key.length < 8 || !CUSTOMS_RE.test(key)) continue;
     descCounts.set(key, (descCounts.get(key) || 0) + 1);
   }
   const repeatedEvents = [...descCounts.entries()]
-    .filter(([, n]) => n >= 3)
+    .filter(([, n]) => n >= 4)
     .map(([description, count]) => ({ description, count }))
     .sort((a, b) => b.count - a.count);
 
@@ -629,26 +660,30 @@ function analyzeTrackingHealth(events, status) {
     bump('warning', `"${short}" repeated ${count}× — parcel may be stuck in a loop.`);
   }
 
-  // Customs-specific: many customs scans without terminal delivery.
+  // Customs hold: many customs scans without release is a strong stuck signal.
   const customsCount = list.filter((e) => CUSTOMS_RE.test(e.description || '')).length;
   const releasedCount = list.filter((e) => RELEASED_CUSTOMS_RE.test(e.description || '')).length;
-  if (customsCount >= 3 && status === 'in_transit') {
-    bump(customsCount >= 5 ? 'critical' : 'warning',
-      `${customsCount} customs scan${customsCount === 1 ? '' : 's'} with no delivery — likely held at customs.`);
+  if (customsCount >= 4 && status === 'in_transit') {
+    bump(customsCount >= 6 ? 'critical' : 'warning',
+      `${customsCount} customs scans with no delivery — likely held at customs.`);
   }
-  if (customsCount >= 2 && releasedCount >= 2 && status === 'in_transit') {
+  if (customsCount >= 3 && releasedCount >= 3 && status === 'in_transit') {
     bump('warning', 'Customs cleared multiple times but parcel still in transit — possible re-inspection.');
   }
 
-  if (status === 'in_transit' && daysSinceLastUpdate != null) {
-    if (daysSinceLastUpdate >= 10) bump('critical', `No carrier update for ${daysSinceLastUpdate} days.`);
-    else if (daysSinceLastUpdate >= 5) bump('warning', `No carrier update for ${daysSinceLastUpdate} days.`);
+  // No movement = the clearest "stuck right now" signal — but only before last-mile.
+  // After hand-off to the local carrier, silence means delivered, not stuck.
+  if (status === 'in_transit' && daysSinceLastUpdate != null && !reachedLastMile) {
+    if (daysSinceLastUpdate >= 14) bump('critical', `No carrier update for ${daysSinceLastUpdate} days (parcel had not reached local delivery).`);
+    else if (daysSinceLastUpdate >= 7) bump('warning', `No carrier update for ${daysSinceLastUpdate} days.`);
   }
 
-  if (status === 'in_transit' && daysInTransit != null && daysInTransit >= 21) {
-    bump('critical', `In transit for ${daysInTransit} days — well past typical delivery window.`);
-  } else if (status === 'in_transit' && daysInTransit != null && daysInTransit >= 14) {
-    bump('warning', `In transit for ${daysInTransit} days.`);
+  // Long total transit while still moving is informational (delayed), not stuck —
+  // 20–30 days is normal for economy. Skip once it reached last-mile (likely
+  // delivered). Only flag the genuinely extreme, pre-delivery case as critical.
+  if (status === 'in_transit' && daysInTransit != null && !reachedLastMile) {
+    if (daysInTransit >= 40) bump('critical', `In transit for ${daysInTransit} days — well past any normal window.`);
+    else if (daysInTransit >= 25) bump('warning', `In transit for ${daysInTransit} days.`);
   }
 
   const isStuck = severity !== 'ok';
@@ -660,4 +695,47 @@ function _withHealth(result) {
   return { ...result, health };
 }
 
-module.exports = { checkTrackingStatus, getFullTrackingEvents, analyzeTrackingHealth, _withHealth };
+/**
+ * Fetch a compact tracking SNAPSHOT for persistence (Shipping tab): canonical
+ * status plus the first carrier scan, the most-recent event (description, time,
+ * location), and a delivered timestamp. One API call (reuses getFullTrackingEvents),
+ * so it's the single source the sync pass writes to the receipts row.
+ *
+ * @param {string} trackingCode
+ * @param {object} [apiCredentials] { appKey, appSecret }
+ * @returns {Promise<{ok:boolean, status:string, source:string, eventCount:number,
+ *   firstScanAt:number|null, lastEventAt:number|null, lastEvent:string|null,
+ *   lastLocation:string|null, deliveredAt:number|null, events:TrackingEvent[],
+ *   health:object}>}
+ */
+async function getTrackingSnapshot(trackingCode, apiCredentials = {}) {
+  const full = await getFullTrackingEvents(trackingCode, apiCredentials);
+  const events = Array.isArray(full.events) ? full.events : [];
+  const VALID = new Set(['pre_transit', 'in_transit', 'delivered', 'exception']);
+  const ok = VALID.has(full.status);
+
+  // Events are newest-first (both official and public paths order them so).
+  const latest = events[0] || null;
+  const lastEventAt = latest ? _parseTrackTime(latest.time) : null;
+
+  // First physical scan = oldest event that isn't the label-created event.
+  const PRE_CODES = new Set(['FPX_L_RPIF']);
+  const firstScanEvent = [...events].reverse().find((e) => e.code && !PRE_CODES.has(e.code));
+  const firstScanAt = firstScanEvent ? _parseTrackTime(firstScanEvent.time) : null;
+
+  return {
+    ok,
+    status: full.status,
+    source: full.source,
+    eventCount: events.length,
+    firstScanAt,
+    lastEventAt,
+    lastEvent: latest ? latest.description : null,
+    lastLocation: latest ? latest.location : null,
+    deliveredAt: full.status === 'delivered' ? lastEventAt : null,
+    events,
+    health: analyzeTrackingHealth(events, full.status),
+  };
+}
+
+module.exports = { checkTrackingStatus, getFullTrackingEvents, analyzeTrackingHealth, _withHealth, getTrackingSnapshot };

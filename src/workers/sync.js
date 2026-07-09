@@ -57,6 +57,7 @@ const {
   upsertListingImage,
   upsertListingInventory,
   updateCarrierStatus,
+  updateTrackingDetail,
   recordFourpxFreight,
   logEvent,
   startSyncLog,
@@ -72,7 +73,7 @@ const {
   upsertEtsyPayment,
   reattributeLedgerEntries,
 } = require('../db/setup');
-const { checkTrackingStatus } = require('../tracking/checker');
+const { getTrackingSnapshot } = require('../tracking/checker');
 const { resolveReceiptFreight } = require('../fourpx/freight');
 const {
   getZeroStylesForListing,
@@ -756,80 +757,95 @@ async function syncGroup(group, shopsInGroup, config, tokenManager, db) {
  * @param {object} config - App config (pre_transit_days)
  */
 async function runTrackingCheckPass(db, config) {
-  const TRACKING_WINDOW_DAYS    = (config.pre_transit_days ?? 30) + 3; // look a bit beyond the filter window
-  const TRACKING_RECHECK_HOURS  = 4;   // re-check each order at most once every 4 hours
-  const MAX_TRACK_CHECKS_PER_CYCLE = 200; // safety cap: max API calls per sync cycle
-  const INTER_REQUEST_MS        = 150; // pause between 4PX API calls
+  // Window: don't keep polling parcels older than this (they're surely delivered
+  // even if the carrier never posted a final scan). Generous so the Shipping tab
+  // still tracks long-haul/stuck parcels.
+  const TRACKING_WINDOW_DAYS    = Math.max((config.pre_transit_days ?? 30) + 3, 120);
+  const PRE_RECHECK_HOURS       = 4;   // pre-transit: check often (pickup detection)
+  const TRANSIT_RECHECK_HOURS   = 18;  // in-transit: refresh status / detect delivery + stuck
+  const MAX_TRACK_CHECKS_PER_CYCLE = 250;
+  const INTER_REQUEST_MS        = 150;
 
-  const windowCutoff  = Math.floor(Date.now() / 1000) - TRACKING_WINDOW_DAYS * 24 * 3600;
-  const recheckCutoff = Math.floor(Date.now() / 1000) - TRACKING_RECHECK_HOURS * 3600;
   const nowEpoch      = Math.floor(Date.now() / 1000);
+  const windowCutoff  = nowEpoch - TRACKING_WINDOW_DAYS * 86400;
+  const preCutoff     = nowEpoch - PRE_RECHECK_HOURS * 3600;
+  const transitCutoff = nowEpoch - TRANSIT_RECHECK_HOURS * 3600;
 
-  // Fetch orders that need a tracking check.
-  // Prioritize:
-  //   1. Never checked (tracking_checked_at IS NULL) — these are the most urgent.
-  //   2. Checked more than RECHECK_HOURS ago — periodic refresh.
-  // Only process 4PX tracking codes (our shops' primary carrier).
-  // Ignore orders where carrier_confirmed_at is already set — they're confirmed in-transit.
+  // Candidates: every 4PX parcel that is NOT yet delivered, within the window,
+  // whose snapshot is stale for its phase. Pre-transit parcels (no first scan) are
+  // refreshed frequently to detect pickup; in-transit parcels less often to keep
+  // their status / last-event / delivery / stuck state current for the Shipping tab.
+  // Never-checked parcels are most urgent; pre-transit beats in-transit.
   const candidates = db.prepare(`
-    SELECT receipt_id, tracking_code, carrier_name, shop_id
+    SELECT receipt_id, tracking_code, carrier_name, shop_id, carrier_confirmed_at
     FROM receipts
-    WHERE is_shipped = 1
-      AND tracking_code IS NOT NULL
-      AND tracking_code LIKE '4PX%'
-      AND carrier_confirmed_at IS NULL
-      AND shipment_notified_at IS NOT NULL
-      AND shipment_notified_at >= ?
-      AND (tracking_checked_at IS NULL OR tracking_checked_at < ?)
+    WHERE tracking_code LIKE '4PX%'
+      AND COALESCE(tracking_status, '') != 'delivered'
+      AND tracking_delivered_at IS NULL
+      AND COALESCE(shipment_notified_at, etsy_created_at) >= @windowCutoff
+      AND (
+        tracking_checked_at IS NULL
+        OR (carrier_confirmed_at IS NULL     AND tracking_checked_at < @preCutoff)
+        OR (carrier_confirmed_at IS NOT NULL AND tracking_checked_at < @transitCutoff)
+      )
     ORDER BY
       CASE WHEN tracking_checked_at IS NULL THEN 0 ELSE 1 END ASC,
-      shipment_notified_at DESC
-    LIMIT ?
-  `).all(windowCutoff, recheckCutoff, MAX_TRACK_CHECKS_PER_CYCLE);
+      CASE WHEN carrier_confirmed_at IS NULL THEN 0 ELSE 1 END ASC,
+      COALESCE(shipment_notified_at, etsy_created_at) DESC
+    LIMIT @max
+  `).all({ windowCutoff, preCutoff, transitCutoff, max: MAX_TRACK_CHECKS_PER_CYCLE });
 
   if (!candidates.length) {
-    console.log('[tracking] No orders need tracking check this cycle.');
+    console.log('[tracking] No parcels need a tracking check this cycle.');
     return;
   }
 
-  console.log(`[tracking] Checking ${candidates.length} order(s) via ${config.fourpx_app_key ? '4PX Official API (authenticated)' : '4PX Public API (fallback)'}…`);
+  console.log(`[tracking] Checking ${candidates.length} parcel(s) via ${config.fourpx_app_key ? '4PX Official API (authenticated)' : '4PX Public API (fallback)'}…`);
 
-  let confirmed = 0;
-  let stillPre  = 0;
-  let unknown   = 0;
+  let confirmed = 0, stillPre = 0, delivered = 0, exception = 0, unknown = 0;
 
   for (const [idx, order] of candidates.entries()) {
     if (idx > 0) await sleep(INTER_REQUEST_MS);
 
-    const result = await checkTrackingStatus(order.tracking_code, order.carrier_name, {
+    const snap = await getTrackingSnapshot(order.tracking_code, {
       appKey:    config.fourpx_app_key    ?? null,
       appSecret: config.fourpx_app_secret ?? null,
     });
 
-    let carrierConfirmedAt = null;
-
-    if (result.status === 'in_transit' || result.status === 'delivered' || result.status === 'exception') {
-      // Package has been physically picked up / scanned by carrier.
-      // Record the first scan time (falls back to now if not available from API).
-      carrierConfirmedAt = result.firstScanAt ?? nowEpoch;
-      confirmed++;
-    } else if (result.status === 'pre_transit') {
-      stillPre++;
-    } else {
-      // 'unknown' — API error, unsupported carrier, or not yet registered.
-      // Treat as pre-transit (fail-open): better to show too many than too few.
+    if (!snap.ok) {
+      // Transient error / not yet registered — record the attempt only so we don't
+      // hammer it, and leave any previously-known status intact (fail-open).
       unknown++;
+      updateTrackingDetail(db, order.receipt_id, { checkedAt: nowEpoch });
+      continue;
     }
 
-    updateCarrierStatus(db, order.receipt_id, {
-      carrierConfirmedAt,
-      trackingCheckedAt: nowEpoch,
+    // First physical scan → carrier_confirmed_at (drives pre-transit detection).
+    const firstScanAt =
+      (snap.status === 'in_transit' || snap.status === 'delivered' || snap.status === 'exception')
+        ? (snap.firstScanAt ?? nowEpoch)
+        : null;
+
+    if (snap.status === 'delivered') delivered++;
+    else if (snap.status === 'exception') exception++;
+    else if (snap.status === 'in_transit') confirmed++;
+    else stillPre++;
+
+    updateTrackingDetail(db, order.receipt_id, {
+      status:       snap.status,
+      firstScanAt,
+      lastEventAt:  snap.lastEventAt,
+      lastEvent:    snap.lastEvent,
+      lastLocation: snap.lastLocation,
+      deliveredAt:  snap.deliveredAt,
+      health:       snap.health,
+      checkedAt:    nowEpoch,
     });
   }
 
   console.log(
-    `[tracking] Done — ${confirmed} confirmed in-transit, ` +
-    `${stillPre} still pre-transit, ${unknown} unknown/error`
+    `[tracking] Done — ${confirmed} in-transit, ${delivered} delivered, ` +
+    `${exception} exception, ${stillPre} pre-transit, ${unknown} unknown/error`
   );
 }
 

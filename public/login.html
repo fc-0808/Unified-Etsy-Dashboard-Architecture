@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Sign in · Unified Dashboard</title>
+		<link
+			rel="icon"
+			type="image/svg+xml"
+			href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231a1d27'/%3E%3Crect x='6' y='6' width='8' height='8' rx='2' fill='%236c8fff'/%3E%3Crect x='18' y='6' width='8' height='8' rx='2' fill='%236c8fff' opacity='.6'/%3E%3Crect x='6' y='18' width='8' height='8' rx='2' fill='%236c8fff' opacity='.6'/%3E%3Crect x='18' y='18' width='8' height='8' rx='2' fill='%236c8fff' opacity='.3'/%3E%3C/svg%3E"
+		/>
+		<style>
+			*,
+			*::before,
+			*::after {
+				box-sizing: border-box;
+				margin: 0;
+				padding: 0;
+			}
+			:root {
+				--bg: #0f1117;
+				--surface: #1a1d27;
+				--border: #2a2d3a;
+				--text: #e8eaf0;
+				--muted: #7b8099;
+				--accent: #f56400;
+				--red: #ef4444;
+				--font: 'Inter', system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+			}
+			body {
+				background: radial-gradient(1200px 600px at 50% -10%, #1a1d27 0%, var(--bg) 60%);
+				color: var(--text);
+				font-family: var(--font);
+				min-height: 100vh;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				padding: 24px;
+			}
+			.card {
+				width: 100%;
+				max-width: 380px;
+				background: var(--surface);
+				border: 1px solid var(--border);
+				border-radius: 14px;
+				padding: 30px 28px 26px;
+				box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+			}
+			.brand {
+				display: flex;
+				align-items: center;
+				gap: 10px;
+				font-weight: 700;
+				font-size: 17px;
+				margin-bottom: 4px;
+			}
+			.brand .dot {
+				width: 11px;
+				height: 11px;
+				border-radius: 50%;
+				background: var(--accent);
+			}
+			.sub {
+				color: var(--muted);
+				font-size: 13px;
+				margin-bottom: 22px;
+			}
+			label {
+				display: block;
+				font-size: 12px;
+				font-weight: 600;
+				color: var(--muted);
+				margin-bottom: 7px;
+			}
+			input[type='password'],
+			input[type='text'] {
+				width: 100%;
+				font-size: 16px;
+				padding: 12px 14px;
+				border-radius: 9px;
+				border: 1px solid var(--border);
+				background: rgba(255, 255, 255, 0.05);
+				color: var(--text);
+				outline: none;
+				transition: border-color 0.12s ease;
+			}
+			input[type='password']:focus,
+			input[type='text']:focus {
+				border-color: var(--accent);
+			}
+			input + label {
+				margin-top: 14px;
+			}
+			button {
+				width: 100%;
+				margin-top: 16px;
+				font-family: var(--font);
+				font-size: 15px;
+				font-weight: 700;
+				padding: 12px;
+				border: none;
+				border-radius: 9px;
+				background: var(--accent);
+				color: #fff;
+				cursor: pointer;
+				transition: filter 0.12s ease;
+			}
+			button:hover {
+				filter: brightness(1.08);
+			}
+			button:disabled {
+				opacity: 0.6;
+				cursor: default;
+			}
+			.error {
+				color: var(--red);
+				font-size: 13px;
+				margin-top: 12px;
+				min-height: 18px;
+			}
+			.foot {
+				margin-top: 20px;
+				font-size: 11.5px;
+				color: var(--muted);
+				line-height: 1.5;
+				text-align: center;
+			}
+		</style>
+	</head>
+	<body>
+		<form class="card" id="loginForm" autocomplete="off">
+			<div class="brand"><span class="dot"></span> Unified Dashboard</div>
+			<div class="sub">Sign in to continue · 请登录以继续</div>
+
+			<label for="uname">Username · 用户名 <span style="opacity: 0.55; font-weight: 400">(leave blank if you only have a password)</span></label>
+			<input id="uname" type="text" placeholder="e.g. mei" autocomplete="username" autofocus />
+
+			<label for="pw">Password · 密码</label>
+			<input id="pw" type="password" inputmode="text" placeholder="••••••••" autocomplete="current-password" />
+
+			<button type="submit" id="submitBtn">Sign in · 登录</button>
+			<div class="error" id="error"></div>
+		</form>
+
+		<script>
+			const form = document.getElementById('loginForm')
+			const uname = document.getElementById('uname')
+			const pw = document.getElementById('pw')
+			const err = document.getElementById('error')
+			const btn = document.getElementById('submitBtn')
+
+			form.addEventListener('submit', async (e) => {
+				e.preventDefault()
+				err.textContent = ''
+				btn.disabled = true
+				try {
+					const resp = await fetch('/api/auth/login', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						credentials: 'same-origin',
+						body: JSON.stringify({ username: uname.value.trim(), password: pw.value }),
+					})
+					const data = await resp.json().catch(() => ({}))
+					if (!resp.ok) {
+						if (resp.status === 429) err.textContent = 'Too many attempts — wait a few minutes · 尝试次数过多，请稍后再试'
+						else err.textContent = /incorrect/i.test(data.error || '') ? 'Incorrect username or password · 用户名或密码错误' : data.error || 'Sign-in failed · 登录失败'
+						btn.disabled = false
+						pw.select()
+						return
+					}
+					// Success — go where this role belongs (shoppers → mobile route,
+					// everyone else → full dashboard). Server tells us via `redirect`.
+					window.location.href = data.redirect || '/'
+				} catch {
+					err.textContent = 'Network error · 网络错误'
+					btn.disabled = false
+				}
+			})
+		</script>
+	</body>
+</html>

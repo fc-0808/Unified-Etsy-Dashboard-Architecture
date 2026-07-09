@@ -21,14 +21,18 @@ const {
   createShopReadinessStateDefinition,
   findTaxonomyId,
 } = require('../etsy/client');
+const productTypes = require('./product-types');
 
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
-// Pick a shop section that looks like an iPhone/phone-case section, else first.
-function pickSection(sections) {
+// Pick the shop section that best matches the product type (e.g. an "AirPods
+// Cases" section for an AirPods run), else the first section for iPhone, else
+// none — so an AirPods run never silently defaults to the iPhone section.
+function pickSection(sections, pt) {
   if (!sections.length) return null;
-  const preferred = sections.find((s) => /iphone|phone|case/i.test(s.title || ''));
-  return (preferred || sections[0]).shop_section_id;
+  const preferred = sections.find((s) => pt.sectionKeywords.test(s.title || ''));
+  if (preferred) return preferred.shop_section_id;
+  return pt.id === 'iphone_case' ? sections[0].shop_section_id : null;
 }
 
 // Prefer a "ready to ship" / non-calculated profile, else the first.
@@ -44,7 +48,8 @@ function pickShippingProfile(profiles) {
  * @param {string|number} shopId  numeric shop ID
  * @returns {Promise<object>}
  */
-async function fetchShopListingSettings(shopClient, shopId) {
+async function fetchShopListingSettings(shopClient, shopId, productType) {
+  const pt = productTypes.getProductType(productType);
   const [shop, shippingRes, returnRes, partnerRes, sectionRes, readinessRes] = await Promise.all([
     getShop(shopClient, shopId).catch((e) => ({ _error: e.message })),
     getShopShippingProfiles(shopClient, shopId).catch((e) => ({ _error: e.message, results: [] })),
@@ -103,11 +108,14 @@ async function fetchShopListingSettings(shopClient, shopId) {
     } catch { /* shops_w may be missing — surfaced as a clear error at create time */ }
   }
 
+  // Resolve the taxonomy for THIS product type by trying its keyword candidates
+  // in order (e.g. AirPods → earbud/headphone/earphone case nodes).
   let taxonomyId = null;
   try {
-    taxonomyId = await findTaxonomyId(shopClient, ['phone case'])
-      || await findTaxonomyId(shopClient, ['cell phone case'])
-      || await findTaxonomyId(shopClient, ['phone', 'case']);
+    for (const keywords of pt.taxonomyKeywords) {
+      taxonomyId = await findTaxonomyId(shopClient, keywords);
+      if (taxonomyId) break;
+    }
   } catch {
     taxonomyId = null;
   }
@@ -124,7 +132,7 @@ async function fetchShopListingSettings(shopClient, shopId) {
     shipping_profile_id: selectedShipping,
     return_policy_id: returnPolicies.length ? returnPolicies[0].return_policy_id : null,
     production_partner_ids: productionPartners.length ? [productionPartners[0].production_partner_id] : [],
-    shop_section_id: pickSection(shopSections),
+    shop_section_id: pickSection(shopSections, pt),
     readiness_state_id: selectedReadiness ? selectedReadiness.readiness_state_id : null,
     who_made: 'someone_else',
     when_made: 'made_to_order',
@@ -146,6 +154,15 @@ async function fetchShopListingSettings(shopClient, shopId) {
     shop_sections: shopSections,
     readiness_states: readinessStates,
     taxonomy_id: taxonomyId,
+    // Product-type context the UI mirrors: the active type, its device-model set,
+    // the styles it offers, and capability flags. `product_types` (the full list)
+    // is added by the server so this cached object stays product-type specific.
+    product_type: pt.id,
+    device_label: pt.deviceLabel,
+    models: pt.models.slice(),
+    style_keys: pt.allowedStyles.slice(),
+    supports_grip: pt.supportsGrip,
+    supports_magsafe: pt.supportsMagsafe,
     defaults,
   };
 }
@@ -161,16 +178,22 @@ async function fetchShopListingSettings(shopClient, shopId) {
  * @param {string} args.shopKey            config shop_id (cache key / row id)
  * @param {boolean} [args.force]
  */
-async function getShopListingSettings({ db, shopClient, shopId, shopKey, force = false }) {
+async function getShopListingSettings({ db, shopClient, shopId, shopKey, productType, force = false }) {
+  const pt = productTypes.getProductType(productType);
+  // Cache is per (shop, product type) — taxonomy, default section, models and
+  // styles all differ by product type, so they must never share a cache row.
+  const cacheKey = pt.id === 'iphone_case' ? shopKey : `${shopKey}::${pt.id}`;
   if (db && !force) {
     try {
-      const row = db.prepare('SELECT data_json, fetched_at FROM shop_listing_settings WHERE shop_key = ?').get(shopKey);
+      const row = db.prepare('SELECT data_json, fetched_at FROM shop_listing_settings WHERE shop_key = ?').get(cacheKey);
       if (row && (Date.now() - row.fetched_at) < CACHE_TTL_MS) {
         const cached = JSON.parse(row.data_json);
         // Invalidate caches written before readiness states existed, so physical
-        // listings always get a readiness_state_id (now mandatory on Etsy).
+        // listings always get a readiness_state_id (now mandatory on Etsy). Also
+        // invalidate legacy rows that predate the product_type field.
         const hasReadinessField = cached.defaults && 'readiness_state_id' in cached.defaults;
-        if (hasReadinessField) {
+        const hasProductType = 'product_type' in cached;
+        if (hasReadinessField && hasProductType) {
           cached._cached = true;
           return cached;
         }
@@ -178,7 +201,7 @@ async function getShopListingSettings({ db, shopClient, shopId, shopKey, force =
     } catch { /* table may not exist yet — fall through to live fetch */ }
   }
 
-  const settings = await fetchShopListingSettings(shopClient, shopId);
+  const settings = await fetchShopListingSettings(shopClient, shopId, pt);
 
   if (db) {
     try {
@@ -186,7 +209,7 @@ async function getShopListingSettings({ db, shopClient, shopId, shopKey, force =
         INSERT INTO shop_listing_settings (shop_key, data_json, fetched_at)
         VALUES (@shop_key, @data_json, @fetched_at)
         ON CONFLICT(shop_key) DO UPDATE SET data_json = @data_json, fetched_at = @fetched_at
-      `).run({ shop_key: shopKey, data_json: JSON.stringify(settings), fetched_at: Date.now() });
+      `).run({ shop_key: cacheKey, data_json: JSON.stringify(settings), fetched_at: Date.now() });
     } catch { /* non-fatal caching failure */ }
   }
   return settings;

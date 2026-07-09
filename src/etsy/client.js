@@ -1484,6 +1484,70 @@ async function getShopSections(shopClient, shopId) {
   });
 }
 
+/** GET /application/shops/{shop_id}/sections/{shop_section_id} — scope none */
+async function getShopSection(shopClient, shopId, sectionId) {
+  const numericId = await resolveShopId(shopClient, shopId);
+  gateClient(shopClient);
+  return withRetry(async () => {
+    const { data } = await shopClient.get(`/application/shops/${numericId}/sections/${sectionId}`);
+    return data;
+  });
+}
+
+/**
+ * POST /application/shops/{shop_id}/sections — scope shops_w
+ * Creates a new shop section. Etsy accepts a single `title` field, sent as
+ * application/x-www-form-urlencoded, and returns the created ShopSection.
+ * @returns {Promise<object>} the created ShopSection (with shop_section_id, rank…)
+ */
+async function createShopSection(shopClient, shopId, { title } = {}) {
+  const numericId = await resolveShopId(shopClient, shopId);
+  gateClient(shopClient);
+  return withRetry(async () => {
+    const params = new URLSearchParams();
+    params.append('title', String(title ?? ''));
+    const { data } = await shopClient.post(
+      `/application/shops/${numericId}/sections`,
+      params,
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
+    );
+    return data;
+  });
+}
+
+/**
+ * PUT /application/shops/{shop_id}/sections/{shop_section_id} — scope shops_w
+ * Renames an existing shop section. Returns the updated ShopSection.
+ */
+async function updateShopSection(shopClient, shopId, sectionId, { title } = {}) {
+  const numericId = await resolveShopId(shopClient, shopId);
+  gateClient(shopClient);
+  return withRetry(async () => {
+    const params = new URLSearchParams();
+    params.append('title', String(title ?? ''));
+    const { data } = await shopClient.put(
+      `/application/shops/${numericId}/sections/${sectionId}`,
+      params,
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
+    );
+    return data;
+  });
+}
+
+/**
+ * DELETE /application/shops/{shop_id}/sections/{shop_section_id} — scope shops_w
+ * Deletes a shop section. Etsy returns 204 No Content on success. Listings that
+ * were in the section are not deleted; they simply become unsectioned.
+ */
+async function deleteShopSection(shopClient, shopId, sectionId) {
+  const numericId = await resolveShopId(shopClient, shopId);
+  gateClient(shopClient);
+  return withRetry(async () => {
+    await shopClient.delete(`/application/shops/${numericId}/sections/${sectionId}`);
+    return true;
+  });
+}
+
 /**
  * GET /application/shops/{shop_id}/readiness-state-definitions — scope shops_r
  * Returns the shop's processing profiles. Every physical listing requires a
@@ -1624,6 +1688,10 @@ module.exports = {
   getShopReadinessStateDefinitions,
   createShopReadinessStateDefinition,
   getShopSections,
+  getShopSection,
+  createShopSection,
+  updateShopSection,
+  deleteShopSection,
   getSellerTaxonomyNodes,
   getPropertiesByTaxonomyId,
   updateListingProperty,

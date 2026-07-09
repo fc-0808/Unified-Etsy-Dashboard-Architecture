@@ -33,7 +33,8 @@ const Database = require('better-sqlite3');
 const {
   getProductMapByNorm, getManualItems,
   getCharmLibrary, getCharmShopDirectory,
-  getOpenIssueMap,
+  getOpenIssueMap, getOpenExchangeMap,
+  MANUAL_SHOP_ID,
 } = require('../db/setup');
 const enginePaths = require('./engine-paths');
 
@@ -215,6 +216,20 @@ function buildRouteRows(db, config, filters = {}) {
     } else {
       whereClause = '0';   // no valid ids → empty result
     }
+  } else if (filters.shop_id === MANUAL_SHOP_ID) {
+    // "Manual orders" scope. Every manual order lives in the synthetic
+    // __manual__ shop, but comes in two shapes:
+    //   • Orders-tab manual order  → a `receipts` row, NO sidecar.
+    //   • Route-tab manual order   → a `receipts` row PLUS a linked
+    //                                `route_manual_items` sidecar (which carries
+    //                                the product image + purchasing detail).
+    // Show ALL of them regardless of date / ship state — the operator asked to
+    // see manual orders specifically, so the date + pending scope (which is only
+    // meaningful for time-bounded Etsy sync data) must not hide any. Sidecar-
+    // bearing receipts are de-duped out just below and re-emitted from the manual
+    // loop with their richer detail, so each order surfaces exactly once.
+    whereClause = 'r.is_paid = 1 AND r.shop_id = @shop_id';
+    params.shop_id = MANUAL_SHOP_ID;
   } else {
     // Default date / pending scope.
     //
@@ -364,6 +379,13 @@ function buildRouteRows(db, config, filters = {}) {
   // the buyer may cancel or swap) — unless the caller explicitly opts in.
   const issueMap = getOpenIssueMap(db);
 
+  // Open wrong-model exchanges, keyed by `${receipt_id}\x00${item_key}`. A line with
+  // an open exchange is one we ALREADY hold (in the wrong model): it must not be
+  // bought again, so it is dropped from the "to shop" buy set — but, unlike an issue,
+  // it stays VISIBLE and is surfaced in the dedicated "To exchange" bucket so staff
+  // carry it back to the stall to swap it for the model the order needs.
+  const exchangeMap = getOpenExchangeMap(db);
+
   // Authoritative product map from Excel "Product Map" sheet, keyed by title_norm.
   // Priority: route_assignments > product_assignments > excel_product_map > OSP catalog.
   const excelProductMap = getProductMapByNorm(db);
@@ -413,6 +435,11 @@ function buildRouteRows(db, config, filters = {}) {
     // opts in (e.g. an audit view), and always tagged so the UI can flag it.
     const issue = issueMap.get(`${meta.receipt_id}\x00${key}`) || null;
     if (issue && !filters.include_issues) return;
+
+    // Open wrong-model exchange for this line (we hold it, but in the wrong model).
+    // It stays visible but is flagged so callers can hold it out of the buy set and
+    // route it into the "To exchange" bucket instead.
+    const exchange = exchangeMap.get(`${meta.receipt_id}\x00${key}`) || null;
 
     let supplier = null;
     if (cat) {
@@ -521,6 +548,17 @@ function buildRouteRows(db, config, filters = {}) {
       // shopping. Used by the dashboard to drop it from the "to shop" counts and
       // the active queue without ever altering the underlying assignment.
       fully_purchased: fullyPurchased,
+      // Open wrong-model exchange — we hold this item but in the wrong model and
+      // must swap it in person at the supplier. Held out of the buy set (we have
+      // it) and surfaced in the dedicated "To exchange" bucket instead.
+      needs_exchange:        !!exchange,
+      exchange_id:           exchange ? exchange.id : null,
+      exchange_have_model:   exchange ? (exchange.have_model || '') : '',
+      exchange_need_model:   exchange ? (exchange.need_model || phoneModel || '') : '',
+      exchange_components:   exchange ? (exchange.components || '') : '',
+      exchange_supplier_shop:  exchange ? (exchange.supplier_shop || '') : '',
+      exchange_supplier_stall: exchange ? (exchange.supplier_stall || '') : '',
+      exchange_note:         exchange ? (exchange.note || '') : '',
       // Manual (operator-created) line-item markers — used by the UI to show a
       // badge and route deletion through the manual-order endpoint.
       is_manual:   !!line.is_manual,
@@ -592,12 +630,17 @@ function buildRouteRows(db, config, filters = {}) {
   // (they bypass the date/shop/pending scope — they're deliberate additions).
   // Suppressed in three situations:
   //   1. Single-receipt / explicit-receipt-set lookups ("Add Order" path).
-  //   2. A shop_id filter is active — manual items carry no shop_id so they
+  //   2. A REAL shop_id filter is active — manual items carry no shop_id so they
   //      would bleed into every filtered shop view, creating noise. When the
   //      operator selects a specific shop they want to see only that shop's
   //      Etsy orders, not unrelated manual entries from other shopping sessions.
+  //      The synthetic __manual__ shop is the ONE exception: selecting it means
+  //      "show manual orders only", so the sidecars must be emitted (this is what
+  //      makes Route-created manual orders visible under the "Manual orders"
+  //      filter — their receipt is de-duped out above and re-emitted here).
+  const manualOnlyScope = filters.shop_id === MANUAL_SHOP_ID;
   if (filters.include_manual !== false &&
-      !filters.shop_id &&
+      (!filters.shop_id || manualOnlyScope) &&
       filters.receipt_id == null &&
       !(Array.isArray(filters.receipt_ids) && filters.receipt_ids.length)) {
     let manualItems = [];
@@ -663,11 +706,17 @@ function buildRouteRows(db, config, filters = {}) {
  * @returns {{ products: Array<object>, phone_models: string[], styles: string[] }}
  */
 function buildProductCatalog(db) {
-  // Cached thumbnail URLs by listing id.
+  // Cached thumbnail URLs by listing id. Source from the canonical listings
+  // table first (covers every live listing, sold or not) and fall back to the
+  // order-driven listing_images cache for delisted products.
   const urlByListing = new Map();
   try {
+    db.prepare("SELECT listing_id, primary_image_url FROM listings WHERE primary_image_url IS NOT NULL AND primary_image_url <> ''")
+      .all().forEach(r => urlByListing.set(Number(r.listing_id), r.primary_image_url));
+  } catch { /* listings table may not exist yet */ }
+  try {
     db.prepare("SELECT listing_id, url FROM listing_images WHERE url IS NOT NULL AND url <> ''")
-      .all().forEach(r => urlByListing.set(Number(r.listing_id), r.url));
+      .all().forEach(r => { if (!urlByListing.has(Number(r.listing_id))) urlByListing.set(Number(r.listing_id), r.url); });
   } catch { /* table may not exist yet */ }
 
   // Shop display names.
@@ -1169,6 +1218,8 @@ function rowsToImportOrders(rows) {
   const byReceipt = new Map();
   for (const row of rows) {
     if (row.excluded) continue;
+    // A line awaiting a wrong-model exchange is already in hand — never re-buy it.
+    if (row.needs_exchange) continue;
     if (!byReceipt.has(row.receipt_id)) {
       byReceipt.set(row.receipt_id, {
         order_number:    String(row.receipt_id),
@@ -1224,49 +1275,175 @@ function rowsToImportOrders(rows) {
   return [...byReceipt.values()].filter(o => o.items.length > 0);
 }
 
+// ─── Catalog thumbnail resolution ─────────────────────────────────────────────
+//
+// The Product Catalog (`product_map`) stores only a free-text product title — it
+// has no stable listing_id link. To show a thumbnail we must resolve that title
+// back to an Etsy listing that has a cached image. Historically this was done by
+// scanning ONLY past orders (`receipts.all_transactions`), so any catalog product
+// that had never sold under that exact title rendered the 📦 placeholder — even
+// when it was a perfectly good live listing with an image already on file. The
+// canonical `listings` table (every live listing, each with `primary_image_url`)
+// was never consulted. That is the root cause of the "so many products have no
+// image" complaint.
+//
+// The resolver below fixes that by sourcing images from BOTH the canonical
+// listings table AND order history, with a conservative, clearly-flagged fuzzy
+// fallback for titles that drift from any single listing (the operator lists the
+// same product across many shops under different SEO titles, so a 1:1 exact match
+// is not always possible).
+
+/** Tokenise a title into lowercase alphanumeric word tokens. */
+function _titleTokens(title) {
+  return normalizeTitle(title).replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+}
+
 /**
- * Build a map of normalised product title → primary product image URL.
+ * Build a reusable catalog-image resolver.
  *
- * The product_map catalog stores only the product title, so to show a thumbnail
- * we resolve each title back to the Etsy listing it came from. Listing IDs and
- * titles live in `receipts.all_transactions` (a JSON array per receipt), and the
- * cached CDN thumbnail URL lives in `listing_images`. We index by the same
- * `normalizeTitle` key used everywhere else so lookups are exact.
+ * Returns `{ resolve(titleNorm, title) }` where `resolve` yields
+ * `{ url, approx }` or `null`:
+ *   • approx=false — exact normalised-title match against a live listing or a
+ *     past order (safe, deterministic — never a different product's photo).
+ *   • approx=true  — high-confidence IDF-weighted fuzzy match used only to fill
+ *     gaps; the UI flags these so the operator knows it is a representative
+ *     image, not necessarily the exact listing.
+ *
+ * The exact map and the fuzzy corpus are built once, so per-row resolution is
+ * cheap.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ fuzzy?: boolean }} [opts]
+ */
+function buildCatalogImageResolver(db, opts = {}) {
+  const FUZZY = opts.fuzzy !== false;
+  // Tuned against the live dataset: accepts genuine title-drift matches while
+  // rejecting same-character-but-different-variant false positives (e.g. a plain
+  // "Hello Kitty" listing must NOT be served for a "Hello Kitty Strawberry"
+  // catalog entry). Cosmetic thumbnails only — purchasing is driven by the
+  // supplier/charm codes, not the photo.
+  const MIN_SCORE = 0.88;
+  const MIN_MARGIN = 0.10;
+
+  // listing_id → cached CDN thumbnail URL (binary-pipeline cache).
+  const urlByListing = new Map();
+  try {
+    db.prepare("SELECT listing_id, url FROM listing_images WHERE url IS NOT NULL AND url <> ''")
+      .all().forEach(r => urlByListing.set(String(r.listing_id), r.url));
+  } catch { /* table may not exist yet */ }
+
+  // Exact resolution map: title_norm → url. Listings (canonical) win over orders.
+  const exact = new Map();
+  // Fuzzy corpus: deduped candidate titles that have an image.
+  const corpusByNorm = new Map(); // title_norm → { tokens, url }
+
+  const addCandidate = (title, url) => {
+    if (!url) return;
+    const tn = normalizeTitle(title);
+    if (!tn) return;
+    if (!exact.has(tn)) exact.set(tn, url);
+    if (!corpusByNorm.has(tn)) corpusByNorm.set(tn, { tokens: _titleTokens(title), url });
+  };
+
+  // 1) Canonical source: every live listing carries its own primary_image_url.
+  try {
+    db.prepare("SELECT listing_id, title, primary_image_url FROM listings WHERE title IS NOT NULL AND title <> ''")
+      .all()
+      .forEach(l => {
+        const url = (l.primary_image_url && String(l.primary_image_url).trim())
+          || urlByListing.get(String(l.listing_id)) || null;
+        addCandidate(l.title, url);
+      });
+  } catch { /* listings table may not exist yet */ }
+
+  // 2) Fallback: products that only exist in order history (e.g. delisted items).
+  try {
+    db.prepare("SELECT all_transactions FROM receipts WHERE all_transactions IS NOT NULL AND all_transactions <> ''")
+      .all()
+      .forEach(r => {
+        let txs = [];
+        try { txs = JSON.parse(r.all_transactions || '[]'); } catch { return; }
+        if (!Array.isArray(txs)) return;
+        for (const t of txs) {
+          const url = t.listing_id ? urlByListing.get(String(t.listing_id)) : null;
+          if (url) addCandidate(t.title || '', url);
+        }
+      });
+  } catch { /* receipts table may not exist yet */ }
+
+  // Precompute IDF + L2-normalised TF-IDF vectors over the candidate corpus.
+  let corpus = [];
+  let idf = () => 1;
+  if (FUZZY && corpusByNorm.size > 0) {
+    const docFreq = new Map();
+    const N = corpusByNorm.size;
+    for (const { tokens } of corpusByNorm.values()) {
+      for (const w of new Set(tokens)) docFreq.set(w, (docFreq.get(w) || 0) + 1);
+    }
+    idf = (w) => Math.log((N + 1) / ((docFreq.get(w) || 0) + 1)) + 1;
+    corpus = [...corpusByNorm.values()].map(c => ({ url: c.url, vec: _tfidfVec(c.tokens, idf) }));
+  }
+
+  /** @param {string} titleNorm @param {string} title */
+  function resolve(titleNorm, title) {
+    const url = exact.get(titleNorm);
+    if (url) return { url, approx: false };
+    if (!FUZZY || corpus.length === 0) return null;
+
+    const qv = _tfidfVec(_titleTokens(title || titleNorm || ''), idf);
+    if (qv.len === 0) return null;
+
+    let best = null, bestScore = 0, second = 0;
+    for (const c of corpus) {
+      const s = _cosine(qv, c.vec);
+      if (s > bestScore) { second = bestScore; bestScore = s; best = c; }
+      else if (s > second) { second = s; }
+    }
+    if (best && bestScore >= MIN_SCORE && (bestScore - second) >= MIN_MARGIN) {
+      return { url: best.url, approx: true, score: Number(bestScore.toFixed(3)) };
+    }
+    return null;
+  }
+
+  return { resolve, exact };
+}
+
+/** Build an L2-normalised TF-IDF vector. @returns {{ v: Map<string,number>, len: number }} */
+function _tfidfVec(tokens, idf) {
+  const tf = new Map();
+  for (const w of tokens) tf.set(w, (tf.get(w) || 0) + 1);
+  const v = new Map();
+  let sumSq = 0;
+  for (const [w, n] of tf) {
+    const wt = n * idf(w);
+    v.set(w, wt);
+    sumSq += wt * wt;
+  }
+  return { v, len: Math.sqrt(sumSq) };
+}
+
+/** Cosine similarity of two TF-IDF vectors. */
+function _cosine(a, b) {
+  if (a.len === 0 || b.len === 0) return 0;
+  const [small, large] = a.v.size <= b.v.size ? [a.v, b.v] : [b.v, a.v];
+  let dot = 0;
+  for (const [w, wt] of small) {
+    const o = large.get(w);
+    if (o) dot += wt * o;
+  }
+  return dot / (a.len * b.len);
+}
+
+/**
+ * Back-compat shim: exact-only map of normalised product title → image URL.
+ * Prefer {@link buildCatalogImageResolver} for new code (adds the fuzzy fallback
+ * and the approximate-match flag).
  *
  * @param {import('better-sqlite3').Database} db
  * @returns {Map<string, string>} title_norm → image URL
  */
 function buildProductImageMap(db) {
-  const urlByListing = new Map();
-  try {
-    db.prepare('SELECT listing_id, url FROM listing_images WHERE url IS NOT NULL AND url <> \'\'')
-      .all()
-      .forEach(r => urlByListing.set(String(r.listing_id), r.url));
-  } catch { /* table may not exist yet */ }
-
-  const out = new Map();
-  if (urlByListing.size === 0) return out;
-
-  let recs = [];
-  try {
-    recs = db.prepare(
-      "SELECT all_transactions FROM receipts WHERE all_transactions IS NOT NULL AND all_transactions <> ''"
-    ).all();
-  } catch { return out; }
-
-  for (const r of recs) {
-    let txs = [];
-    try { txs = JSON.parse(r.all_transactions || '[]'); } catch { continue; }
-    if (!Array.isArray(txs)) continue;
-    for (const t of txs) {
-      const tn = normalizeTitle(t.title || '');
-      if (!tn || out.has(tn)) continue;
-      const lid = t.listing_id ? String(t.listing_id) : '';
-      const url = lid ? urlByListing.get(lid) : null;
-      if (url) out.set(tn, url);
-    }
-  }
-  return out;
+  return buildCatalogImageResolver(db, { fuzzy: false }).exact;
 }
 
 /**
@@ -1348,6 +1525,7 @@ module.exports = {
   buildRouteRows,
   buildProductCatalog,
   buildProductImageMap,
+  buildCatalogImageResolver,
   reconcileProductMap,
   loadCharmCatalog,
   resolveCharmImagePath,

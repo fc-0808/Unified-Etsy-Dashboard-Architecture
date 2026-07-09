@@ -1,0 +1,2336 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1" />
+		<meta name="theme-color" content="#0f1117" />
+		<meta name="apple-mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+		<meta name="apple-mobile-web-app-title" content="Shopping" />
+		<title>Shopping Route · 采购路线</title>
+		<link rel="manifest" href="/shop.webmanifest" />
+		<link rel="apple-touch-icon" href="/shop-icon.svg" />
+		<link rel="icon" type="image/svg+xml" href="/shop-icon.svg" />
+		<style>
+			*,
+			*::before,
+			*::after {
+				box-sizing: border-box;
+				margin: 0;
+				padding: 0;
+				-webkit-tap-highlight-color: transparent;
+			}
+			:root {
+				--bg: #0f1117;
+				--surface: #171a23;
+				--surface2: #1d2130;
+				--border: #2a2f3e;
+				--text: #e8eaf0;
+				--muted: #8a90a6;
+				--accent: #f56400;
+				--blue: #6c8fff;
+				--green: #22c55e;
+				--green-bg: #16351f;
+				--amber: #f5a524;
+				--amber-bg: #3a2d10;
+				--red: #ef4444;
+				--red-bg: #3a1618;
+				--purple: #a78bfa;
+				--purple-bg: #291f3d;
+				--font: 'Inter', system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+				--safe-top: env(safe-area-inset-top, 0px);
+				--safe-bottom: env(safe-area-inset-bottom, 0px);
+			}
+			html,
+			body {
+				background: var(--bg);
+				color: var(--text);
+				font-family: var(--font);
+				overscroll-behavior-y: contain;
+			}
+			body {
+				min-height: 100vh;
+				padding-bottom: calc(24px + var(--safe-bottom));
+			}
+			button {
+				font-family: inherit;
+				cursor: pointer;
+				border: none;
+				background: none;
+				color: inherit;
+			}
+			img {
+				display: block;
+			}
+
+			/* ── Header ─────────────────────────────────────────── */
+			header {
+				position: sticky;
+				top: 0;
+				z-index: 30;
+				background: rgba(15, 17, 23, 0.92);
+				backdrop-filter: blur(12px);
+				border-bottom: 1px solid var(--border);
+				padding: calc(10px + var(--safe-top)) 14px 10px;
+			}
+			.hrow {
+				display: flex;
+				align-items: center;
+				gap: 8px 10px;
+				flex-wrap: wrap;
+			}
+			/* The title never wraps to a second line; if the row runs out of room the
+			   action cluster (status + buttons) drops to its own line instead. */
+			.brand {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				font-weight: 800;
+				font-size: 16px;
+				white-space: nowrap;
+				flex: 1 1 auto;
+				min-width: 0;
+			}
+			.brand #brandText {
+				overflow: hidden;
+				text-overflow: ellipsis;
+			}
+			.brand .glyph {
+				font-size: 18px;
+				flex-shrink: 0;
+			}
+			.hactions {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				margin-left: auto;
+				flex-shrink: 0;
+			}
+			.conn {
+				display: inline-flex;
+				align-items: center;
+				gap: 5px;
+				font-size: 11px;
+				font-weight: 600;
+				color: var(--muted);
+				padding: 4px 8px;
+				border-radius: 20px;
+				border: 1px solid var(--border);
+				white-space: nowrap;
+				flex-shrink: 0;
+			}
+			.conn .dot {
+				width: 8px;
+				height: 8px;
+				border-radius: 50%;
+				background: var(--muted);
+			}
+			.conn.live .dot {
+				background: var(--green);
+				box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18);
+			}
+			.conn.live {
+				color: var(--green);
+			}
+			.conn.off .dot {
+				background: var(--amber);
+			}
+			.conn.off {
+				color: var(--amber);
+			}
+			.iconbtn {
+				width: 38px;
+				height: 38px;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				border-radius: 10px;
+				border: 1px solid var(--border);
+				background: var(--surface);
+				font-size: 17px;
+			}
+			.iconbtn:active {
+				background: var(--surface2);
+			}
+			.iconbtn.langbtn {
+				width: auto;
+				min-width: 38px;
+				padding: 0 11px;
+				font-size: 13px;
+				font-weight: 800;
+				color: var(--accent);
+				border-color: rgba(245, 100, 0, 0.4);
+			}
+			.iconbtn.menubtn {
+				font-size: 19px;
+			}
+
+			/* ── Navigation drawer (route tree) ─────────────────── */
+			.drawer-bg {
+				position: fixed;
+				inset: 0;
+				z-index: 55;
+				background: rgba(0, 0, 0, 0.5);
+				display: none;
+				opacity: 0;
+				transition: opacity 0.2s ease;
+			}
+			.drawer-bg.open {
+				display: block;
+				opacity: 1;
+			}
+			.drawer {
+				position: absolute;
+				top: 0;
+				left: 0;
+				bottom: 0;
+				width: min(86vw, 350px);
+				background: var(--surface);
+				border-right: 1px solid var(--border);
+				display: flex;
+				flex-direction: column;
+				transform: translateX(-100%);
+				transition: transform 0.25s ease;
+				box-shadow: 6px 0 30px rgba(0, 0, 0, 0.4);
+			}
+			.drawer-bg.open .drawer {
+				transform: translateX(0);
+			}
+			.drawer-head {
+				display: flex;
+				align-items: flex-start;
+				justify-content: space-between;
+				gap: 10px;
+				padding: calc(12px + var(--safe-top)) 14px 12px;
+				border-bottom: 1px solid var(--border);
+			}
+			.drawer-title {
+				font-weight: 800;
+				font-size: 17px;
+			}
+			.drawer-sub {
+				font-size: 12px;
+				color: var(--muted);
+				margin-top: 3px;
+			}
+			.drawer-tree {
+				flex: 1;
+				overflow-y: auto;
+				padding: 8px 8px calc(20px + var(--safe-bottom));
+				-webkit-overflow-scrolling: touch;
+			}
+			.trow {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				padding: 12px 10px;
+				border-radius: 10px;
+				cursor: pointer;
+			}
+			.trow:active {
+				background: var(--surface2);
+			}
+			.tcaret {
+				width: 14px;
+				flex-shrink: 0;
+				color: var(--muted);
+				font-size: 11px;
+				transition: transform 0.15s ease;
+			}
+			.tnode.collapsed > .trow .tcaret {
+				transform: rotate(-90deg);
+			}
+			.tnode.collapsed > .tchildren {
+				display: none;
+			}
+			.tlabel {
+				flex: 1;
+				min-width: 0;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+				font-size: 14px;
+			}
+			.tlabel .tsub {
+				color: var(--muted);
+				font-weight: 500;
+				margin-left: 4px;
+			}
+			.trow.section .tlabel {
+				font-weight: 800;
+				font-size: 15px;
+			}
+			.trow.floor .tlabel {
+				font-weight: 700;
+			}
+			.trow.leaf .tlabel {
+				font-size: 13.5px;
+			}
+			.tcount {
+				font-size: 11px;
+				font-weight: 800;
+				min-width: 22px;
+				height: 22px;
+				padding: 0 7px;
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				border-radius: 11px;
+				background: var(--accent);
+				color: #fff;
+				flex-shrink: 0;
+			}
+			.tcount.z {
+				background: var(--green-bg);
+				color: var(--green);
+			}
+			.tchildren {
+				margin-left: 15px;
+				border-left: 1px solid var(--border);
+				padding-left: 4px;
+			}
+			.tempty {
+				color: var(--muted);
+				text-align: center;
+				padding: 40px 16px;
+				font-size: 14px;
+			}
+			/* Brief highlight of a group after you jump to it from the drawer. */
+			.group.ghl > .ghead {
+				box-shadow: 0 0 0 2px var(--blue);
+				border-radius: 10px;
+			}
+
+			/* ── Summary + progress ─────────────────────────────── */
+			.summary {
+				display: flex;
+				gap: 8px;
+				margin-top: 10px;
+			}
+			.stat {
+				flex: 1;
+				background: var(--surface);
+				border: 1px solid var(--border);
+				border-radius: 12px;
+				padding: 8px 10px;
+			}
+			.stat .n {
+				font-size: 20px;
+				font-weight: 800;
+				line-height: 1.1;
+			}
+			.stat .l {
+				font-size: 12px;
+				color: var(--muted);
+				margin-top: 2px;
+			}
+			.stat.done .n {
+				color: var(--green);
+			}
+			.progress {
+				height: 8px;
+				border-radius: 5px;
+				background: var(--surface2);
+				overflow: hidden;
+				margin-top: 10px;
+			}
+			.progress > i {
+				display: block;
+				height: 100%;
+				width: 0;
+				background: linear-gradient(90deg, var(--accent), var(--green));
+				transition: width 0.35s ease;
+			}
+
+			/* ── Filter bar ─────────────────────────────────────── */
+			.filters {
+				display: flex;
+				gap: 8px;
+				padding: 10px 14px 2px;
+				align-items: center;
+			}
+			.search {
+				flex: 1;
+				position: relative;
+			}
+			.search input {
+				width: 100%;
+				font-size: 15px;
+				padding: 10px 12px 10px 34px;
+				border-radius: 10px;
+				border: 1px solid var(--border);
+				background: var(--surface);
+				color: var(--text);
+				outline: none;
+			}
+			.search input:focus {
+				border-color: var(--accent);
+			}
+			.search .mag {
+				position: absolute;
+				left: 11px;
+				top: 50%;
+				transform: translateY(-50%);
+				color: var(--muted);
+				font-size: 14px;
+			}
+			.chipbtn {
+				padding: 9px 12px;
+				border-radius: 10px;
+				border: 1px solid var(--border);
+				background: var(--surface);
+				font-size: 13px;
+				font-weight: 600;
+				color: var(--muted);
+				white-space: nowrap;
+			}
+			.chipbtn.on {
+				color: var(--text);
+				border-color: var(--accent);
+				background: rgba(245, 100, 0, 0.12);
+			}
+			.advfilters {
+				padding: 8px 14px 0;
+				display: none;
+				gap: 8px;
+				flex-wrap: wrap;
+			}
+			.advfilters.open {
+				display: flex;
+			}
+			.advfilters select,
+			.advfilters input[type='date'] {
+				flex: 1;
+				min-width: 130px;
+				font-size: 14px;
+				padding: 9px 10px;
+				border-radius: 10px;
+				border: 1px solid var(--border);
+				background: var(--surface);
+				color: var(--text);
+			}
+
+			/* ── Groups + cards ─────────────────────────────────── */
+			#list {
+				padding: 6px 12px 0;
+			}
+			.section {
+				margin-top: 18px;
+			}
+			.section:first-child {
+				margin-top: 6px;
+			}
+			.section-head {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				font-size: 13px;
+				font-weight: 800;
+				letter-spacing: 0.3px;
+				color: var(--text);
+				text-transform: uppercase;
+				padding: 4px 4px 2px;
+				border-bottom: 2px solid var(--border);
+				margin-bottom: 4px;
+			}
+			.section-count {
+				margin-left: auto;
+				font-size: 12px;
+				font-weight: 800;
+				color: #fff;
+				background: var(--accent);
+				border-radius: 11px;
+				min-width: 22px;
+				height: 22px;
+				padding: 0 8px;
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+			}
+			.section-count.sdone {
+				background: var(--green-bg);
+				color: var(--green);
+			}
+			/* Per-section accent (replaces the old emoji cue with a clean color). */
+			.section.cg .section-head {
+				border-bottom-color: rgba(245, 100, 0, 0.55);
+			}
+			.section.charm .section-head {
+				border-bottom-color: rgba(167, 139, 250, 0.55);
+			}
+			.section.ex .section-head {
+				border-bottom-color: rgba(108, 143, 255, 0.55);
+			}
+			.section.charm .section-count {
+				background: var(--purple);
+			}
+			.section.ex .section-count {
+				background: var(--blue);
+			}
+			/* Exchange card */
+			.card.ex {
+				border-color: rgba(108, 143, 255, 0.35);
+			}
+			.exswap {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				flex-wrap: wrap;
+			}
+			.exhave {
+				font-size: 15px;
+				font-weight: 700;
+				color: var(--muted);
+				text-decoration: line-through;
+			}
+			.exarrow {
+				color: var(--blue);
+				font-weight: 800;
+			}
+			.exbuy .exbuytag {
+				font-size: 17px;
+				line-height: 1;
+			}
+			.exneed {
+				font-size: 19px;
+				font-weight: 800;
+				color: var(--text);
+			}
+			.exnote {
+				font-size: 12px;
+				color: var(--muted);
+				margin-top: 6px;
+			}
+			.markall.exbtn {
+				background: var(--blue);
+			}
+			/* Divider inside a supplier group separating "buy" from "exchange". */
+			.gsublabel {
+				font-size: 10.5px;
+				font-weight: 800;
+				letter-spacing: 0.6px;
+				text-transform: uppercase;
+				color: var(--blue);
+				margin: 4px 2px 8px;
+				padding-top: 10px;
+				border-top: 1px dashed var(--border);
+			}
+			.group {
+				margin-top: 10px;
+			}
+			.ghead .floor.charmpin {
+				background: var(--purple-bg);
+				color: var(--purple);
+			}
+			.ghead {
+				position: sticky;
+				top: 0;
+				z-index: 10;
+				display: flex;
+				align-items: baseline;
+				gap: 8px;
+				padding: 8px 12px;
+				margin: 0 -2px 8px;
+				background: linear-gradient(180deg, var(--surface2), var(--surface));
+				border: 1px solid var(--border);
+				border-radius: 10px;
+			}
+			.ghead .floor {
+				font-size: 11px;
+				font-weight: 800;
+				color: var(--accent);
+				background: rgba(245, 100, 0, 0.14);
+				padding: 2px 8px;
+				border-radius: 20px;
+				white-space: nowrap;
+			}
+			.ghead .shop {
+				font-weight: 800;
+				font-size: 15.5px;
+				flex: 1;
+				min-width: 0;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+			.ghead .stall {
+				font-size: 13.5px;
+				color: var(--muted);
+				white-space: nowrap;
+			}
+			.ghead .stall {
+				color: #b9c0d6;
+			}
+			.ghead .floor.unknown {
+				color: var(--muted);
+				background: var(--surface2);
+			}
+			.ghead .gcount {
+				font-size: 12px;
+				color: var(--text);
+				font-weight: 800;
+				min-width: 22px;
+				height: 22px;
+				padding: 0 7px;
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				background: var(--accent);
+				border-radius: 11px;
+			}
+			.ghead .gcount.done {
+				background: var(--green-bg);
+				color: var(--green);
+			}
+			.ghead.gdone {
+				opacity: 0.5;
+			}
+			.ghead {
+				cursor: pointer;
+				user-select: none;
+			}
+			.ghead .gchev {
+				font-size: 11px;
+				color: var(--muted);
+				margin-left: 2px;
+			}
+			.group.collapsed .ghead {
+				margin-bottom: 0;
+			}
+			.card {
+				background: var(--surface);
+				border: 1px solid var(--border);
+				border-radius: 14px;
+				padding: 12px;
+				margin-bottom: 10px;
+				transition: opacity 0.2s ease, border-color 0.2s ease;
+			}
+			.card.done {
+				opacity: 0.62;
+				border-color: var(--green-bg);
+			}
+			.ctop {
+				display: flex;
+				gap: 12px;
+			}
+			.thumb {
+				width: 104px;
+				height: 104px;
+				border-radius: 12px;
+				object-fit: cover;
+				background: var(--surface2);
+				flex-shrink: 0;
+			}
+			.thumb.ph {
+				background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40' viewBox='0 0 24 24' fill='none' stroke='%238a90a6' stroke-width='1.4'%3E%3Crect x='3' y='3' width='18' height='18' rx='3'/%3E%3Ccircle cx='8.5' cy='8.5' r='1.6'/%3E%3Cpath d='M21 15l-5-5L5 21'/%3E%3C/svg%3E");
+				background-repeat: no-repeat;
+				background-position: center;
+				background-size: 38px;
+			}
+			.cinfo {
+				flex: 1;
+				min-width: 0;
+				display: flex;
+				flex-direction: column;
+				justify-content: center;
+			}
+			/* Phone model + style — the primary identity of a card now that the
+			   product name is gone. Made large and bold. */
+			.cident {
+				display: flex;
+				flex-wrap: wrap;
+				align-items: center;
+				gap: 6px 8px;
+			}
+			/* Case/Grip cards stack model → style so the style pill is ALWAYS on its
+			   own line beneath the model, regardless of how long the model name is
+			   (fixes the "sometimes beside, sometimes below" inconsistency). */
+			.cident.stack {
+				flex-direction: column;
+				align-items: flex-start;
+				gap: 6px;
+			}
+			.cmodel {
+				font-size: 19px;
+				font-weight: 800;
+				line-height: 1.2;
+				color: var(--text);
+			}
+			.cstyle {
+				font-size: 14px;
+				font-weight: 700;
+				color: var(--accent);
+				background: rgba(245, 100, 0, 0.14);
+				border-radius: 7px;
+				padding: 4px 10px;
+			}
+			.ccharm {
+				font-size: 19px;
+				font-weight: 800;
+				line-height: 1.2;
+				color: var(--purple);
+			}
+			.cqty {
+				font-size: 17px;
+				font-weight: 800;
+				color: #fff;
+				background: var(--accent);
+				border-radius: 8px;
+				padding: 3px 12px;
+			}
+			.cmeta {
+				margin-top: 7px;
+				display: flex;
+				flex-wrap: wrap;
+				gap: 5px;
+			}
+			.tag {
+				font-size: 11px;
+				font-weight: 600;
+				color: var(--muted);
+				background: var(--surface2);
+				border-radius: 6px;
+				padding: 2px 7px;
+			}
+			.tag.qty {
+				color: var(--blue);
+				background: rgba(108, 143, 255, 0.12);
+			}
+			.tag.pre {
+				color: var(--amber);
+				background: var(--amber-bg);
+			}
+			.tag.charm {
+				color: var(--purple);
+				background: var(--purple-bg);
+			}
+			.csub {
+				font-size: 11px;
+				color: var(--muted);
+				margin-top: 5px;
+				display: flex;
+				flex-wrap: wrap;
+				gap: 4px 10px;
+			}
+			.csub b {
+				color: var(--text);
+				font-weight: 600;
+			}
+
+			/* component status controls */
+			.comps {
+				display: flex;
+				gap: 7px;
+				margin-top: 11px;
+			}
+			.comp {
+				flex: 1;
+				border-radius: 12px;
+				border: 1px solid var(--border);
+				background: var(--surface2);
+				padding: 12px 6px;
+				text-align: center;
+				min-width: 0;
+				min-height: 62px;
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				justify-content: center;
+				gap: 4px;
+			}
+			.comp .cl {
+				font-size: 11px;
+				font-weight: 700;
+				text-transform: uppercase;
+				letter-spacing: 0.4px;
+				color: var(--muted);
+			}
+			.comp .cs {
+				font-size: 15px;
+				font-weight: 800;
+				line-height: 1.15;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				gap: 3px;
+			}
+			.comp.pending {
+				border-color: var(--border);
+			}
+			.comp.pending .cs {
+				color: var(--muted);
+			}
+			.comp.purchased {
+				border-color: var(--green);
+				background: var(--green-bg);
+			}
+			.comp.purchased .cs {
+				color: var(--green);
+			}
+			.comp.stock {
+				border-color: var(--red);
+				background: var(--red-bg);
+			}
+			.comp.stock .cs {
+				color: var(--red);
+			}
+			.comp.prod {
+				border-color: var(--purple);
+				background: var(--purple-bg);
+			}
+			.comp.prod .cs {
+				color: var(--purple);
+			}
+			.comp:active {
+				transform: scale(0.97);
+			}
+			.markall {
+				width: 100%;
+				margin-top: 10px;
+				padding: 15px;
+				min-height: 52px;
+				border-radius: 12px;
+				background: var(--accent);
+				color: #fff;
+				font-weight: 800;
+				font-size: 15px;
+			}
+			.markall:active {
+				filter: brightness(0.92);
+			}
+			.markall.done {
+				background: var(--green-bg);
+				color: var(--green);
+				border: 1px solid var(--green);
+			}
+			.saving {
+				font-size: 10px;
+				color: var(--blue);
+			}
+
+			/* ── Empty / loading ────────────────────────────────── */
+			.state {
+				text-align: center;
+				color: var(--muted);
+				padding: 60px 24px;
+				font-size: 14px;
+			}
+			.state .big {
+				font-size: 40px;
+				margin-bottom: 12px;
+			}
+			.state-title {
+				font-size: 16px;
+				font-weight: 700;
+				color: var(--text);
+			}
+			.spinner {
+				width: 30px;
+				height: 30px;
+				border: 3px solid var(--border);
+				border-top-color: var(--accent);
+				border-radius: 50%;
+				margin: 0 auto 14px;
+				animation: spin 0.8s linear infinite;
+			}
+			@keyframes spin {
+				to {
+					transform: rotate(360deg);
+				}
+			}
+
+			/* ── Bottom sheet (status picker) ───────────────────── */
+			.sheet-bg {
+				position: fixed;
+				inset: 0;
+				z-index: 50;
+				background: rgba(0, 0, 0, 0.55);
+				display: none;
+				align-items: flex-end;
+			}
+			.sheet-bg.open {
+				display: flex;
+			}
+			.sheet {
+				width: 100%;
+				background: var(--surface);
+				border-top-left-radius: 20px;
+				border-top-right-radius: 20px;
+				border-top: 1px solid var(--border);
+				padding: 8px 16px calc(20px + var(--safe-bottom));
+				transform: translateY(100%);
+				transition: transform 0.25s ease;
+			}
+			.sheet-bg.open .sheet {
+				transform: translateY(0);
+			}
+			.sheet .grip {
+				width: 40px;
+				height: 4px;
+				background: var(--border);
+				border-radius: 3px;
+				margin: 6px auto 12px;
+			}
+			.sheet h4 {
+				font-size: 13px;
+				color: var(--muted);
+				font-weight: 700;
+				margin-bottom: 12px;
+			}
+			.sheet h4 b {
+				color: var(--text);
+			}
+			.opt {
+				display: flex;
+				align-items: center;
+				gap: 12px;
+				width: 100%;
+				padding: 14px 14px;
+				border-radius: 12px;
+				border: 1px solid var(--border);
+				background: var(--surface2);
+				margin-bottom: 8px;
+				font-size: 15px;
+				font-weight: 700;
+				text-align: left;
+			}
+			.opt .swatch {
+				width: 12px;
+				height: 12px;
+				border-radius: 50%;
+				flex-shrink: 0;
+			}
+			.opt .zh {
+				color: var(--muted);
+				font-weight: 500;
+				font-size: 13px;
+				margin-left: auto;
+			}
+			.opt.sel {
+				border-color: var(--accent);
+			}
+
+			/* ── Toast ──────────────────────────────────────────── */
+			#toast {
+				position: fixed;
+				left: 50%;
+				bottom: calc(20px + var(--safe-bottom));
+				transform: translateX(-50%) translateY(20px);
+				z-index: 60;
+				display: flex;
+				align-items: center;
+				gap: 14px;
+				background: var(--surface2);
+				border: 1px solid var(--border);
+				color: var(--text);
+				font-size: 13px;
+				font-weight: 600;
+				padding: 10px 16px;
+				border-radius: 24px;
+				box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+				opacity: 0;
+				pointer-events: none;
+				transition: opacity 0.25s ease, transform 0.25s ease;
+				max-width: 92vw;
+			}
+			#toast.show {
+				opacity: 1;
+				pointer-events: auto;
+				transform: translateX(-50%) translateY(0);
+			}
+			.toast-btn {
+				background: transparent;
+				border: none;
+				color: var(--accent);
+				font-family: inherit;
+				font-weight: 800;
+				font-size: 13px;
+				padding: 2px 4px;
+				cursor: pointer;
+				white-space: nowrap;
+			}
+		</style>
+	</head>
+	<body>
+		<header>
+			<div class="hrow">
+				<button class="iconbtn menubtn" id="menuBtn" title="Menu / 目录" aria-label="Open navigation">☰</button>
+				<div class="brand"><span id="brandText">Shopping Route</span></div>
+				<div class="hactions">
+					<span class="conn" id="conn"><span class="dot"></span><span id="connText">Connecting</span></span>
+					<button class="iconbtn" id="undoBtn" title="Undo / 撤销" style="display: none">↶</button>
+					<button class="iconbtn langbtn" id="langBtn" title="Switch language / 切换语言">中文</button>
+					<button class="iconbtn" id="dashBtn" title="Back to dashboard" style="display: none">🏠</button>
+					<button class="iconbtn" id="refreshBtn" title="Refresh">↻</button>
+					<button class="iconbtn" id="logoutBtn" title="Sign out">⏻</button>
+				</div>
+			</div>
+			<div class="summary">
+				<div class="stat"><div class="n" id="stItems">–</div><div class="l" id="lblItems">Items to buy</div></div>
+				<div class="stat"><div class="n" id="stOrders">–</div><div class="l" id="lblOrders">Orders</div></div>
+			</div>
+			<div class="progress"><i id="progressBar"></i></div>
+		</header>
+
+		<div class="filters">
+			<div class="search">
+				<span class="mag">🔍</span>
+				<input id="searchInput" type="search" placeholder="Search…" autocomplete="off" />
+			</div>
+			<button class="chipbtn" id="showDoneBtn" title="Show bought">Show bought</button>
+			<button class="chipbtn" id="advBtn" title="Filters">⚙</button>
+		</div>
+		<div class="advfilters" id="advFilters">
+			<select id="shopFilter"><option value="">All shops</option></select>
+			<input type="date" id="dateFrom" title="From date" />
+			<input type="date" id="dateTo" title="To date" />
+		</div>
+
+		<div id="list">
+			<div class="state" id="stateBox"><div class="spinner"></div>Loading route…</div>
+		</div>
+
+		<div class="drawer-bg" id="drawerBg">
+			<nav class="drawer" id="drawer" aria-label="Route navigation">
+				<div class="drawer-head">
+					<div>
+						<div id="drawerTitle" class="drawer-title">Overview</div>
+						<div id="drawerSub" class="drawer-sub"></div>
+					</div>
+					<button class="iconbtn" id="drawerClose" aria-label="Close">✕</button>
+				</div>
+				<div class="drawer-tree" id="treeRoot"></div>
+			</nav>
+		</div>
+
+		<div class="sheet-bg" id="sheetBg">
+			<div class="sheet" id="sheet">
+				<div class="grip"></div>
+				<h4 id="sheetTitle"></h4>
+				<div id="sheetOpts"></div>
+			</div>
+		</div>
+
+		<div id="toast"></div>
+
+		<script>
+			'use strict'
+			// ── Constants ───────────────────────────────────────────────────────
+			const COMP_CASE = { key: 'case', flag: 'has_case', status: 'status_case', label: 'Case', labelZh: '壳' }
+			const COMP_GRIP = { key: 'grip', flag: 'has_grip', status: 'status_grip', label: 'Grip', labelZh: '支架' }
+			const COMP_CHARM = { key: 'charm', flag: 'has_charm', status: 'status_charm', label: 'Charm', labelZh: '挂件' }
+			const COMPONENTS = [COMP_CASE, COMP_GRIP, COMP_CHARM]
+			// The shopping route (like the Excel) is split into two sections you shop
+			// separately: cases + grips at the case suppliers, and charms at the charm
+			// stalls. A single order line can appear in BOTH — its case/grip part under
+			// its supplier, and its charm part under its charm stall.
+			const CASE_GRIP = [COMP_CASE, COMP_GRIP]
+			const CHARM = [COMP_CHARM]
+			// status → { css class, swatch color, EN, ZH }
+			const STATUS_META = {
+				Pending: { cls: 'pending', color: '#8a90a6', en: 'To buy', zh: '待购' },
+				Purchased: { cls: 'purchased', color: '#22c55e', en: 'Bought', zh: '已购' },
+				'Out of Stock': { cls: 'stock', color: '#ef4444', en: 'No stock', zh: '缺货' },
+				'Out of Production': { cls: 'prod', color: '#a78bfa', en: 'Discontinued', zh: '停产' },
+			}
+			const STATUS_ORDER = ['Pending', 'Purchased', 'Out of Stock', 'Out of Production']
+			const LS = 'shopRouteFilters'
+
+			// ── i18n ─ the page shows ONE language at a time (English OR 简体中文) ──
+			let LANG = (() => {
+				try {
+					return localStorage.getItem('shopLang') === 'zh' ? 'zh' : 'en'
+				} catch {
+					return 'en'
+				}
+			})()
+			const T = {
+				brand: { en: 'Shopping Route', zh: '采购路线' },
+				items: { en: 'Items to buy', zh: '待购' },
+				orders: { en: 'Orders', zh: '订单' },
+				searchPh: { en: 'Search product, model, charm…', zh: '搜索产品、型号、挂件…' },
+				showBought: { en: 'Show bought', zh: '显示已购' },
+				allShops: { en: 'All shops', zh: '全部店铺' },
+				secCG: { en: 'Cases & Grips', zh: '手机壳 / 支架' },
+				secCharm: { en: 'Charms', zh: '挂件' },
+				secEx: { en: 'Exchanges', zh: '换货' },
+				supplierNotSet: { en: 'Supplier not set', zh: '未匹配供应商' },
+				charmNotSet: { en: 'Charm stall not set', zh: '挂件摊位未设置' },
+				noCharmCode: { en: 'No charm code', zh: '未指定挂件' },
+				markBought: { en: 'Mark bought', zh: '标记已购' },
+				bought: { en: 'Bought', zh: '已购' },
+				markExchanged: { en: 'Mark exchanged', zh: '标记已换' },
+				exHave: { en: 'Have', zh: '现有' },
+				exNeed: { en: 'Need', zh: '需换' },
+				undo: { en: 'Undo', zh: '撤销' },
+				undone: { en: 'Undone', zh: '已撤销' },
+				markedBought: { en: 'Marked bought', zh: '已标记已购' },
+				markedExchanged: { en: 'Marked exchanged', zh: '已标记换货' },
+				nothing: { en: 'Nothing to shop right now.', zh: '暂无需要采购的订单。' },
+				allBought: { en: 'All bought — great work!', zh: '全部采购完成！' },
+				noMatches: { en: 'No matches.', zh: '无匹配结果' },
+				loading: { en: 'Loading route…', zh: '正在加载…' },
+				stallDone: { en: 'Stall complete', zh: '这个摊位买齐了' },
+				cantOpen: { en: "This account can't open the shopping route.", zh: '该账号无法打开采购页面。' },
+				couldntLoad: { en: "Couldn't load the route.", zh: '加载失败。' },
+				retry: { en: 'Retry', zh: '重试' },
+				live: { en: 'Live', zh: '实时' },
+				connecting: { en: 'Connecting', zh: '连接中' },
+				saving: { en: 'Saving…', zh: '保存中…' },
+				offline: { en: 'Offline', zh: '离线' },
+				overview: { en: 'Overview', zh: '总览' },
+				otherFloor: { en: 'Other', zh: '其他' },
+				leftSummary: { en: 'left to buy', zh: '待购' },
+			}
+			const t = (k) => (T[k] ? T[k][LANG] : k)
+			const compLabel = (c) => (LANG === 'zh' ? c.labelZh : c.label)
+			const stLabel = (s) => {
+				const m = STATUS_META[s] || STATUS_META.Pending
+				return LANG === 'zh' ? m.zh : m.en
+			}
+			const ordersN = (n) => (LANG === 'zh' ? `${n} 单` : `${n} order${n > 1 ? 's' : ''}`)
+			const floorLabel = (n) => (LANG === 'zh' ? `${n}楼` : `F${n}`)
+
+			// Update all fixed (non-list) text to the active language.
+			function applyStaticI18n() {
+				document.title = t('brand')
+				$('brandText').textContent = t('brand')
+				$('lblItems').textContent = t('items')
+				$('lblOrders').textContent = t('orders')
+				$('searchInput').placeholder = t('searchPh')
+				$('showDoneBtn').textContent = t('showBought')
+				$('langBtn').textContent = LANG === 'en' ? '中文' : 'EN'
+				const opt0 = $('shopFilter').querySelector('option[value=""]')
+				if (opt0) opt0.textContent = t('allShops')
+				document.documentElement.lang = LANG === 'zh' ? 'zh-CN' : 'en'
+			}
+
+			// ── State ───────────────────────────────────────────────────────────
+			let ROWS = [] // full row set from server
+			let EXCHANGES = [] // open wrong-model swaps to carry back to the stalls
+			let ME = null // my username (to skip my own SSE echoes)
+			let showDone = false
+			let searchQ = ''
+			const rowIndex = new Map() // `${receipt_id}\x00${item_key}` → row
+			const pending = new Map() // key → patch awaiting server (retry queue)
+			let flushing = false
+			const collapseOverride = new Map() // groupKey → bool (user's explicit expand/collapse)
+			let LAST_GROUPS = [] // groups as last rendered (for collapse + auto-scroll)
+			const AGG = new Map() // aggId → [rows] for aggregated charm cards (rebuilt each render)
+			const undoStack = [] // recent reversible actions (accidental taps → Undo)
+
+			const $ = (id) => document.getElementById(id)
+			const keyOf = (r) => r.receipt_id + '\x00' + r.item_key
+			const esc = (s) =>
+				String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
+
+			// ── Fully-purchased predicate (mirrors server rowFullyPurchased) ─────
+			function fullyPurchased(r) {
+				const present = []
+				if (r.has_case) present.push(r.status_case || 'Pending')
+				if (r.has_grip) present.push(r.status_grip || 'Pending')
+				if (r.has_charm) present.push(r.status_charm || 'Pending')
+				return present.length > 0 && present.every((s) => s === 'Purchased')
+			}
+
+			// "Done" for just the components that belong to one section.
+			function partDone(r, comps) {
+				const present = comps.filter((c) => r[c.flag])
+				return present.length > 0 && present.every((c) => (r[c.status] || 'Pending') === 'Purchased')
+			}
+			const cgDone = (r) => partDone(r, CASE_GRIP)
+			const charmDone = (r) => partDone(r, CHARM)
+
+			// ── Toast (optionally with an action button, e.g. "Undo") ────────────
+			let toastT = null
+			function toast(msg, actionLabel, actionFn) {
+				const el = $('toast')
+				el.innerHTML = ''
+				const span = document.createElement('span')
+				span.className = 'toast-msg'
+				span.textContent = msg
+				el.appendChild(span)
+				if (actionLabel && actionFn) {
+					const b = document.createElement('button')
+					b.className = 'toast-btn'
+					b.textContent = actionLabel
+					b.addEventListener('click', () => {
+						el.classList.remove('show')
+						actionFn()
+					})
+					el.appendChild(b)
+				}
+				el.classList.add('show')
+				clearTimeout(toastT)
+				toastT = setTimeout(() => el.classList.remove('show'), actionLabel ? 5500 : 2600)
+			}
+
+			// ── Connection badge ────────────────────────────────────────────────
+			function setConn(state) {
+				const c = $('conn')
+				const txt = $('connText')
+				c.classList.remove('live', 'off')
+				if (state === 'live') {
+					c.classList.add('live')
+					txt.textContent = t('live')
+				} else if (state === 'off') {
+					c.classList.add('off')
+					txt.textContent = pending.size ? t('saving') : t('offline')
+				} else {
+					txt.textContent = t('connecting')
+				}
+			}
+
+			// ── Grouping by supplier location ────────────────────────────────────
+			// Order MUST match the desktop Orders Sorting Dashboard's default sort
+			// (Supplier / Location, ascending): floor → stall → shop. Floor 999 /
+			// missing is treated as "unknown" and sorts last, exactly like desktop.
+			function floorNorm(floor) {
+				return floor != null && floor !== 999 && floor !== '' ? Number(floor) : 9999
+			}
+			function supplierSortKey(floor, stall, shop) {
+				return `${String(floorNorm(floor)).padStart(4, '0')}\x00${(stall || '').toLowerCase()}\x00${(shop || '').toLowerCase()}`
+			}
+			function groupRows(rows) {
+				const groups = new Map()
+				for (const r of rows) {
+					const shop = (r.supplier_shop || '').trim()
+					const stall = (r.supplier_stall || '').trim()
+					const floor = r.supplier_floor
+					const matched = !!(shop || stall)
+					// Group identity + sort key both use the desktop's floor→stall→shop
+					// ordering so grouped cards appear in the exact same sequence.
+					const key = matched ? supplierSortKey(floor, stall, shop) : '\uffff'
+					if (!groups.has(key)) groups.set(key, { floor, shop, stall, matched, sortKey: key, rows: [] })
+					groups.get(key).rows.push(r)
+				}
+				// Same comparison the desktop uses (code-unit, not locale) so the
+				// sequence is byte-for-byte identical, including Chinese shop names.
+				return [...groups.values()].sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0))
+			}
+
+			// ── Summary + progress ───────────────────────────────────────────────
+			function renderSummary() {
+				const actionable = ROWS.filter((r) => !r.excluded && !r.needs_exchange)
+				const remaining = actionable.filter((r) => !fullyPurchased(r))
+				const done = actionable.length - remaining.length
+				$('stItems').textContent = remaining.length
+				$('stOrders').textContent = new Set(remaining.map((r) => r.receipt_id)).size
+				const pct = actionable.length ? Math.round((done / actionable.length) * 100) : 0
+				$('progressBar').style.width = pct + '%'
+			}
+
+			// ── Card rendering ───────────────────────────────────────────────────
+			// Status buttons for ONLY the components in this section.
+			function compHtml(r, comps) {
+				return comps
+					.filter((c) => r[c.flag])
+					.map((c) => {
+						const st = r[c.status] || 'Pending'
+						const m = STATUS_META[st] || STATUS_META.Pending
+						return `<button class="comp ${m.cls}" data-rid="${r.receipt_id}" data-ik="${esc(r.item_key)}" data-c="${c.key}">
+							<div class="cl">${compLabel(c)}</div>
+							<div class="cs">${stLabel(st)}</div>
+						</button>`
+					})
+					.join('')
+			}
+
+			// Case/Grip card — no product name; the phone model + style ARE the
+			// identity, shown large. Product photo is enlarged.
+			function cardHtml(r, g) {
+				const done = g.doneFn(r)
+				const img = r.image_url
+					? `<img class="thumb" loading="lazy" decoding="async" src="${esc(r.image_url)}" onerror="this.classList.add('ph');this.removeAttribute('src')" />`
+					: `<div class="thumb ph"></div>`
+				const tags = []
+				if (r.quantity > 1) tags.push(`<span class="tag qty">×${r.quantity}</span>`)
+				if (r.is_pre_transit) tags.push(`<span class="tag pre">Pre-transit</span>`)
+				const btn = done
+					? `<button class="markall done" data-rid="${r.receipt_id}" data-ik="${esc(r.item_key)}" data-sec="${g.section}">${t('bought')}</button>`
+					: `<button class="markall" data-rid="${r.receipt_id}" data-ik="${esc(r.item_key)}" data-sec="${g.section}">${t('markBought')}</button>`
+				return `<div class="card ${done ? 'done' : ''}" data-rid="${r.receipt_id}" data-ik="${esc(r.item_key)}">
+					<div class="ctop">
+						${img}
+						<div class="cinfo">
+							<div class="cident stack">
+								<span class="cmodel">${esc(r.phone_model || '—')}</span>
+								${r.style ? `<span class="cstyle">${esc(r.style)}</span>` : ''}
+							</div>
+							${tags.length ? `<div class="cmeta">${tags.join('')}</div>` : ''}
+						</div>
+					</div>
+					<div class="comps">${compHtml(r, g.comps)}</div>
+					${btn}
+				</div>`
+			}
+
+			// Charm card — one card PER charm code (identical charms are merged and
+			// show the total quantity to buy). Shows the charm photo, code, and ×qty.
+			function charmCardHtml(a) {
+				const done = a.done
+				const status = aggStatus(a.rows)
+				const m = STATUS_META[status] || STATUS_META.Pending
+				const img = a.charm_code
+					? `<img class="thumb" loading="lazy" decoding="async" src="/api/route/charm-image?code=${encodeURIComponent(a.charm_code)}" onerror="this.classList.add('ph');this.removeAttribute('src')" />`
+					: `<div class="thumb ph"></div>`
+				const orders = a.rows.length
+				const btn = done
+					? `<button class="markall done" data-agg="${a.aggId}" data-sec="charm">${t('bought')}</button>`
+					: `<button class="markall" data-agg="${a.aggId}" data-sec="charm">${t('markBought')}</button>`
+				return `<div class="card ${done ? 'done' : ''}">
+					<div class="ctop">
+						${img}
+						<div class="cinfo">
+							<div class="cident">
+								<span class="ccharm">${esc(a.charm_code || t('noCharmCode'))}</span>
+								<span class="cqty">×${a.qty}</span>
+							</div>
+							<div class="cmeta"><span class="tag">${ordersN(orders)}</span></div>
+						</div>
+					</div>
+					<div class="comps">
+						<button class="comp ${m.cls}" data-agg="${a.aggId}" data-c="charm">
+							<div class="cl">${compLabel(COMP_CHARM)}</div>
+							<div class="cs">${stLabel(status)}</div>
+						</button>
+					</div>
+					${btn}
+				</div>`
+			}
+
+			// Merge charm lines by charm code (empty codes stay separate). Quantity is
+			// the sum of the line quantities so one row can say "buy ×N".
+			function aggregateCharms(rows) {
+				const map = new Map()
+				let uniq = 0
+				for (const r of rows) {
+					const code = (r.charm_code || '').trim()
+					const key = code ? code.toLowerCase() : '__none__' + uniq++
+					if (!map.has(key)) map.set(key, { charm_code: code, rows: [] })
+					map.get(key).rows.push(r)
+				}
+				const arr = [...map.values()]
+				for (const a of arr) {
+					a.qty = a.rows.reduce((n, r) => n + (r.quantity || 1), 0)
+					a.done = a.rows.every(charmDone)
+				}
+				arr.sort((a, b) => String(a.charm_code || '~').localeCompare(String(b.charm_code || '~'), undefined, { numeric: true }))
+				return arr
+			}
+
+			// A merged charm's shown status: Purchased if all bought, else the first
+			// actionable status (prefer "to buy").
+			function aggStatus(rows) {
+				const st = rows.map((r) => r.status_charm || 'Pending')
+				if (st.every((s) => s === 'Purchased')) return 'Purchased'
+				if (st.some((s) => s === 'Pending')) return 'Pending'
+				return st.find((s) => s !== 'Purchased') || 'Pending'
+			}
+
+			// Correction card — a model to fix on this trip. Two shapes:
+			//   • Swap  (we hold a wrong model): shows HAVE → NEED, carry & swap it.
+			//   • Buy   (no stock — buyer changed model): shows 🛒 BUY NEED, purchase it.
+			// The distinction is simply whether have_model is set.
+			function exCardHtml(x) {
+				const img = x.image_url
+					? `<img class="thumb" loading="lazy" decoding="async" src="${esc(x.image_url)}" onerror="this.classList.add('ph');this.removeAttribute('src')" />`
+					: `<div class="thumb ph"></div>`
+				const comps = (x.components || '')
+					.split(',')
+					.map((s) => s.trim())
+					.filter(Boolean)
+					.map((c) => (c === 'case' ? compLabel(COMP_CASE) : c === 'grip' ? compLabel(COMP_GRIP) : c === 'charm' ? compLabel(COMP_CHARM) : c))
+					.join(' + ')
+				const have = (x.have_model || '').trim()
+				const swapHtml = have
+					? `<div class="exswap">
+								<span class="exhave">${esc(have)}</span>
+								<span class="exarrow">→</span>
+								<span class="exneed">${esc(x.need_model || '?')}</span>
+							</div>`
+					: `<div class="exswap exbuy">
+								<span class="exbuytag">🛒</span>
+								<span class="exneed">${esc(x.need_model || '?')}</span>
+							</div>`
+				return `<div class="card ex" data-exid="${x.exchange_id}">
+					<div class="ctop">
+						${img}
+						<div class="cinfo">
+							${swapHtml}
+							${comps ? `<div class="cmeta"><span class="cstyle">${esc(comps)}</span></div>` : ''}
+							${x.note ? `<div class="exnote">${esc(x.note)}</div>` : ''}
+						</div>
+					</div>
+					<button class="markall exbtn" data-exid="${x.exchange_id}">${have ? t('markExchanged') : t('markBought')}</button>
+				</div>`
+			}
+
+			function markExchanged(exid) {
+				const idx = EXCHANGES.findIndex((x) => x.exchange_id === exid)
+				if (idx < 0) return
+				const x = EXCHANGES[idx]
+				EXCHANGES.splice(idx, 1) // optimistic
+				const el = document.querySelector('.card.ex[data-exid="' + exid + '"]')
+				if (el) removeCardEl(el)
+				refreshBadges()
+				pushUndo({ type: 'exchange', exchange: x })
+				toast((x.have_model || '').trim() ? t('markedExchanged') : t('markedBought'), t('undo'), performUndo)
+				fetch('/api/exchanges/' + encodeURIComponent(exid) + '/done', { method: 'POST', credentials: 'same-origin' })
+					.then((r) => {
+						if (r.status === 401) location.href = '/login'
+						else if (!r.ok) throw new Error('HTTP ' + r.status)
+					})
+					.catch(() => {
+						EXCHANGES.splice(Math.min(idx, EXCHANGES.length), 0, x) // roll back
+						render()
+					})
+			}
+
+			// Charms are shopped at charm stalls, so they group by charm shop/stall.
+			function groupCharmRows(rows) {
+				const groups = new Map()
+				for (const r of rows) {
+					const shop = (r.charm_shop || '').trim()
+					const key = shop ? shop.toLowerCase() : '\uffff'
+					if (!groups.has(key)) groups.set(key, { shop, stall: (r.charm_stall || '').trim(), floor: r.charm_floor, sortKey: key, rows: [] })
+					groups.get(key).rows.push(r)
+				}
+				return [...groups.values()].sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0))
+			}
+
+			function applySearch(rows) {
+				if (!searchQ) return rows
+				const q = searchQ.toLowerCase()
+				return rows.filter((r) =>
+					[r.title, r.phone_model, r.style, r.charm_code, r.supplier_shop, r.supplier_stall, r.charm_shop, r.have_model, r.need_model].some((v) =>
+						String(v || '').toLowerCase().includes(q),
+					),
+				)
+			}
+
+			function render() {
+				renderSummary()
+				const box = $('list')
+				if (!ROWS.length && !EXCHANGES.length) {
+					LAST_GROUPS = []
+					box.innerHTML = `<div class="state"><div class="state-title">${t('nothing')}</div></div>`
+					maybeRenderTree()
+					return
+				}
+
+				// Section 1 — Cases & Grips, MERGED with exchanges at the same stall.
+				// A shopper standing at a supplier sees, in one place, what to BUY and
+				// what to SWAP there — no need to backtrack for exchanges later.
+				const supKey = (r) => {
+					const shop = (r.supplier_shop || '').trim()
+					const stall = (r.supplier_stall || '').trim()
+					return shop || stall ? supplierSortKey(r.supplier_floor, stall, shop) : '\uffff'
+				}
+				const merged = new Map()
+				const ensureGroup = (r) => {
+					const k = supKey(r)
+					if (!merged.has(k)) {
+						const shop = (r.supplier_shop || '').trim()
+						const stall = (r.supplier_stall || '').trim()
+						merged.set(k, { floor: r.supplier_floor, shop, stall, matched: !!(shop || stall), rows: [], exRows: [] })
+					}
+					return merged.get(k)
+				}
+				let cg = ROWS.filter((r) => r.has_case || r.has_grip)
+				cg = applySearch(cg.filter((r) => showDone || !cgDone(r)))
+				for (const r of cg) ensureGroup(r).rows.push(r)
+				for (const x of applySearch(EXCHANGES)) ensureGroup(x).exRows.push(x)
+				const cgGroups = [...merged.keys()]
+					.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+					.map((k) => ({ ...merged.get(k), section: 'cg', comps: CASE_GRIP, doneFn: cgDone, sortKey: 'cg\x01' + k }))
+
+				// Section 2 — Charms, grouped by charm stall, then merged by charm code.
+				let ch = ROWS.filter((r) => r.has_charm)
+				ch = applySearch(ch.filter((r) => showDone || !charmDone(r)))
+				const chGroups = groupCharmRows(ch).map((g) => ({ ...g, section: 'charm', comps: CHARM, doneFn: charmDone, sortKey: 'ch\x01' + g.sortKey, aggs: aggregateCharms(g.rows) }))
+
+				// Register every merged charm so its buttons can act on all its lines.
+				AGG.clear()
+				let ac = 0
+				for (const g of chGroups) for (const a of g.aggs) { a.aggId = 'a' + ac++; AGG.set(a.aggId, a.rows) }
+
+				LAST_GROUPS = [...cgGroups, ...chGroups]
+
+				if (!cgGroups.length && !chGroups.length) {
+					box.innerHTML = `<div class="state"><div class="state-title">${searchQ ? t('noMatches') : t('allBought')}</div></div>`
+					maybeRenderTree()
+					return
+				}
+
+				const prevScroll = window.scrollY
+				box.innerHTML = renderSection(t('secCG'), cgGroups, 0, 'cg') + renderSection(t('secCharm'), chGroups, cgGroups.length, 'charm')
+				maybeRenderTree()
+				// Keep the shopper's place across a re-render (search/collapse/undo) —
+				// no jarring jump.
+				if (prevScroll > 0) requestAnimationFrame(() => window.scrollTo(0, prevScroll))
+			}
+
+			// Items still needing action in a group = unbought lines + open exchanges.
+			function groupRemaining(g) {
+				const buy = g.rows.filter((r) => !g.doneFn(r)).length
+				return buy + ((g.exRows && g.exRows.length) || 0)
+			}
+
+			function renderSection(title, groups, baseIdx, kind) {
+				if (!groups.length) return ''
+				const remaining = groups.reduce((n, g) => n + groupRemaining(g), 0)
+				const badge = remaining ? `<span class="section-count">${remaining}</span>` : `<span class="section-count sdone">✓</span>`
+				const body = groups.map((g, j) => renderGroup(g, baseIdx + j)).join('')
+				return `<div class="section ${kind || ''}"><div class="section-head">${title}${badge}</div>${body}</div>`
+			}
+
+			function renderGroup(g, gidx) {
+				const remaining = groupRemaining(g)
+				const allDone = remaining === 0
+				const collapsed = isCollapsed(g)
+				const count = allDone ? `<span class="gcount done">✓</span>` : `<span class="gcount">${remaining}</span>`
+				const chev = `<span class="gchev">${collapsed ? '▸' : '▾'}</span>`
+				let head
+				if (g.section === 'charm') {
+					const hasFloor = g.floor != null && g.floor !== '' && g.floor !== 999
+					head = `<div class="ghead${allDone ? ' gdone' : ''}">
+						${hasFloor ? `<span class="floor">${esc(floorLabel(g.floor))}</span>` : ''}
+						<span class="shop">${esc(g.shop || t('charmNotSet'))}</span>
+						${g.stall ? `<span class="stall">${esc(g.stall)}</span>` : ''}
+						${count}${chev}
+					</div>`
+				} else {
+					const hasFloor = g.floor != null && g.floor !== '' && g.floor !== 999
+					head = g.matched
+						? `<div class="ghead${allDone ? ' gdone' : ''}">
+							${hasFloor ? `<span class="floor">${esc(floorLabel(g.floor))}</span>` : ''}
+							<span class="shop">${esc(g.shop || '—')}</span>
+							${g.stall ? `<span class="stall">${esc(g.stall)}</span>` : ''}
+							${count}${chev}
+						</div>`
+						: `<div class="ghead${allDone ? ' gdone' : ''}">
+							<span class="shop">${t('supplierNotSet')}</span>
+							${count}${chev}
+						</div>`
+				}
+				let body = ''
+				if (!collapsed) {
+					let cards
+					if (g.section === 'charm') {
+						cards = g.aggs.map((a) => charmCardHtml(a)).join('')
+					} else {
+						cards = g.rows.map((r) => cardHtml(r, g)).join('')
+						// Exchanges to swap at THIS same stall, under a small divider so the
+						// shopper handles buying and swapping in one visit.
+						if (g.exRows && g.exRows.length) {
+							cards += `<div class="gsublabel">${t('secEx')}</div>` + g.exRows.map((x) => exCardHtml(x)).join('')
+						}
+					}
+					body = `<div class="gbody">${cards}</div>`
+				}
+				return `<div class="group${collapsed ? ' collapsed' : ''}" data-gidx="${gidx}">${head}${body}</div>`
+			}
+
+			// A group is collapsed if the user explicitly collapsed it, else it
+			// auto-collapses once every (visible) line in it is bought.
+			function isCollapsed(g) {
+				if (collapseOverride.has(g.sortKey)) return collapseOverride.get(g.sortKey)
+				// Auto-collapse only when there's nothing left to buy AND nothing to swap.
+				return groupRemaining(g) === 0
+			}
+
+			// Section-aware group keys + completion (for celebration / auto-scroll).
+			function cgGroupKey(r) {
+				const shop = (r.supplier_shop || '').trim()
+				const stall = (r.supplier_stall || '').trim()
+				return 'cg\x01' + (shop || stall ? supplierSortKey(r.supplier_floor, stall, shop) : '\uffff')
+			}
+			// Exchange → same supplier-location key as the buy list (they're merged).
+			const exCgKey = (x) => cgGroupKey(x)
+			function charmGroupKey(r) {
+				const shop = (r.charm_shop || '').trim()
+				return 'ch\x01' + (shop ? shop.toLowerCase() : '\uffff')
+			}
+			function cgGroupDone(key) {
+				const rs = ROWS.filter((r) => (r.has_case || r.has_grip) && cgGroupKey(r) === key)
+				const buysDone = rs.length > 0 && rs.every(cgDone)
+				// The stall isn't "done" while a swap is still owed there.
+				const swapPending = EXCHANGES.some((x) => exCgKey(x) === key)
+				return buysDone && !swapPending
+			}
+			function charmGroupDone(key) {
+				const rs = ROWS.filter((r) => r.has_charm && charmGroupKey(r) === key)
+				return rs.length > 0 && rs.every(charmDone)
+			}
+
+			// ── Navigation drawer (route tree: Section → Floor → Supplier) ───────
+			const treeCollapsed = new Set() // tree node ids the user has collapsed
+			const drawerOpen = () => $('drawerBg').classList.contains('open')
+
+			// Build the tree from the CURRENTLY rendered groups so leaf → card jumps
+			// line up with the DOM (via each group's data-gidx index).
+			function buildTree() {
+				const cg = { id: 'sec:cg', type: 'section', label: t('secCG'), remaining: 0, floorMap: new Map(), children: [] }
+				const charm = { id: 'sec:charm', type: 'section', label: t('secCharm'), remaining: 0, children: [] }
+				LAST_GROUPS.forEach((g, gidx) => {
+					// Count includes exchanges owed at the stall (they're merged into cg).
+					const remaining = groupRemaining(g)
+					if (g.section === 'charm') {
+						charm.children.push({ type: 'leaf', gidx, label: g.shop || t('charmNotSet'), sub: g.stall || '', remaining })
+						charm.remaining += remaining
+					} else {
+						const hasFloor = g.floor != null && g.floor !== '' && g.floor !== 999
+						const fid = cg.id + ':flr:' + (hasFloor ? g.floor : '_')
+						let fl = cg.floorMap.get(fid)
+						if (!fl) {
+							fl = { id: fid, type: 'floor', label: hasFloor ? floorLabel(g.floor) : t('otherFloor'), remaining: 0, children: [] }
+							cg.floorMap.set(fid, fl)
+							cg.children.push(fl)
+						}
+						fl.children.push({ type: 'leaf', gidx, label: g.shop || t('supplierNotSet'), sub: g.stall || '', remaining })
+						fl.remaining += remaining
+						cg.remaining += remaining
+					}
+				})
+				const out = []
+				if (cg.children.length) out.push(cg)
+				if (charm.children.length) out.push(charm)
+				return out
+			}
+
+			function treeNodeHtml(node) {
+				const badge = (n) => `<span class="${n === 0 ? 'tcount z' : 'tcount'}">${n === 0 ? '✓' : n}</span>`
+				if (node.type === 'leaf') {
+					const sub = node.sub ? ` <span class="tsub">${esc(node.sub)}</span>` : ''
+					return `<div class="tnode"><div class="trow leaf" data-gidx="${node.gidx}">
+						<span class="tcaret" style="visibility:hidden">·</span>
+						<span class="tlabel">${esc(node.label)}${sub}</span>
+						${badge(node.remaining)}
+					</div></div>`
+				}
+				const collapsed = treeCollapsed.has(node.id)
+				return `<div class="tnode ${collapsed ? 'collapsed' : ''}">
+					<div class="trow ${node.type}" data-toggle="${node.id}">
+						<span class="tcaret">▾</span>
+						<span class="tlabel">${esc(node.label)}</span>
+						${badge(node.remaining)}
+					</div>
+					<div class="tchildren">${node.children.map(treeNodeHtml).join('')}</div>
+				</div>`
+			}
+
+			function renderTree() {
+				const tree = buildTree()
+				const items = tree.reduce((n, s) => n + s.remaining, 0)
+				const orders = new Set(ROWS.filter((r) => !fullyPurchased(r)).map((r) => r.receipt_id)).size
+				$('drawerTitle').textContent = t('overview')
+				$('drawerSub').textContent = `${items} ${t('leftSummary')} · ${ordersN(orders)}`
+				$('treeRoot').innerHTML = tree.length ? tree.map(treeNodeHtml).join('') : `<div class="tempty">${t('allBought')}</div>`
+			}
+			function maybeRenderTree() {
+				if (drawerOpen()) renderTree()
+			}
+
+			function openDrawer() {
+				renderTree()
+				$('drawerBg').classList.add('open')
+			}
+			function closeDrawer() {
+				$('drawerBg').classList.remove('open')
+			}
+
+			// Jump from a drawer leaf to its group: expand it, scroll it into view
+			// (below the sticky header), and flash it.
+			function navigateToGroup(gidx) {
+				const g = LAST_GROUPS[gidx]
+				closeDrawer()
+				if (g && g.sortKey) collapseOverride.set(g.sortKey, false)
+				render()
+				requestAnimationFrame(() => {
+					const grp = document.querySelector(`.group[data-gidx="${gidx}"]`)
+					if (!grp) return
+					const hH = (document.querySelector('header') || {}).offsetHeight || 0
+					const top = grp.getBoundingClientRect().top + window.scrollY - hH - 8
+					window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+					grp.classList.add('ghl')
+					setTimeout(() => grp.classList.remove('ghl'), 1500)
+				})
+			}
+
+			// ── In-place DOM updates ─────────────────────────────────────────────
+			// Status changes patch the affected card(s) directly instead of rebuilding
+			// the whole list. This removes the flash/refresh AND stops every image
+			// from reloading on each tap.
+			function findCgCard(r) {
+				const rid = String(r.receipt_id)
+				for (const el of document.querySelectorAll('.card[data-rid]')) {
+					if (el.dataset.rid === rid && el.dataset.ik === r.item_key) return el
+				}
+				return null
+			}
+			// Locate the merged-charm card covering a row via the live AGG map.
+			function findCharmCard(r) {
+				for (const btn of document.querySelectorAll('.comp[data-agg]')) {
+					const rows = AGG.get(btn.dataset.agg)
+					if (rows && rows.includes(r)) return { el: btn.closest('.card'), rows }
+				}
+				return null
+			}
+			function updateCgCardEl(el, r) {
+				const done = cgDone(r)
+				el.classList.toggle('done', done)
+				const compsEl = el.querySelector('.comps')
+				if (compsEl) compsEl.innerHTML = compHtml(r, CASE_GRIP)
+				const btn = el.querySelector('.markall')
+				if (btn) {
+					btn.className = 'markall' + (done ? ' done' : '')
+					btn.textContent = done ? t('bought') : t('markBought')
+				}
+			}
+			function updateCharmCardEl(el, rows) {
+				const done = rows.every(charmDone)
+				const status = aggStatus(rows)
+				const m = STATUS_META[status] || STATUS_META.Pending
+				el.classList.toggle('done', done)
+				const comp = el.querySelector('.comp')
+				if (comp) {
+					comp.className = 'comp ' + m.cls
+					const cs = comp.querySelector('.cs')
+					if (cs) cs.textContent = stLabel(status)
+				}
+				const btn = el.querySelector('.markall')
+				if (btn) {
+					btn.className = 'markall' + (done ? ' done' : '')
+					btn.textContent = done ? t('bought') : t('markBought')
+				}
+			}
+			// Remove a card; drop its group / section when they become empty.
+			function removeCardEl(el) {
+				const groupEl = el.closest('.group')
+				const sectionEl = el.closest('.section')
+				el.remove()
+				if (groupEl && !groupEl.querySelector('.card')) groupEl.remove()
+				if (sectionEl && !sectionEl.querySelector('.card')) sectionEl.remove()
+			}
+			// Recompute every count badge (group, section, summary, drawer) + collapse
+			// finished stalls — all without rebuilding the list.
+			function refreshBadges() {
+				renderSummary()
+				let cgRem = 0
+				let chRem = 0
+				document.querySelectorAll('.group[data-gidx]').forEach((groupEl) => {
+					const g = LAST_GROUPS[+groupEl.dataset.gidx]
+					if (!g) return
+					const rem = groupRemaining(g)
+					if (g.section === 'charm') chRem += rem
+					else cgRem += rem
+					const gc = groupEl.querySelector('.ghead .gcount')
+					if (gc) {
+						gc.className = 'gcount' + (rem === 0 ? ' done' : '')
+						gc.textContent = rem === 0 ? '✓' : rem
+					}
+					if (rem === 0 && !collapseOverride.has(g.sortKey) && !groupEl.classList.contains('collapsed')) {
+						groupEl.classList.add('collapsed')
+						const gb = groupEl.querySelector('.gbody')
+						if (gb) gb.remove()
+					}
+				})
+				const setSec = (sel, rem) => {
+					const b = document.querySelector(sel + ' .section-head .section-count')
+					if (b) {
+						b.className = 'section-count' + (rem === 0 ? ' sdone' : '')
+						b.textContent = rem === 0 ? '✓' : rem
+					}
+				}
+				setSec('.section.cg', cgRem)
+				setSec('.section.charm', chRem)
+				if (!$('list').querySelector('.card')) {
+					LAST_GROUPS = []
+					$('list').innerHTML = `<div class="state"><div class="state-title">${searchQ ? t('noMatches') : t('allBought')}</div></div>`
+				}
+				if (drawerOpen()) renderTree()
+			}
+			// Patch the UI in place for one status change across one/many lines.
+			function patchUi(rowsArr, touchesCharm) {
+				for (const r of rowsArr) {
+					if (touchesCharm) {
+						const found = findCharmCard(r)
+						if (found) {
+							if (!showDone && found.rows.every(charmDone)) removeCardEl(found.el)
+							else updateCharmCardEl(found.el, found.rows)
+						}
+					} else {
+						const el = findCgCard(r)
+						if (el) {
+							if (!showDone && cgDone(r)) removeCardEl(el)
+							else updateCgCardEl(el, r)
+						}
+					}
+				}
+				refreshBadges()
+			}
+			// Patch a row wherever it appears (a line can be in both the Case/Grip and
+			// Charm sections). Used for real-time updates from other devices.
+			function patchRowEverywhere(r) {
+				const cg = findCgCard(r)
+				if (cg) {
+					if (!showDone && cgDone(r)) removeCardEl(cg)
+					else updateCgCardEl(cg, r)
+				}
+				const ch = findCharmCard(r)
+				if (ch) {
+					if (!showDone && ch.rows.every(charmDone)) removeCardEl(ch.el)
+					else updateCharmCardEl(ch.el, ch.rows)
+				}
+				refreshBadges()
+			}
+
+			// ── Status changes (optimistic + retry queue) ────────────────────────
+			function applyLocal(r, patch) {
+				Object.assign(r, patch)
+			}
+
+			// Queue the change for the server (optimistic; retried on failure).
+			function enqueueNetwork(r, patch) {
+				const k = keyOf(r)
+				const op = pending.get(k) || { receipt_id: r.receipt_id, item_key: r.item_key, title: r.title }
+				Object.assign(op, patch)
+				pending.set(k, op)
+				setConn(sse && sse.readyState === 1 ? 'live' : 'off')
+				flush()
+			}
+
+			// Apply one status change to one OR MANY lines (a merged charm hits every
+			// order line it covers), persist each, re-render, and — if this completes
+			// a whole stall — celebrate + jump to the next stall still needing shopping.
+			function commitRows(rowsArr, patch, opts = {}) {
+				if (!rowsArr || !rowsArr.length) return
+				// Record the pre-change values so this can be undone (skip when this
+				// call IS an undo).
+				if (!opts.isUndo) {
+					const changes = rowsArr.map((r) => {
+						const prev = {}
+						for (const k in patch) prev[k] = r[k]
+						return { receipt_id: r.receipt_id, item_key: r.item_key, prev }
+					})
+					pushUndo({ type: 'assign', changes })
+				}
+				const touchesCG = 'status_case' in patch || 'status_grip' in patch
+				const touchesCharm = 'status_charm' in patch
+				const cgKeys = new Set(rowsArr.map(cgGroupKey))
+				const chKeys = new Set(rowsArr.map(charmGroupKey))
+				const wasCg = new Map([...cgKeys].map((k) => [k, cgGroupDone(k)]))
+				const wasCh = new Map([...chKeys].map((k) => [k, charmGroupDone(k)]))
+				for (const r of rowsArr) {
+					applyLocal(r, patch)
+					enqueueNetwork(r, patch)
+				}
+				patchUi(rowsArr, touchesCharm)
+				if (touchesCharm) {
+					for (const k of chKeys) if (!wasCh.get(k) && charmGroupDone(k)) return celebrateStall(k)
+				} else if (touchesCG) {
+					for (const k of cgKeys) if (!wasCg.get(k) && cgGroupDone(k)) return celebrateStall(k)
+				}
+			}
+
+			async function flush() {
+				if (flushing || !pending.size) return
+				flushing = true
+				for (const [k, op] of [...pending]) {
+					try {
+						const resp = await fetch('/api/shop/assign', {
+							method: 'POST',
+							headers: { 'Content-Type': 'application/json' },
+							credentials: 'same-origin',
+							body: JSON.stringify(op),
+						})
+						if (resp.status === 401) {
+							location.href = '/login'
+							return
+						}
+						if (!resp.ok) throw new Error('HTTP ' + resp.status)
+						pending.delete(k)
+					} catch (e) {
+						// keep in queue; retry shortly
+					}
+				}
+				flushing = false
+				if (pending.size) {
+					setConn('off')
+					setTimeout(flush, 3000)
+				} else {
+					setConn(sse && sse.readyState === 1 ? 'live' : 'off')
+				}
+			}
+
+			// Set one component's status across one or many lines (skips no-ops).
+			function setStatusRows(rowsArr, compKey, status) {
+				const field = 'status_' + compKey
+				const changed = rowsArr.filter((r) => (r[field] || 'Pending') !== status)
+				if (!changed.length) return
+				commitRows(changed, { [field]: status })
+			}
+
+			// Mark a section's components bought across one or many lines.
+			function markSection(rowsArr, sec) {
+				const comps = sec === 'charm' ? CHARM : CASE_GRIP
+				const patch = {}
+				for (const c of comps) {
+					if (rowsArr.some((r) => r[c.flag] && (r[c.status] || 'Pending') !== 'Purchased')) patch[c.status] = 'Purchased'
+				}
+				if (!Object.keys(patch).length) return
+				commitRows(rowsArr, patch)
+				toast(t('markedBought'), t('undo'), performUndo)
+			}
+
+			// ── Undo (accidental taps) ───────────────────────────────────────────
+			function pushUndo(action) {
+				undoStack.push(action)
+				if (undoStack.length > 30) undoStack.shift()
+				updateUndoBtn()
+			}
+			function updateUndoBtn() {
+				$('undoBtn').style.display = undoStack.length ? '' : 'none'
+			}
+			function performUndo() {
+				const action = undoStack.pop()
+				updateUndoBtn()
+				if (!action) return
+				if (action.type === 'assign') {
+					for (const c of action.changes) {
+						const row = rowIndex.get(c.receipt_id + '\x00' + c.item_key)
+						if (row) {
+							applyLocal(row, c.prev)
+							enqueueNetwork(row, c.prev)
+						}
+					}
+					render()
+					toast(t('undone'))
+				} else if (action.type === 'exchange') {
+					const x = action.exchange
+					if (!EXCHANGES.some((e) => e.exchange_id === x.exchange_id)) EXCHANGES.push(x)
+					render()
+					toast(t('undone'))
+					fetch('/api/exchanges/' + encodeURIComponent(x.exchange_id) + '/reopen', { method: 'POST', credentials: 'same-origin' }).catch(() => {})
+				}
+			}
+
+			// ── Stall completion: celebrate + move to the next stall ──────────────
+			function celebrateStall(key) {
+				toast(t('stallDone'))
+				setTimeout(() => scrollToNextIncomplete(key), 350)
+			}
+
+			function scrollToNextIncomplete(fromKey) {
+				const idx = LAST_GROUPS.findIndex((g) => g.sortKey === fromKey)
+				const start = idx >= 0 ? idx + 1 : 0
+				for (let i = start; i < LAST_GROUPS.length; i++) {
+					const g = LAST_GROUPS[i]
+					if (groupRemaining(g) > 0) {
+						const el = document.querySelector(`.group[data-gidx="${i}"] .ghead`)
+						if (el) {
+							const headerH = (document.querySelector('header') || {}).offsetHeight || 0
+							const top = el.getBoundingClientRect().top + window.scrollY - headerH - 6
+							window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+						}
+						return
+					}
+				}
+				// Nothing left to shop — stay exactly where the shopper is. (Jumping
+				// back to the top here was disorienting and annoying.)
+			}
+
+			// ── Bottom-sheet status picker ───────────────────────────────────────
+			let sheetTarget = null // { rows, compKey }
+			function openSheet(rowsArr, compKey) {
+				sheetTarget = { rows: rowsArr, compKey }
+				const comp = COMPONENTS.find((c) => c.key === compKey)
+				const r0 = rowsArr[0]
+				const field = 'status_' + compKey
+				const cur = rowsArr.every((r) => (r[field] || 'Pending') === (r0[field] || 'Pending')) ? r0[field] || 'Pending' : null
+				let subtitle
+				if (compKey === 'charm') {
+					const qty = rowsArr.reduce((n, r) => n + (r.quantity || 1), 0)
+					subtitle = `${esc(r0.charm_code || 'charm')} ×${qty}`
+				} else {
+					subtitle = esc([r0.phone_model, r0.style].filter(Boolean).join(' · ') || 'item')
+				}
+				$('sheetTitle').innerHTML = `${compLabel(comp)} · <b>${subtitle}</b>`
+				$('sheetOpts').innerHTML = STATUS_ORDER.map((s) => {
+					const m = STATUS_META[s]
+					return `<button class="opt ${s === cur ? 'sel' : ''}" data-s="${esc(s)}">
+						<span class="swatch" style="background:${m.color}"></span>
+						<span>${stLabel(s)}</span>
+					</button>`
+				}).join('')
+				$('sheetBg').classList.add('open')
+			}
+			function closeSheet() {
+				$('sheetBg').classList.remove('open')
+				sheetTarget = null
+			}
+
+			// ── Event delegation ─────────────────────────────────────────────────
+			const rowFromEl = (el) => rowIndex.get(el.dataset.rid + '\x00' + el.dataset.ik)
+			// Resolve the target line(s) for a button: a merged charm (data-agg) maps
+			// to every line it covers; a normal button maps to its single line.
+			const rowsFromEl = (el) => {
+				if (el.dataset.agg) return AGG.get(el.dataset.agg) || []
+				const r = rowFromEl(el)
+				return r ? [r] : []
+			}
+			$('list').addEventListener('click', (e) => {
+				const comp = e.target.closest('.comp')
+				if (comp) {
+					const rows = rowsFromEl(comp)
+					if (rows.length) openSheet(rows, comp.dataset.c)
+					return
+				}
+				const all = e.target.closest('.markall')
+				if (all) {
+					if (all.dataset.exid) {
+						markExchanged(Number(all.dataset.exid))
+						return
+					}
+					const rows = rowsFromEl(all)
+					if (rows.length) markSection(rows, all.dataset.sec)
+					return
+				}
+				// Tap a stall header to collapse / expand it.
+				const head = e.target.closest('.ghead')
+				if (head) {
+					const wrap = head.closest('.group')
+					const g = wrap && LAST_GROUPS[Number(wrap.dataset.gidx)]
+					if (g) {
+						collapseOverride.set(g.sortKey, !isCollapsed(g))
+						render()
+					}
+				}
+			})
+			$('sheetBg').addEventListener('click', (e) => {
+				if (e.target === $('sheetBg')) return closeSheet()
+				const opt = e.target.closest('.opt')
+				if (opt && sheetTarget) {
+					setStatusRows(sheetTarget.rows, sheetTarget.compKey, opt.dataset.s)
+					closeSheet()
+				}
+			})
+
+			document.addEventListener('keydown', (e) => {
+				if (e.key === 'Escape') {
+					closeDrawer()
+					closeSheet()
+				}
+			})
+
+			// ── Navigation drawer wiring ─────────────────────────────────────────
+			$('menuBtn').addEventListener('click', openDrawer)
+			$('drawerClose').addEventListener('click', closeDrawer)
+			$('drawerBg').addEventListener('click', (e) => {
+				if (e.target === $('drawerBg')) closeDrawer()
+			})
+			$('treeRoot').addEventListener('click', (e) => {
+				const leaf = e.target.closest('.trow.leaf')
+				if (leaf) {
+					navigateToGroup(Number(leaf.dataset.gidx))
+					return
+				}
+				const tog = e.target.closest('.trow[data-toggle]')
+				if (tog) {
+					const id = tog.dataset.toggle
+					if (treeCollapsed.has(id)) treeCollapsed.delete(id)
+					else treeCollapsed.add(id)
+					renderTree()
+				}
+			})
+
+			// ── Filters wiring ───────────────────────────────────────────────────
+			$('showDoneBtn').addEventListener('click', () => {
+				showDone = !showDone
+				$('showDoneBtn').classList.toggle('on', showDone)
+				render()
+			})
+			$('advBtn').addEventListener('click', () => {
+				$('advFilters').classList.toggle('open')
+				$('advBtn').classList.toggle('on')
+			})
+			let searchT = null
+			$('searchInput').addEventListener('input', (e) => {
+				clearTimeout(searchT)
+				searchT = setTimeout(() => {
+					searchQ = e.target.value.trim()
+					render()
+				}, 180)
+			})
+			$('langBtn').addEventListener('click', () => {
+				LANG = LANG === 'en' ? 'zh' : 'en'
+				try {
+					localStorage.setItem('shopLang', LANG)
+				} catch {}
+				applyStaticI18n()
+				render()
+			})
+			$('undoBtn').addEventListener('click', performUndo)
+			$('dashBtn').addEventListener('click', () => (location.href = '/'))
+			$('refreshBtn').addEventListener('click', () => load(true))
+			$('logoutBtn').addEventListener('click', async () => {
+				try {
+					await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' })
+				} catch {}
+				location.href = '/login'
+			})
+			for (const id of ['shopFilter', 'dateFrom', 'dateTo']) {
+				$(id).addEventListener('change', () => {
+					saveFilters()
+					load(true)
+				})
+			}
+
+			function saveFilters() {
+				try {
+					localStorage.setItem(
+						LS,
+						JSON.stringify({ shop: $('shopFilter').value, from: $('dateFrom').value, to: $('dateTo').value, showDone }),
+					)
+				} catch {}
+			}
+			function loadFilters() {
+				try {
+					const f = JSON.parse(localStorage.getItem(LS) || '{}')
+					if (f.shop) $('shopFilter').value = f.shop
+					if (f.from) $('dateFrom').value = f.from
+					if (f.to) $('dateTo').value = f.to
+					showDone = !!f.showDone
+					$('showDoneBtn').classList.toggle('on', showDone)
+				} catch {}
+			}
+
+			// ── Data loading ─────────────────────────────────────────────────────
+			async function loadShops() {
+				try {
+					const r = await fetch('/api/shops', { credentials: 'same-origin' })
+					if (!r.ok) return
+					const data = await r.json()
+					const shops = data.shops || data || []
+					const sel = $('shopFilter')
+					const cur = sel.value
+					sel.innerHTML = `<option value="">${t('allShops')}</option>`
+					for (const s of shops) {
+						const id = s.shop_id || s.id
+						const name = s.shop_name || s.name || id
+						if (!id) continue
+						const o = document.createElement('option')
+						o.value = id
+						o.textContent = name
+						sel.appendChild(o)
+					}
+					sel.value = cur
+				} catch {}
+			}
+
+			async function whoAmI() {
+				try {
+					const r = await fetch('/api/auth/me', { credentials: 'same-origin' })
+					if (r.ok) {
+						const d = await r.json()
+						ME = d.user || null
+						if (d.authEnabled && !d.role) location.href = '/login'
+						// Show "back to dashboard" for the owner, and for a packer ONLY
+						// when on the office LAN (so they can return to Packing Mode). Over
+						// the public tunnel a packer stays shopping-only, so it's hidden.
+						const onLan = /^(localhost|127\.|\[?::1\]?|192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/.test(location.hostname)
+						if (d.role === 'owner' || (d.role === 'packer' && onLan)) $('dashBtn').style.display = ''
+					}
+				} catch {}
+			}
+
+			async function load(showSpinner) {
+				if (showSpinner) $('list').innerHTML = `<div class="state"><div class="spinner"></div>${t('loading')}</div>`
+				const params = new URLSearchParams()
+				if ($('shopFilter').value) params.set('shop_id', $('shopFilter').value)
+				if ($('dateFrom').value) params.set('date_from', $('dateFrom').value)
+				if ($('dateTo').value) params.set('date_to', $('dateTo').value)
+				try {
+					const r = await fetch('/api/shop/route?' + params.toString(), { credentials: 'same-origin' })
+					if (r.status === 401) {
+						location.href = '/login'
+						return
+					}
+					if (r.status === 403) {
+						$('list').innerHTML = `<div class="state"><div class="state-title">${t('cantOpen')}</div></div>`
+						return
+					}
+					if (!r.ok) throw new Error('HTTP ' + r.status)
+					const data = await r.json()
+					ROWS = data.rows || []
+					EXCHANGES = data.exchanges || []
+					rowIndex.clear()
+					for (const row of ROWS) rowIndex.set(keyOf(row), row)
+					render()
+					// A successful load means we CAN reach the server — that's the honest
+					// "connected" signal (SSE is only for instant push on top of this).
+					setConn(sseOpen ? 'live' : 'live')
+				} catch (e) {
+					setConn('off')
+					// Only replace the list with an error screen if we have nothing to
+					// show; a failed background poll must not wipe the current list.
+					if (showSpinner || !ROWS.length) {
+						$('list').innerHTML = `<div class="state"><div class="state-title">${t('couldntLoad')}</div><button class="chipbtn on" onclick="location.reload()" style="margin-top:14px">${t('retry')}</button></div>`
+					}
+				}
+			}
+
+			// ── Real-time updates: SSE with a polling fallback ───────────────────
+			// SSE gives instant push, but some networks/proxies (e.g. a Cloudflare
+			// Tunnel or a carrier proxy) buffer or block event-streams. So we never
+			// HARD-depend on it: if SSE doesn't open fast, or drops, we quietly poll
+			// the route every few seconds so the team still stays in sync.
+			let sse = null
+			let sseOpen = false
+			let sseRetry = 0
+			let sseOpenTimer = null
+			let sseRetryTimer = null
+			let pollTimer = null
+
+			function startPolling() {
+				if (pollTimer) return
+				pollTimer = setInterval(() => {
+					if (!sseOpen) load(false)
+				}, 12000)
+			}
+			function stopPolling() {
+				if (pollTimer) {
+					clearInterval(pollTimer)
+					pollTimer = null
+				}
+			}
+			function scheduleReconnect() {
+				clearTimeout(sseRetryTimer)
+				sseRetry = Math.min(sseRetry + 1, 6)
+				sseRetryTimer = setTimeout(connectSSE, 1000 * sseRetry)
+			}
+
+			function connectSSE() {
+				try {
+					if (sse) sse.close()
+				} catch {}
+				try {
+					sse = new EventSource('/api/shop/stream')
+				} catch {
+					startPolling()
+					scheduleReconnect()
+					return
+				}
+				clearTimeout(sseOpenTimer)
+				// If the stream doesn't open within 6s it's almost certainly being
+				// buffered/blocked upstream — fall back to polling and keep retrying.
+				sseOpenTimer = setTimeout(() => {
+					if (!sseOpen) {
+						try {
+							sse.close()
+						} catch {}
+						startPolling()
+						scheduleReconnect()
+					}
+				}, 6000)
+				sse.onopen = () => {
+					sseOpen = true
+					clearTimeout(sseOpenTimer)
+					sseRetry = 0
+					stopPolling()
+					setConn(pending.size ? 'off' : 'live')
+				}
+				sse.onmessage = (ev) => {
+					let msg
+					try {
+						msg = JSON.parse(ev.data)
+					} catch {
+						return
+					}
+					// A wrong-model swap changed elsewhere.
+					if (msg.type === 'exchange') {
+						if (msg.status === 'open') {
+							// Reopened (someone undid a swap) — re-fetch so it reappears.
+							load(false)
+							return
+						}
+						const i = EXCHANGES.findIndex((x) => x.exchange_id === msg.exchange_id)
+						if (i >= 0) {
+							EXCHANGES.splice(i, 1)
+							const el = document.querySelector('.card.ex[data-exid="' + msg.exchange_id + '"]')
+							if (el) removeCardEl(el)
+							refreshBadges()
+							if (msg.by && msg.by !== ME) toast(LANG === 'zh' ? `${msg.by} 已换货一项` : `${msg.by} exchanged an item`)
+						}
+						return
+					}
+					if (msg.type !== 'assign') return
+					const k = msg.receipt_id + '\x00' + msg.item_key
+					// Don't clobber a change we're still trying to save.
+					if (pending.has(k)) return
+					const r = rowIndex.get(k)
+					if (!r) {
+						// A line we don't have yet (new order / different filter) — refresh soon.
+						return
+					}
+					const before = fullyPurchased(r)
+					r.status_case = msg.status_case
+					r.status_grip = msg.status_grip
+					r.status_charm = msg.status_charm
+					if (msg.charm_code != null) r.charm_code = msg.charm_code
+					if (msg.charm_shop != null) r.charm_shop = msg.charm_shop
+					// In-place patch (no full re-render) so the list never flashes when a
+					// teammate — or our own echoed change — comes in over the stream.
+					patchRowEverywhere(r)
+					if (msg.by && msg.by !== ME) {
+						const after = fullyPurchased(r)
+						if (after && !before) toast(LANG === 'zh' ? `${msg.by} 已购买一项` : `${msg.by} bought an item`)
+						else toast(LANG === 'zh' ? `${msg.by} 更新了一项` : `${msg.by} updated an item`)
+					}
+				}
+				sse.onerror = () => {
+					sseOpen = false
+					clearTimeout(sseOpenTimer)
+					try {
+						sse.close()
+					} catch {}
+					// Keep data fresh via polling while the stream is down; the next
+					// successful load() reaffirms "live" (or marks "off" if unreachable).
+					startPolling()
+					scheduleReconnect()
+				}
+			}
+
+			// Re-sync when the app returns to foreground (phone unlocked / tab back).
+			document.addEventListener('visibilitychange', () => {
+				if (document.visibilityState === 'visible') {
+					if (!sse || sse.readyState === 2) connectSSE()
+					load(false)
+					flush()
+				}
+			})
+			window.addEventListener('online', () => {
+				flush()
+				if (!sse || sse.readyState === 2) connectSSE()
+			})
+			window.addEventListener('offline', () => setConn('off'))
+
+			// ── Boot ─────────────────────────────────────────────────────────────
+			async function boot() {
+				applyStaticI18n()
+				loadFilters()
+				// Start real-time + identity checks in PARALLEL with loading the list,
+				// instead of waiting for each round-trip in series — faster first paint.
+				whoAmI()
+				connectSSE()
+				await loadShops()
+				await load(true)
+				if ('serviceWorker' in navigator) {
+					navigator.serviceWorker.register('/shop-sw.js', { scope: '/shop' }).catch(() => {})
+				}
+			}
+			boot()
+		</script>
+	</body>
+</html>

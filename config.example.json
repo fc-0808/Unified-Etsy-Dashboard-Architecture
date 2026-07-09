@@ -17,11 +17,14 @@
   "_tracking_edit_comment": "tracking_edit_days: window (in days) during which Etsy allows the tracking number of a shipped receipt to be edited / re-submitted. Etsy's policy is ~3 days from the shipment notification; after that their API rejects re-submitting tracking. The dashboard uses this value to show/hide the 'Edit tracking' action on pre-transit orders and to display the remaining time. Etsy remains the source of truth — a call outside the window still surfaces Etsy's own rejection.",
   "tracking_edit_days": 3,
 
+  "_recently_packaged_comment": "recently_packaged_days: look-back window (in days) for the Packing Station's 'Recently packaged' review tab. Lists orders whose packaged_at falls within this window, newest first, so a packer can catch and fix a mispacked parcel (wrong item / buyer / model) shortly after sealing it. Independent of ship state. 7 days is the default; raise it for a longer safety net.",
+  "recently_packaged_days": 7,
+
   "_fourpx_comment": "4PX Official Open Platform API credentials (https://open.4px.com). When set, the sync worker uses the authenticated tr.order.tracking.get endpoint to determine precise pre-transit/in-transit status for 4PX shipments. These credentials ALSO power the 'Create 4PX Shipment' feature in the Orders tab. Register at https://open.4px.com to obtain these values.",
   "fourpx_app_key": "YOUR_4PX_APP_KEY",
   "fourpx_app_secret": "YOUR_4PX_APP_SECRET",
 
-  "_fourpx_order_comment": "4PX shipping order creation settings. These three fields enable the 'Create 4PX Shipment' button on unshipped orders. fourpx_sender: your registered shipper address — must match the address registered with your 4PX account. REQUIRED fields: first_name, country, city, post_code. IMPORTANT: post_code (sender ZIP/postal code) is required for ALL destinations — 4PX rejects orders without it with error DS000000. Australia, Canada, NZ, US, and GB also require phone. fourpx_warehouse_code: the 4PX warehouse/drop-off code (e.g. 'CNSZX01' for Shenzhen SZX — ask your 4PX account manager). fourpx_default_product: default logistics product code pre-selected in the drawer (e.g. 'BDS' or 'S5058'). Leave fourpx_sender null to disable shipment creation.",
+  "_fourpx_order_comment": "4PX shipping order creation settings. These three fields enable the 'Create 4PX Shipment' button on unshipped orders. fourpx_sender: your registered shipper address — must match the address registered with your 4PX account. REQUIRED fields: first_name, country, city, post_code. IMPORTANT: post_code (sender ZIP/postal code) is required for ALL destinations — 4PX rejects orders without it with error DS000000. Australia, Canada, NZ, US, and GB also require phone. fourpx_warehouse_code: the 4PX warehouse/drop-off code (e.g. 'CNSZX01' for Shenzhen SZX — ask your 4PX account manager). fourpx_default_product: fallback logistics product when POSTLINK-S5058 (S5058 / postlink-s5058) is not offered for the destination (e.g. 'QC'). The dashboard always prefers POSTLINK-S5058 when the destination catalogue lists it. Leave fourpx_sender null to disable shipment creation.",
   "fourpx_sender": {
     "first_name": "YOUR NAME",
     "company": "YOUR COMPANY",
@@ -33,13 +36,15 @@
     "post_code": "XXXXXX"
   },
   "fourpx_warehouse_code": "CNSZX01",
-  "fourpx_default_product": "BDS",
+  "fourpx_default_product": "QC",
 
   "_fourpx_freight_comment": "4PX shipping-cost sync (shown in the Earnings tab). When 4PX credentials are set, the sync worker prices every 4PX order: an immediate rate-card ESTIMATE via ds.xms.estimated_cost.get (the cost the 4PX portal shows once a parcel is measured), reconciled to the BILLED amount via ds.xms.order.getFreight once 4PX settles it. fourpx_freight_sync: set false to disable the extra API traffic. fourpx_freight_recheck_hours: how often an unbilled/estimated order is re-priced (default 6). fourpx_default_weight_g: fallback parcel weight (grams) for orders with no stored declared weight (default 100). fourpx_settlement_currency: currency 4PX bills in (CN accounts: CNY).",
   "fourpx_freight_sync": true,
   "fourpx_freight_recheck_hours": 6,
   "fourpx_default_weight_g": 100,
   "fourpx_settlement_currency": "CNY",
+  "_fourpx_stuck_comment": "Shipping tab: an in-transit 4PX parcel with no new carrier scan for this many days is flagged as 'stuck' (e.g. held at customs) so you can escalate to 4PX. Default 10.",
+  "fourpx_stuck_days": 10,
 
   "_label_print_comment": "Shipping-label printing. The 'Print label' button rasterizes the 4PX label PDF to a pure 1-bit bitmap at the printer's exact native resolution and prints it 1:1, keeping the barcode crisp/scannable (normal scaled printing blurs the bars into grey). label_print_mode: 'auto' = silent direct print on Windows when label_printer_name is installed, otherwise open the PDF in your default app; 'silent' = always direct print; 'open' = always open the PDF. label_printer_name: exact Windows printer name. label_width_mm/label_height_mm: loaded label media size. label_dpi: print-head resolution (Deli DL-720W = 203). label_print_threshold: 1-255 black/white cutoff (higher = bolder). label_print_copies: copies per click.",
   "label_print_mode": "auto",
