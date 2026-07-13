@@ -132,6 +132,46 @@ function sleep(ms) {
   return new Promise((res) => setTimeout(res, ms));
 }
 
+/**
+ * OpSec egress-IP allowlist (opt-in). When a group declares `expected_egress_ip`
+ * in config.json (a string or an array of strings), the observed exit IP from
+ * verifyGroupProxy MUST match one of them or the group is skipped for the cycle.
+ * This is the strongest guard against a silent proxy/VPN leak exposing a shop on
+ * an unexpected IP — the footprint Etsy uses to link/flag related shops. Groups
+ * without the field are unaffected (returns true).
+ *
+ * @param {object} group
+ * @param {string} ip
+ * @returns {boolean}
+ */
+function egressIpAllowed(group, ip) {
+  const raw = group?.expected_egress_ip;
+  if (raw == null || raw === '') return true; // not configured → no enforcement
+  const allow = (Array.isArray(raw) ? raw : [raw]).map((s) => String(s).trim()).filter(Boolean);
+  if (!allow.length) return true;
+  return allow.includes(String(ip).trim());
+}
+
+/**
+ * Build a VALID node-cron expression for an "every N minutes" interval.
+ *
+ * The naive step-minute pattern (asterisk-slash-N in the minute field) is only
+ * legal when N ≤ 59 — the minute field cannot express "every 90 minutes", and
+ * some node-cron builds silently mis-fire or run hourly for N > 59. This
+ * normalizes: sub-hour intervals stay minute-based;
+ * hour-multiple intervals switch to the hour field; ≥24h caps at once daily.
+ *
+ * @param {number} minutes
+ * @returns {string} cron expression
+ */
+function intervalToCron(minutes) {
+  const m = Math.max(1, Math.ceil(Number(minutes) || 60));
+  if (m < 60) return `*/${m} * * * *`;
+  const hours = Math.round(m / 60);
+  if (hours >= 24) return '0 0 * * *';      // daily ceiling
+  return `0 */${hours} * * *`;              // every H hours, on the hour
+}
+
 // ─── Order-triggered inventory check + auto-restock ──────────────────────────
 
 /**
@@ -375,6 +415,8 @@ async function syncShop(shop, group, config, proxyClient, tokenManager, db, egre
       shop.shared_secret,
       accessToken,
       getToken,
+      // Fail closed: a proxied group must never egress on the server's own IP.
+      { requireProxy: usesGroupProxy(group) },
     );
 
     // ── 3. Resolve shop name → numeric ID (cached after first call) ───────────
@@ -563,7 +605,9 @@ async function syncLedgerForShop(shop, group, config, proxyClient, tokenManager,
     if (force) tokenManager.invalidate(shop.shop_id);
     return tokenManager.getAccessToken(shop.shop_id, shop.api_key, shop.refresh_token ?? null, proxyClient);
   };
-  const shopClient = buildShopClient(proxyClient, shop.api_key, shop.shared_secret, accessToken, getToken);
+  const shopClient = buildShopClient(proxyClient, shop.api_key, shop.shared_secret, accessToken, getToken, {
+    requireProxy: usesGroupProxy(group), // fail closed for proxied groups
+  });
   await resolveShopId(shopClient, shop.shop_id);
 
   const now = Math.floor(Date.now() / 1000);
@@ -668,6 +712,17 @@ async function syncGroup(group, shopsInGroup, config, tokenManager, db) {
       console.log(`${label} Direct connection confirmed — egress IP: ${egressIp}`);
     } else {
       console.log(`${label} Proxy verified — exit IP: ${egressIp}`);
+    }
+    // OpSec: if the operator pinned the group's expected egress IP, refuse to sync
+    // when the observed exit IP doesn't match — a proxy rotation or VPN leak would
+    // otherwise expose these shops on an unexpected IP.
+    if (!egressIpAllowed(group, egressIp)) {
+      console.error(
+        `${label} EGRESS IP MISMATCH — expected ${JSON.stringify(group.expected_egress_ip)}, ` +
+        `observed ${egressIp}. Skipping all shops in this group this cycle (fail-closed). ` +
+        `Fix the proxy/VPN or update expected_egress_ip in config.json.`
+      );
+      return;
     }
   } catch (err) {
     if (isDirect) {
@@ -1094,7 +1149,9 @@ async function runInventoryWatchCycle(config, tokenManager, db) {
       const accessToken = await tokenManager.getAccessToken(
         shopCfg.shop_id, shopCfg.api_key, shopCfg.refresh_token ?? null, proxyClient
       );
-      const shopClient  = buildShopClient(proxyClient, shopCfg.api_key, shopCfg.shared_secret, accessToken);
+      const shopClient  = buildShopClient(proxyClient, shopCfg.api_key, shopCfg.shared_secret, accessToken, null, {
+        requireProxy: usesGroupProxy(groupCfg), // fail closed for proxied groups
+      });
       await resolveShopId(shopClient, shopCfg.shop_id);
 
       // Fetch live inventory — never restock from cache alone (avoids stale over-restock)
@@ -1218,9 +1275,7 @@ async function main() {
   // Instead: every hour at minute 0 → "0 * * * *"
   //          every 30 min          → "0,30 * * * *"
   //          other intervals       → "0 */${intervalMinutes} * * *" (hour-based)
-  const cronExpr = intervalMinutes === 60
-    ? '0 * * * *'
-    : `*/${Math.ceil(intervalMinutes)} * * * *`;
+  const cronExpr = intervalToCron(intervalMinutes);
   console.log(`\n[sync] Scheduling next cycle with cron: ${cronExpr}`);
 
   cron.schedule(cronExpr, async () => {
@@ -1273,6 +1328,29 @@ async function main() {
   console.log('[sync] Worker is running. Press Ctrl+C to stop.\n');
 }
 
+/**
+ * Release the sync-cycle advisory lock IF this process still owns it.
+ *
+ * Called by the embedded dashboard on graceful shutdown. A UI restart / PM2
+ * reload exits this process directly; if a sync cycle's lock is still held
+ * (owner = this pid), the freshly-revived process cannot acquire it until the
+ * SYNC_LOCK_TTL_SEC (~20 min) heartbeat lapses — so its boot sync is skipped and
+ * the in-memory Etsy API budget stays "unknown" until then. Releasing here lets
+ * the new process sync (and re-learn the budget) within seconds of boot.
+ *
+ * Owner-scoped (DELETE … WHERE owner = us), so a genuinely separate live worker
+ * that happens to hold the lock is never disturbed.
+ *
+ * @param {import('better-sqlite3').Database} db
+ */
+function releaseSyncLock(db) {
+  try {
+    releaseLock(db, SYNC_LOCK_NAME, SYNC_LOCK_OWNER);
+  } catch {
+    /* best-effort during shutdown — never throw from an exit path */
+  }
+}
+
 // ─── Exports (used by server for manual sync triggers) ───────────────────────
 // Only export when required as a module; don't run main() in that case.
 if (require.main === module) {
@@ -1281,5 +1359,5 @@ if (require.main === module) {
     process.exit(1);
   });
 } else {
-  module.exports = { syncShop, syncGroup, runSyncCycle, runTrackingCheckPass, runFreightSyncPass, checkAndRestockForOrders, runInventoryWatchCycle, syncLedgerForShop };
+  module.exports = { syncShop, syncGroup, runSyncCycle, runTrackingCheckPass, runFreightSyncPass, checkAndRestockForOrders, runInventoryWatchCycle, syncLedgerForShop, releaseSyncLock, intervalToCron };
 }

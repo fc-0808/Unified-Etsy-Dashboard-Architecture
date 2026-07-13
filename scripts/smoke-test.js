@@ -62,7 +62,9 @@ async function testShop(shopCtx, tokenManager, proxyClient, db) {
     }
 
     // ── Step 2: Build authenticated shop client ────────────────────────────────
-    const shopClient = buildShopClient(proxyClient, shop.api_key, shop.shared_secret, accessToken);
+    const shopClient = buildShopClient(proxyClient, shop.api_key, shop.shared_secret, accessToken, null, {
+      requireProxy: usesGroupProxy(group), // fail closed for proxied groups
+    });
 
     // ── Step 3: API ping (validates x-api-key format) ─────────────────────────
     try {

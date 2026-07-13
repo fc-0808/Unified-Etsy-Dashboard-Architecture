@@ -47,8 +47,10 @@ const ZH_TO_EN = {
   '已购买': 'Purchased',
   '缺货': 'Out of Stock',
   '停产': 'Out of Production',
+  '错档口位': 'Wrong Stall',
+  '没有此型号': 'Model Unavailable',
 };
-const EN_STATUSES = new Set(['Pending', 'Purchased', 'Out of Stock', 'Out of Production']);
+const EN_STATUSES = new Set(['Pending', 'Purchased', 'Out of Stock', 'Out of Production', 'Wrong Stall', 'Model Unavailable']);
 
 /** Values that mean "this component does not apply to this line" → ignore. */
 const NA_VALUES = new Set(['N/A', 'NA', '不适用', '', '—', '-', '\u2014']);

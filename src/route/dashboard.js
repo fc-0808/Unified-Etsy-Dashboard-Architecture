@@ -33,13 +33,17 @@ const Database = require('better-sqlite3');
 const {
   getProductMapByNorm, getManualItems,
   getCharmLibrary, getCharmShopDirectory,
-  getOpenIssueMap, getOpenExchangeMap,
+  getOpenIssueMap, getOpenExchangeMap, getSubstitutionMap,
   MANUAL_SHOP_ID,
 } = require('../db/setup');
 const enginePaths = require('./engine-paths');
 
-/** Valid component purchase statuses — mirror of OSP's STATUS_OPTIONS. */
-const STATUS_OPTIONS = ['Pending', 'Purchased', 'Out of Stock', 'Out of Production'];
+/** Valid component purchase statuses — mirror of OSP's STATUS_OPTIONS.
+ *   Wrong Stall       (错档口位) — the recorded stall is wrong; must re-source.
+ *                     Behaves like Out of Stock: still OUTSTANDING (needs action).
+ *   Model Unavailable (没有此型号) — this phone model isn't carried here; a dead
+ *                     end like Out of Production (terminal, not outstanding). */
+const STATUS_OPTIONS = ['Pending', 'Purchased', 'Out of Stock', 'Out of Production', 'Wrong Stall', 'Model Unavailable'];
 const DEFAULT_STATUS = 'Pending';
 
 /**
@@ -386,9 +390,24 @@ function buildRouteRows(db, config, filters = {}) {
   // carry it back to the stall to swap it for the model the order needs.
   const exchangeMap = getOpenExchangeMap(db);
 
+  // Local design switches, keyed by `${receipt_id}\x00${item_key}`. When a line
+  // has a switch, we PURCHASE the replacement design: its title drives supplier
+  // matching, its style drives Case/Grip/Charm, and its image/model ride along.
+  // The Etsy receipt is never touched — this is a purely local override.
+  const substitutionMap = getSubstitutionMap(db);
+
   // Authoritative product map from Excel "Product Map" sheet, keyed by title_norm.
   // Priority: route_assignments > product_assignments > excel_product_map > OSP catalog.
   const excelProductMap = getProductMapByNorm(db);
+  // Durable physical-product identity across Etsy shops/listing IDs. Generated
+  // from near-identical primary product images and persisted in listing_phash.
+  // Product Map carries the same key so Excel/catalog aliases remain linked.
+  const canonicalByListing = new Map();
+  try {
+    db.prepare('SELECT listing_id, canonical_key FROM listing_phash WHERE canonical_key IS NOT NULL')
+      .all()
+      .forEach(r => canonicalByListing.set(Number(r.listing_id), r.canonical_key));
+  } catch { /* migration may not have run yet */ }
 
   // Optional supplier-catalog enrichment (read-only from the engine's
   // etsy_orders.db — vendored inside this dashboard, no external program).
@@ -409,19 +428,40 @@ function buildRouteRows(db, config, filters = {}) {
    *   image_url, is_manual?, manual_id? }
    */
   function emitRow(meta, line) {
-    const title = (line.title || '').trim();
-    if (!title) return;
+    const origTitle = (line.title || '').trim();
+    if (!origTitle) return;
 
-    const phoneModel = line.phoneModel || '';
-    const style      = line.style || '';
-    const comps      = styleComponents(style);
     // Listing-scoped key uniquely identifies this line-item's product, so two
-    // different listings that share a 50-char title prefix never collide.
-    const key       = line.item_key || lineItemKey(title, line.listing_id);
+    // different listings that share a 50-char title prefix never collide. It is
+    // derived from the ORIGINAL title so a design switch keeps the same identity
+    // (and its saved purchase status) rather than orphaning the assignment.
+    const key = line.item_key || lineItemKey(origTitle, line.listing_id);
+
+    // Apply a local design switch, if any: buy the replacement design instead of
+    // the original. Title → supplier match, style → components, model/image ride
+    // along. Never affects Etsy.
+    const sub = substitutionMap.get(`${meta.receipt_id}\x00${key}`) || null;
+    const title       = sub ? (sub.new_title || origTitle).trim() : origTitle;
+    const phoneModel  = sub && sub.new_phone_model ? sub.new_phone_model : (line.phoneModel || '');
+    const style       = sub && sub.new_style ? sub.new_style : (line.style || '');
+    const comps       = styleComponents(style);
     const titleNorm = normalizeTitle(title);
+    // Switched image: uploaded bytes are served from our endpoint; a catalog pick
+    // stores a CDN url. Falls through to the line's own image when neither is set.
+    if (sub) {
+      line = {
+        ...line,
+        image_url: sub.has_image_data
+          ? `/api/route/substitution-image/${sub.id}`
+          : (sub.image_url || line.image_url),
+      };
+    }
     const saved    = assignMap[`${meta.receipt_id}\x00${key}`] || {};
     const product  = productMap[key] || {};
     const excelPM  = excelProductMap.get(titleNorm) || {};
+    const canonicalProductKey = canonicalByListing.get(Number(line.listing_id))
+      || excelPM.canonical_product_key
+      || '';
 
     // Durably removed lines drop out of the dashboard AND route generation
     // entirely. They are only materialised when the caller explicitly asks for
@@ -441,8 +481,17 @@ function buildRouteRows(db, config, filters = {}) {
     // route it into the "To exchange" bucket instead.
     const exchange = exchangeMap.get(`${meta.receipt_id}\x00${key}`) || null;
 
+    // A CUSTOM design switch is a product that is NOT in our catalog (the operator
+    // uploaded a photo + typed a title after the buyer agreed to switch). Its title
+    // must therefore NOT be title-matched against the supplier catalog / product map
+    // — a fuzzy match would attach the wrong stall. Force it UNMATCHED so it lands in
+    // the "unmatched" bucket for the operator to source (ask around) and fill in.
+    // A catalog switch, by contrast, IS a real catalog product and keeps matching.
+    // The operator's own saved supplier override (route_assignments) is always kept.
+    const isCustomSub = !!(sub && sub.source === 'custom');
+
     let supplier = null;
-    if (cat) {
+    if (cat && !isCustomSub) {
       // Supplier match is purely a function of the title — cache by title key.
       const catKey = titleNorm;
       if (!supplierCache.has(catKey)) supplierCache.set(catKey, matchSupplier(cat, title));
@@ -451,13 +500,13 @@ function buildRouteRows(db, config, filters = {}) {
 
     // Priority chain for supplier (highest → lowest):
     //   1. Per-order manual override  (route_assignments.supplier_*_override)
-    //   2. Per-product user save      (product_assignments.supplier_*)
-    //   3. Excel Product Map          (product_map.shop_name / stall)
-    //   4. OSP catalog exact match    (etsy_orders.db catalog)
-    const shopOvr  = saved.supplier_shop_override  || product.supplier_shop  || excelPM.shop_name || '';
-    const stallOvr = saved.supplier_stall_override || product.supplier_stall || excelPM.stall     || '';
+    //   2. Per-product user save      (product_assignments.supplier_*)   [skipped for custom]
+    //   3. Excel Product Map          (product_map.shop_name / stall)    [skipped for custom]
+    //   4. OSP catalog exact match    (etsy_orders.db catalog)           [skipped for custom]
+    const shopOvr  = saved.supplier_shop_override  || (isCustomSub ? '' : (product.supplier_shop  || excelPM.shop_name)) || '';
+    const stallOvr = saved.supplier_stall_override || (isCustomSub ? '' : (product.supplier_stall || excelPM.stall))     || '';
     const isOverride = !!(saved.supplier_shop_override || saved.supplier_stall_override ||
-                          product.supplier_shop || product.supplier_stall);
+                          (!isCustomSub && (product.supplier_shop || product.supplier_stall)));
     if (shopOvr || stallOvr) {
       const effectiveStall = stallOvr || (supplier?.stall || '');
       supplier = {
@@ -465,8 +514,8 @@ function buildRouteRows(db, config, filters = {}) {
         stall:       effectiveStall,
         floor:       stallFloor(effectiveStall),
         price:       supplier?.price      || '',
-        charm_shop:  excelPM.charm_shop   || supplier?.charm_shop  || '',
-        charm_code:  excelPM.charm_code   || supplier?.charm_code  || '',
+        charm_shop:  (isCustomSub ? '' : excelPM.charm_shop) || supplier?.charm_shop || '',
+        charm_code:  (isCustomSub ? '' : excelPM.charm_code) || supplier?.charm_code || '',
         match_score: 100,
         in_catalog:  true,
         is_override: isOverride,
@@ -488,8 +537,8 @@ function buildRouteRows(db, config, filters = {}) {
     //
     // Keeping catalog data out of charm_code ensures "Needs charm" always surfaces
     // every item that still requires a conscious operator decision.
-    const effectiveCharmCode = saved.charm_code || product.charm_code || '';
-    const effectiveCharmShop = saved.charm_shop || product.charm_shop || '';
+    const effectiveCharmCode = saved.charm_code || (isCustomSub ? '' : product.charm_code) || '';
+    const effectiveCharmShop = saved.charm_shop || (isCustomSub ? '' : product.charm_shop) || '';
 
     // ── Derived shopping-completion state ─────────────────────────────────────
     // A line is "fully purchased" once EVERY component it actually has (case /
@@ -519,6 +568,7 @@ function buildRouteRows(db, config, filters = {}) {
       team_note:   meta.team_note || '',
       country:     meta.country || '',
       listing_id:  line.listing_id || null,
+      product_key: canonicalProductKey,
       title,
       quantity:    line.quantity || 1,
       phone_model: phoneModel,
@@ -559,6 +609,12 @@ function buildRouteRows(db, config, filters = {}) {
       exchange_supplier_shop:  exchange ? (exchange.supplier_shop || '') : '',
       exchange_supplier_stall: exchange ? (exchange.supplier_stall || '') : '',
       exchange_note:         exchange ? (exchange.note || '') : '',
+      // Local design switch — this line is being purchased as a replacement
+      // design the buyer agreed to (never reflected on Etsy). The title/style/
+      // model/image above already reflect the switched product.
+      substituted:      !!sub,
+      substitution_id:  sub ? sub.id : null,
+      substituted_from: sub ? (sub.original_title || origTitle) : '',
       // Manual (operator-created) line-item markers — used by the UI to show a
       // badge and route deletion through the manual-order endpoint.
       is_manual:   !!line.is_manual,
@@ -576,8 +632,9 @@ function buildRouteRows(db, config, filters = {}) {
       supplier_match_score: supplier ? supplier.match_score : 0,
       supplier_is_override: supplier ? !!supplier.is_override : false,
       // Catalog's suggested charm — Excel Product Map first, then OSP catalog.
-      suggested_charm_code: excelPM.charm_code || (supplier ? supplier.charm_code : ''),
-      suggested_charm_shop: excelPM.charm_shop || (supplier ? supplier.charm_shop : ''),
+      // Suppressed for custom switches (no catalog record to suggest from).
+      suggested_charm_code: isCustomSub ? '' : (excelPM.charm_code || (supplier ? supplier.charm_code : '')),
+      suggested_charm_shop: isCustomSub ? '' : (excelPM.charm_shop || (supplier ? supplier.charm_shop : '')),
     });
   }
 

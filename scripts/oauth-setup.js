@@ -23,6 +23,15 @@
  * NOT your system browser. The OAuth authorization page must be visited from
  * the group's designated IPFoxy IP to avoid linking the token to your home IP.
  *
+ * IMPORTANT: For proxied groups this script routes BOTH the API-key ping and the
+ * authorization-code → token exchange through the group's VPN→IPFoxy chain — the
+ * exact same path the running dashboard uses for token refresh and every API call.
+ * This guarantees Etsy only ever sees the group's single static residential IP for
+ * a shop, from the very first grant onward (never the operator's home IP). The VPN
+ * (localhost:vpn_local_port) must therefore be running when you set up a proxied
+ * shop; the script fails closed with a clear message if the chain is unreachable.
+ * Direct groups (proxy: "direct") intentionally use no proxy.
+ *
  * Required scopes (what we request):
  *   transactions_r  — read orders and receipts
  *   transactions_w  — create shipment tracking (mark orders as shipped)
@@ -45,6 +54,7 @@ const readline = require('readline');
 const axios = require('axios');
 const { loadConfig, getAllShops, findShopContext, usesGroupProxy } = require('../src/config/schema');
 const { TokenManager } = require('../src/auth/token-manager');
+const { createGroupProxyClient, verifyGroupProxy } = require('../src/proxy/factory');
 
 const REDIRECT_URI = 'http://localhost:3003/oauth/redirect';
 const CALLBACK_PORT = 3003;
@@ -207,11 +217,16 @@ function waitForAuthCode(expectedState) {
  *
  * @param {string} keystring
  * @param {string} sharedSecret
+ * @param {import('axios').AxiosInstance} [proxyClient] - Group proxy client for
+ *        proxied groups so this preflight egresses on the same IP as every other
+ *        call for this shop. Falls back to a direct connection when omitted.
  * @returns {Promise<number>} application_id from openapi-ping
  */
-async function verifyApiKeyActive(keystring, sharedSecret) {
+async function verifyApiKeyActive(keystring, sharedSecret, proxyClient) {
   try {
-    const { data } = await axios.get('https://api.etsy.com/v3/application/openapi-ping', {
+    const client = proxyClient ?? axios;
+    const { data } = await client.get('https://api.etsy.com/v3/application/openapi-ping', {
+      baseURL: '', // full URL — don't prepend the proxy client's /v3 baseURL
       headers: { 'x-api-key': `${keystring}:${sharedSecret}` },
       timeout: 15_000,
     });
@@ -236,7 +251,7 @@ async function verifyApiKeyActive(keystring, sharedSecret) {
 
 // ─── Token exchange ────────────────────────────────────────────────────────────
 
-async function exchangeCodeForTokens(keystring, authCode, codeVerifier) {
+async function exchangeCodeForTokens(keystring, authCode, codeVerifier, proxyClient) {
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     client_id: keystring,
@@ -245,7 +260,12 @@ async function exchangeCodeForTokens(keystring, authCode, codeVerifier) {
     code_verifier: codeVerifier,
   });
 
-  const { data } = await axios.post(ETSY_TOKEN_URL, body.toString(), {
+  // Route through the group proxy (when supplied) so the token grant is bound to
+  // the SAME residential IP as the browser authorization and all future refreshes
+  // — never the operator's home IP.
+  const client = proxyClient ?? axios;
+  const { data } = await client.post(ETSY_TOKEN_URL, body.toString(), {
+    baseURL: '', // full URL — don't prepend the proxy client's /v3 baseURL
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
   });
   return data;
@@ -290,9 +310,36 @@ async function main() {
   console.log(`  Group:        ${shop.group_label}`);
   console.log(`  Routing:      ${isDirect ? 'direct (no proxy)' : 'VPN → IPFoxy proxy'}`);
   console.log(`  API key:      ${shop.api_key.slice(0, 8)}...`);
+
+  // Build the SAME network path the runtime uses for this shop. Proxied groups
+  // route the ping + token exchange through the group's VPN→IPFoxy chain so Etsy
+  // only ever sees the group's static residential IP — identical to token refresh
+  // and every API call. Doing the exchange over the operator's home IP instead
+  // would bind the initial grant to a different IP than every later call (and, if
+  // all shops are set up from one machine, link them to a shared IP). Fail closed
+  // if the chain is unreachable rather than silently falling back to the home IP.
+  let proxyClient = null;
+  if (!isDirect) {
+    console.log('\n  Verifying the group proxy chain (VPN → IPFoxy)...');
+    try {
+      const egressIp = await verifyGroupProxy(shopCtx.group, config.vpn_local_port);
+      proxyClient = createGroupProxyClient(shopCtx.group, config.vpn_local_port);
+      console.log(`  ✓ Proxy verified — Etsy will see exit IP ${egressIp}`);
+      console.log('  ► Confirm this IP matches the AdsPower profile you authorize in.');
+    } catch (err) {
+      console.error(
+        `\n  ✗ Could not reach this group's proxy chain: ${err.message}\n\n` +
+          `  Start the VPN (localhost:${config.vpn_local_port}) and make sure the group's\n` +
+          `  IPFoxy proxy is active, then re-run oauth:setup. Refusing to continue so the\n` +
+          `  token is never exchanged over the wrong IP.\n`
+      );
+      process.exit(1);
+    }
+  }
+
   console.log('\n  Verifying API key with Etsy (openapi-ping)...');
   try {
-    const appId = await verifyApiKeyActive(shop.api_key, shop.shared_secret);
+    const appId = await verifyApiKeyActive(shop.api_key, shop.shared_secret, proxyClient);
     console.log(`  ✓ API key active — application_id ${appId}`);
   } catch (err) {
     console.error(`\n  ${err.message}\n`);
@@ -341,7 +388,7 @@ async function main() {
 
   let tokenData;
   try {
-    tokenData = await exchangeCodeForTokens(shop.api_key, authCode, codeVerifier);
+    tokenData = await exchangeCodeForTokens(shop.api_key, authCode, codeVerifier, proxyClient);
   } catch (err) {
     const desc = err.response?.data?.error_description ?? err.message;
     console.error(`\n  Token exchange failed: ${desc}\n`);

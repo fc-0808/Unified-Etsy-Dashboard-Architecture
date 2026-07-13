@@ -101,7 +101,8 @@ function _readSuppliers(wb) {
 
 /**
  * Read the "Product Map" sheet → array of product-title → supplier + charm rows.
- * Columns: PRODUCT TITLE, SHOP NAME, STALL, Charm Shop, Charm Code
+ * Columns: PRODUCT TITLE, SHOP NAME, STALL, Charm Shop, Charm Code,
+ * Canonical Product ID (optional; exported by the dashboard)
  */
 function _readProductMap(wb) {
   return _sheetRows(wb, 'Product Map')
@@ -114,6 +115,7 @@ function _readProductMap(wb) {
         stall:      _pick(r, ['stall']),
         charm_shop: _pick(r, ['charm shop']),
         charm_code: _pick(r, ['charm code']),
+        canonical_product_key: _pick(r, ['canonical product id', 'canonical product key', 'product id']),
         sort_order: idx,
       };
     })

@@ -48,6 +48,8 @@ const STATUS_FILL = {
   'Pending':           { bg: COLORS.pendingBg, fg: COLORS.muted },
   'Out of Stock':      { bg: COLORS.warnBg,    fg: COLORS.warn },
   'Out of Production': { bg: COLORS.dangerBg,  fg: COLORS.danger },
+  'Wrong Stall':       { bg: COLORS.warnBg,    fg: COLORS.warn },
+  'Model Unavailable': { bg: COLORS.dangerBg,  fg: COLORS.danger },
 };
 
 const thinBorder = () => ({

@@ -319,6 +319,36 @@ function initDb(dbPath) {
     );
 
     -- ─────────────────────────────────────────────
+    -- Perceptual image hash: listing_id → dHash of its primary image. Used to
+    -- link the SAME physical product across shops (different listings / titles,
+    -- but the same design image) so the shopping route can unify their orders.
+    -- The sha column is the byte-hash of the source image the phash was computed
+    -- from, so we recompute only when the cached image actually changes.
+    -- ─────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS listing_phash (
+      listing_id  INTEGER PRIMARY KEY,
+      phash       TEXT    NOT NULL,
+      sha         TEXT    NOT NULL,
+      algo        TEXT,
+      canonical_key TEXT,
+      computed_at INTEGER DEFAULT (strftime('%s', 'now'))
+    );
+
+    -- Durable audit trail for supplier purchase prices. Catalog/Excel imports
+    -- must never make a manually recorded price unrecoverable again.
+    CREATE TABLE IF NOT EXISTS product_price_history (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      canonical_key  TEXT,
+      title_norm     TEXT NOT NULL,
+      component      TEXT NOT NULL CHECK(component IN ('case','grip')),
+      old_cost       REAL,
+      new_cost       REAL,
+      changed_at     INTEGER DEFAULT (strftime('%s','now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_price_history_product
+      ON product_price_history(canonical_key, title_norm, changed_at DESC);
+
+    -- ─────────────────────────────────────────────
     -- Listings cache — synced on-demand from the Listings tab
     -- ─────────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS listings (
@@ -520,6 +550,7 @@ function initDb(dbPath) {
       stall       TEXT    DEFAULT '',
       charm_shop  TEXT    DEFAULT '',
       charm_code  TEXT    DEFAULT '',
+      canonical_product_key TEXT,
       sort_order  INTEGER DEFAULT 0,
       updated_at  INTEGER DEFAULT (strftime('%s','now'))
     );
@@ -750,6 +781,49 @@ function initDb(dbPath) {
     );
     CREATE INDEX IF NOT EXISTS idx_order_exchanges_receipt ON order_exchanges(receipt_id);
     CREATE INDEX IF NOT EXISTS idx_order_exchanges_status  ON order_exchanges(status);
+
+    -- ─────────────────────────────────────────────────────────────────
+    -- order_line_substitutions: LOCAL "design switch" override for an order
+    --   line whose original product cannot be supplied. After a fulfilment
+    --   issue is flagged and the buyer agrees to switch (instead of a refund),
+    --   the operator picks a replacement design — from the product catalog or a
+    --   custom upload — and we record it here.
+    --
+    --   This is a NON-DESTRUCTIVE OVERRIDE LAYER: the Etsy receipt/transaction
+    --   is never modified and NOTHING is pushed to Etsy. The dashboard simply
+    --   RENDERS and PURCHASES the replacement design for this line instead of the
+    --   original — so the switched product flows back into the Orders/Route
+    --   purchasing queue and is bought like any other item.
+    --
+    --   One row per affected LINE-ITEM, keyed by (receipt_id, item_key) — the
+    --   SAME listing-scoped key route/dashboard.lineItemKey(title, listing_id)
+    --   uses — so the override maps 1:1 onto the order line and its Route row,
+    --   and the line's purchase status (route_assignments) stays linked.
+    --
+    --   new_title / new_style / new_phone_model drive what we buy: the title
+    --   feeds supplier matching, the style feeds Case/Grip/Charm detection, and
+    --   the model rides along (the buyer may switch model too). Images come from
+    --   either a catalog CDN url (image_url) OR uploaded bytes (image_data).
+    -- ─────────────────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS order_line_substitutions (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      receipt_id        INTEGER NOT NULL,
+      item_key          TEXT    NOT NULL,
+      original_title    TEXT,
+      new_title         TEXT    NOT NULL,
+      new_style         TEXT,
+      new_phone_model   TEXT,
+      source            TEXT,            -- 'catalog' | 'custom'
+      source_listing_id INTEGER,
+      image_url         TEXT,            -- catalog CDN thumbnail
+      image_data        BLOB,            -- uploaded custom image bytes
+      image_mime        TEXT,
+      note              TEXT,
+      created_at        INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      updated_at        INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      UNIQUE(receipt_id, item_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_order_subs_receipt ON order_line_substitutions(receipt_id);
   `);
 
   // ── Migrations ────────────────────────────────────────────────────────────
@@ -1149,6 +1223,36 @@ function initDb(dbPath) {
   if (!charmDirCols.includes('sort_order')) {
     db.exec('ALTER TABLE charm_shop_directory ADD COLUMN sort_order INTEGER DEFAULT 0');
   }
+
+  // cost columns — wholesale purchase price shown on the mobile shopping route so
+  // the shopper can pay the supplier (e.g. via WeChat) without asking the owner.
+  //   product_map.cost_case / cost_grip = case & grip prices, priced SEPARATELY
+  //     (same supplier stall, but each component has its own price)
+  //   charm_library.cost                = charm price per code (paid at charm stall)
+  // REAL + nullable (NULL = "not priced yet"). Preserved by every other product_map
+  // / charm write because those ON CONFLICT updates never mention these columns.
+  const pmCols = db.pragma('table_info(product_map)').map(c => c.name);
+  if (!pmCols.includes('cost_case')) db.exec('ALTER TABLE product_map ADD COLUMN cost_case REAL');
+  if (!pmCols.includes('cost_grip')) db.exec('ALTER TABLE product_map ADD COLUMN cost_grip REAL');
+  if (!pmCols.includes('canonical_product_key')) db.exec('ALTER TABLE product_map ADD COLUMN canonical_product_key TEXT');
+  // Retire the earlier single combined `cost` column (only ever briefly present,
+  // no meaningful data): fold any value into cost_case, then drop it. Guarded so
+  // it's a no-op once removed / on SQLite builds without DROP COLUMN.
+  if (pmCols.includes('cost')) {
+    try {
+      db.exec('UPDATE product_map SET cost_case = cost WHERE cost IS NOT NULL AND cost_case IS NULL');
+      db.exec('ALTER TABLE product_map DROP COLUMN cost');
+    } catch (e) {
+      console.warn('[db] could not drop legacy product_map.cost:', e.message);
+    }
+  }
+  const clCols = db.pragma('table_info(charm_library)').map(c => c.name);
+  if (!clCols.includes('cost')) db.exec('ALTER TABLE charm_library ADD COLUMN cost REAL');
+
+  const phashCols = db.pragma('table_info(listing_phash)').map(c => c.name);
+  if (!phashCols.includes('algo')) db.exec('ALTER TABLE listing_phash ADD COLUMN algo TEXT');
+  if (!phashCols.includes('canonical_key')) db.exec('ALTER TABLE listing_phash ADD COLUMN canonical_key TEXT');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_listing_phash_canonical ON listing_phash(canonical_key)');
 
   // seq for bulk_job_items — preserves the scanner's natural-sort order
   //   (1, 2, 3 … 10, 11) instead of SQLite's lexicographic text order
@@ -2402,6 +2506,56 @@ function upsertListing(db, shopId, listing) {
 }
 
 /**
+ * Reconcile the local listings cache for one shop+state against what Etsy just
+ * returned, deleting rows Etsy no longer lists in that state.
+ *
+ * Why this exists: a listings sync only UPSERTs, so a listing that was deleted
+ * on Etsy — or moved out of the synced state (e.g. active → sold_out/expired) —
+ * would otherwise linger forever in the local cache. That makes the Listings tab
+ * show stale "old" listings and bury the real, current ones. Pruning the rows the
+ * sync did NOT see makes the local cache a faithful mirror of the shop's Etsy
+ * listings for that state.
+ *
+ * Safety: the caller must only invoke this after a full, successful pagination of
+ * the state AND only when `seenIds` is non-empty — never prune against an empty
+ * result set, or a transient empty page would wipe the whole cache.
+ *
+ * The listing's dependent inventory rows are removed in the same transaction so
+ * no orphaned `listing_inventory` rows are left behind.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} shopId            - config shop_id (matches listings.shop_id)
+ * @param {string} state             - the concrete Etsy state just enumerated
+ * @param {Set<number>} seenIds      - listing_ids Etsy returned for this state
+ * @returns {number} count of stale listings removed
+ */
+function pruneStaleListings(db, shopId, state, seenIds) {
+  if (!seenIds || seenIds.size === 0) return 0; // never prune against an empty sync
+
+  const local = db
+    .prepare('SELECT listing_id FROM listings WHERE shop_id = ? AND state = ?')
+    .all(shopId, state);
+
+  const stale = local
+    .map((r) => r.listing_id)
+    .filter((id) => !seenIds.has(id));
+
+  if (!stale.length) return 0;
+
+  const delInventory = db.prepare('DELETE FROM listing_inventory WHERE listing_id = ?');
+  const delListing   = db.prepare('DELETE FROM listings WHERE listing_id = ?');
+  const prune = db.transaction((ids) => {
+    for (const id of ids) {
+      delInventory.run(id);
+      delListing.run(id);
+    }
+  });
+  prune(stale);
+
+  return stale.length;
+}
+
+/**
  * Upsert one inventory product row (one variation combination).
  * Extracts 'Style' and a secondary property automatically.
  */
@@ -2443,6 +2597,42 @@ function upsertListingInventory(db, listingId, product, offering) {
     price_amount:    offering?.price ? offering.price.amount / offering.price.divisor : null,
     price_currency:  offering?.price?.currency_code ?? null,
   });
+}
+
+/**
+ * Reconcile a single listing's cached inventory against the products Etsy just
+ * returned, deleting variation rows for products that no longer exist (a variation
+ * removed on Etsy). Keeps the per-variation price/stock strip a faithful mirror
+ * instead of showing phantom styles that were deleted upstream.
+ *
+ * Safety: only prunes when `seenProductIds` is non-empty, so a listing that
+ * momentarily returned no inventory never gets its cache wiped.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} listingId
+ * @param {Set<number>} seenProductIds - product_ids present in the fresh fetch
+ * @returns {number} count of stale variation rows removed
+ */
+function pruneStaleInventory(db, listingId, seenProductIds) {
+  if (!seenProductIds || seenProductIds.size === 0) return 0;
+
+  const local = db
+    .prepare('SELECT product_id FROM listing_inventory WHERE listing_id = ?')
+    .all(listingId);
+
+  const stale = local
+    .map((r) => r.product_id)
+    .filter((pid) => !seenProductIds.has(pid));
+
+  if (!stale.length) return 0;
+
+  const del = db.prepare('DELETE FROM listing_inventory WHERE listing_id = ? AND product_id = ?');
+  const prune = db.transaction((ids) => {
+    for (const pid of ids) del.run(listingId, pid);
+  });
+  prune(stale);
+
+  return stale.length;
 }
 
 /**
@@ -2955,7 +3145,7 @@ function getFourpxBalanceStatus(db) {
 
 // ─── Route assignments ────────────────────────────────────────────────────────
 
-const _VALID_STATUSES = new Set(['Pending', 'Purchased', 'Out of Stock', 'Out of Production']);
+const _VALID_STATUSES = new Set(['Pending', 'Purchased', 'Out of Stock', 'Out of Production', 'Wrong Stall', 'Model Unavailable']);
 
 /**
  * Insert or update a single order line's route assignment.
@@ -3902,21 +4092,38 @@ function getCharmShopDirectory(db) {
  */
 function replaceProductMap(db, rows) {
   const now = Math.floor(Date.now() / 1000);
+  // Excel is authoritative for supplier/charm fields, but app-managed identity
+  // and costs must survive a full-sheet re-import.
+  const existingByNorm = new Map(
+    db.prepare('SELECT title_norm, cost_case, cost_grip, canonical_product_key FROM product_map')
+      .all()
+      .map(r => [r.title_norm, r]),
+  );
   const ins = db.prepare(`
-    INSERT INTO product_map (title_norm, title, shop_name, stall, charm_shop, charm_code, sort_order, updated_at)
-    VALUES (@title_norm, @title, @shop_name, @stall, @charm_shop, @charm_code, @sort_order, @updated_at)
+    INSERT INTO product_map (
+      title_norm, title, shop_name, stall, charm_shop, charm_code,
+      canonical_product_key, cost_case, cost_grip, sort_order, updated_at
+    )
+    VALUES (
+      @title_norm, @title, @shop_name, @stall, @charm_shop, @charm_code,
+      @canonical_product_key, @cost_case, @cost_grip, @sort_order, @updated_at
+    )
     ON CONFLICT(title_norm) DO UPDATE SET
       title      = excluded.title,
       shop_name  = excluded.shop_name,
       stall      = excluded.stall,
       charm_shop = excluded.charm_shop,
       charm_code = excluded.charm_code,
+      canonical_product_key = excluded.canonical_product_key,
+      cost_case  = excluded.cost_case,
+      cost_grip  = excluded.cost_grip,
       sort_order = excluded.sort_order,
       updated_at = excluded.updated_at
   `);
   const tx = db.transaction((list) => {
     db.prepare('DELETE FROM product_map').run();
     for (const r of list) {
+      const prior = existingByNorm.get(String(r.title_norm || '').trim()) || {};
       ins.run({
         title_norm: String(r.title_norm || '').trim(),
         title:      String(r.title      || '').trim(),
@@ -3924,6 +4131,9 @@ function replaceProductMap(db, rows) {
         stall:      String(r.stall      || '').trim(),
         charm_shop: String(r.charm_shop || '').trim(),
         charm_code: String(r.charm_code || '').trim(),
+        canonical_product_key: String(r.canonical_product_key || prior.canonical_product_key || '').trim() || null,
+        cost_case: r.cost_case == null ? (prior.cost_case ?? null) : r.cost_case,
+        cost_grip: r.cost_grip == null ? (prior.cost_grip ?? null) : r.cost_grip,
         sort_order: typeof r.sort_order === 'number' ? r.sort_order : 9999,
         updated_at: now,
       });
@@ -3942,6 +4152,82 @@ function getProductMapByNorm(db) {
       .forEach(r => map.set(r.title_norm, r));
   } catch { /* table may not exist before first import */ }
   return map;
+}
+
+/** Normalise cost input → a non-negative number, or null to clear. */
+function _normCost(cost) {
+  if (cost === null || cost === undefined || cost === '') return null;
+  const n = Number(cost);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.round(n * 100) / 100; // 2 dp
+}
+
+/**
+ * Set the per-component purchase cost(s) for a product (by title). Case and grip
+ * are priced separately. Pass only the field(s) you want to change:
+ *   undefined → keep the existing value; a number/''/null → set (null clears).
+ * Creates the product_map row if it doesn't exist yet; the supplier/charm mapping
+ * already on the row is preserved.
+ * @returns {{ title_norm: string, cost_case: number|null, cost_grip: number|null }}
+ */
+function setProductCost(db, { title, cost_case, cost_grip }) {
+  const t = String(title || '').trim();
+  if (!t) { const e = new Error('Product title is required.'); e.code = 'REQUIRED'; throw e; }
+  const titleNorm = t.replace(/\|/g, ',').replace(/\s+/g, ' ').toLowerCase();
+  const now = Math.floor(Date.now() / 1000);
+  const existing = db.prepare('SELECT id, cost_case, cost_grip, canonical_product_key FROM product_map WHERE title_norm = ?').get(titleNorm);
+  const nextCase = cost_case === undefined ? (existing ? existing.cost_case : null) : _normCost(cost_case);
+  const nextGrip = cost_grip === undefined ? (existing ? existing.cost_grip : null) : _normCost(cost_grip);
+  const history = db.prepare(`
+    INSERT INTO product_price_history
+      (canonical_key, title_norm, component, old_cost, new_cost, changed_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  const writeHistory = () => {
+    if (cost_case !== undefined && (existing?.cost_case ?? null) !== nextCase) {
+      history.run(existing?.canonical_product_key || null, titleNorm, 'case', existing?.cost_case ?? null, nextCase, now);
+    }
+    if (cost_grip !== undefined && (existing?.cost_grip ?? null) !== nextGrip) {
+      history.run(existing?.canonical_product_key || null, titleNorm, 'grip', existing?.cost_grip ?? null, nextGrip, now);
+    }
+  };
+  if (existing) {
+    db.prepare('UPDATE product_map SET cost_case = @cc, cost_grip = @cg, updated_at = @now WHERE title_norm = @tn')
+      .run({ cc: nextCase, cg: nextGrip, now, tn: titleNorm });
+    // One physical product can have many Etsy listing titles. Price is a
+    // physical-product fact, so keep every canonical alias in sync.
+    if (existing.canonical_product_key) {
+      db.prepare(
+        'UPDATE product_map SET cost_case = @cc, cost_grip = @cg, updated_at = @now WHERE canonical_product_key = @pk',
+      ).run({ cc: nextCase, cg: nextGrip, now, pk: existing.canonical_product_key });
+    }
+    writeHistory();
+  } else {
+    const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM product_map').get().m;
+    db.prepare('INSERT INTO product_map (title_norm, title, cost_case, cost_grip, sort_order, updated_at) VALUES (@tn, @t, @cc, @cg, @so, @now)')
+      .run({ tn: titleNorm, t, cc: nextCase, cg: nextGrip, so: maxOrder + 1, now });
+    writeHistory();
+  }
+  return { title_norm: titleNorm, cost_case: nextCase, cost_grip: nextGrip };
+}
+
+/**
+ * Set the purchase cost for a charm (by code). Creates a minimal charm_library
+ * row if the code isn't catalogued yet.
+ * @returns {{ code: string, cost: number|null }}
+ */
+function setCharmCost(db, { code, cost }) {
+  const cd = String(code || '').trim();
+  if (!cd) { const e = new Error('Charm code is required.'); e.code = 'REQUIRED'; throw e; }
+  const c = _normCost(cost);
+  const now = Math.floor(Date.now() / 1000);
+  const existing = db.prepare('SELECT code FROM charm_library WHERE code = ?').get(cd);
+  if (existing) {
+    db.prepare('UPDATE charm_library SET cost = @c, updated_at = @now WHERE code = @cd').run({ c, now, cd });
+  } else {
+    db.prepare('INSERT INTO charm_library (code, cost, updated_at) VALUES (@cd, @c, @now)').run({ cd, c, now });
+  }
+  return { code: cd, cost: c };
 }
 
 /**
@@ -3964,6 +4250,27 @@ function getProductMap(db, q) {
   );
 }
 
+function _syncCanonicalProductMapFields(db, titleNorm, fields) {
+  const row = db.prepare('SELECT canonical_product_key FROM product_map WHERE title_norm = ?').get(titleNorm);
+  if (!row?.canonical_product_key) return;
+  db.prepare(`
+    UPDATE product_map SET
+      shop_name = @shop_name,
+      stall = @stall,
+      charm_shop = @charm_shop,
+      charm_code = @charm_code,
+      updated_at = @updated_at
+    WHERE canonical_product_key = @canonical_product_key
+  `).run({
+    canonical_product_key: row.canonical_product_key,
+    shop_name: String(fields.shop_name || '').trim(),
+    stall: String(fields.stall || '').trim(),
+    charm_shop: String(fields.charm_shop || '').trim(),
+    charm_code: String(fields.charm_code || '').trim(),
+    updated_at: Math.floor(Date.now() / 1000),
+  });
+}
+
 /**
  * Insert or update a single product_map row.
  * Conflict resolution is by title_norm (UNIQUE).
@@ -3984,14 +4291,21 @@ function upsertProductMapRow(db, row) {
   const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM product_map').get().m;
 
   const info = db.prepare(`
-    INSERT INTO product_map (title_norm, title, shop_name, stall, charm_shop, charm_code, sort_order, updated_at)
-    VALUES (@title_norm, @title, @shop_name, @stall, @charm_shop, @charm_code, @sort_order, @updated_at)
+    INSERT INTO product_map (
+      title_norm, title, shop_name, stall, charm_shop, charm_code,
+      canonical_product_key, sort_order, updated_at
+    )
+    VALUES (
+      @title_norm, @title, @shop_name, @stall, @charm_shop, @charm_code,
+      @canonical_product_key, @sort_order, @updated_at
+    )
     ON CONFLICT(title_norm) DO UPDATE SET
       title      = excluded.title,
       shop_name  = excluded.shop_name,
       stall      = excluded.stall,
       charm_shop = excluded.charm_shop,
       charm_code = excluded.charm_code,
+      canonical_product_key = COALESCE(excluded.canonical_product_key, product_map.canonical_product_key),
       updated_at = excluded.updated_at
   `).run({
     title_norm: titleNorm,
@@ -4000,6 +4314,7 @@ function upsertProductMapRow(db, row) {
     stall:      String(row.stall      || '').trim(),
     charm_shop: String(row.charm_shop || '').trim(),
     charm_code: String(row.charm_code || '').trim(),
+    canonical_product_key: String(row.canonical_product_key || '').trim() || null,
     sort_order: typeof row.sort_order === 'number' ? row.sort_order : maxOrder + 1,
     updated_at: now,
   });
@@ -4008,6 +4323,7 @@ function upsertProductMapRow(db, row) {
     ? info.lastInsertRowid
     : db.prepare('SELECT id FROM product_map WHERE title_norm = ?').get(titleNorm).id;
 
+  _syncCanonicalProductMapFields(db, titleNorm, row);
   return { id, title_norm: titleNorm };
 }
 
@@ -4037,10 +4353,12 @@ function updateProductMapRowById(db, row) {
   }
 
   const now  = Math.floor(Date.now() / 1000);
+  const existing = db.prepare('SELECT canonical_product_key FROM product_map WHERE id = ?').get(id);
   const info = db.prepare(`
     UPDATE product_map
     SET title_norm = @title_norm, title = @title, shop_name = @shop_name, stall = @stall,
-        charm_shop = @charm_shop, charm_code = @charm_code, updated_at = @updated_at
+        charm_shop = @charm_shop, charm_code = @charm_code,
+        canonical_product_key = @canonical_product_key, updated_at = @updated_at
     WHERE id = @id
   `).run({
     id,
@@ -4050,12 +4368,16 @@ function updateProductMapRowById(db, row) {
     stall:      String(row.stall      || '').trim(),
     charm_shop: String(row.charm_shop || '').trim(),
     charm_code: String(row.charm_code || '').trim(),
+    canonical_product_key: row.canonical_product_key === undefined
+      ? (existing?.canonical_product_key || null)
+      : (String(row.canonical_product_key || '').trim() || null),
     updated_at: now,
   });
 
   if (info.changes === 0) {
     const e = new Error('Entry not found.'); e.code = 'NOT_FOUND'; throw e;
   }
+  _syncCanonicalProductMapFields(db, titleNorm, row);
 }
 
 /**
@@ -4492,6 +4814,152 @@ function patchOrderExchange(db, id, patch) {
 function deleteOrderExchange(db, id) {
   try { return db.prepare('DELETE FROM order_exchanges WHERE id = ?').run(Number(id)).changes > 0; }
   catch { return false; }
+}
+
+// ─── Order line substitutions (local "design switch" override) ──────────────
+//
+// Non-destructive: NEVER touches Etsy. Records that an order line should be
+// RENDERED and PURCHASED as a replacement design chosen by the operator after
+// the buyer agreed to switch. See the order_line_substitutions table comment.
+
+/** Fields safe to expose to the UI/Route (never the raw image BLOB). */
+const _SUB_PUBLIC_COLS = `
+  id, receipt_id, item_key, original_title, new_title, new_style,
+  new_phone_model, source, source_listing_id, image_url,
+  (image_data IS NOT NULL AND length(image_data) > 0) AS has_image_data,
+  image_mime, note, created_at, updated_at`;
+
+/**
+ * Map of `${receipt_id}\x00${item_key}` → substitution (metadata only), for use
+ * by the Route builder to override a line's product with the switched design.
+ * @param {Database.Database} db
+ * @returns {Map<string, object>}
+ */
+function getSubstitutionMap(db) {
+  const map = new Map();
+  try {
+    db.prepare(`SELECT ${_SUB_PUBLIC_COLS} FROM order_line_substitutions`).all()
+      .forEach((r) => map.set(`${r.receipt_id}\x00${r.item_key}`, r));
+  } catch { /* table may not exist yet on first run */ }
+  return map;
+}
+
+/**
+ * All substitutions for a set of receipts (metadata only), keyed by receipt_id.
+ * @param {Database.Database} db
+ * @param {Array<number>} receiptIds
+ * @returns {Object<number, Array<object>>}
+ */
+function getSubstitutionsForReceipts(db, receiptIds) {
+  const out = {};
+  const ids = (receiptIds || []).map(Number).filter(Number.isInteger);
+  if (!ids.length) return out;
+  try {
+    const ph = ids.map(() => '?').join(',');
+    db.prepare(`SELECT ${_SUB_PUBLIC_COLS} FROM order_line_substitutions WHERE receipt_id IN (${ph})`)
+      .all(ids)
+      .forEach((r) => { (out[r.receipt_id] ||= []).push(r); });
+  } catch { /* table may not exist yet */ }
+  return out;
+}
+
+/** The substitution for one line (metadata only), or null. */
+function getSubstitutionForLine(db, receiptId, itemKey) {
+  try {
+    return db.prepare(`SELECT ${_SUB_PUBLIC_COLS} FROM order_line_substitutions WHERE receipt_id = ? AND item_key = ?`)
+      .get(Number(receiptId), String(itemKey)) || null;
+  } catch { return null; }
+}
+
+/**
+ * Create or update the design switch for a line. Keyed by (receipt_id, item_key).
+ * When image_data is provided it replaces the stored image; when it's undefined
+ * the existing image is kept (so metadata-only edits don't wipe an upload).
+ *
+ * @param {Database.Database} db
+ * @param {object} p - { receipt_id, item_key, original_title?, new_title,
+ *   new_style?, new_phone_model?, source?, source_listing_id?, image_url?,
+ *   image_data?(Buffer|null), image_mime?, note? }
+ * @returns {object} the upserted substitution (metadata only)
+ */
+function upsertOrderSubstitution(db, p) {
+  const now = Math.floor(Date.now() / 1000);
+  const hasImage = Object.prototype.hasOwnProperty.call(p, 'image_data');
+  const existing = getSubstitutionForLine(db, p.receipt_id, p.item_key);
+
+  if (existing) {
+    // Update in place; only overwrite the image when a new one was supplied.
+    const sets = [
+      'original_title = COALESCE(@original_title, original_title)',
+      'new_title = @new_title',
+      'new_style = @new_style',
+      'new_phone_model = @new_phone_model',
+      'source = @source',
+      'source_listing_id = @source_listing_id',
+      'image_url = @image_url',
+      'note = @note',
+      'updated_at = @now',
+    ];
+    if (hasImage) { sets.push('image_data = @image_data', 'image_mime = @image_mime'); }
+    db.prepare(`UPDATE order_line_substitutions SET ${sets.join(', ')} WHERE receipt_id = @receipt_id AND item_key = @item_key`).run({
+      receipt_id: Number(p.receipt_id),
+      item_key: String(p.item_key),
+      original_title: p.original_title != null ? String(p.original_title) : null,
+      new_title: String(p.new_title),
+      new_style: p.new_style != null ? String(p.new_style) : null,
+      new_phone_model: p.new_phone_model != null ? String(p.new_phone_model) : null,
+      source: p.source != null ? String(p.source) : null,
+      source_listing_id: p.source_listing_id != null ? Number(p.source_listing_id) : null,
+      image_url: p.image_url != null ? String(p.image_url) : null,
+      image_data: hasImage ? (p.image_data || null) : null,
+      image_mime: hasImage ? (p.image_mime != null ? String(p.image_mime) : null) : null,
+      note: p.note != null ? String(p.note) : null,
+      now,
+    });
+  } else {
+    db.prepare(`
+      INSERT INTO order_line_substitutions
+        (receipt_id, item_key, original_title, new_title, new_style, new_phone_model,
+         source, source_listing_id, image_url, image_data, image_mime, note, created_at, updated_at)
+      VALUES
+        (@receipt_id, @item_key, @original_title, @new_title, @new_style, @new_phone_model,
+         @source, @source_listing_id, @image_url, @image_data, @image_mime, @note, @now, @now)
+    `).run({
+      receipt_id: Number(p.receipt_id),
+      item_key: String(p.item_key),
+      original_title: p.original_title != null ? String(p.original_title) : null,
+      new_title: String(p.new_title),
+      new_style: p.new_style != null ? String(p.new_style) : null,
+      new_phone_model: p.new_phone_model != null ? String(p.new_phone_model) : null,
+      source: p.source != null ? String(p.source) : null,
+      source_listing_id: p.source_listing_id != null ? Number(p.source_listing_id) : null,
+      image_url: p.image_url != null ? String(p.image_url) : null,
+      image_data: hasImage ? (p.image_data || null) : null,
+      image_mime: hasImage ? (p.image_mime != null ? String(p.image_mime) : null) : null,
+      note: p.note != null ? String(p.note) : null,
+      now,
+    });
+  }
+  return getSubstitutionForLine(db, p.receipt_id, p.item_key);
+}
+
+/** Remove the design switch for a line. Returns true when a row was removed. */
+function deleteOrderSubstitution(db, receiptId, itemKey) {
+  try {
+    return db.prepare('DELETE FROM order_line_substitutions WHERE receipt_id = ? AND item_key = ?')
+      .run(Number(receiptId), String(itemKey)).changes > 0;
+  } catch { return false; }
+}
+
+/** Fetch a substitution's stored image bytes + mime, or null. */
+function getSubstitutionImage(db, id) {
+  try {
+    const row = db.prepare('SELECT image_data, image_mime FROM order_line_substitutions WHERE id = ?').get(Number(id));
+    if (row && row.image_data && row.image_data.length) {
+      return { data: row.image_data, mime: row.image_mime || 'image/png' };
+    }
+  } catch { /* table may not exist yet */ }
+  return null;
 }
 
 /**
@@ -5007,6 +5475,12 @@ module.exports = {
   upsertOrderExchange,
   patchOrderExchange,
   deleteOrderExchange,
+  getSubstitutionMap,
+  getSubstitutionsForReceipts,
+  getSubstitutionForLine,
+  upsertOrderSubstitution,
+  deleteOrderSubstitution,
+  getSubstitutionImage,
   insertManualItem,
   getManualItems,
   getManualItemImage,
@@ -5025,6 +5499,8 @@ module.exports = {
   getSupplierDirectory,
   getCharmShopDirectory,
   getProductMapByNorm,
+  setProductCost,
+  setCharmCost,
   insertSupplierDirectoryRow,
   updateSupplierDirectoryRow,
   deleteSupplierDirectoryRow,
@@ -5049,7 +5525,9 @@ module.exports = {
   getListingImageData,
   upsertListingImageData,
   upsertListing,
+  pruneStaleListings,
   upsertListingInventory,
+  pruneStaleInventory,
   logEvent,
   updateCarrierStatus,
   startSyncLog,

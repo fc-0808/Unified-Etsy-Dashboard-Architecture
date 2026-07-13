@@ -273,6 +273,33 @@ function loadConfig() {
 
   raw.groups.forEach((group, i) => validateGroup(group, i));
 
+  // ── OpSec: enforce Etsy's Personal Access "5 shops per app key" limit ─────────
+  // Etsy caps each app (keystring) at 5 authorized shops. Exceeding it is itself a
+  // review/anti-abuse trigger, so surface it loudly at startup rather than letting
+  // a 6th shop silently attach to a key. This is a WARNING (never fatal) so an
+  // operator mid-migration is not locked out of the dashboard.
+  const ETSY_SHOPS_PER_KEY = 5;
+  const shopsPerKey = new Map();
+  for (const group of raw.groups) {
+    for (const shop of group.shops) {
+      const key = shop.api_key;
+      if (!key) continue;
+      if (!shopsPerKey.has(key)) shopsPerKey.set(key, []);
+      shopsPerKey.get(key).push(shop.shop_name || shop.shop_id);
+    }
+  }
+  for (const [key, names] of shopsPerKey) {
+    if (names.length > ETSY_SHOPS_PER_KEY) {
+      const masked = `${String(key).slice(0, 6)}…`;
+      console.warn(
+        `[config] ⚠ API key ${masked} is mapped to ${names.length} shops ` +
+        `(${names.join(', ')}), exceeding Etsy's Personal Access limit of ${ETSY_SHOPS_PER_KEY} ` +
+        `shops per app key. Move the extra shop(s) to a separate app/key to avoid an ` +
+        `Etsy anti-abuse review.`
+      );
+    }
+  }
+
   // Apply defaults for optional fields
   const config = {
     vpn_local_port: raw.vpn_local_port ?? 7897,

@@ -143,7 +143,12 @@ function printBitmapWindows(pngPath, opts) {
         resolve();
       } else {
         const msg = (stderr || stdout || `powershell exited with code ${code}`).trim();
-        reject(new Error(msg));
+        const err = new Error(msg);
+        // Exit 4/5 are the script's pre-flight "printer offline / not ready"
+        // signals. They are actionable hardware faults, so the caller must
+        // surface them rather than silently falling back to opening the PDF.
+        if (code === 4 || code === 5) err.printerNotReady = true;
+        reject(err);
       }
     });
   });

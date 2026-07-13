@@ -19,6 +19,14 @@ const axios = require('axios');
 const { SocksClient } = require('socks');
 const { usesGroupProxy } = require('../config/schema');
 
+// Stable, descriptive User-Agent so Etsy can attribute our traffic to this app
+// rather than treating a generic axios default UA as anonymous bot traffic.
+const APP_VERSION = (() => {
+  try { return require('../../package.json').version || '0.0.0'; }
+  catch { return '0.0.0'; }
+})();
+const ETSY_USER_AGENT = `Unified-Etsy-Dashboard/${APP_VERSION} (+node)`;
+
 /**
  * Parse "socks5://user:pass@host:port" into the object socks library expects.
  * @param {string} url
@@ -135,6 +143,7 @@ function createDirectGroupClient(groupConfig, forceNew = false) {
     headers: {
       'Content-Type': 'application/json',
       Accept: 'application/json',
+      'User-Agent': ETSY_USER_AGENT,
     },
   });
 
@@ -164,6 +173,7 @@ function createGroupClient(groupConfig, vpnPort, forceNew = false) {
     headers: {
       'Content-Type': 'application/json',
       Accept: 'application/json',
+      'User-Agent': ETSY_USER_AGENT,
     },
   });
 

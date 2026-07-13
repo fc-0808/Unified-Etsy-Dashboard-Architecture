@@ -10,7 +10,7 @@
  */
 
 const path = require('path');
-const { loadConfig, getAllShops } = require('../src/config/schema');
+const { loadConfig, getAllShops, usesGroupProxy } = require('../src/config/schema');
 const { TokenManager }           = require('../src/auth/token-manager');
 const { createGroupProxyClient, verifyGroupProxy } = require('../src/proxy/factory');
 const { buildShopClient, getListingImagesBatch, resolveShopId } = require('../src/etsy/client');
@@ -96,7 +96,9 @@ async function main() {
     let shopClient;
     try {
       const accessToken = await tokenManager.getAccessToken(shop.shop_id, shop.api_key, null, proxyClient);
-      shopClient = buildShopClient(proxyClient, shop.api_key, shop.shared_secret, accessToken);
+      shopClient = buildShopClient(proxyClient, shop.api_key, shop.shared_secret, accessToken, null, {
+        requireProxy: usesGroupProxy(group), // fail closed for proxied groups
+      });
       await resolveShopId(shopClient, shop.shop_id); // warm up the client
     } catch (err) {
       console.error(`[${groupId}] Token error: ${err.message} — skipping group`);

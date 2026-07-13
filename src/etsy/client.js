@@ -85,6 +85,25 @@ const QPD_BACKGROUND_RESERVE = 300;
 // else must respect the background reserve above.
 const PRIORITY_CRITICAL = 'critical';
 
+// ─── Per-second (QPS) pacing ──────────────────────────────────────────────────
+// Etsy's hard wall is 5 QPS PER API KEY. The QPD guard above says nothing about
+// bursts within a single second, so several concurrent callers on one key (e.g.
+// the inventory sync's worker pool, a listing-counts fan-out, or 20 back-to-back
+// image uploads while creating a listing) could otherwise cross 5 QPS and start
+// tripping 429s — exactly the signal Etsy's anti-abuse systems watch. We pace
+// EVERY outgoing request through a per-key leaky bucket sized a touch under the
+// wall so the combined rate can never exceed it, no matter how many jobs overlap.
+const QPS_SAFETY = 4; // requests/sec per key (Etsy allows 5 — leave headroom)
+
+// A single, stable identifier Etsy can attribute our traffic to. A descriptive
+// User-Agent is Etsy best practice and reduces the chance of being lumped in with
+// anonymous/generic bot traffic. Version is read from package.json (best-effort).
+const APP_VERSION = (() => {
+  try { return require('../../package.json').version || '0.0.0'; }
+  catch { return '0.0.0'; }
+})();
+const ETSY_USER_AGENT = `Unified-Etsy-Dashboard/${APP_VERSION} (+node)`;
+
 /**
  * Thrown when an API key's QPD (queries-per-day) budget is exhausted, or when a
  * 429 persists through every retry. Identifiable via `code === 'ETSY_QPD_EXHAUSTED'`.
@@ -127,13 +146,18 @@ function isQpdExhaustedError(err) {
 const HISTORY_RING_SIZE = 200;
 
 class RateLimiter {
-  constructor(maxCallsPer24h = QPD_SAFETY_BUFFER, keyId = 'default') {
+  constructor(maxCallsPer24h = QPD_SAFETY_BUFFER, keyId = 'default', maxQps = QPS_SAFETY) {
     this._max = maxCallsPer24h;
     this._window = 24 * 60 * 60 * 1000; // sliding 24h window (Etsy uses bucket-based sliding window)
     this._calls = [];
     this._serverRemaining = null;       // updated from x-remaining-today response header
     this._keyId = keyId;                // masked keystring, for human-readable logs
     this._blockedUntil = 0;             // ms epoch; while in the future, check() short-circuits
+    // QPS pacing: minimum gap between two requests on this key, and the epoch (ms)
+    // at which the next request is allowed to leave. Concurrent callers each reserve
+    // a distinct future slot, so N parallel requests are spaced, never simultaneous.
+    this._minRequestIntervalMs = Math.ceil(1000 / Math.max(1, maxQps));
+    this._nextRequestAt = 0;
     /**
      * Ring-buffer of authoritative budget snapshots from Etsy headers.
      * Each entry: { ts: <ms epoch>, remaining: <number>, delta: <number|null> }
@@ -242,6 +266,25 @@ class RateLimiter {
       : Math.ceil(DEFAULT_QPD_COOLDOWN_MS / 1000);
     this._blockedUntil = Math.max(this._blockedUntil, Date.now() + sec * 1000);
     this._serverRemaining = 0;
+  }
+
+  /**
+   * QPS gate — resolves once this request may leave without breaching the per-key
+   * per-second wall. Reserves the next free slot atomically (synchronous section
+   * before the await), so many concurrent callers on the same key line up behind
+   * one another spaced by `_minRequestIntervalMs` instead of firing at once.
+   *
+   * This is a pure smoother: it never rejects, only delays. QPD exhaustion is a
+   * separate concern handled by check(); this only shapes burst rate.
+   *
+   * @returns {Promise<void>}
+   */
+  async throttleQps() {
+    const now = Date.now();
+    const slot = Math.max(now, this._nextRequestAt);
+    this._nextRequestAt = slot + this._minRequestIntervalMs;
+    const wait = slot - now;
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
   }
 
   /**
@@ -578,9 +621,23 @@ async function withRetry(fn, maxRetries = 3) {
  *        requests on this client. Use 'critical' for operator-initiated order
  *        fulfilment (ship/complete/edit tracking) so it is never gated by the
  *        background reserve. Defaults to 'normal' (respects the reserve).
+ * @param {boolean} [options.requireProxy=false] - Fail-closed OpSec guard. When
+ *        true, the underlying group client MUST carry an httpsAgent (i.e. the
+ *        VPN→IPFoxy proxy chain). If it doesn't, we throw instead of letting a
+ *        shop that must be proxied accidentally egress on the server's own
+ *        datacenter IP — the exact footprint that gets shops linked/flagged.
  * @returns {import('axios').AxiosInstance}
  */
 function buildShopClient(groupProxyClient, apiKey, sharedSecret, accessToken, getToken, options = {}) {
+  // ── OpSec fail-closed: a shop that must be proxied never egresses direct ──────
+  if (options.requireProxy && !groupProxyClient.defaults.httpsAgent) {
+    throw new Error(
+      `[etsy/client] Refusing to build a shop client for a proxied group without a ` +
+      `proxy agent. This would send the shop's Etsy traffic from the server's own IP ` +
+      `(group_id=${groupProxyClient._groupId ?? 'unknown'}). Check config.json proxy settings.`
+    );
+  }
+
   // Use axios.create() — Object.create() on an axios instance does not propagate
   // defaults into the actual request headers (axios merges from instance.defaults
   // at request time, which requires a real instance, not a prototype clone).
@@ -591,6 +648,7 @@ function buildShopClient(groupProxyClient, apiKey, sharedSecret, accessToken, ge
     headers: {
       'Content-Type': 'application/json',
       Accept:         'application/json',
+      'User-Agent':   ETSY_USER_AGENT,
       // CORRECT FORMAT: keystring:shared_secret (both required per Etsy API docs)
       'x-api-key':    `${apiKey}:${sharedSecret}`,
       // CORRECT FORMAT: Bearer numeric_user_id.oauth_token
@@ -600,6 +658,17 @@ function buildShopClient(groupProxyClient, apiKey, sharedSecret, accessToken, ge
   // Stamp the budget priority so gateClient() can honor it on every request.
   instance.defaults.__etsyPriority = options.priority === PRIORITY_CRITICAL ? PRIORITY_CRITICAL : 'normal';
   attachRateLimitInterceptor(instance);
+
+  // ── QPS pacing (applies to EVERY request, incl. critical) ────────────────────
+  // Etsy's 5 QPS wall is enforced per key regardless of call priority, so even
+  // order-fulfilment bursts (e.g. bulk-complete of up to 200 receipts) must be
+  // spaced. This request interceptor awaits the per-key leaky bucket before each
+  // send, capping the combined outgoing rate across ALL overlapping jobs on the
+  // key. It only ever delays — it never rejects — so correctness is unaffected.
+  instance.interceptors.request.use(async (cfg) => {
+    await getRateLimiter(instance).throttleQps();
+    return cfg;
+  });
 
   // Etsy access tokens expire after 1 hour. For long-lived clients (e.g. a bulk
   // run that spans >1h), a token baked in at creation goes stale mid-run →
@@ -832,17 +901,24 @@ async function updateListingInventory(shopClient, listingId, inventory) {
  * @param {string|number} shopId - numeric shop ID
  * @param {object} [opts]
  * @param {'active'|'inactive'|'draft'|'sold_out'|'expired'|'all'} [opts.state]
+ * @param {boolean} [opts.includeInventory=false] - Also request the `Inventory`
+ *        association so each listing carries its full per-variation inventory
+ *        (offerings with price + quantity) inline. This is far cheaper than a
+ *        follow-up getListingInventory per listing (one page call of up to 100
+ *        listings vs. up to 100 separate calls) and lets the caller cache
+ *        variation prices in the same pass.
  * @yields {object[]} batches of listing objects
  */
 async function* paginateListings(shopClient, shopId, opts = {}) {
-  const { state = 'active' } = opts;
+  const { state = 'active', includeInventory = false } = opts;
+  const includes = includeInventory ? 'Images,Inventory' : 'Images';
   let offset = 0;
   const limit = 100;
   while (true) {
     gateClient(shopClient);
     const { data } = await withRetry(() =>
       shopClient.get(`/application/shops/${shopId}/listings`, {
-        params: { limit, offset, state, includes: 'Images', sort_on: 'updated', sort_order: 'desc' },
+        params: { limit, offset, state, includes, sort_on: 'updated', sort_order: 'desc' },
       })
     );
     const listings = data.results ?? data.listings ?? [];
@@ -850,6 +926,7 @@ async function* paginateListings(shopClient, shopId, opts = {}) {
     yield listings;
     if (listings.length < limit) break;
     offset += limit;
+    await new Promise((r) => setTimeout(r, 250)); // polite pause between pages
   }
 }
 
@@ -1027,9 +1104,14 @@ async function* paginateLedgerEntries(shopClient, shopId, opts = {}) {
   const pageSize  = opts.pageSize ?? 100;
   const minCreated = opts.minCreated;
   const maxCreated = opts.maxCreated;
+  // Optional hard ceiling on entries per window (budget defence). Defaults to
+  // unbounded to preserve prior behaviour; the QPD guard still stops a runaway
+  // walk once the background reserve is reached.
+  const maxTotal  = opts.maxTotal ?? Infinity;
   let offset = 0;
+  let fetched = 0;
 
-  while (true) {
+  while (fetched < maxTotal) {
     gateClient(shopClient);
     const data = await withRetry(async () => {
       const { data } = await shopClient.get(
@@ -1042,6 +1124,7 @@ async function* paginateLedgerEntries(shopClient, shopId, opts = {}) {
     if (results.length === 0) break;
     yield results;
     offset += results.length;
+    fetched += results.length;
     if (results.length < pageSize) break;
     await new Promise((r) => setTimeout(r, 250)); // polite pause between pages
   }

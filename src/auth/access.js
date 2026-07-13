@@ -78,10 +78,13 @@ const PACKER_ALLOW = [
 	{ m: 'GET', re: /^\/api\/shop\/route$/ },
 	{ m: 'GET', re: /^\/api\/shop\/stream$/ },
 	{ m: 'POST', re: /^\/api\/shop\/assign$/ },
+	{ m: 'POST', re: /^\/api\/shop\/cost$/ },
 	{ m: 'POST', re: /^\/api\/exchanges\/[^/]+\/done$/ },
 	{ m: 'POST', re: /^\/api\/exchanges\/[^/]+\/reopen$/ },
+	{ m: 'GET', re: /^\/api\/route\/floor-map$/ },
 	{ m: 'GET', re: /^\/api\/route\/listing-image\/[^/]+$/ },
 	{ m: 'GET', re: /^\/api\/route\/manual-image\/[^/]+$/ },
+	{ m: 'GET', re: /^\/api\/route\/substitution-image\/[^/]+$/ },
 	{ m: 'GET', re: /^\/api\/route\/charm-image$/ },
 ]
 
@@ -95,10 +98,13 @@ const SHOPPER_ALLOW = [
 	{ m: 'GET', re: /^\/api\/shop\/route$/ }, // live route rows
 	{ m: 'GET', re: /^\/api\/shop\/stream$/ }, // real-time SSE feed
 	{ m: 'POST', re: /^\/api\/shop\/assign$/ }, // update a purchase status
+	{ m: 'POST', re: /^\/api\/shop\/cost$/ }, // set a product/charm purchase cost
 	{ m: 'POST', re: /^\/api\/exchanges\/[^/]+\/done$/ }, // mark a wrong-model swap done
 	{ m: 'POST', re: /^\/api\/exchanges\/[^/]+\/reopen$/ }, // undo a swap-done
+	{ m: 'GET', re: /^\/api\/route\/floor-map$/ }, // in-person supplier map
 	{ m: 'GET', re: /^\/api\/route\/listing-image\/[^/]+$/ }, // product photos
 	{ m: 'GET', re: /^\/api\/route\/manual-image\/[^/]+$/ }, // manual-item photos
+	{ m: 'GET', re: /^\/api\/route\/substitution-image\/[^/]+$/ }, // switched-design photos
 	{ m: 'GET', re: /^\/api\/route\/charm-image$/ }, // charm photos
 ]
 

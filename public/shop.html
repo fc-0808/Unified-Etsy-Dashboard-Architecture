@@ -29,6 +29,7 @@
 				--muted: #8a90a6;
 				--accent: #f56400;
 				--blue: #6c8fff;
+				--blue-bg: #172138;
 				--green: #22c55e;
 				--green-bg: #16351f;
 				--amber: #f5a524;
@@ -37,6 +38,8 @@
 				--red-bg: #3a1618;
 				--purple: #a78bfa;
 				--purple-bg: #291f3d;
+				--rose: #fb7185;
+				--rose-bg: #3a1522;
 				--font: 'Inter', system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
 				--safe-top: env(safe-area-inset-top, 0px);
 				--safe-bottom: env(safe-area-inset-bottom, 0px);
@@ -151,6 +154,19 @@
 			}
 			.iconbtn:active {
 				background: var(--surface2);
+			}
+			.iconbtn svg {
+				width: 19px;
+				height: 19px;
+				fill: none;
+				stroke: currentColor;
+				stroke-width: 2;
+				stroke-linecap: round;
+				stroke-linejoin: round;
+			}
+			.iconbtn.menubtn svg {
+				width: 21px;
+				height: 21px;
 			}
 			.iconbtn.langbtn {
 				width: auto;
@@ -373,6 +389,16 @@
 				transform: translateY(-50%);
 				color: var(--muted);
 				font-size: 14px;
+				display: inline-flex;
+			}
+			.search .mag svg {
+				width: 16px;
+				height: 16px;
+				fill: none;
+				stroke: currentColor;
+				stroke-width: 2;
+				stroke-linecap: round;
+				stroke-linejoin: round;
 			}
 			.chipbtn {
 				padding: 9px 12px;
@@ -384,10 +410,28 @@
 				color: var(--muted);
 				white-space: nowrap;
 			}
+			.chipbtn.iconchip {
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				padding: 9px 11px;
+			}
+			.chipbtn.iconchip svg {
+				width: 17px;
+				height: 17px;
+				fill: none;
+				stroke: currentColor;
+				stroke-width: 2;
+				stroke-linecap: round;
+				stroke-linejoin: round;
+			}
 			.chipbtn.on {
 				color: var(--text);
 				border-color: var(--accent);
 				background: rgba(245, 100, 0, 0.12);
+			}
+			.chipbtn.iconchip.on svg {
+				fill: rgba(245, 100, 0, 0.18);
 			}
 			.advfilters {
 				padding: 8px 14px 0;
@@ -524,16 +568,21 @@
 			}
 			.ghead {
 				position: sticky;
-				top: 0;
+				/* Pin BELOW the app header (whose height varies with wrapping / language),
+				   measured live into --stick-top — otherwise the stall header hides behind
+				   the header exactly when the shopper needs it while scrolling a long stall. */
+				top: var(--stick-top, 56px);
 				z-index: 10;
 				display: flex;
-				align-items: baseline;
+				align-items: center;
 				gap: 8px;
 				padding: 8px 12px;
 				margin: 0 -2px 8px;
 				background: linear-gradient(180deg, var(--surface2), var(--surface));
 				border: 1px solid var(--border);
 				border-radius: 10px;
+				/* Soft depth so a pinned header lifts off the cards scrolling beneath it. */
+				box-shadow: 0 4px 12px rgba(0, 0, 0, 0.28);
 			}
 			.ghead .floor {
 				font-size: 11px;
@@ -582,6 +631,43 @@
 				background: var(--green-bg);
 				color: var(--green);
 			}
+			/* Per-stall payable total — the amount to pay this stall via WeChat.
+			   Pushed to the right so it reads like a receipt line. */
+			.ghead .gtotal {
+				margin-left: auto;
+				font-size: 15px;
+				font-weight: 800;
+				color: var(--green);
+				white-space: nowrap;
+				letter-spacing: 0.2px;
+			}
+			/* "Locate on map" pin in a supplier header. */
+			.ghead .glocate {
+				align-self: center;
+				flex: none;
+				width: 30px;
+				height: 30px;
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				border-radius: 8px;
+				border: 1px solid var(--border);
+				background: var(--surface2);
+				color: var(--blue);
+			}
+			.ghead .glocate svg {
+				width: 16px;
+				height: 16px;
+				fill: none;
+				stroke: currentColor;
+				stroke-width: 2;
+				stroke-linecap: round;
+				stroke-linejoin: round;
+			}
+			.ghead .glocate:active {
+				background: var(--surface);
+				transform: scale(0.94);
+			}
 			.ghead.gdone {
 				opacity: 0.5;
 			}
@@ -609,6 +695,107 @@
 				opacity: 0.62;
 				border-color: var(--green-bg);
 			}
+			/* Merged product card: one image + a row per model to buy (unifies multiple
+			   orders of the same product, incl. the same design across shops). */
+			.product {
+				background: var(--surface);
+				border: 1px solid var(--border);
+				border-radius: 14px;
+				padding: 12px;
+				margin-bottom: 10px;
+			}
+			.product-head {
+				display: flex;
+				align-items: flex-start;
+				gap: 14px;
+			}
+			.product-meta {
+				flex: 1;
+				min-width: 0;
+				display: flex;
+				flex-direction: column;
+				align-items: stretch;
+				gap: 9px;
+			}
+			.product-summary {
+				display: flex;
+				align-items: center;
+				gap: 7px;
+				min-height: 24px;
+			}
+			.product-count {
+				font-size: 13px;
+				font-weight: 700;
+				color: var(--muted);
+			}
+			.component-totals {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 6px;
+			}
+			.component-total {
+				display: inline-flex;
+				align-items: center;
+				padding: 4px 9px;
+				border-radius: 8px;
+				font-size: 13px;
+				font-weight: 800;
+				white-space: nowrap;
+			}
+			.component-total.case {
+				color: var(--blue);
+				background: var(--blue-bg);
+				border: 1px solid rgba(108, 143, 255, 0.35);
+			}
+			.component-total.grip {
+				color: var(--amber);
+				background: var(--amber-bg);
+				border: 1px solid rgba(245, 165, 36, 0.35);
+			}
+			.product-prices {
+				display: flex;
+				gap: 6px;
+			}
+			.product-prices .price {
+				min-height: 38px;
+				padding: 6px 10px;
+			}
+			.product-prices .price .pv {
+				font-size: 16px;
+			}
+			.card.in-product {
+				background: transparent;
+				border: none;
+				border-radius: 0;
+				margin: 0;
+				padding: 14px 0 0;
+			}
+			.card.in-product + .card.in-product {
+				border-top: 1px solid var(--border);
+			}
+			/* First model row: a divider under the shared product image. */
+			.plines > .card.in-product:first-child {
+				margin-top: 12px;
+				border-top: 1px solid var(--border);
+			}
+			.model-line-head {
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				gap: 10px;
+			}
+			.model-line-head .cmeta {
+				margin-top: 0;
+				justify-content: flex-end;
+			}
+			.model-group .comps {
+				margin-top: 10px;
+			}
+			.markall.compact {
+				min-height: 44px;
+				padding: 11px;
+				margin-top: 8px;
+			}
 			.ctop {
 				display: flex;
 				gap: 12px;
@@ -626,6 +813,39 @@
 				background-repeat: no-repeat;
 				background-position: center;
 				background-size: 38px;
+			}
+			/* Charms are tall/vertical — show the WHOLE charm (contain, not cropped)
+			   in a larger, taller frame so the design is clearly readable at a glance. */
+			.thumb.charm-thumb {
+				width: 118px;
+				height: 150px;
+				object-fit: contain;
+				background: var(--surface2);
+				padding: 4px;
+			}
+			.thumb {
+				cursor: zoom-in;
+			}
+			/* Full-screen image zoom (tap any photo to read the design clearly). */
+			.zoom-bg {
+				position: fixed;
+				inset: 0;
+				z-index: 80;
+				background: rgba(0, 0, 0, 0.92);
+				display: none;
+				align-items: center;
+				justify-content: center;
+				padding: 16px;
+				cursor: zoom-out;
+			}
+			.zoom-bg.open {
+				display: flex;
+			}
+			.zoom-bg img {
+				max-width: 100%;
+				max-height: 100%;
+				object-fit: contain;
+				border-radius: 10px;
 			}
 			.cinfo {
 				flex: 1;
@@ -692,6 +912,66 @@
 				border-radius: 6px;
 				padding: 2px 7px;
 			}
+			/* Price chips — one per component, aligned in a row beneath the matching
+			   status buttons so each price sits under the thing it belongs to. Tap
+			   to set/change. */
+			.cprice {
+				margin-top: 7px;
+				display: flex;
+				flex-wrap: wrap;
+				gap: 7px;
+			}
+			.price {
+				flex: 1 1 0;
+				min-width: 0;
+				font: inherit;
+				display: inline-flex;
+				align-items: center;
+				justify-content: space-between;
+				gap: 10px;
+				background: var(--surface2);
+				border: 1px solid var(--border);
+				border-radius: 12px;
+				padding: 8px 13px;
+				min-height: 46px;
+				cursor: pointer;
+				transition: border-color 0.15s ease, background 0.15s ease;
+			}
+			.price:active {
+				transform: scale(0.985);
+			}
+			.price .pl {
+				font-size: 13px;
+				font-weight: 700;
+				color: var(--muted);
+				white-space: nowrap;
+			}
+			.price .pvwrap {
+				display: inline-flex;
+				align-items: baseline;
+				gap: 6px;
+				min-width: 0;
+			}
+			.price .pv {
+				font-size: 18px;
+				font-weight: 800;
+				color: var(--green);
+				letter-spacing: 0.2px;
+			}
+			.price .price-per {
+				font-size: 11px;
+				font-weight: 600;
+				color: var(--muted);
+				white-space: nowrap;
+			}
+			.price.unset {
+				border-style: dashed;
+			}
+			.price.unset .pv {
+				color: var(--muted);
+				font-size: 14px;
+				font-weight: 700;
+			}
 			.tag.qty {
 				color: var(--blue);
 				background: rgba(108, 143, 255, 0.12);
@@ -728,49 +1008,102 @@
 				border-radius: 12px;
 				border: 1px solid var(--border);
 				background: var(--surface2);
-				padding: 12px 6px;
-				text-align: center;
+				padding: 10px 8px;
 				min-width: 0;
 				min-height: 62px;
 				display: flex;
-				flex-direction: column;
+				flex-direction: row;
 				align-items: center;
 				justify-content: center;
-				gap: 4px;
+				gap: 9px;
+				transition: background-color 0.18s ease, border-color 0.18s ease, transform 0.06s ease;
+			}
+			/* Component TYPE icon — always visible so case / grip / charm are told
+			   apart instantly, not just by their label. */
+			.comp .cicon {
+				width: 24px;
+				height: 24px;
+				flex: none;
+				color: var(--muted);
+				transition: color 0.18s ease;
+			}
+			.comp .cicon svg {
+				width: 100%;
+				height: 100%;
+				display: block;
+				fill: none;
+				stroke: currentColor;
+				stroke-width: 2;
+				stroke-linecap: round;
+				stroke-linejoin: round;
+			}
+			.comp .ctext {
+				display: flex;
+				flex-direction: column;
+				align-items: flex-start;
+				gap: 1px;
+				min-width: 0;
 			}
 			.comp .cl {
-				font-size: 11px;
-				font-weight: 700;
-				text-transform: uppercase;
-				letter-spacing: 0.4px;
-				color: var(--muted);
+				font-size: 12px;
+				font-weight: 800;
+				letter-spacing: 0.2px;
+				line-height: 1.1;
+				color: var(--text);
 			}
 			.comp .cs {
-				font-size: 15px;
+				font-size: 13.5px;
 				font-weight: 800;
 				line-height: 1.15;
-				display: flex;
-				align-items: center;
-				justify-content: center;
-				gap: 3px;
-			}
-			.comp.pending {
-				border-color: var(--border);
-			}
-			.comp.pending .cs {
 				color: var(--muted);
+				transition: color 0.18s ease;
 			}
+			/* PENDING ("to buy") → the chip pops in the component's signature colour
+			   so the shopper sees what to grab AND which type at a glance. */
+			.comp.pending.type-case {
+				border-color: var(--blue);
+				background: var(--blue-bg);
+			}
+			.comp.pending.type-case .cicon,
+			.comp.pending.type-case .cl,
+			.comp.pending.type-case .cs {
+				color: var(--blue);
+			}
+			.comp.pending.type-grip {
+				border-color: var(--amber);
+				background: var(--amber-bg);
+			}
+			.comp.pending.type-grip .cicon,
+			.comp.pending.type-grip .cl,
+			.comp.pending.type-grip .cs {
+				color: var(--amber);
+			}
+			.comp.pending.type-charm {
+				border-color: var(--purple);
+				background: var(--purple-bg);
+			}
+			.comp.pending.type-charm .cicon,
+			.comp.pending.type-charm .cl,
+			.comp.pending.type-charm .cs {
+				color: var(--purple);
+			}
+			/* PURCHASED → calm green "done"; the type recedes. */
 			.comp.purchased {
 				border-color: var(--green);
 				background: var(--green-bg);
 			}
+			.comp.purchased .cicon,
+			.comp.purchased .cl,
 			.comp.purchased .cs {
 				color: var(--green);
 			}
+			/* Problem states. */
 			.comp.stock {
 				border-color: var(--red);
 				background: var(--red-bg);
 			}
+			.comp.stock .cicon,
+			.comp.stock .cl,
 			.comp.stock .cs {
 				color: var(--red);
 			}
@@ -778,8 +1111,70 @@
 				border-color: var(--purple);
 				background: var(--purple-bg);
 			}
+			.comp.prod .cicon,
+			.comp.prod .cl,
 			.comp.prod .cs {
 				color: var(--purple);
+			}
+			.comp.wrong {
+				border-color: var(--amber);
+				background: var(--amber-bg);
+			}
+			.comp.wrong .cicon,
+			.comp.wrong .cl,
+			.comp.wrong .cs {
+				color: var(--amber);
+			}
+			.comp.nomodel {
+				border-color: var(--rose);
+				background: var(--rose-bg);
+			}
+			.comp.nomodel .cicon,
+			.comp.nomodel .cl,
+			.comp.nomodel .cs {
+				color: var(--rose);
+			}
+			/* MIXED → orders of one model landed on different statuses. The chip stays
+			   a calm neutral so the colour-coded count breakdown inside carries the
+			   meaning (e.g. green "已购" + red "缺货"). */
+			.comp.mixed {
+				border-color: #46506a;
+				background: rgba(148, 163, 184, 0.07);
+			}
+			.comp.mixed .cicon,
+			.comp.mixed .cl {
+				color: #cbd5e1;
+			}
+			/* Per-status count breakdown shown inside a mixed aggregate chip. Each
+			   segment is coloured by its status; the bold number is the piece count.
+			   A middot separates segments; it wraps gracefully if space is tight. */
+			.comp.mixed .cs {
+				margin-top: 1px;
+			}
+			.cbreak {
+				display: inline-flex;
+				flex-wrap: wrap;
+				align-items: center;
+				gap: 1px 6px;
+			}
+			.cseg {
+				font-size: 12.5px;
+				font-weight: 700;
+				white-space: nowrap;
+			}
+			.cseg b {
+				font-weight: 900;
+			}
+			/* Resolved counts (bought / discontinued / no-model) recede so the
+			   still-to-buy counts read first. */
+			.cseg.done {
+				opacity: 0.5;
+			}
+			.cseg:not(:last-child)::after {
+				content: '·';
+				margin-left: 6px;
+				color: var(--muted);
+				font-weight: 700;
 			}
 			.comp:active {
 				transform: scale(0.97);
@@ -860,6 +1255,8 @@
 				padding: 8px 16px calc(20px + var(--safe-bottom));
 				transform: translateY(100%);
 				transition: transform 0.25s ease;
+				max-height: 82vh;
+				overflow-y: auto;
 			}
 			.sheet-bg.open .sheet {
 				transform: translateY(0);
@@ -894,6 +1291,61 @@
 				font-weight: 700;
 				text-align: left;
 			}
+			/* ── Price editor sheet ─────────────────────────────── */
+			.price-input-row {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				border: 1px solid var(--border);
+				background: var(--surface2);
+				border-radius: 12px;
+				padding: 6px 14px;
+				margin-bottom: 14px;
+			}
+			.price-input-row .price-cur {
+				font-size: 26px;
+				font-weight: 800;
+				color: var(--green);
+			}
+			#priceInput {
+				flex: 1;
+				min-width: 0;
+				font: inherit;
+				font-size: 30px;
+				font-weight: 800;
+				color: var(--text);
+				background: transparent;
+				border: none;
+				outline: none;
+				padding: 8px 0;
+			}
+			.price-actions {
+				display: flex;
+				gap: 10px;
+			}
+			.price-actions button {
+				font: inherit;
+				font-size: 16px;
+				font-weight: 800;
+				border-radius: 12px;
+				padding: 15px 14px;
+				border: 1px solid var(--border);
+				cursor: pointer;
+			}
+			.price-actions .price-clear {
+				flex: 0 0 auto;
+				background: var(--surface2);
+				color: var(--muted);
+			}
+			.price-actions .price-save {
+				flex: 1;
+				background: var(--green);
+				color: #05130b;
+				border-color: transparent;
+			}
+			.price-actions button:active {
+				transform: scale(0.98);
+			}
 			.opt .swatch {
 				width: 12px;
 				height: 12px;
@@ -909,6 +1361,54 @@
 			.opt.sel {
 				border-color: var(--accent);
 			}
+			/* ── Multi-order status sheet (set-all + per-order) ─────────────────── */
+			.sheet-lab {
+				font-size: 12px;
+				color: var(--muted);
+				font-weight: 800;
+				text-transform: uppercase;
+				letter-spacing: 0.05em;
+				margin: 4px 2px 8px;
+			}
+			.opt-grid {
+				display: grid;
+				grid-template-columns: 1fr 1fr;
+				gap: 8px;
+				margin-bottom: 10px;
+			}
+			.opt.mini {
+				margin-bottom: 0;
+				padding: 12px 12px;
+				min-height: 46px;
+				font-size: 14px;
+				gap: 9px;
+			}
+			.opt.mini.sel {
+				background: var(--surface);
+				box-shadow: inset 0 0 0 1px var(--accent);
+			}
+			.order-row {
+				border-top: 1px solid var(--border);
+				padding-top: 12px;
+				margin-bottom: 14px;
+			}
+			.order-lab {
+				font-size: 14px;
+				font-weight: 800;
+				color: var(--text);
+				margin-bottom: 9px;
+				display: flex;
+				align-items: center;
+				gap: 8px;
+			}
+			.order-lab .oq {
+				font-size: 12px;
+				font-weight: 700;
+				color: var(--muted);
+				background: var(--surface2);
+				border-radius: 999px;
+				padding: 1px 9px;
+			}
 
 			/* ── Toast ──────────────────────────────────────────── */
 			#toast {
@@ -918,25 +1418,34 @@
 				transform: translateX(-50%) translateY(20px);
 				z-index: 60;
 				display: flex;
-				align-items: center;
-				gap: 14px;
+				flex-direction: column;
+				align-items: stretch;
 				background: var(--surface2);
 				border: 1px solid var(--border);
 				color: var(--text);
 				font-size: 13px;
 				font-weight: 600;
-				padding: 10px 16px;
-				border-radius: 24px;
+				border-radius: 14px;
 				box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
 				opacity: 0;
 				pointer-events: none;
-				transition: opacity 0.25s ease, transform 0.25s ease;
+				transition: opacity 0.22s ease, transform 0.22s ease;
 				max-width: 92vw;
+				overflow: hidden;
 			}
 			#toast.show {
 				opacity: 1;
 				pointer-events: auto;
 				transform: translateX(-50%) translateY(0);
+			}
+			.toast-row {
+				display: flex;
+				align-items: center;
+				gap: 16px;
+				padding: 12px 16px;
+			}
+			.toast-msg {
+				min-width: 0;
 			}
 			.toast-btn {
 				background: transparent;
@@ -944,41 +1453,501 @@
 				color: var(--accent);
 				font-family: inherit;
 				font-weight: 800;
-				font-size: 13px;
-				padding: 2px 4px;
+				font-size: 14px;
+				letter-spacing: 0.3px;
+				padding: 6px 10px;
+				margin: -6px -4px -6px 0;
+				border-radius: 8px;
 				cursor: pointer;
 				white-space: nowrap;
+				display: inline-flex;
+				align-items: center;
+				gap: 6px;
+			}
+			.toast-btn:active {
+				background: rgba(245, 100, 0, 0.14);
+			}
+			/* Countdown track — a shrinking line showing the remaining undo window. */
+			.toast-bar {
+				height: 3px;
+				width: 100%;
+				background: rgba(255, 255, 255, 0.12);
+			}
+			.toast-bar > i {
+				display: block;
+				height: 100%;
+				width: 100%;
+				background: var(--accent);
+				transform: scaleX(1);
+				transform-origin: left center;
+			}
+
+			/* ── Supplier map (in-person wayfinding) ─────────────── */
+			.map-bg {
+				position: fixed;
+				inset: 0;
+				z-index: 58;
+				background: var(--bg);
+				display: none;
+				flex-direction: column;
+			}
+			.map-bg.open {
+				display: flex;
+			}
+			/* Slim header — leaves the maximum area for the map itself. */
+			.map-head {
+				display: flex;
+				align-items: center;
+				gap: 9px;
+				padding: calc(5px + var(--safe-top)) 11px 5px;
+				border-bottom: 1px solid var(--border);
+				background: var(--surface);
+			}
+			.map-head .iconbtn {
+				width: 32px;
+				height: 32px;
+			}
+			/* Title + subtitle share ONE line to keep the header short (more map). */
+			.map-titles {
+				flex: 1;
+				min-width: 0;
+				display: flex;
+				align-items: baseline;
+				gap: 8px;
+				overflow: hidden;
+			}
+			.map-title {
+				font-size: 14px;
+				font-weight: 800;
+				line-height: 1.15;
+				white-space: nowrap;
+				flex: none;
+			}
+			.map-sub {
+				font-size: 11.5px;
+				color: var(--muted);
+				white-space: nowrap;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				min-width: 0;
+			}
+			.map-floors {
+				display: flex;
+				gap: 6px;
+				flex-shrink: 0;
+			}
+			.map-floor {
+				min-width: 38px;
+				padding: 6px 11px;
+				border-radius: 9px;
+				border: 1px solid var(--border);
+				background: var(--surface2);
+				font-weight: 800;
+				font-size: 12.5px;
+				color: var(--muted);
+			}
+			.map-floor.on {
+				color: var(--text);
+				border-color: var(--accent);
+				background: rgba(245, 100, 0, 0.12);
+			}
+			/* Legend floats over the map (top-left) instead of taking its own row. */
+			.map-legend {
+				position: absolute;
+				top: 10px;
+				left: 10px;
+				z-index: 2;
+				display: flex;
+				flex-wrap: wrap;
+				gap: 12px;
+				padding: 7px 11px;
+				border: 1px solid var(--border);
+				border-radius: 11px;
+				background: rgba(23, 26, 35, 0.82);
+				backdrop-filter: blur(8px);
+				font-size: 11px;
+				color: var(--muted);
+				pointer-events: none;
+			}
+			.map-legend .lg {
+				display: inline-flex;
+				align-items: center;
+				gap: 6px;
+			}
+			.map-legend .sw {
+				width: 12px;
+				height: 12px;
+				border-radius: 4px;
+				border: 1px solid var(--border);
+				background: var(--surface2);
+			}
+			.map-legend .sw.need {
+				background: rgba(245, 100, 0, 0.9);
+				border-color: var(--accent);
+			}
+			.map-legend .sw.done {
+				background: var(--green-bg);
+				border-color: var(--green);
+			}
+			/* Stage: a fixed viewport; the scene inside is panned & zoomed. */
+			.map-body {
+				flex: 1;
+				position: relative;
+				overflow: hidden;
+				touch-action: none;
+				cursor: grab;
+				background: radial-gradient(circle at 50% 28%, rgba(108, 143, 255, 0.06), transparent 62%), var(--bg);
+				perspective: 1500px;
+				perspective-origin: 50% 36%;
+			}
+			.map-body.grabbing {
+				cursor: grabbing;
+			}
+			.map-scene {
+				position: absolute;
+				top: 0;
+				left: 0;
+				transform-origin: 0 0;
+				transform-style: preserve-3d;
+				will-change: transform;
+			}
+			/* The floor plate — a top-down plan with BOTH corridors side by side. */
+			.map-floor {
+				display: inline-flex;
+				flex-direction: row;
+				align-items: flex-start;
+				gap: 8px;
+				padding: 18px 18px 22px;
+				background: repeating-linear-gradient(0deg, transparent 0 27px, rgba(255, 255, 255, 0.018) 27px 28px),
+					repeating-linear-gradient(90deg, transparent 0 27px, rgba(255, 255, 255, 0.018) 27px 28px), var(--surface);
+				border: 1px solid var(--border);
+				border-radius: 16px;
+				box-shadow: 0 32px 64px rgba(0, 0, 0, 0.5);
+				transform: rotateX(0deg);
+				transform-origin: 50% 45%;
+				transition: transform 0.45s ease;
+			}
+			.map-scene.tilt .map-floor {
+				transform: rotateX(52deg);
+			}
+			.corridor {
+				display: flex;
+				flex-direction: column;
+				align-items: stretch;
+			}
+			/* Central walkway between the two corridors; landmarks (elevator) sit at
+			   the near/bottom end. */
+			.map-walkway {
+				align-self: stretch;
+				display: flex;
+				flex-direction: column;
+				justify-content: flex-end;
+				align-items: center;
+				min-width: 46px;
+				padding-bottom: 4px;
+			}
+			.map-elevator {
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				gap: 2px;
+				padding: 7px 6px;
+				border: 1px solid var(--blue);
+				border-radius: 10px;
+				background: rgba(108, 143, 255, 0.14);
+				color: var(--blue);
+				font-size: 10px;
+				font-weight: 800;
+				text-align: center;
+				box-shadow: 0 2px 0 rgba(0, 0, 0, 0.4), 0 4px 10px rgba(0, 0, 0, 0.3);
+			}
+			.map-elevator svg {
+				width: 20px;
+				height: 20px;
+				fill: none;
+				stroke: currentColor;
+				stroke-width: 2;
+				stroke-linecap: round;
+				stroke-linejoin: round;
+			}
+			.corridor-title {
+				font-size: 12px;
+				font-weight: 800;
+				text-transform: uppercase;
+				letter-spacing: 0.6px;
+				color: var(--muted);
+				text-align: center;
+				margin-bottom: 12px;
+				white-space: nowrap;
+			}
+			.aisle {
+				display: flex;
+				align-items: flex-start;
+			}
+			.aisle .side {
+				width: 136px;
+				flex: none;
+			}
+			/* The dashed lane between the two sides IS the walkable aisle. */
+			.aisle .side.a {
+				border-right: 2px dashed var(--border);
+				padding-right: 10px;
+			}
+			.aisle .side.b {
+				padding-left: 10px;
+			}
+			.side-title {
+				font-size: 12px;
+				font-weight: 800;
+				color: var(--blue);
+				text-align: center;
+				padding: 0 0 9px;
+			}
+			.mblock {
+				display: flex;
+				flex-direction: column;
+				gap: 7px;
+			}
+			/* Cross-corridor: a horizontal walkway between two stall runs. */
+			.mblock + .mblock {
+				margin-top: 12px;
+				padding-top: 16px;
+				border-top: 2px dashed var(--border);
+			}
+			/* Booths — raised 2.5-D tiles (base edge + drop shadow) that read as 3-D
+			   under the perspective tilt. */
+			.mstall {
+				position: relative;
+				border: 1px solid var(--border);
+				border-radius: 10px;
+				background: linear-gradient(180deg, #232838, #191d29);
+				padding: 10px 11px;
+				min-height: 52px;
+				display: flex;
+				flex-direction: column;
+				justify-content: center;
+				text-align: left;
+				width: 100%;
+				box-shadow: 0 2px 0 rgba(0, 0, 0, 0.4), 0 4px 8px rgba(0, 0, 0, 0.3);
+				transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, transform 0.06s ease;
+			}
+			.mstall .mcode {
+				font-size: 12px;
+				font-weight: 700;
+				color: var(--muted);
+				letter-spacing: 0.3px;
+			}
+			.mstall .mname {
+				font-size: 15px;
+				font-weight: 800;
+				color: var(--text);
+				line-height: 1.15;
+				margin-top: 2px;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+			/* Order count sits in the box's top-right corner (frees the body for a
+			   bigger shop name / code). */
+			.mstall .mcount {
+				position: absolute;
+				top: 6px;
+				right: 6px;
+				font-size: 11px;
+				font-weight: 800;
+				color: #fff;
+				background: var(--accent);
+				border-radius: 9px;
+				min-width: 20px;
+				height: 20px;
+				padding: 0 6px;
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+			}
+			/* When the order-count badge is present, keep the code clear of it. */
+			.mstall.need .mcode {
+				padding-right: 22px;
+			}
+			.mstall.unnamed {
+				opacity: 0.4;
+				min-height: 36px;
+				background: #171a24;
+				box-shadow: 0 1px 0 rgba(0, 0, 0, 0.3);
+			}
+			.mstall.need {
+				border-color: var(--accent);
+				background: linear-gradient(180deg, rgba(245, 100, 0, 0.24), rgba(245, 100, 0, 0.12));
+				box-shadow: 0 3px 0 #a83f00, 0 9px 18px rgba(245, 100, 0, 0.34);
+				cursor: pointer;
+			}
+			.mstall.need .mcode,
+			.mstall.need .mname {
+				color: #ffb877;
+			}
+			.mstall.done {
+				border-color: var(--green);
+				background: linear-gradient(180deg, rgba(34, 197, 94, 0.16), rgba(34, 197, 94, 0.08));
+				box-shadow: 0 2px 0 #12603a, 0 5px 12px rgba(34, 197, 94, 0.22);
+				cursor: pointer;
+			}
+			.mstall.done .mcode,
+			.mstall.done .mname {
+				color: #63e6a1;
+			}
+			.mstall.done .mcount {
+				background: var(--green);
+				color: #05130b;
+			}
+			.mstall.need:active,
+			.mstall.done:active {
+				transform: scale(0.97);
+			}
+			/* Locate mode: mute the floor and turn the target into a high-contrast
+			   cyan beacon. Orange already means "to buy", so a distinct hue avoids
+			   confusing location focus with purchase status. */
+			.map-body.locating .mstall:not(.locate),
+			.map-body.locating .map-elevator {
+				opacity: 0.42;
+				filter: saturate(0.45);
+			}
+			@keyframes mlocatePulse {
+				0%,
+				100% {
+					outline-color: #5ee7ff;
+					transform: scale(1);
+				}
+				50% {
+					outline-color: #fff;
+					transform: scale(1.14);
+				}
+			}
+			.mstall.locate {
+				opacity: 1 !important;
+				filter: none !important;
+				outline: 5px solid #5ee7ff;
+				outline-offset: 4px;
+				border-radius: 9px;
+				background: linear-gradient(180deg, rgba(0, 213, 255, 0.48), rgba(0, 102, 255, 0.34));
+				border-color: #fff;
+				box-shadow: 0 0 0 4px rgba(94, 231, 255, 0.38), 0 0 34px rgba(94, 231, 255, 0.95);
+				animation: mlocatePulse 0.8s ease-in-out infinite;
+				z-index: 8;
+				position: relative;
+			}
+			.mstall.locate .mcode,
+			.mstall.locate .mname {
+				color: #fff;
+			}
+			.mstall.locate::after {
+				content: attr(data-located);
+				position: absolute;
+				left: 50%;
+				bottom: calc(100% + 9px);
+				transform: translateX(-50%);
+				padding: 4px 9px;
+				border-radius: 9px;
+				background: #5ee7ff;
+				color: #05202b;
+				font-size: 12px;
+				font-weight: 900;
+				letter-spacing: 0.6px;
+				white-space: nowrap;
+				box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+			}
+			/* Zoom / 3-D controls overlaid on the stage. */
+			.map-ctrls {
+				position: absolute;
+				right: 12px;
+				bottom: calc(14px + var(--safe-bottom));
+				display: flex;
+				flex-direction: column;
+				gap: 8px;
+				z-index: 2;
+			}
+			.map-ctrl {
+				width: 44px;
+				height: 44px;
+				border-radius: 12px;
+				border: 1px solid var(--border);
+				background: rgba(29, 33, 48, 0.92);
+				backdrop-filter: blur(8px);
+				color: var(--text);
+				font-weight: 800;
+				font-size: 13px;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+			}
+			.map-ctrl svg {
+				width: 20px;
+				height: 20px;
+				fill: none;
+				stroke: currentColor;
+				stroke-width: 2;
+				stroke-linecap: round;
+				stroke-linejoin: round;
+			}
+			.map-ctrl:active {
+				background: var(--surface2);
+			}
+			.map-ctrl.on {
+				border-color: var(--accent);
+				color: var(--accent);
+				background: rgba(245, 100, 0, 0.16);
+			}
+
+			/* Respect users who ask for less motion: drop non-essential animation and
+			   press-scale effects (the undo window still works, just without the
+			   animated line). */
+			@media (prefers-reduced-motion: reduce) {
+				*,
+				*::before,
+				*::after {
+					animation-duration: 0.001ms !important;
+					animation-iteration-count: 1 !important;
+					transition-duration: 0.001ms !important;
+					scroll-behavior: auto !important;
+				}
+				.comp:active,
+				.price:active,
+				.markall:active,
+				.toast-btn:active {
+					transform: none !important;
+				}
 			}
 		</style>
 	</head>
 	<body>
 		<header>
 			<div class="hrow">
-				<button class="iconbtn menubtn" id="menuBtn" title="Menu / 目录" aria-label="Open navigation">☰</button>
+				<button class="iconbtn menubtn" id="menuBtn" title="Menu / 目录" aria-label="Open navigation"><svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
 				<div class="brand"><span id="brandText">Shopping Route</span></div>
 				<div class="hactions">
-					<span class="conn" id="conn"><span class="dot"></span><span id="connText">Connecting</span></span>
-					<button class="iconbtn" id="undoBtn" title="Undo / 撤销" style="display: none">↶</button>
-					<button class="iconbtn langbtn" id="langBtn" title="Switch language / 切换语言">中文</button>
-					<button class="iconbtn" id="dashBtn" title="Back to dashboard" style="display: none">🏠</button>
-					<button class="iconbtn" id="refreshBtn" title="Refresh">↻</button>
-					<button class="iconbtn" id="logoutBtn" title="Sign out">⏻</button>
+					<span class="conn" id="conn" role="status" aria-live="polite"><span class="dot"></span><span id="connText">Connecting</span></span>
+					<button class="iconbtn" id="mapBtn" title="Supplier map / 供应商地图" aria-label="Supplier map" style="display: none"><svg viewBox="0 0 24 24"><path d="M9 4 3.5 6v14L9 18l6 2 5.5-2V4L15 6 9 4z"/><line x1="9" y1="4" x2="9" y2="18"/><line x1="15" y1="6" x2="15" y2="20"/></svg></button>
+					<button class="iconbtn langbtn" id="langBtn" title="Switch language / 切换语言" aria-label="Switch language">中文</button>
+					<button class="iconbtn" id="dashBtn" title="Back to dashboard" aria-label="Back to dashboard" style="display: none"><svg viewBox="0 0 24 24"><path d="M3 11l9-8 9 8"/><path d="M5 9.8V21h14V9.8"/></svg></button>
+					<button class="iconbtn" id="refreshBtn" title="Refresh" aria-label="Refresh"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3.5V9h-5.5"/></svg></button>
+					<button class="iconbtn" id="logoutBtn" title="Sign out" aria-label="Sign out"><svg viewBox="0 0 24 24"><path d="M15 4h3a1.5 1.5 0 0 1 1.5 1.5v13A1.5 1.5 0 0 1 18 20h-3"/><path d="M10 12h9"/><path d="M15.5 8.5 19 12l-3.5 3.5"/></svg></button>
 				</div>
 			</div>
 			<div class="summary">
 				<div class="stat"><div class="n" id="stItems">–</div><div class="l" id="lblItems">Items to buy</div></div>
-				<div class="stat"><div class="n" id="stOrders">–</div><div class="l" id="lblOrders">Orders</div></div>
+				<div class="stat"><div class="n" id="stStalls">–</div><div class="l" id="lblStalls">Stalls to visit</div></div>
 			</div>
 			<div class="progress"><i id="progressBar"></i></div>
 		</header>
 
 		<div class="filters">
 			<div class="search">
-				<span class="mag">🔍</span>
-				<input id="searchInput" type="search" placeholder="Search…" autocomplete="off" />
+				<span class="mag"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg></span>
+				<input id="searchInput" type="search" placeholder="Search…" autocomplete="off" aria-label="Search" />
 			</div>
 			<button class="chipbtn" id="showDoneBtn" title="Show bought">Show bought</button>
-			<button class="chipbtn" id="advBtn" title="Filters">⚙</button>
+			<button class="chipbtn iconchip" id="advBtn" title="Filters" aria-label="Filters"><svg viewBox="0 0 24 24"><path d="M4 5h16l-6.2 8v5l-3.6 2v-7z"/></svg></button>
 		</div>
 		<div class="advfilters" id="advFilters">
 			<select id="shopFilter"><option value="">All shops</option></select>
@@ -991,27 +1960,65 @@
 		</div>
 
 		<div class="drawer-bg" id="drawerBg">
-			<nav class="drawer" id="drawer" aria-label="Route navigation">
+			<nav class="drawer" id="drawer" role="dialog" aria-modal="true" aria-label="Route navigation">
 				<div class="drawer-head">
 					<div>
 						<div id="drawerTitle" class="drawer-title">Overview</div>
 						<div id="drawerSub" class="drawer-sub"></div>
 					</div>
-					<button class="iconbtn" id="drawerClose" aria-label="Close">✕</button>
+					<button class="iconbtn" id="drawerClose" title="Close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button>
 				</div>
 				<div class="drawer-tree" id="treeRoot"></div>
 			</nav>
 		</div>
 
+		<div class="map-bg" id="mapBg" role="dialog" aria-modal="true" aria-label="Supplier map">
+			<div class="map-head">
+				<button class="iconbtn" id="mapClose" title="Close" aria-label="Close"><svg viewBox="0 0 24 24"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button>
+				<div class="map-titles">
+					<span class="map-title" id="mapTitle">Map</span>
+					<span class="map-sub" id="mapSub"></span>
+				</div>
+				<div class="map-floors" id="mapFloors"></div>
+			</div>
+			<div class="map-body" id="mapBody">
+				<div class="map-scene" id="mapScene"><div class="map-floor" id="mapFloor"></div></div>
+				<div class="map-legend" id="mapLegend"></div>
+				<div class="map-ctrls">
+					<button class="map-ctrl" id="map3dBtn" title="Toggle 3D view" aria-label="Toggle 3D view">3D</button>
+					<button class="map-ctrl" id="mapFit" title="Fit to screen" aria-label="Fit to screen"><svg viewBox="0 0 24 24"><path d="M4 9V5a1 1 0 0 1 1-1h4"/><path d="M20 9V5a1 1 0 0 0-1-1h-4"/><path d="M4 15v4a1 1 0 0 0 1 1h4"/><path d="M20 15v4a1 1 0 0 1-1 1h-4"/></svg></button>
+					<button class="map-ctrl" id="mapZoomOut" title="Zoom out" aria-label="Zoom out"><svg viewBox="0 0 24 24"><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+					<button class="map-ctrl" id="mapZoomIn" title="Zoom in" aria-label="Zoom in"><svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+				</div>
+			</div>
+		</div>
+
+		<div class="zoom-bg" id="zoomBg"><img id="zoomImg" alt="" /></div>
+
 		<div class="sheet-bg" id="sheetBg">
-			<div class="sheet" id="sheet">
+			<div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
 				<div class="grip"></div>
 				<h4 id="sheetTitle"></h4>
 				<div id="sheetOpts"></div>
 			</div>
 		</div>
 
-		<div id="toast"></div>
+		<div class="sheet-bg" id="priceBg">
+			<div class="sheet" id="priceSheet" role="dialog" aria-modal="true" aria-labelledby="priceTitle">
+				<div class="grip"></div>
+				<h4 id="priceTitle"></h4>
+				<div class="price-input-row">
+					<span class="price-cur" id="priceCur">¥</span>
+					<input id="priceInput" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0" />
+				</div>
+				<div class="price-actions">
+					<button class="price-clear" id="priceClear"></button>
+					<button class="price-save" id="priceSave"></button>
+				</div>
+			</div>
+		</div>
+
+		<div id="toast" role="status" aria-live="polite"></div>
 
 		<script>
 			'use strict'
@@ -1020,6 +2027,14 @@
 			const COMP_GRIP = { key: 'grip', flag: 'has_grip', status: 'status_grip', label: 'Grip', labelZh: '支架' }
 			const COMP_CHARM = { key: 'charm', flag: 'has_charm', status: 'status_charm', label: 'Charm', labelZh: '挂件' }
 			const COMPONENTS = [COMP_CASE, COMP_GRIP, COMP_CHARM]
+			// Line icons (stroke = currentColor) so each component type is recognisable
+			// at a glance, not just by its label: phone = case, popsocket = grip,
+			// star = charm.
+			const ICONS = {
+				case: '<svg viewBox="0 0 24 24"><rect x="6" y="2.5" width="12" height="19" rx="2.5"/><line x1="10" y1="18.3" x2="14" y2="18.3"/></svg>',
+				grip: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.2"/></svg>',
+				charm: '<svg viewBox="0 0 24 24"><path d="M12 2.6l2.6 6.3 6.8.5-5.2 4.4 1.7 6.6L12 17.3 6.3 20.9l1.7-6.6L2.8 9.4l6.8-.5z"/></svg>',
+			}
 			// The shopping route (like the Excel) is split into two sections you shop
 			// separately: cases + grips at the case suppliers, and charms at the charm
 			// stalls. A single order line can appear in BOTH — its case/grip part under
@@ -1032,8 +2047,13 @@
 				Purchased: { cls: 'purchased', color: '#22c55e', en: 'Bought', zh: '已购' },
 				'Out of Stock': { cls: 'stock', color: '#ef4444', en: 'No stock', zh: '缺货' },
 				'Out of Production': { cls: 'prod', color: '#a78bfa', en: 'Discontinued', zh: '停产' },
+				'Wrong Stall': { cls: 'wrong', color: '#f5a524', en: 'Wrong stall', zh: '错档口位' },
+				'Model Unavailable': { cls: 'nomodel', color: '#fb7185', en: 'No model', zh: '没有此型号' },
+				// Display-only pseudo-status: several orders of one model sit on
+				// DIFFERENT statuses. Never sent to the server, never in the picker.
+				mixed: { cls: 'mixed', color: '#94a3b8', en: 'Mixed', zh: '混合' },
 			}
-			const STATUS_ORDER = ['Pending', 'Purchased', 'Out of Stock', 'Out of Production']
+			const STATUS_ORDER = ['Pending', 'Purchased', 'Out of Stock', 'Out of Production', 'Wrong Stall', 'Model Unavailable']
 			const LS = 'shopRouteFilters'
 
 			// ── i18n ─ the page shows ONE language at a time (English OR 简体中文) ──
@@ -1048,6 +2068,7 @@
 				brand: { en: 'Shopping Route', zh: '采购路线' },
 				items: { en: 'Items to buy', zh: '待购' },
 				orders: { en: 'Orders', zh: '订单' },
+				stalls: { en: 'Stalls to visit', zh: '待跑摊位' },
 				searchPh: { en: 'Search product, model, charm…', zh: '搜索产品、型号、挂件…' },
 				showBought: { en: 'Show bought', zh: '显示已购' },
 				allShops: { en: 'All shops', zh: '全部店铺' },
@@ -1066,6 +2087,19 @@
 				undone: { en: 'Undone', zh: '已撤销' },
 				markedBought: { en: 'Marked bought', zh: '已标记已购' },
 				markedExchanged: { en: 'Marked exchanged', zh: '已标记换货' },
+				priceFor: { en: 'Price', zh: '价格' },
+				setPrice: { en: 'Set', zh: '设价' },
+				save: { en: 'Save', zh: '保存' },
+				clear: { en: 'Clear', zh: '清除' },
+				priceInvalid: { en: 'Enter a valid amount', zh: '请输入有效金额' },
+				priceSaved: { en: 'Price saved', zh: '价格已保存' },
+				priceSaveFail: { en: "Couldn't save price", zh: '价格保存失败' },
+				mapTitle: { en: 'Supplier map', zh: '供应商地图' },
+				legTo: { en: 'To buy', zh: '待购' },
+				legDone: { en: 'Bought', zh: '已购' },
+				legOther: { en: 'Other', zh: '其他' },
+				mapNone: { en: 'Map unavailable.', zh: '地图不可用。' },
+				locate: { en: 'Locate on map', zh: '在地图上定位' },
 				nothing: { en: 'Nothing to shop right now.', zh: '暂无需要采购的订单。' },
 				allBought: { en: 'All bought — great work!', zh: '全部采购完成！' },
 				noMatches: { en: 'No matches.', zh: '无匹配结果' },
@@ -1081,6 +2115,10 @@
 				overview: { en: 'Overview', zh: '总览' },
 				otherFloor: { en: 'Other', zh: '其他' },
 				leftSummary: { en: 'left to buy', zh: '待购' },
+				mixed: { en: 'Mixed', zh: '混合' },
+				setAll: { en: 'Set all orders', zh: '全部订单设为' },
+				perOrder: { en: 'Set each order', zh: '逐单设置' },
+				order: { en: 'Order', zh: '订单' },
 			}
 			const t = (k) => (T[k] ? T[k][LANG] : k)
 			const compLabel = (c) => (LANG === 'zh' ? c.labelZh : c.label)
@@ -1089,14 +2127,54 @@
 				return LANG === 'zh' ? m.zh : m.en
 			}
 			const ordersN = (n) => (LANG === 'zh' ? `${n} 单` : `${n} order${n > 1 ? 's' : ''}`)
+			// Status line for an aggregate chip. A "mixed" aggregate shows progress
+			// (bought / total) so the shopper sees at a glance what's left to resolve.
+			// Priority order for a mixed breakdown — still-to-buy states first, resolved
+			// last — so the shopper's eye lands on what still needs action.
+			const STATUS_PRIORITY = ['Pending', 'Out of Stock', 'Wrong Stall', 'Purchased', 'Out of Production', 'Model Unavailable']
+			// Statuses that still need the shopper's attention on the floor (mirror of
+			// the server's outstanding set). Resolved statuses are dimmed in a mixed
+			// breakdown so the actionable counts pop.
+			const OUTSTANDING_STATUSES = new Set(['Pending', 'Out of Stock', 'Wrong Stall'])
+			// Quantity-weighted status tally across a set of order lines (matches the
+			// chip's ×qty label: the segment counts always sum to it).
+			function statusCounts(rows, statusField) {
+				const m = new Map()
+				for (const r of rows) {
+					const s = r[statusField] || 'Pending'
+					m.set(s, (m.get(s) || 0) + (r.quantity || 1))
+				}
+				return m
+			}
+			// Status line for an aggregate chip. When every order of the model shares a
+			// status we show that one label (the chip already carries its colour). When
+			// they DIFFER we render a colour-coded count breakdown — e.g. “1 已购 · 1 缺货”
+			// — so the shopper reads at a glance exactly what's done vs. still to buy,
+			// instead of a vague “mixed”. Returns HTML (safe: only known status keys and
+			// integer counts).
+			function aggStatusHtml(st, rows, statusField) {
+				if (st !== 'mixed') return stLabel(st)
+				const counts = statusCounts(rows, statusField)
+				const segs = STATUS_PRIORITY.filter((s) => counts.has(s)).map((s) => {
+					const meta = STATUS_META[s] || STATUS_META.Pending
+					const dim = OUTSTANDING_STATUSES.has(s) ? '' : ' done'
+					return `<span class="cseg${dim}" style="color:${meta.color}"><b>${counts.get(s)}</b> ${stLabel(s)}</span>`
+				})
+				return `<span class="cbreak">${segs.join('')}</span>`
+			}
 			const floorLabel = (n) => (LANG === 'zh' ? `${n}楼` : `F${n}`)
+			// Supplier costs are in RMB (mall wholesale). Change CUR to localise.
+			const CUR = '¥'
+			const money = (n) => CUR + (Math.round((Number(n) || 0) * 100) / 100)
+			// Match the server's product_map title normalisation for cost lookups.
+			const normTitle = (s) => String(s || '').replace(/\|/g, ',').replace(/\s+/g, ' ').trim().toLowerCase()
 
 			// Update all fixed (non-list) text to the active language.
 			function applyStaticI18n() {
 				document.title = t('brand')
 				$('brandText').textContent = t('brand')
 				$('lblItems').textContent = t('items')
-				$('lblOrders').textContent = t('orders')
+				$('lblStalls').textContent = t('stalls')
 				$('searchInput').placeholder = t('searchPh')
 				$('showDoneBtn').textContent = t('showBought')
 				$('langBtn').textContent = LANG === 'en' ? '中文' : 'EN'
@@ -1117,10 +2195,17 @@
 			const collapseOverride = new Map() // groupKey → bool (user's explicit expand/collapse)
 			let LAST_GROUPS = [] // groups as last rendered (for collapse + auto-scroll)
 			const AGG = new Map() // aggId → [rows] for aggregated charm cards (rebuilt each render)
-			const undoStack = [] // recent reversible actions (accidental taps → Undo)
+			let MODEL_AGG_SEQ = 0
 
 			const $ = (id) => document.getElementById(id)
 			const keyOf = (r) => r.receipt_id + '\x00' + r.item_key
+			// Subtle haptic feedback for confirmations — a shopper often taps without
+			// looking in a busy market. No-op where unsupported (iOS Safari ignores it).
+			const haptic = (p) => {
+				try {
+					if (navigator.vibrate) navigator.vibrate(p)
+				} catch {}
+			}
 			const esc = (s) =>
 				String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
 
@@ -1141,28 +2226,56 @@
 			const cgDone = (r) => partDone(r, CASE_GRIP)
 			const charmDone = (r) => partDone(r, CHARM)
 
-			// ── Toast (optionally with an action button, e.g. "Undo") ────────────
+			// ── Snackbar (message + optional action + optional countdown line) ────
+			// When `countdownMs` is set alongside an action, a shrinking line shows how
+			// much of the undo window is left; the bar auto-dismisses when it empties.
 			let toastT = null
-			function toast(msg, actionLabel, actionFn) {
+			function hideToast() {
+				clearTimeout(toastT)
+				$('toast').classList.remove('show')
+			}
+			function toast(msg, actionLabel, actionFn, countdownMs) {
 				const el = $('toast')
 				el.innerHTML = ''
+				const row = document.createElement('div')
+				row.className = 'toast-row'
 				const span = document.createElement('span')
 				span.className = 'toast-msg'
 				span.textContent = msg
-				el.appendChild(span)
-				if (actionLabel && actionFn) {
+				row.appendChild(span)
+				const hasAction = !!(actionLabel && actionFn)
+				if (hasAction) {
 					const b = document.createElement('button')
 					b.className = 'toast-btn'
 					b.textContent = actionLabel
 					b.addEventListener('click', () => {
-						el.classList.remove('show')
+						hideToast()
 						actionFn()
 					})
-					el.appendChild(b)
+					row.appendChild(b)
+				}
+				el.appendChild(row)
+				let dur = hasAction ? 5500 : 2600
+				if (hasAction && countdownMs) {
+					dur = countdownMs
+					const bar = document.createElement('div')
+					bar.className = 'toast-bar'
+					const fill = document.createElement('i')
+					bar.appendChild(fill)
+					el.appendChild(bar)
+					// Animate the line from full → empty over the undo window. Force a
+					// reflow between states so the transition restarts every time.
+					requestAnimationFrame(() => {
+						fill.style.transition = 'none'
+						fill.style.transform = 'scaleX(1)'
+						void fill.offsetWidth
+						fill.style.transition = `transform ${dur}ms linear`
+						fill.style.transform = 'scaleX(0)'
+					})
 				}
 				el.classList.add('show')
 				clearTimeout(toastT)
-				toastT = setTimeout(() => el.classList.remove('show'), actionLabel ? 5500 : 2600)
+				toastT = setTimeout(() => el.classList.remove('show'), dur)
 			}
 
 			// ── Connection badge ────────────────────────────────────────────────
@@ -1191,6 +2304,18 @@
 			function supplierSortKey(floor, stall, shop) {
 				return `${String(floorNorm(floor)).padStart(4, '0')}\x00${(stall || '').toLowerCase()}\x00${(shop || '').toLowerCase()}`
 			}
+			// Stop identity for a line, matching the list's grouping exactly so counts
+			// line up with what the shopper sees. Case/grip stops key by supplier
+			// location; charm stops key by charm stall. Unmatched → a single bucket.
+			const supKeyOf = (r) => {
+				const shop = (r.supplier_shop || '').trim()
+				const stall = (r.supplier_stall || '').trim()
+				return shop || stall ? supplierSortKey(r.supplier_floor, stall, shop) : '\uffff'
+			}
+			const charmKeyOf = (r) => {
+				const shop = (r.charm_shop || '').trim()
+				return shop ? shop.toLowerCase() : '\uffff'
+			}
 			function groupRows(rows) {
 				const groups = new Map()
 				for (const r of rows) {
@@ -1215,7 +2340,18 @@
 				const remaining = actionable.filter((r) => !fullyPurchased(r))
 				const done = actionable.length - remaining.length
 				$('stItems').textContent = remaining.length
-				$('stOrders').textContent = new Set(remaining.map((r) => r.receipt_id)).size
+				// Stalls still to visit — the actionable metric that replaced the (for a
+				// shopper, meaningless) order count. A line contributes a supplier stop
+				// while its case/grip is unbought and a charm stop while its charm is
+				// unbought (two different stalls → two stops); open exchanges are stops
+				// too. Deduped, so the number equals the stall cards still showing work.
+				const stops = new Set()
+				for (const r of actionable) {
+					if ((r.has_case || r.has_grip) && !cgDone(r)) stops.add('s\x01' + supKeyOf(r))
+					if (r.has_charm && !charmDone(r)) stops.add('c\x01' + charmKeyOf(r))
+				}
+				for (const x of EXCHANGES) stops.add('s\x01' + supKeyOf(x))
+				$('stStalls').textContent = stops.size
 				const pct = actionable.length ? Math.round((done / actionable.length) * 100) : 0
 				$('progressBar').style.width = pct + '%'
 			}
@@ -1228,41 +2364,165 @@
 					.map((c) => {
 						const st = r[c.status] || 'Pending'
 						const m = STATUS_META[st] || STATUS_META.Pending
-						return `<button class="comp ${m.cls}" data-rid="${r.receipt_id}" data-ik="${esc(r.item_key)}" data-c="${c.key}">
-							<div class="cl">${compLabel(c)}</div>
-							<div class="cs">${stLabel(st)}</div>
+						return `<button class="comp type-${c.key} ${m.cls}" data-rid="${r.receipt_id}" data-ik="${esc(r.item_key)}" data-c="${c.key}">
+							<span class="cicon">${ICONS[c.key] || ''}</span>
+							<div class="ctext"><span class="cl">${compLabel(c)}</span><span class="cs">${stLabel(st)}</span></div>
 						</button>`
 					})
 					.join('')
 			}
 
+			function aggregateComponentStatus(rows, component) {
+				const relevant = rows.filter((r) => r[component.flag])
+				const statuses = relevant.map((r) => r[component.status] || 'Pending')
+				if (!statuses.length) return 'Pending'
+				if (statuses.every((s) => s === statuses[0])) return statuses[0]
+				// Orders of the same model landed on different statuses (e.g. one
+				// bought, one out of stock). Surface it as a distinct "mixed" chip
+				// so the shopper knows to open it and resolve per order.
+				return 'mixed'
+			}
+
+			function aggregateCompHtml(rows, comps, aggId) {
+				return comps
+					.filter((c) => rows.some((r) => r[c.flag]))
+					.map((c) => {
+						const relevant = rows.filter((r) => r[c.flag])
+						const status = aggregateComponentStatus(rows, c)
+						const meta = STATUS_META[status] || STATUS_META.Pending
+						const qty = relevant.reduce((n, r) => n + (r.quantity || 1), 0)
+						return `<button class="comp type-${c.key} ${meta.cls}" data-agg="${aggId}" data-c="${c.key}">
+							<span class="cicon">${ICONS[c.key] || ''}</span>
+							<div class="ctext"><span class="cl">${compLabel(c)}${qty > 1 ? ` ×${qty}` : ''}</span><span class="cs">${aggStatusHtml(status, relevant, c.status)}</span></div>
+						</button>`
+					})
+					.join('')
+			}
+
+			// Price chip: shows the line total (unit × qty), tappable to set/change.
+			// `attrs` carries the identity the cost endpoint needs (product title or
+			// charm code) so a tap can save it.
+			function priceChip(attrs, label, unitCost, qty) {
+				const lab = `<span class="pl">${label}</span>`
+				if (unitCost == null || unitCost === '') {
+					return `<button class="price unset" ${attrs}>${lab}<span class="pvwrap"><span class="pv">${t('setPrice')}</span></span></button>`
+				}
+				const total = Number(unitCost) * (qty || 1)
+				const per = qty && qty > 1 ? `<span class="price-per">${money(unitCost)}×${qty}</span>` : ''
+				return `<button class="price" ${attrs}>${lab}<span class="pvwrap"><span class="pv">${money(total)}</span>${per}</span></button>`
+			}
+
 			// Case/Grip card — no product name; the phone model + style ARE the
 			// identity, shown large. Product photo is enlarged.
-			function cardHtml(r, g) {
-				const done = g.doneFn(r)
-				const img = r.image_url
+			function imgHtml(r) {
+				return r.image_url
 					? `<img class="thumb" loading="lazy" decoding="async" src="${esc(r.image_url)}" onerror="this.classList.add('ph');this.removeAttribute('src')" />`
 					: `<div class="thumb ph"></div>`
+			}
+			// A standalone Case/Grip card (single order for this product).
+			function cardHtml(r, g) {
+				const done = g.doneFn(r)
 				const tags = []
 				if (r.quantity > 1) tags.push(`<span class="tag qty">×${r.quantity}</span>`)
-				if (r.is_pre_transit) tags.push(`<span class="tag pre">Pre-transit</span>`)
 				const btn = done
 					? `<button class="markall done" data-rid="${r.receipt_id}" data-ik="${esc(r.item_key)}" data-sec="${g.section}">${t('bought')}</button>`
 					: `<button class="markall" data-rid="${r.receipt_id}" data-ik="${esc(r.item_key)}" data-sec="${g.section}">${t('markBought')}</button>`
-				return `<div class="card ${done ? 'done' : ''}" data-rid="${r.receipt_id}" data-ik="${esc(r.item_key)}">
-					<div class="ctop">
-						${img}
-						<div class="cinfo">
+				// One price chip per component present — case & grip priced separately.
+				const chips = []
+				if (r.has_case) chips.push(priceChip(`data-kind="product" data-part="case" data-title="${esc(r.title)}"`, compLabel(COMP_CASE), r.cost_case, r.quantity))
+				if (r.has_grip) chips.push(priceChip(`data-kind="product" data-part="grip" data-title="${esc(r.title)}"`, compLabel(COMP_GRIP), r.cost_grip, r.quantity))
+				const info = `<div class="cinfo">
 							<div class="cident stack">
 								<span class="cmodel">${esc(r.phone_model || '—')}</span>
-								${r.style ? `<span class="cstyle">${esc(r.style)}</span>` : ''}
 							</div>
 							${tags.length ? `<div class="cmeta">${tags.join('')}</div>` : ''}
-						</div>
-					</div>
+						</div>`
+				return `<div class="card ${done ? 'done' : ''}" data-rid="${r.receipt_id}" data-ik="${esc(r.item_key)}">
+					<div class="ctop">${imgHtml(r)}${info}</div>
 					<div class="comps">${compHtml(r, g.comps)}</div>
+					${chips.length ? `<div class="cprice">${chips.join('')}</div>` : ''}
 					${btn}
 				</div>`
+			}
+
+			function modelGroupHtml(rows, g, aggId) {
+				const r0 = rows[0]
+				const done = rows.every(g.doneFn)
+				const qty = rows.reduce((n, r) => n + (r.quantity || 1), 0)
+				const tags = []
+				if (qty > 1) tags.push(`<span class="tag qty">×${qty}</span>`)
+				const button = done
+					? `<button class="markall done compact" data-agg="${aggId}" data-sec="${g.section}">${t('bought')}</button>`
+					: `<button class="markall compact" data-agg="${aggId}" data-sec="${g.section}">${t('markBought')}</button>`
+				return `<div class="card in-product model-group ${done ? 'done' : ''}" data-agg="${aggId}">
+					<div class="model-line-head">
+						<span class="cmodel">${esc(r0.phone_model || '—')}</span>
+						${tags.length ? `<span class="cmeta">${tags.join('')}</span>` : ''}
+					</div>
+					<div class="comps">${aggregateCompHtml(rows, g.comps, aggId)}</div>
+					${button}
+				</div>`
+			}
+
+			// Render a supplier group's Case/Grip cards, unifying multiple orders of
+			// the SAME product (identical image across shops → same product_key) into a
+			// single product card: the image is shown ONCE, with a row per model to buy.
+			function renderCgCards(g) {
+				const byProduct = new Map()
+				for (const r of g.rows) {
+					const k = r.product_key || 't:' + normTitle(r.title)
+					if (!byProduct.has(k)) byProduct.set(k, [])
+					byProduct.get(k).push(r)
+				}
+				let html = ''
+				for (const lines of byProduct.values()) {
+					if (lines.length < 2) {
+						html += cardHtml(lines[0], g)
+						continue
+					}
+					const r0 = lines[0]
+					const totalQty = lines.reduce((n, r) => n + (r.quantity || 1), 0)
+					const caseNeed = lines.filter((r) => r.has_case && (r.status_case || 'Pending') !== 'Purchased').reduce((n, r) => n + (r.quantity || 1), 0)
+					const gripNeed = lines.filter((r) => r.has_grip && (r.status_grip || 'Pending') !== 'Purchased').reduce((n, r) => n + (r.quantity || 1), 0)
+					const caseCost = lines.find((r) => r.cost_case != null)?.cost_case ?? null
+					const gripCost = lines.find((r) => r.cost_grip != null)?.cost_grip ?? null
+					const sharedPrices = []
+					if (lines.some((r) => r.has_case)) sharedPrices.push(priceChip(`data-kind="product" data-part="case" data-title="${esc(r0.title)}"`, compLabel(COMP_CASE), caseCost, 1))
+					if (lines.some((r) => r.has_grip)) sharedPrices.push(priceChip(`data-kind="product" data-part="grip" data-title="${esc(r0.title)}"`, compLabel(COMP_GRIP), gripCost, 1))
+					const byModel = new Map()
+					for (const line of lines) {
+						const model = String(line.phone_model || '—').trim()
+						if (!byModel.has(model)) byModel.set(model, [])
+						byModel.get(model).push(line)
+					}
+					const modelGroups = [...byModel.entries()].sort((a, b) =>
+						b[0].localeCompare(a[0], undefined, { numeric: true, sensitivity: 'base' }),
+					)
+					html += `<div class="product">
+						<div class="product-head">
+							${imgHtml(r0)}
+							<div class="product-meta">
+								<div class="product-summary">
+									<span class="product-count">${modelGroups.length} ${LANG === 'zh' ? '个型号' : modelGroups.length > 1 ? 'models' : 'model'}</span>
+									<span class="tag qty">×${totalQty}</span>
+								</div>
+								<div class="component-totals">
+									${caseNeed ? `<span class="component-total case">${compLabel(COMP_CASE)} ×${caseNeed}</span>` : ''}
+									${gripNeed ? `<span class="component-total grip">${compLabel(COMP_GRIP)} ×${gripNeed}</span>` : ''}
+								</div>
+								${sharedPrices.length ? `<div class="product-prices">${sharedPrices.join('')}</div>` : ''}
+							</div>
+						</div>
+						<div class="plines">${modelGroups
+							.map(([, modelRows]) => {
+								const aggId = 'm' + MODEL_AGG_SEQ++
+								AGG.set(aggId, modelRows)
+								return modelGroupHtml(modelRows, g, aggId)
+							})
+							.join('')}</div>
+					</div>`
+				}
+				return html
 			}
 
 			// Charm card — one card PER charm code (identical charms are merged and
@@ -1272,8 +2532,8 @@
 				const status = aggStatus(a.rows)
 				const m = STATUS_META[status] || STATUS_META.Pending
 				const img = a.charm_code
-					? `<img class="thumb" loading="lazy" decoding="async" src="/api/route/charm-image?code=${encodeURIComponent(a.charm_code)}" onerror="this.classList.add('ph');this.removeAttribute('src')" />`
-					: `<div class="thumb ph"></div>`
+					? `<img class="thumb charm-thumb" loading="lazy" decoding="async" src="/api/route/charm-image?code=${encodeURIComponent(a.charm_code)}" onerror="this.classList.add('ph');this.removeAttribute('src')" />`
+					: `<div class="thumb charm-thumb ph"></div>`
 				const orders = a.rows.length
 				const btn = done
 					? `<button class="markall done" data-agg="${a.aggId}" data-sec="charm">${t('bought')}</button>`
@@ -1290,11 +2550,12 @@
 						</div>
 					</div>
 					<div class="comps">
-						<button class="comp ${m.cls}" data-agg="${a.aggId}" data-c="charm">
-							<div class="cl">${compLabel(COMP_CHARM)}</div>
-							<div class="cs">${stLabel(status)}</div>
+						<button class="comp type-charm ${m.cls}" data-agg="${a.aggId}" data-c="charm">
+							<span class="cicon">${ICONS.charm}</span>
+							<div class="ctext"><span class="cl">${compLabel(COMP_CHARM)}</span><span class="cs">${aggStatusHtml(status, a.rows, 'status_charm')}</span></div>
 						</button>
 					</div>
+					${a.charm_code ? `<div class="cprice">${priceChip(`data-kind="charm" data-code="${esc(a.charm_code)}"`, compLabel(COMP_CHARM), a.charm_cost, a.qty)}</div>` : ''}
 					${btn}
 				</div>`
 			}
@@ -1314,6 +2575,7 @@
 				for (const a of arr) {
 					a.qty = a.rows.reduce((n, r) => n + (r.quantity || 1), 0)
 					a.done = a.rows.every(charmDone)
+					a.charm_cost = a.rows[0] ? a.rows[0].charm_cost : null
 				}
 				arr.sort((a, b) => String(a.charm_code || '~').localeCompare(String(b.charm_code || '~'), undefined, { numeric: true }))
 				return arr
@@ -1323,9 +2585,8 @@
 			// actionable status (prefer "to buy").
 			function aggStatus(rows) {
 				const st = rows.map((r) => r.status_charm || 'Pending')
-				if (st.every((s) => s === 'Purchased')) return 'Purchased'
-				if (st.some((s) => s === 'Pending')) return 'Pending'
-				return st.find((s) => s !== 'Purchased') || 'Pending'
+				if (st.every((s) => s === st[0])) return st[0]
+				return 'mixed'
 			}
 
 			// Correction card — a model to fix on this trip. Two shapes:
@@ -1374,8 +2635,9 @@
 				const el = document.querySelector('.card.ex[data-exid="' + exid + '"]')
 				if (el) removeCardEl(el)
 				refreshBadges()
-				pushUndo({ type: 'exchange', exchange: x })
-				toast((x.have_model || '').trim() ? t('markedExchanged') : t('markedBought'), t('undo'), performUndo)
+				haptic(10)
+				const action = pushUndo({ type: 'exchange', exchange: x })
+				showUndoBar((x.have_model || '').trim() ? t('markedExchanged') : t('markedBought'), action)
 				fetch('/api/exchanges/' + encodeURIComponent(exid) + '/done', { method: 'POST', credentials: 'same-origin' })
 					.then((r) => {
 						if (r.status === 401) location.href = '/login'
@@ -1422,14 +2684,9 @@
 				// Section 1 — Cases & Grips, MERGED with exchanges at the same stall.
 				// A shopper standing at a supplier sees, in one place, what to BUY and
 				// what to SWAP there — no need to backtrack for exchanges later.
-				const supKey = (r) => {
-					const shop = (r.supplier_shop || '').trim()
-					const stall = (r.supplier_stall || '').trim()
-					return shop || stall ? supplierSortKey(r.supplier_floor, stall, shop) : '\uffff'
-				}
 				const merged = new Map()
 				const ensureGroup = (r) => {
-					const k = supKey(r)
+					const k = supKeyOf(r)
 					if (!merged.has(k)) {
 						const shop = (r.supplier_shop || '').trim()
 						const stall = (r.supplier_stall || '').trim()
@@ -1452,6 +2709,7 @@
 
 				// Register every merged charm so its buttons can act on all its lines.
 				AGG.clear()
+				MODEL_AGG_SEQ = 0
 				let ac = 0
 				for (const g of chGroups) for (const a of g.aggs) { a.aggId = 'a' + ac++; AGG.set(a.aggId, a.rows) }
 
@@ -1476,6 +2734,33 @@
 				const buy = g.rows.filter((r) => !g.doneFn(r)).length
 				return buy + ((g.exRows && g.exRows.length) || 0)
 			}
+			// Amount still to PAY at this stall (sum of unbought line costs). Exchanges
+			// are swaps, not purchases, so they're excluded. anyUnpriced flags that some
+			// items don't have a price yet (so the shown total is a partial total).
+			function groupSubtotal(g) {
+				let sum = 0
+				let anyUnpriced = false
+				if (g.section === 'charm') {
+					for (const a of g.aggs || []) {
+						if (a.done) continue
+						if (a.charm_cost != null) sum += Number(a.charm_cost) * (a.qty || 1)
+						else anyUnpriced = true
+					}
+				} else {
+					for (const r of g.rows) {
+						if (g.doneFn(r)) continue
+						const qty = r.quantity || 1
+						if (r.has_case) r.cost_case != null ? (sum += Number(r.cost_case) * qty) : (anyUnpriced = true)
+						if (r.has_grip) r.cost_grip != null ? (sum += Number(r.cost_grip) * qty) : (anyUnpriced = true)
+					}
+				}
+				return { sum: Math.round(sum * 100) / 100, anyUnpriced }
+			}
+			function gtotalHtml(g) {
+				const st = groupSubtotal(g)
+				if (st.sum <= 0) return ''
+				return `<span class="gtotal">${money(st.sum)}${st.anyUnpriced ? '+' : ''}</span>`
+			}
 
 			function renderSection(title, groups, baseIdx, kind) {
 				if (!groups.length) return ''
@@ -1491,6 +2776,12 @@
 				const collapsed = isCollapsed(g)
 				const count = allDone ? `<span class="gcount done">✓</span>` : `<span class="gcount">${remaining}</span>`
 				const chev = `<span class="gchev">${collapsed ? '▸' : '▾'}</span>`
+				const gtotal = gtotalHtml(g)
+				// "Locate on map" — only for supplier stalls we can actually point to.
+				const locBtn =
+					g.section !== 'charm' && g.matched && g.stall && mapHasStall(g.stall)
+						? `<button class="glocate" data-stall="${esc(g.stall)}" title="${t('locate')}" aria-label="${t('locate')}"><svg viewBox="0 0 24 24"><path d="M12 21s7-5.6 7-11a7 7 0 1 0-14 0c0 5.4 7 11 7 11z"/><circle cx="12" cy="10" r="2.6"/></svg></button>`
+						: ''
 				let head
 				if (g.section === 'charm') {
 					const hasFloor = g.floor != null && g.floor !== '' && g.floor !== 999
@@ -1498,7 +2789,7 @@
 						${hasFloor ? `<span class="floor">${esc(floorLabel(g.floor))}</span>` : ''}
 						<span class="shop">${esc(g.shop || t('charmNotSet'))}</span>
 						${g.stall ? `<span class="stall">${esc(g.stall)}</span>` : ''}
-						${count}${chev}
+						${gtotal}${count}${chev}
 					</div>`
 				} else {
 					const hasFloor = g.floor != null && g.floor !== '' && g.floor !== 999
@@ -1507,11 +2798,11 @@
 							${hasFloor ? `<span class="floor">${esc(floorLabel(g.floor))}</span>` : ''}
 							<span class="shop">${esc(g.shop || '—')}</span>
 							${g.stall ? `<span class="stall">${esc(g.stall)}</span>` : ''}
-							${count}${chev}
+							${locBtn}${gtotal}${count}${chev}
 						</div>`
 						: `<div class="ghead${allDone ? ' gdone' : ''}">
 							<span class="shop">${t('supplierNotSet')}</span>
-							${count}${chev}
+							${gtotal}${count}${chev}
 						</div>`
 				}
 				let body = ''
@@ -1520,7 +2811,7 @@
 					if (g.section === 'charm') {
 						cards = g.aggs.map((a) => charmCardHtml(a)).join('')
 					} else {
-						cards = g.rows.map((r) => cardHtml(r, g)).join('')
+						cards = renderCgCards(g)
 						// Exchanges to swap at THIS same stall, under a small divider so the
 						// shopper handles buying and swapping in one visit.
 						if (g.exRows && g.exRows.length) {
@@ -1630,14 +2921,39 @@
 			}
 			function maybeRenderTree() {
 				if (drawerOpen()) renderTree()
+				syncMap()
+			}
+
+			// ── Overlay focus management (return focus on close, for a11y) ───────
+			let lastFocus = null
+			function rememberFocus() {
+				lastFocus = document.activeElement
+			}
+			function restoreFocus() {
+				try {
+					if (lastFocus && lastFocus.focus) lastFocus.focus()
+				} catch {}
+				lastFocus = null
+			}
+			// Close whichever overlay is on top (Escape / back-gesture friendly).
+			function closeTopOverlay() {
+				if ($('zoomBg').classList.contains('open')) return closeZoom(), true
+				if ($('priceBg').classList.contains('open')) return closePriceSheet(), true
+				if ($('sheetBg').classList.contains('open')) return closeSheet(), true
+				if (mapOpen()) return closeMap(), true
+				if (drawerOpen()) return closeDrawer(), true
+				return false
 			}
 
 			function openDrawer() {
+				rememberFocus()
 				renderTree()
 				$('drawerBg').classList.add('open')
+				$('drawerClose').focus()
 			}
 			function closeDrawer() {
 				$('drawerBg').classList.remove('open')
+				restoreFocus()
 			}
 
 			// Jump from a drawer leaf to its group: expand it, scroll it into view
@@ -1658,34 +2974,405 @@
 				})
 			}
 
+			// ── Supplier map (in-person wayfinding) ──────────────────────────────
+			let FLOOR_LAYOUT = null // [{ mall, floor, label, corridors:[…] }]
+			let MAP_STALLS = new Set() // normalised stall codes that exist on any floor
+			let mapFloorIdx = 0
+			let mapLocateMode = false
+			let mapLocateTarget = ''
+			const mapOpen = () => $('mapBg').classList.contains('open')
+			// Same normalisation the server uses, so route stalls match map stalls.
+			const mapNorm = (s) =>
+				String(s || '')
+					.trim()
+					.toUpperCase()
+					.replace(/\s+/g, '')
+					.replace(/[–—]/g, '-')
+			const mapCodeAliases = (code) => {
+				const normalized = mapNorm(code)
+				if (!normalized) return []
+				const out = new Set([normalized])
+				const match = /^([A-Z]+)(\d{3,})-(\d{3,})$/.exec(normalized)
+				if (match) {
+					const start = Number(match[2])
+					const end = Number(match[3])
+					if (end >= start && end - start <= 20) {
+						for (let value = start; value <= end; value++) out.add(`${match[1]}${value}`)
+					}
+				}
+				return [...out]
+			}
+			const stallAliases = (stall) => (stall && stall.aliases && stall.aliases.length ? stall.aliases : mapCodeAliases(stall && (stall.code || stall.norm || stall)))
+			const stallCodesOverlap = (a, b) => {
+				const right = new Set(mapCodeAliases(b))
+				return mapCodeAliases(a).some((code) => right.has(code))
+			}
+			// Localise a label that may be a plain string ('左a') or an {en,zh} pair.
+			const lz = (v) => (typeof v === 'string' ? v : v ? (LANG === 'zh' ? v.zh : v.en) : '')
+
+			async function loadFloorMap() {
+				try {
+					const r = await fetch('/api/route/floor-map', { credentials: 'same-origin' })
+					if (!r.ok) return
+					const d = await r.json()
+					FLOOR_LAYOUT = (d.floors || []).filter((f) => f.corridors && f.corridors.length)
+					// Index of every stall on the map, so the list only shows a "locate"
+					// button for shops we can actually point to.
+					MAP_STALLS = new Set()
+					for (const f of FLOOR_LAYOUT) for (const c of f.corridors) for (const sd of c.sides) for (const blk of sd.blocks) for (const st of blk) {
+						for (const alias of stallAliases(st)) MAP_STALLS.add(alias)
+					}
+					if (FLOOR_LAYOUT.length) {
+						$('mapBtn').style.display = ''
+						render() // re-render so locate buttons appear on already-shown groups
+					}
+				} catch {}
+			}
+			const mapHasStall = (stall) => MAP_STALLS.has(mapNorm(stall))
+
+			// Per-stall (normalised) shopping status from the live route: how many
+			// lines still to buy vs. total. Exchanges owed at a supplier count too.
+			function stallStatusMap() {
+				const m = new Map()
+				const bump = (code, remaining) => {
+					const c = mapNorm(code)
+					if (!c) return
+					let e = m.get(c)
+					if (!e) {
+						e = { total: 0, remaining: 0 }
+						m.set(c, e)
+					}
+					e.total++
+					if (remaining) e.remaining++
+				}
+				for (const r of ROWS) if (r.has_case || r.has_grip) bump(r.supplier_stall, !cgDone(r))
+				for (const x of EXCHANGES) bump(x.supplier_stall, true)
+				return m
+			}
+
+			// Index of the rendered cg group for a stall (for tap-to-jump), or -1.
+			function groupIdxForStall(norm) {
+				for (let i = 0; i < LAST_GROUPS.length; i++) {
+					const g = LAST_GROUPS[i]
+					if (g.section === 'cg' && stallCodesOverlap(g.stall, norm)) return i
+				}
+				return -1
+			}
+
+			function renderMap() {
+				const body = $('mapFloor')
+				if (!FLOOR_LAYOUT || !FLOOR_LAYOUT.length) {
+					body.innerHTML = `<div class="state"><div class="state-title">${t('mapNone')}</div></div>`
+					return
+				}
+				if (mapFloorIdx >= FLOOR_LAYOUT.length) mapFloorIdx = 0
+				const floor = FLOOR_LAYOUT[mapFloorIdx]
+				const stat = stallStatusMap()
+				$('mapTitle').textContent = t('mapTitle')
+				// Single floor → no switcher pill (saves header height); the floor is
+				// shown in the subtitle instead.
+				$('mapFloors').innerHTML =
+					FLOOR_LAYOUT.length > 1
+						? FLOOR_LAYOUT.map((f, i) => `<button class="map-floor ${i === mapFloorIdx ? 'on' : ''}" data-fi="${i}">${esc(lz(f.label))}</button>`).join('')
+						: ''
+				$('mapLegend').innerHTML =
+					`<span class="lg"><span class="sw need"></span>${t('legTo')}</span>` +
+					`<span class="lg"><span class="sw done"></span>${t('legDone')}</span>` +
+					`<span class="lg"><span class="sw other"></span>${t('legOther')}</span>`
+
+				let needStalls = 0
+				const cell = (st) => {
+					const aliases = stallAliases(st)
+					const e = aliases.reduce(
+						(total, alias) => {
+							const value = stat.get(alias)
+							if (value) {
+								total.total += value.total
+								total.remaining += value.remaining
+							}
+							return total
+						},
+						{ total: 0, remaining: 0 },
+					)
+					const hasStatus = !!(e && e.total > 0)
+					const aliasAttr = aliases.map(esc).join(' ')
+					// Faint only when it's neither named nor on today's route. Every cell
+					// carries data-code so the "locate" action can target it.
+					if (!st.named && !hasStatus) {
+						return `<div class="mstall unnamed" data-code="${esc(st.norm)}" data-aliases="${aliasAttr}"><span class="mcode">${esc(st.code)}</span></div>`
+					}
+					let cls = 'other'
+					let count = 0
+					if (hasStatus) {
+						if (e.remaining > 0) {
+							cls = 'need'
+							count = e.remaining
+							needStalls++
+						} else cls = 'done'
+					}
+					const tap = cls === 'need' || cls === 'done'
+					const tag = tap ? 'button' : 'div'
+					return `<${tag} class="mstall ${cls}" data-code="${esc(st.norm)}" data-aliases="${aliasAttr}"${tap ? ` data-stall="${esc(st.norm)}"` : ''}>
+						<span class="mcode">${esc(st.code)}</span>
+						${st.name ? `<span class="mname">${esc(st.name)}</span>` : ''}
+						${count > 0 ? `<span class="mcount">${count}</span>` : ''}
+					</${tag}>`
+				}
+
+				const elevatorHtml = (l) =>
+					`<div class="map-elevator" title="${esc(lz(l.label))}"><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><polyline points="9.5 9.5 12 7 14.5 9.5"/><polyline points="9.5 14.5 12 17 14.5 14.5"/></svg><span>${esc(lz(l.label))}</span></div>`
+				let html = ''
+				floor.corridors.forEach((c, ci) => {
+					html += `<div class="corridor"><div class="corridor-title">${esc(lz(c.label))}</div><div class="aisle">`
+					c.sides.forEach((sd, si) => {
+						html += `<div class="side ${si === 0 ? 'a' : 'b'}"><div class="side-title">${esc(sd.label)}</div>`
+						// Flip each side vertically: the last-recorded stall shows at the
+						// TOP (e.g. 右b → A225-227 top, A248 bottom). Data stays in physical
+						// walking order; only the display is reversed. slice() avoids
+						// mutating the cached layout across re-renders.
+						html += sd.blocks
+							.slice()
+							.reverse()
+							.map((blk) => `<div class="mblock">${blk.slice().reverse().map(cell).join('')}</div>`)
+							.join('')
+						html += `</div>`
+					})
+					html += `</div></div>`
+					// Central walkway between the two corridors — holds the elevator at the
+					// near (bottom) end, between A275 (左b) and A2-21 (右a).
+					if (ci === 0 && floor.corridors.length > 1) {
+						const landmarks = floor.landmarks || []
+						const elev = landmarks.find((l) => l.type === 'elevator')
+						html += `<div class="map-walkway">${elev ? elevatorHtml(elev) : ''}</div>`
+					}
+				})
+				body.innerHTML = html
+				const floorLbl = lz(floor.label)
+				$('mapSub').textContent = needStalls
+					? LANG === 'zh'
+						? `${floorLbl} · 需前往 ${needStalls} 个摊位`
+						: `${floorLbl} · ${needStalls} stall${needStalls > 1 ? 's' : ''} to visit`
+					: LANG === 'zh'
+						? `${floorLbl} · 本层无需采购`
+						: `${floorLbl} · nothing to buy here`
+			}
+			// Keep the map fresh while it's open (status changes, teammate updates).
+			function syncMap() {
+				if (!mapOpen()) return
+				renderMap()
+				if (mapLocateMode && mapLocateTarget) {
+					const cell = $('mapFloor').querySelector('.mstall[data-aliases~="' + CSS.escape(mapLocateTarget) + '"]')
+					if (cell) focusCell(cell)
+				}
+			}
+
+			function openMap() {
+				if (!FLOOR_LAYOUT || !FLOOR_LAYOUT.length) return
+				rememberFocus()
+				mapLocateMode = false
+				mapLocateTarget = ''
+				$('mapBody').classList.remove('locating')
+				// Default to the floor with the most stalls still to visit.
+				const stat = stallStatusMap()
+				let best = 0
+				let bestN = -1
+				FLOOR_LAYOUT.forEach((f, i) => {
+					let n = 0
+					for (const c of f.corridors) for (const sd of c.sides) for (const blk of sd.blocks) for (const st of blk) {
+						const e = stat.get(st.norm)
+						if (e && e.remaining > 0) n++
+					}
+					if (n > bestN) {
+						bestN = n
+						best = i
+					}
+				})
+				mapFloorIdx = best
+				set3d(false) // open flat (readable); user can tap 3D to tilt
+				renderMap()
+				$('mapBg').classList.add('open')
+				// Open framing the ENTIRE floor so no stall is hidden below the fold
+				// (e.g. A201-202 at the far end). Detail is a pinch / double-tap away.
+				requestAnimationFrame(() => requestAnimationFrame(fitMap))
+				$('mapClose').focus()
+			}
+			function closeMap() {
+				$('mapBg').classList.remove('open')
+				$('mapBody').classList.remove('locating')
+				mapLocateMode = false
+				mapLocateTarget = ''
+				restoreFocus()
+			}
+
+			// Which floor index holds a given stall code (or -1).
+			function floorIdxForStall(norm) {
+				for (let i = 0; i < (FLOOR_LAYOUT || []).length; i++) {
+					for (const c of FLOOR_LAYOUT[i].corridors) for (const sd of c.sides) for (const blk of sd.blocks) for (const st of blk) {
+						if (stallAliases(st).includes(norm)) return i
+					}
+				}
+				return -1
+			}
+			// Open the map focused on ONE stall: switch to its floor, zoom in, centre it
+			// and pulse it. Triggered by a supplier group's "locate" button when the
+			// shopper doesn't know where a shop is.
+			function openMapAt(code) {
+				if (!FLOOR_LAYOUT || !FLOOR_LAYOUT.length) return
+				const norm = mapNorm(code)
+				mapLocateTarget = norm
+				const fi = floorIdxForStall(norm)
+				rememberFocus()
+				mapLocateMode = true
+				if (fi >= 0) mapFloorIdx = fi
+				set3d(false)
+				renderMap()
+				$('mapBg').classList.add('open')
+				$('mapClose').focus()
+				requestAnimationFrame(() =>
+					requestAnimationFrame(() => {
+						const cell = fi >= 0 ? $('mapFloor').querySelector('.mstall[data-aliases~="' + CSS.escape(norm) + '"]') : null
+						if (cell) focusCell(cell)
+						else {
+							fitMap()
+							toast(LANG === 'zh' ? '该摊位不在地图上' : "That stall isn't on the map")
+						}
+					}),
+				)
+			}
+			// Frame the WHOLE floor (so the shopper sees where the shop sits in the
+			// overall layout) and make the target pulse so it's found at a glance.
+			function focusCell(cell) {
+				fitMap()
+				$('mapBody').classList.add('locating')
+				cell.dataset.located = LANG === 'zh' ? '这里' : 'HERE'
+				cell.classList.add('locate')
+			}
+
+			// ── Map pan / zoom / 3-D (dependency-free, pointer-events) ───────────
+			let mScale = 1
+			let mTx = 0
+			let mTy = 0
+			let mTilt = false
+			const M_MIN = 0.12
+			const M_MAX = 4.5
+			const mPointers = new Map()
+			let mPinchDist = 0
+			let mPinchMid = null
+			let mPanLast = null
+			let mMoved = false // gesture moved → suppress the tap-to-jump click
+			let mDown = null
+
+			function applyMapTransform() {
+				$('mapScene').style.transform = `translate(${mTx.toFixed(2)}px, ${mTy.toFixed(2)}px) scale(${mScale.toFixed(4)})`
+			}
+			const clampScale = (s) => Math.max(M_MIN, Math.min(M_MAX, s))
+			// Point in stage-local coordinates.
+			function stagePt(clientX, clientY) {
+				const r = $('mapBody').getBoundingClientRect()
+				return { x: clientX - r.left, y: clientY - r.top }
+			}
+			// Zoom by `factor` while keeping stage point (sx,sy) fixed (zoom-to-cursor).
+			function mapZoomAt(factor, sx, sy) {
+				const ns = clampScale(mScale * factor)
+				const ratio = ns / mScale
+				mTx = sx - (sx - mTx) * ratio
+				mTy = sy - (sy - mTy) * ratio
+				mScale = ns
+				applyMapTransform()
+			}
+			// Fit the whole floor into the stage, centered.
+			function fitMap() {
+				const stage = $('mapBody')
+				const floor = $('mapFloor')
+				const sw = stage.clientWidth
+				const sh = stage.clientHeight
+				const fw = floor.offsetWidth
+				const fh = floor.offsetHeight
+				if (!fw || !fh || !sw || !sh) return
+				const pad = 8
+				mScale = clampScale(Math.min((sw - pad * 2) / fw, (sh - pad * 2) / fh))
+				mTx = (sw - fw * mScale) / 2
+				mTy = Math.max(pad, (sh - fh * mScale) / 2)
+				applyMapTransform()
+			}
+			function set3d(on) {
+				mTilt = on
+				$('mapScene').classList.toggle('tilt', on)
+				$('map3dBtn').classList.toggle('on', on)
+			}
+			const mapCenter = () => {
+				const r = $('mapBody').getBoundingClientRect()
+				return { x: r.width / 2, y: r.height / 2 }
+			}
+
 			// ── In-place DOM updates ─────────────────────────────────────────────
 			// Status changes patch the affected card(s) directly instead of rebuilding
 			// the whole list. This removes the flash/refresh AND stops every image
 			// from reloading on each tap.
 			function findCgCard(r) {
-				const rid = String(r.receipt_id)
-				for (const el of document.querySelectorAll('.card[data-rid]')) {
-					if (el.dataset.rid === rid && el.dataset.ik === r.item_key) return el
+				// Direct attribute lookup (O(1)-ish) instead of scanning every card;
+				// CSS.escape guards item_keys containing quotes / special characters.
+				const direct = document.querySelector('.card[data-rid="' + CSS.escape(String(r.receipt_id)) + '"][data-ik="' + CSS.escape(r.item_key) + '"]')
+				if (direct) return direct
+				for (const el of document.querySelectorAll('.model-group[data-agg]')) {
+					const rows = AGG.get(el.dataset.agg)
+					if (rows && rows.includes(r)) return el
 				}
 				return null
 			}
 			// Locate the merged-charm card covering a row via the live AGG map.
 			function findCharmCard(r) {
-				for (const btn of document.querySelectorAll('.comp[data-agg]')) {
+				for (const btn of document.querySelectorAll('.comp[data-agg][data-c="charm"]')) {
 					const rows = AGG.get(btn.dataset.agg)
 					if (rows && rows.includes(r)) return { el: btn.closest('.card'), rows }
 				}
 				return null
 			}
 			function updateCgCardEl(el, r) {
-				const done = cgDone(r)
+				const rows = el.dataset.agg ? AGG.get(el.dataset.agg) || [r] : [r]
+				const done = rows.every(cgDone)
 				el.classList.toggle('done', done)
-				const compsEl = el.querySelector('.comps')
-				if (compsEl) compsEl.innerHTML = compHtml(r, CASE_GRIP)
+				// Patch ONLY the affected component button(s) in place. Rebuilding the
+				// whole .comps innerHTML tore down / recreated both buttons every tap,
+				// which caused the visible twitch — so we surgically update instead.
+				for (const c of CASE_GRIP) {
+					if (!rows.some((row) => row[c.flag])) continue
+					const cb = el.querySelector('.comp[data-c="' + c.key + '"]')
+					if (!cb) continue
+					const relevant = rows.filter((row) => row[c.flag])
+					const st = aggregateComponentStatus(rows, c)
+					const m = STATUS_META[st] || STATUS_META.Pending
+					cb.className = 'comp type-' + c.key + ' ' + m.cls
+					const qty = relevant.reduce((n, row) => n + (row.quantity || 1), 0)
+					const cl = cb.querySelector('.cl')
+					if (cl) cl.textContent = compLabel(c) + (qty > 1 ? ` ×${qty}` : '')
+					const cs = cb.querySelector('.cs')
+					if (cs) cs.innerHTML = aggStatusHtml(st, relevant, c.status)
+				}
 				const btn = el.querySelector('.markall')
 				if (btn) {
-					btn.className = 'markall' + (done ? ' done' : '')
+					btn.classList.toggle('done', done)
 					btn.textContent = done ? t('bought') : t('markBought')
+				}
+				updateProductSummary(el.closest('.product'))
+			}
+
+			function updateProductSummary(productEl) {
+				if (!productEl) return
+				const rows = []
+				for (const el of productEl.querySelectorAll('.model-group[data-agg]')) {
+					for (const row of AGG.get(el.dataset.agg) || []) rows.push(row)
+				}
+				const values = {
+					case: rows.filter((r) => r.has_case && (r.status_case || 'Pending') !== 'Purchased').reduce((n, r) => n + (r.quantity || 1), 0),
+					grip: rows.filter((r) => r.has_grip && (r.status_grip || 'Pending') !== 'Purchased').reduce((n, r) => n + (r.quantity || 1), 0),
+				}
+				for (const [key, qty] of Object.entries(values)) {
+					const el = productEl.querySelector('.component-total.' + key)
+					if (!el) continue
+					const comp = key === 'case' ? COMP_CASE : COMP_GRIP
+					el.textContent = `${compLabel(comp)} ×${qty}`
+					el.hidden = qty === 0
 				}
 			}
 			function updateCharmCardEl(el, rows) {
@@ -1695,9 +3382,9 @@
 				el.classList.toggle('done', done)
 				const comp = el.querySelector('.comp')
 				if (comp) {
-					comp.className = 'comp ' + m.cls
+					comp.className = 'comp type-charm ' + m.cls
 					const cs = comp.querySelector('.cs')
-					if (cs) cs.textContent = stLabel(status)
+					if (cs) cs.innerHTML = aggStatusHtml(status, rows, 'status_charm')
 				}
 				const btn = el.querySelector('.markall')
 				if (btn) {
@@ -1705,11 +3392,14 @@
 					btn.textContent = done ? t('bought') : t('markBought')
 				}
 			}
-			// Remove a card; drop its group / section when they become empty.
+			// Remove a card; drop its product wrapper / group / section when empty.
 			function removeCardEl(el) {
+				const productEl = el.closest('.product')
 				const groupEl = el.closest('.group')
 				const sectionEl = el.closest('.section')
 				el.remove()
+				if (productEl && !productEl.querySelector('.card')) productEl.remove()
+				else updateProductSummary(productEl)
 				if (groupEl && !groupEl.querySelector('.card')) groupEl.remove()
 				if (sectionEl && !sectionEl.querySelector('.card')) sectionEl.remove()
 			}
@@ -1750,6 +3440,7 @@
 					$('list').innerHTML = `<div class="state"><div class="state-title">${searchQ ? t('noMatches') : t('allBought')}</div></div>`
 				}
 				if (drawerOpen()) renderTree()
+				syncMap()
 			}
 			// Patch the UI in place for one status change across one/many lines.
 			function patchUi(rowsArr, touchesCharm) {
@@ -1763,7 +3454,8 @@
 					} else {
 						const el = findCgCard(r)
 						if (el) {
-							if (!showDone && cgDone(r)) removeCardEl(el)
+							const rows = el.dataset.agg ? AGG.get(el.dataset.agg) || [r] : [r]
+							if (!showDone && rows.every(cgDone)) removeCardEl(el)
 							else updateCgCardEl(el, r)
 						}
 					}
@@ -1775,7 +3467,8 @@
 			function patchRowEverywhere(r) {
 				const cg = findCgCard(r)
 				if (cg) {
-					if (!showDone && cgDone(r)) removeCardEl(cg)
+					const rows = cg.dataset.agg ? AGG.get(cg.dataset.agg) || [r] : [r]
+					if (!showDone && rows.every(cgDone)) removeCardEl(cg)
 					else updateCgCardEl(cg, r)
 				}
 				const ch = findCharmCard(r)
@@ -1804,17 +3497,22 @@
 			// Apply one status change to one OR MANY lines (a merged charm hits every
 			// order line it covers), persist each, re-render, and — if this completes
 			// a whole stall — celebrate + jump to the next stall still needing shopping.
+			// Applies a status patch optimistically and returns
+			//   { action, completedKey }
+			// so the caller can offer an undo (with countdown) and, if a stall just
+			// finished, celebrate + advance. `action` is null for undo replays.
 			function commitRows(rowsArr, patch, opts = {}) {
-				if (!rowsArr || !rowsArr.length) return
+				if (!rowsArr || !rowsArr.length) return { action: null, completedKey: null }
 				// Record the pre-change values so this can be undone (skip when this
 				// call IS an undo).
+				let action = null
 				if (!opts.isUndo) {
 					const changes = rowsArr.map((r) => {
 						const prev = {}
 						for (const k in patch) prev[k] = r[k]
 						return { receipt_id: r.receipt_id, item_key: r.item_key, prev }
 					})
-					pushUndo({ type: 'assign', changes })
+					action = pushUndo({ type: 'assign', changes })
 				}
 				const touchesCG = 'status_case' in patch || 'status_grip' in patch
 				const touchesCharm = 'status_charm' in patch
@@ -1827,10 +3525,29 @@
 					enqueueNetwork(r, patch)
 				}
 				patchUi(rowsArr, touchesCharm)
+				let completedKey = null
 				if (touchesCharm) {
-					for (const k of chKeys) if (!wasCh.get(k) && charmGroupDone(k)) return celebrateStall(k)
+					for (const k of chKeys) if (!wasCh.get(k) && charmGroupDone(k)) { completedKey = k; break }
 				} else if (touchesCG) {
-					for (const k of cgKeys) if (!wasCg.get(k) && cgGroupDone(k)) return celebrateStall(k)
+					for (const k of cgKeys) if (!wasCg.get(k) && cgGroupDone(k)) { completedKey = k; break }
+				}
+				return { action, completedKey }
+			}
+
+			// Undo window (ms) for the countdown snackbar. Long enough to catch an
+			// accidental tap, short enough to stay out of the way — Gmail uses ~5–10s.
+			const UNDO_MS = 6000
+			// After a status commit: show the undo snackbar, and if a stall just
+			// finished, use a celebratory message + scroll to the next one.
+			function afterCommit(res, msg, opts = {}) {
+				if (!res || !res.action) return
+				if (res.completedKey && !opts.noAdvance) {
+					haptic([14, 40, 22]) // stall finished — a distinct success buzz
+					showUndoBar(t('stallDone'), res.action)
+					setTimeout(() => scrollToNextIncomplete(res.completedKey), 350)
+				} else {
+					haptic(10) // a single confirming tap
+					showUndoBar(msg, res.action)
 				}
 			}
 
@@ -1865,11 +3582,15 @@
 			}
 
 			// Set one component's status across one or many lines (skips no-ops).
-			function setStatusRows(rowsArr, compKey, status) {
+			// `opts.noAdvance` keeps the view put (used for per-order edits made while
+			// the status sheet is open, so it doesn't scroll away underneath).
+			function setStatusRows(rowsArr, compKey, status, opts = {}) {
 				const field = 'status_' + compKey
 				const changed = rowsArr.filter((r) => (r[field] || 'Pending') !== status)
 				if (!changed.length) return
-				commitRows(changed, { [field]: status })
+				const comp = COMPONENTS.find((c) => c.key === compKey)
+				const res = commitRows(changed, { [field]: status })
+				afterCommit(res, `${compLabel(comp)} · ${stLabel(status)}`, opts)
 			}
 
 			// Mark a section's components bought across one or many lines.
@@ -1880,23 +3601,26 @@
 					if (rowsArr.some((r) => r[c.flag] && (r[c.status] || 'Pending') !== 'Purchased')) patch[c.status] = 'Purchased'
 				}
 				if (!Object.keys(patch).length) return
-				commitRows(rowsArr, patch)
-				toast(t('markedBought'), t('undo'), performUndo)
+				const res = commitRows(rowsArr, patch)
+				afterCommit(res, t('markedBought'))
 			}
 
-			// ── Undo (accidental taps) ───────────────────────────────────────────
+			// ── Undo (via the bottom countdown snackbar) ─────────────────────────
+			// Each committed action carries everything needed to revert it. The undo
+			// affordance is the countdown snackbar only (no persistent header button);
+			// once the countdown lapses the action stands.
 			function pushUndo(action) {
-				undoStack.push(action)
-				if (undoStack.length > 30) undoStack.shift()
-				updateUndoBtn()
+				return action
 			}
-			function updateUndoBtn() {
-				$('undoBtn').style.display = undoStack.length ? '' : 'none'
+			// Show the countdown undo snackbar for a specific just-performed action.
+			function showUndoBar(msg, action) {
+				if (!action) return toast(msg)
+				toast(msg, t('undo'), () => undoAction(action), UNDO_MS)
 			}
-			function performUndo() {
-				const action = undoStack.pop()
-				updateUndoBtn()
+			// Revert one specific action.
+			function undoAction(action) {
 				if (!action) return
+				haptic(10)
 				if (action.type === 'assign') {
 					for (const c of action.changes) {
 						const row = rowIndex.get(c.receipt_id + '\x00' + c.item_key)
@@ -1914,12 +3638,6 @@
 					toast(t('undone'))
 					fetch('/api/exchanges/' + encodeURIComponent(x.exchange_id) + '/reopen', { method: 'POST', credentials: 'same-origin' }).catch(() => {})
 				}
-			}
-
-			// ── Stall completion: celebrate + move to the next stall ──────────────
-			function celebrateStall(key) {
-				toast(t('stallDone'))
-				setTimeout(() => scrollToNextIncomplete(key), 350)
 			}
 
 			function scrollToNextIncomplete(fromKey) {
@@ -1942,33 +3660,176 @@
 			}
 
 			// ── Bottom-sheet status picker ───────────────────────────────────────
-			let sheetTarget = null // { rows, compKey }
-			function openSheet(rowsArr, compKey) {
-				sheetTarget = { rows: rowsArr, compKey }
+			// Two shapes:
+			//   • Single order  → a plain status list (tap = set that line).
+			//   • Many orders of one model → a "set all" list PLUS a per-order
+			//     section, so one unit can be Bought while another is Out of Stock
+			//     / Wrong Stall / etc. Each order maps 1:1 to a real line item.
+			let sheetTarget = null // { rows, compKey, field }
+			function optHtml(s, sel, extraAttr, mini) {
+				const m = STATUS_META[s]
+				return `<button class="opt${mini ? ' mini' : ''}${sel ? ' sel' : ''}" data-s="${esc(s)}"${extraAttr || ''}>
+					<span class="swatch" style="background:${m.color}"></span>
+					<span>${stLabel(s)}</span>
+				</button>`
+			}
+			function renderSheet() {
+				if (!sheetTarget) return
+				const { rows, compKey, field } = sheetTarget
 				const comp = COMPONENTS.find((c) => c.key === compKey)
-				const r0 = rowsArr[0]
-				const field = 'status_' + compKey
-				const cur = rowsArr.every((r) => (r[field] || 'Pending') === (r0[field] || 'Pending')) ? r0[field] || 'Pending' : null
+				const r0 = rows[0]
+				const totalQty = rows.reduce((n, r) => n + (r.quantity || 1), 0)
 				let subtitle
 				if (compKey === 'charm') {
-					const qty = rowsArr.reduce((n, r) => n + (r.quantity || 1), 0)
-					subtitle = `${esc(r0.charm_code || 'charm')} ×${qty}`
+					subtitle = `${esc(r0.charm_code || 'charm')}${totalQty > 1 ? ` ×${totalQty}` : ''}`
 				} else {
-					subtitle = esc([r0.phone_model, r0.style].filter(Boolean).join(' · ') || 'item')
+					subtitle = esc(r0.phone_model || 'item') + (totalQty > 1 ? ` ×${totalQty}` : '')
 				}
 				$('sheetTitle').innerHTML = `${compLabel(comp)} · <b>${subtitle}</b>`
-				$('sheetOpts').innerHTML = STATUS_ORDER.map((s) => {
-					const m = STATUS_META[s]
-					return `<button class="opt ${s === cur ? 'sel' : ''}" data-s="${esc(s)}">
-						<span class="swatch" style="background:${m.color}"></span>
-						<span>${stLabel(s)}</span>
-					</button>`
-				}).join('')
+				if (rows.length <= 1) {
+					const cur = r0[field] || 'Pending'
+					$('sheetOpts').innerHTML = STATUS_ORDER.map((s) => optHtml(s, s === cur, '')).join('')
+					return
+				}
+				// Multi-order: set-all list, then a row per constituent order.
+				const allSame = rows.every((r) => (r[field] || 'Pending') === (r0[field] || 'Pending'))
+				const cur = allSame ? r0[field] || 'Pending' : null
+				let h = `<div class="sheet-lab">${t('setAll')}</div>`
+				h += `<div class="opt-grid">${STATUS_ORDER.map((s) => optHtml(s, s === cur, '', true)).join('')}</div>`
+				h += `<div class="sheet-lab">${t('perOrder')}</div>`
+				rows.forEach((r, i) => {
+					const st = r[field] || 'Pending'
+					const q = (r.quantity || 1) > 1 ? `<span class="oq">×${r.quantity}</span>` : ''
+					h += `<div class="order-row">
+						<div class="order-lab">${t('order')} ${i + 1}${q}</div>
+						<div class="opt-grid">${STATUS_ORDER.map((s) => optHtml(s, s === st, ` data-oi="${i}"`, true)).join('')}</div>
+					</div>`
+				})
+				$('sheetOpts').innerHTML = h
+			}
+			function openSheet(rowsArr, compKey) {
+				rememberFocus()
+				const field = 'status_' + compKey
+				// Only orders that actually carry this component are addressable.
+				const relevant = rowsArr.filter((r) => r['has_' + compKey])
+				sheetTarget = { rows: relevant.length ? relevant : rowsArr, compKey, field }
+				renderSheet()
 				$('sheetBg').classList.add('open')
+				const first = $('sheetOpts').querySelector('.opt')
+				if (first) first.focus()
 			}
 			function closeSheet() {
 				$('sheetBg').classList.remove('open')
 				sheetTarget = null
+				restoreFocus()
+			}
+
+			// ── Price editor ─────────────────────────────────────────────────────
+			let priceTarget = null // { kind, key, part }
+			const costField = (part) => (part === 'grip' ? 'cost_grip' : 'cost_case')
+			// Apply a saved cost to every matching line in memory. A product-component
+			// cost is shared by all orders of that title; a charm cost by all lines of
+			// that code.
+			function applyCostLocally(kind, key, cost, part) {
+				if (kind === 'product') {
+					const tn = normTitle(key)
+					const f = costField(part)
+					ROWS.forEach((r) => {
+						if (normTitle(r.title) === tn) r[f] = cost
+					})
+				} else {
+					const cd = String(key || '').trim()
+					ROWS.forEach((r) => {
+						if (String(r.charm_code || '').trim() === cd) r.charm_cost = cost
+					})
+				}
+			}
+			function openPriceSheet(ds) {
+				const kind = ds.kind
+				if (kind !== 'product' && kind !== 'charm') return
+				rememberFocus()
+				const part = ds.part === 'grip' ? 'grip' : 'case'
+				const key = kind === 'product' ? ds.title : ds.code
+				if (!key) return
+				priceTarget = { kind, key, part }
+				let unit = null
+				if (kind === 'product') {
+					const f = costField(part)
+					const r0 = ROWS.find((x) => normTitle(x.title) === normTitle(key))
+					unit = r0 ? r0[f] : null
+					const comp = part === 'grip' ? COMP_GRIP : COMP_CASE
+					const sub = r0 ? esc([r0.phone_model, r0.style].filter(Boolean).join(' · ')) : esc(key)
+					$('priceTitle').innerHTML = `${t('priceFor')} · ${compLabel(comp)} · <b>${sub}</b>`
+				} else {
+					const r0 = ROWS.find((x) => String(x.charm_code || '').trim() === key && x.charm_cost != null)
+					unit = r0 ? r0.charm_cost : null
+					$('priceTitle').innerHTML = `${t('priceFor')} · ${compLabel(COMP_CHARM)} · <b>${esc(key)}</b>`
+				}
+				$('priceCur').textContent = CUR
+				$('priceClear').textContent = t('clear')
+				$('priceSave').textContent = t('save')
+				const inp = $('priceInput')
+				inp.value = unit != null ? unit : ''
+				$('priceBg').classList.add('open')
+				setTimeout(() => {
+					inp.focus()
+					inp.select()
+				}, 60)
+			}
+			function closePriceSheet() {
+				$('priceBg').classList.remove('open')
+				priceTarget = null
+				restoreFocus()
+			}
+			async function savePrice(clear) {
+				if (!priceTarget) return
+				const { kind, key, part } = priceTarget
+				let cost = null
+				if (!clear) {
+					const raw = $('priceInput').value.trim()
+					if (raw === '') {
+						cost = null
+					} else {
+						const n = Number(raw)
+						if (!isFinite(n) || n < 0) {
+							toast(t('priceInvalid'))
+							return
+						}
+						cost = Math.round(n * 100) / 100
+					}
+				}
+				// Optimistic: reflect immediately, then persist.
+				applyCostLocally(kind, key, cost, part)
+				render()
+				closePriceSheet()
+				try {
+					const body = kind === 'product' ? { kind, title: key, part, cost } : { kind, code: key, cost }
+					const resp = await fetch('/api/shop/cost', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						credentials: 'same-origin',
+						body: JSON.stringify(body),
+					})
+					if (resp.status === 401) return (location.href = '/login')
+					if (!resp.ok) throw new Error('HTTP ' + resp.status)
+					toast(t('priceSaved'))
+				} catch (e) {
+					toast(t('priceSaveFail'))
+				}
+			}
+
+			// ── Full-screen image zoom ───────────────────────────────────────────
+			function openZoom(src) {
+				// Product thumbnails are served at 300px; load a sharper variant for the
+				// zoom. Charm photos are already full-res from our endpoint.
+				rememberFocus()
+				$('zoomImg').src = src.replace('il_300x300.', 'il_570xN.')
+				$('zoomBg').classList.add('open')
+			}
+			function closeZoom() {
+				$('zoomBg').classList.remove('open')
+				$('zoomImg').removeAttribute('src')
+				restoreFocus()
 			}
 
 			// ── Event delegation ─────────────────────────────────────────────────
@@ -1981,9 +3842,21 @@
 				return r ? [r] : []
 			}
 			$('list').addEventListener('click', (e) => {
+				// Tap a photo → open it full-screen so the design is easy to read.
+				const thumb = e.target.closest('img.thumb')
+				if (thumb && thumb.getAttribute('src')) {
+					openZoom(thumb.getAttribute('src'))
+					return
+				}
+				const priceEl = e.target.closest('.price')
+				if (priceEl) {
+					openPriceSheet(priceEl.dataset)
+					return
+				}
 				const comp = e.target.closest('.comp')
 				if (comp) {
-					const rows = rowsFromEl(comp)
+					const meta = COMPONENTS.find((c) => c.key === comp.dataset.c)
+					const rows = rowsFromEl(comp).filter((r) => !meta || r[meta.flag])
 					if (rows.length) openSheet(rows, comp.dataset.c)
 					return
 				}
@@ -1995,6 +3868,13 @@
 					}
 					const rows = rowsFromEl(all)
 					if (rows.length) markSection(rows, all.dataset.sec)
+					return
+				}
+				// "Locate on map" pin → open the map focused on this stall (must run
+				// before the header collapse handler below).
+				const loc = e.target.closest('.glocate')
+				if (loc) {
+					openMapAt(loc.dataset.stall)
 					return
 				}
 				// Tap a stall header to collapse / expand it.
@@ -2011,14 +3891,34 @@
 			$('sheetBg').addEventListener('click', (e) => {
 				if (e.target === $('sheetBg')) return closeSheet()
 				const opt = e.target.closest('.opt')
-				if (opt && sheetTarget) {
-					setStatusRows(sheetTarget.rows, sheetTarget.compKey, opt.dataset.s)
+				if (!opt || !sheetTarget) return
+				const s = opt.dataset.s
+				if (opt.dataset.oi != null) {
+					// Per-order: apply to just that line, keep the sheet open so the
+					// shopper can set the sibling order(s), and refresh the highlights.
+					const row = sheetTarget.rows[Number(opt.dataset.oi)]
+					if (row) setStatusRows([row], sheetTarget.compKey, s, { noAdvance: true })
+					renderSheet()
+				} else {
+					// Set-all: one decision for every order of this model, then close.
+					setStatusRows(sheetTarget.rows, sheetTarget.compKey, s)
 					closeSheet()
 				}
 			})
+			$('priceBg').addEventListener('click', (e) => {
+				if (e.target === $('priceBg')) closePriceSheet()
+			})
+			$('priceSave').addEventListener('click', () => savePrice(false))
+			$('priceClear').addEventListener('click', () => savePrice(true))
+			$('priceInput').addEventListener('keydown', (e) => {
+				if (e.key === 'Enter') savePrice(false)
+			})
+
+			$('zoomBg').addEventListener('click', closeZoom)
 
 			document.addEventListener('keydown', (e) => {
 				if (e.key === 'Escape') {
+					closeZoom()
 					closeDrawer()
 					closeSheet()
 				}
@@ -2043,6 +3943,135 @@
 					else treeCollapsed.add(id)
 					renderTree()
 				}
+			})
+
+			// ── Supplier map wiring ──────────────────────────────────────────────
+			$('mapBtn').addEventListener('click', openMap)
+			$('mapClose').addEventListener('click', closeMap)
+			$('mapFloors').addEventListener('click', (e) => {
+				const b = e.target.closest('.map-floor[data-fi]')
+				if (!b) return
+				mapFloorIdx = Number(b.dataset.fi)
+				renderMap()
+				requestAnimationFrame(fitMap)
+			})
+			// Tap a highlighted stall → jump to its group (ignored if the gesture was
+			// a pan/pinch, not a tap).
+			$('mapBody').addEventListener('click', (e) => {
+				if (mMoved) return
+				const cell = e.target.closest('.mstall[data-stall]')
+				if (cell) {
+					const gidx = groupIdxForStall(cell.dataset.stall)
+					closeMap()
+					if (gidx >= 0) navigateToGroup(gidx)
+					return
+				}
+				// A supplier-pin lookup is a quick locate-and-dismiss flow: tapping
+				// any empty part of the map closes it. Drag/pinch and controls remain
+				// unaffected.
+				if (mapLocateMode && !e.target.closest('.map-ctrl')) closeMap()
+			})
+			$('mapBg').addEventListener('click', (e) => {
+				if (!mapLocateMode) return
+				if (e.target.closest('#mapClose, .map-ctrl, .map-floor, .mstall')) return
+				if (!e.target.closest('#mapBody')) closeMap()
+			})
+
+			// Zoom / 3-D controls.
+			$('mapZoomIn').addEventListener('click', () => {
+				const c = mapCenter()
+				mapZoomAt(1.3, c.x, c.y)
+			})
+			$('mapZoomOut').addEventListener('click', () => {
+				const c = mapCenter()
+				mapZoomAt(0.77, c.x, c.y)
+			})
+			$('mapFit').addEventListener('click', fitMap)
+			$('map3dBtn').addEventListener('click', () => set3d(!mTilt))
+
+			// Pan (1 pointer) + pinch-zoom (2 pointers).
+			const stage = $('mapBody')
+			stage.addEventListener('pointerdown', (e) => {
+				if (e.target.closest('.map-ctrl')) return
+				try {
+					stage.setPointerCapture(e.pointerId)
+				} catch {}
+				mPointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+				mMoved = false
+				mDown = { x: e.clientX, y: e.clientY }
+				if (mPointers.size === 1) {
+					mPanLast = { x: e.clientX, y: e.clientY }
+					stage.classList.add('grabbing')
+				} else if (mPointers.size === 2) {
+					const [a, b] = [...mPointers.values()]
+					mPinchDist = Math.hypot(a.x - b.x, a.y - b.y)
+					mPinchMid = stagePt((a.x + b.x) / 2, (a.y + b.y) / 2)
+				}
+			})
+			stage.addEventListener('pointermove', (e) => {
+				if (!mPointers.has(e.pointerId)) return
+				mPointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+				if (mPointers.size >= 2) {
+					const [a, b] = [...mPointers.values()]
+					const dist = Math.hypot(a.x - b.x, a.y - b.y)
+					const mid = stagePt((a.x + b.x) / 2, (a.y + b.y) / 2)
+					if (mPinchDist > 0) {
+						mapZoomAt(dist / mPinchDist, mid.x, mid.y)
+						if (mPinchMid) {
+							mTx += mid.x - mPinchMid.x
+							mTy += mid.y - mPinchMid.y
+							applyMapTransform()
+						}
+					}
+					mPinchDist = dist
+					mPinchMid = mid
+					mMoved = true
+					return
+				}
+				if (mPanLast) {
+					if (mDown && Math.abs(e.clientX - mDown.x) + Math.abs(e.clientY - mDown.y) > 6) mMoved = true
+					mTx += e.clientX - mPanLast.x
+					mTy += e.clientY - mPanLast.y
+					mPanLast = { x: e.clientX, y: e.clientY }
+					applyMapTransform()
+				}
+			})
+			const mapPointerUp = (e) => {
+				mPointers.delete(e.pointerId)
+				if (mPointers.size < 2) {
+					mPinchDist = 0
+					mPinchMid = null
+				}
+				if (mPointers.size === 1) {
+					const p = [...mPointers.values()][0]
+					mPanLast = { x: p.x, y: p.y }
+				} else if (mPointers.size === 0) {
+					mPanLast = null
+					stage.classList.remove('grabbing')
+				}
+			}
+			stage.addEventListener('pointerup', mapPointerUp)
+			stage.addEventListener('pointercancel', mapPointerUp)
+			// Wheel / trackpad zoom-to-cursor.
+			stage.addEventListener(
+				'wheel',
+				(e) => {
+					e.preventDefault()
+					const p = stagePt(e.clientX, e.clientY)
+					mapZoomAt(e.deltaY < 0 ? 1.12 : 0.89, p.x, p.y)
+				},
+				{ passive: false },
+			)
+			// Double-tap / double-click: zoom in, or fit if already zoomed in.
+			stage.addEventListener('dblclick', (e) => {
+				if (e.target.closest('.map-ctrl')) return
+				const p = stagePt(e.clientX, e.clientY)
+				if (mScale > 1.3) fitMap()
+				else mapZoomAt(1.9, p.x, p.y)
+			})
+			// Re-fit on rotate / resize so the whole plan stays framed.
+			window.addEventListener('resize', () => {
+				if (mapOpen()) fitMap()
 			})
 
 			// ── Filters wiring ───────────────────────────────────────────────────
@@ -2071,7 +4100,6 @@
 				applyStaticI18n()
 				render()
 			})
-			$('undoBtn').addEventListener('click', performUndo)
 			$('dashBtn').addEventListener('click', () => (location.href = '/'))
 			$('refreshBtn').addEventListener('click', () => load(true))
 			$('logoutBtn').addEventListener('click', async () => {
@@ -2170,7 +4198,7 @@
 					render()
 					// A successful load means we CAN reach the server — that's the honest
 					// "connected" signal (SSE is only for instant push on top of this).
-					setConn(sseOpen ? 'live' : 'live')
+					setConn('live')
 				} catch (e) {
 					setConn('off')
 					// Only replace the list with an error screen if we have nothing to
@@ -2179,6 +4207,76 @@
 						$('list').innerHTML = `<div class="state"><div class="state-title">${t('couldntLoad')}</div><button class="chipbtn on" onclick="location.reload()" style="margin-top:14px">${t('retry')}</button></div>`
 					}
 				}
+			}
+
+			// ── Self-healing reconciliation ──────────────────────────────────────
+			// SSE only PATCHES lines we already hold; it never adds newly-synced
+			// orders and can't repair a stale set the client latched onto during a
+			// transient server/sync window. So — like every serious real-time app —
+			// we periodically re-pull the authoritative route and on app focus / SSE
+			// (re)connect, reconciling silently. Comparing the fetched signature to the
+			// CURRENT rows means an unchanged route (incl. our own already-saved edits)
+			// costs one fetch and ZERO re-render (no flicker); we never reconcile
+			// mid-edit (pending saves) or over an open overlay.
+			function routeSig(rows, exchanges) {
+				const parts = []
+				for (const r of rows) {
+					parts.push(
+						r.receipt_id +
+							':' +
+							r.item_key +
+							':' +
+							(r.status_case || '') +
+							(r.status_grip || '') +
+							(r.status_charm || '') +
+							':' +
+							(r.charm_code || '') +
+							':' +
+							(r.cost_case ?? '') +
+							'/' +
+							(r.cost_grip ?? '') +
+							'/' +
+							(r.charm_cost ?? ''),
+					)
+				}
+				parts.push('x:' + (exchanges || []).map((e) => e.exchange_id).join(','))
+				return rows.length + '|' + parts.join('|')
+			}
+			function anyOverlayOpen() {
+				return (
+					$('sheetBg').classList.contains('open') ||
+					$('priceBg').classList.contains('open') ||
+					$('zoomBg').classList.contains('open') ||
+					mapOpen() ||
+					drawerOpen()
+				)
+			}
+			async function reconcile() {
+				// Safe-to-refresh guards: foreground only, no unsaved edits to clobber,
+				// and never yank the list out from under an open sheet/map/drawer.
+				if (document.hidden || pending.size || anyOverlayOpen()) return
+				const params = new URLSearchParams()
+				if ($('shopFilter').value) params.set('shop_id', $('shopFilter').value)
+				if ($('dateFrom').value) params.set('date_from', $('dateFrom').value)
+				if ($('dateTo').value) params.set('date_to', $('dateTo').value)
+				try {
+					const r = await fetch('/api/shop/route?' + params.toString(), { credentials: 'same-origin' })
+					if (r.status === 401) return (location.href = '/login')
+					if (!r.ok) return
+					const data = await r.json()
+					const rows = data.rows || []
+					const exchanges = data.exchanges || []
+					setConn('live') // a successful pull proves we're connected
+					// Re-check guards: an overlay/edit may have begun during the fetch.
+					if (pending.size || anyOverlayOpen()) return
+					// Already in sync (incl. our own saved edits)? Do nothing — no flicker.
+					if (routeSig(rows, exchanges) === routeSig(ROWS, EXCHANGES)) return
+					ROWS = rows
+					EXCHANGES = exchanges
+					rowIndex.clear()
+					for (const row of ROWS) rowIndex.set(keyOf(row), row)
+					render()
+				} catch {}
 			}
 
 			// ── Real-time updates: SSE with a polling fallback ───────────────────
@@ -2196,7 +4294,7 @@
 			function startPolling() {
 				if (pollTimer) return
 				pollTimer = setInterval(() => {
-					if (!sseOpen) load(false)
+					if (!sseOpen) reconcile()
 				}, 12000)
 			}
 			function stopPolling() {
@@ -2240,6 +4338,9 @@
 					sseRetry = 0
 					stopPolling()
 					setConn(pending.size ? 'off' : 'live')
+					// Catch up on anything that changed (new orders, other devices)
+					// while the stream was down or before it opened.
+					reconcile()
 				}
 				sse.onmessage = (ev) => {
 					let msg
@@ -2262,6 +4363,15 @@
 							if (el) removeCardEl(el)
 							refreshBadges()
 							if (msg.by && msg.by !== ME) toast(LANG === 'zh' ? `${msg.by} 已换货一项` : `${msg.by} exchanged an item`)
+						}
+						return
+					}
+					// A price was set/changed elsewhere — update matching lines + subtotals.
+					if (msg.type === 'cost') {
+						const key = msg.kind === 'product' ? msg.title : msg.code
+						if (key != null) {
+							applyCostLocally(msg.kind, key, msg.cost, msg.part)
+							render()
 						}
 						return
 					}
@@ -2316,19 +4426,43 @@
 			})
 			window.addEventListener('offline', () => setConn('off'))
 
+			// Escape closes the top-most open overlay (dialog / drawer / zoom).
+			document.addEventListener('keydown', (e) => {
+				if (e.key === 'Escape') closeTopOverlay()
+			})
+
 			// ── Boot ─────────────────────────────────────────────────────────────
+			// Keep sticky stall headers pinned exactly below the app header, whose
+			// height changes with language / wrapping / rotation. A ResizeObserver
+			// tracks it live so the offset is always correct (no magic numbers).
+			function syncStickTop() {
+				const h = document.querySelector('header')
+				if (h) document.documentElement.style.setProperty('--stick-top', h.offsetHeight + 'px')
+			}
+
 			async function boot() {
 				applyStaticI18n()
+				syncStickTop()
+				if (window.ResizeObserver) new ResizeObserver(syncStickTop).observe(document.querySelector('header'))
+				window.addEventListener('resize', syncStickTop)
 				loadFilters()
 				// Start real-time + identity checks in PARALLEL with loading the list,
 				// instead of waiting for each round-trip in series — faster first paint.
 				whoAmI()
 				connectSSE()
+				loadFloorMap()
 				await loadShops()
 				await load(true)
 				if ('serviceWorker' in navigator) {
 					navigator.serviceWorker.register('/shop-sw.js', { scope: '/shop' }).catch(() => {})
 				}
+				// Self-heal: periodically reconcile with the server even while SSE is
+				// live (SSE never adds new orders), and whenever the app returns to the
+				// foreground — so the counts can never silently drift from the truth.
+				setInterval(reconcile, 45000)
+				document.addEventListener('visibilitychange', () => {
+					if (!document.hidden) reconcile()
+				})
 			}
 			boot()
 		</script>

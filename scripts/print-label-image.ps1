@@ -39,6 +39,26 @@ try {
     Write-Error "Printer not found or invalid: '$Printer'"
     exit 2
   }
+
+  # Pre-flight readiness check. $doc.Print() only QUEUES the job and reports
+  # success even when the printer is offline — the job then piles up in the
+  # spooler and nothing physically prints. Refuse loudly instead of lying.
+  # Emit to stderr directly (not Write-Error): with ErrorActionPreference='Stop'
+  # a Write-Error terminates the script with exit code 1, which would erase the
+  # distinct 4/5 codes the Node caller relies on to flag a hardware fault.
+  $info = Get-CimInstance -ClassName Win32_Printer -Filter "Name='$Printer'" -ErrorAction SilentlyContinue
+  if ($info) {
+    if ($info.WorkOffline) {
+      [Console]::Error.WriteLine("Printer '$Printer' is OFFLINE. Power it on, reconnect USB, then uncheck 'Use Printer Offline'.")
+      exit 4
+    }
+    $notReady = @{ 4 = 'out of paper/labels'; 7 = 'cover/door open'; 8 = 'paper jammed'; 9 = 'offline' }[[int]$info.DetectedErrorState]
+    if ($notReady) {
+      [Console]::Error.WriteLine("Printer '$Printer' is not ready: $notReady. Fix it, then print again.")
+      exit 5
+    }
+  }
+
   $doc.PrinterSettings.Copies = [Math]::Max(1, $Copies)
   $doc.DocumentName = [System.IO.Path]::GetFileNameWithoutExtension($ImagePath)
 

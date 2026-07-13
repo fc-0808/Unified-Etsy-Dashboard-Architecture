@@ -4,6 +4,9 @@
 // process.env. Non-fatal if the file is absent — config.json still drives Etsy.
 require('dotenv').config()
 
+const crypto = require('crypto')
+const sharp = require('sharp')
+
 /**
  * Local dashboard server.
  *
@@ -34,17 +37,24 @@ const cron = require('node-cron')
 // never throw ERR_INVALID_CHAR when written to the response header.
 const contentDisposition = require('content-disposition')
 
-const { loadConfig, getAllShops } = require('../config/schema')
+const { loadConfig, getAllShops, usesGroupProxy } = require('../config/schema')
 const { TokenManager } = require('../auth/token-manager')
 const { initDb, syncConfigToDb } = require('../db/setup')
 // Single source of truth for the Ready-to-pack ("To pack & ship") queue scope,
 // shared with scripts/test-pack-queue-exchange.js so the two can never drift.
 const packQueue = require('../orders/pack-queue')
+// Single source of truth for Etsy double-fire / "ghost receipt" suppression,
+// shared with scripts/test-dedup.js (synthetic unit tests) and
+// scripts/verify-dedup-fix.js (live-DB regression check) so the three can never
+// drift. The heavy reasoning lives in the module's header comment.
+const { computeDuplicateSuppression } = require('../orders/dedup')
 const { createGroupProxyClient } = require('../proxy/factory')
 const { buildShopClient, resolveShopId, createReceiptShipment, paginateListings, updateListing, createDraftListing, deleteListing, getListingInventory, updateListingInventory, getShop, updateShop, isQpdExhaustedError, getBudgetSnapshots, getShopSections, createShopSection, updateShopSection, deleteShopSection } = require('../etsy/client')
 const {
 	upsertListing,
+	pruneStaleListings,
 	upsertListingInventory,
+	pruneStaleInventory,
 	logEvent,
 	upsertFourpxShipment,
 	recordFourpxFreight,
@@ -69,6 +79,8 @@ const {
 	deleteCharmShopDirectoryRow,
 	getCharmLibrary,
 	getCharmByCode,
+	setProductCost,
+	setCharmCost,
 	insertCharmLibraryRow,
 	updateCharmLibraryRow,
 	deleteCharmLibraryRow,
@@ -121,8 +133,15 @@ const {
 	patchOrderExchange,
 	deleteOrderExchange,
 	normalizeExchangeComponents,
+	getSubstitutionMap,
+	getSubstitutionsForReceipts,
+	getSubstitutionForLine,
+	upsertOrderSubstitution,
+	deleteOrderSubstitution,
+	getSubstitutionImage,
 } = require('../db/setup')
 const routeDashboard = require('../route/dashboard')
+const { FLOOR_MAPS, normalizeStallCode, stallCodeAliases } = require('../route/floor-map')
 const { generateBuyerIssueMessage } = require('../support/buyer-message')
 const enginePaths = require('../route/engine-paths')
 const statusImport = require('../route/status-import')
@@ -130,17 +149,12 @@ const { buildSyncReportWorkbook } = require('../route/sync-report-xlsx')
 const { batchFetchRouteImages } = require('../route/image-fetcher')
 const unmatchedImages = require('../route/unmatched-images')
 const { logZeroStockIfNeeded, listingHasLiveZero, raiseOfferingsToTarget, getZeroStylesForListing, formatStyleLabel, removeModelFromInventory } = require('../inventory/helpers')
-const { syncShop, runSyncCycle, runInventoryWatchCycle, syncLedgerForShop } = require('../workers/sync')
+const { syncShop, runSyncCycle, runInventoryWatchCycle, syncLedgerForShop, releaseSyncLock, intervalToCron } = require('../workers/sync')
 const { createGroupClient } = require('../proxy/factory')
 const { getLogisticsProducts, createShipOrder, getShipLabel, cancelShipOrder, getShipOrder, getOrderFreight, getEstimatedCost, splitName, safeLabelBaseName, assignUniqueLabelNames } = require('../fourpx/orders')
 const { renderLabelBitmap, printBitmapWindows, writeTempLabelPng } = require('../fourpx/label-print')
 const { resolveReceiptFreight } = require('../fourpx/freight')
-const {
-	FOURPX_POSTLINK_S5058_CODE,
-	FOURPX_POSTLINK_S5058_COUNTRIES,
-	FOURPX_COUNTRY_DEFAULT_PRODUCT,
-	resolveLogisticsProduct,
-} = require('../fourpx/product-preference')
+const { FOURPX_POSTLINK_S5058_CODE, FOURPX_POSTLINK_S5058_COUNTRIES, FOURPX_COUNTRY_DEFAULT_PRODUCT, resolveLogisticsProduct } = require('../fourpx/product-preference')
 const { getFullTrackingEvents, getTrackingSnapshot, _withHealth } = require('../tracking/checker')
 const { scanInputRoot } = require('../listings/scanner')
 const { getShopListingSettings } = require('../listings/shop-settings')
@@ -594,9 +608,29 @@ app.use((req, res, next) => {
 })
 
 // Owner-only: recent audit entries (packer is denied by the gate above anyway).
+// Optional `since`/`until` (epoch ms) bound the window so the client can request
+// a real day/range accurately — the caller computes local-day boundaries, the
+// server only compares numeric timestamps (timezone-agnostic).
 app.get('/api/audit', auth.requireOwner, (req, res) => {
-	const limit = Math.min(Number(req.query.limit) || 200, 1000)
-	const rows = db.prepare('SELECT id, ts, role, user, method, path, status, details FROM audit_log ORDER BY id DESC LIMIT ?').all(limit)
+	const limit = Math.min(Number(req.query.limit) || 200, 2000)
+	const since = Number(req.query.since)
+	const until = Number(req.query.until)
+	const where = []
+	const whereParams = []
+	if (Number.isFinite(since)) {
+		where.push('ts >= ?')
+		whereParams.push(since)
+	}
+	if (Number.isFinite(until)) {
+		where.push('ts < ?')
+		whereParams.push(until)
+	}
+	const whereSql = where.length ? ' WHERE ' + where.join(' AND ') : ''
+	const rows = db.prepare(`SELECT id, ts, role, user, method, path, status, details FROM audit_log${whereSql} ORDER BY id DESC LIMIT ?`).all(...whereParams, limit)
+	// Authoritative per-person counts over the WHOLE range (never capped by the
+	// row limit), so the UI's per-user totals stay correct even when the rendered
+	// list is truncated. Cardinality is tiny (one row per user/role pair).
+	const tallies = db.prepare(`SELECT user, role, COUNT(*) AS n FROM audit_log${whereSql} GROUP BY user, role`).all(...whereParams)
 	const entries = rows.map((r) => {
 		let details = null
 		if (r.details) {
@@ -608,7 +642,7 @@ app.get('/api/audit', auth.requireOwner, (req, res) => {
 		}
 		return { ...r, details }
 	})
-	res.json({ entries })
+	res.json({ entries, tallies })
 })
 
 // ─── Team / user management (owner only) ─────────────────────────────────────────
@@ -979,7 +1013,10 @@ app.get('/api/summary', (req, res) => {
 // Component purchase statuses that still require shopping. Mirrors
 // PURCHASE_OUTSTANDING_STATUSES used by the per-order rollup logic below so the
 // "fully purchased" predicate is computed identically everywhere.
-const PURCHASE_QUEUE_OUTSTANDING = new Set(['Pending', 'Out of Stock'])
+// 'Wrong Stall' joins the outstanding set — the item still needs sourcing once
+// the stall mapping is corrected. 'Model Unavailable' is terminal (like Out of
+// Production) and deliberately absent.
+const PURCHASE_QUEUE_OUTSTANDING = new Set(['Pending', 'Out of Stock', 'Wrong Stall'])
 
 /**
  * Classify a candidate set of receipts by purchasing progress.
@@ -1033,6 +1070,14 @@ function classifyPurchaseState(candidates) {
 	} catch {
 		/* table may be missing on first run */
 	}
+	// Design switches — a switched line's components come from the REPLACEMENT
+	// design's style, so the buy/ready classification reflects what we actually buy.
+	let subMap = new Map()
+	try {
+		subMap = getSubstitutionMap(db)
+	} catch {
+		/* table may be missing on first run */
+	}
 
 	const ready = new Set()
 	const outstanding = new Set()
@@ -1058,7 +1103,8 @@ function classifyPurchaseState(candidates) {
 			if (seen.has(key)) continue
 			seen.add(key)
 			const a = ra.get(`${c.receipt_id}\x00${key}`) || {}
-			const comps = txComponents(t)
+			const sub = subMap.get(`${c.receipt_id}\x00${key}`)
+			const comps = sub && sub.new_style ? componentsFromStyle(sub.new_style) : txComponents(t)
 			// Two DISTINCT per-line signals:
 			//   lineToBuy     — actively buyable but not yet bought (Pending / Out of Stock);
 			//                   drives the Needs-purchase / 等待备货 buy queue.
@@ -1090,76 +1136,20 @@ function classifyPurchaseState(candidates) {
 	return { ready, outstanding }
 }
 
-// Time window (seconds) within which two same-product receipts for the same buyer
-// are treated as a single Etsy double-fire rather than two genuine orders.
-//
-// DEDUP_WINDOW_SEC — tight window used when BOTH halves of a cluster are real
-//   (paid/shipped) orders. Two fully-paid orders for the same product by the same
-//   buyer are only collapsed when they fire near-simultaneously; a legitimate
-//   re-purchase minutes/hours apart is deliberately kept as two orders.
-//
-// GHOST_PAIR_WINDOW_SEC — wide window used to pair an unpaid "Payment Processing"
-//   GHOST (the losing half of a double-fire) with its real twin. Etsy's payment
-//   pipeline lag and buyer retries mean the ghost and the real order can be created
-//   well over the tight window apart — observed 8.5 min in production, and retries
-//   can be longer. Widening is SAFE here because we only ever suppress a receipt
-//   that never cleared payment (and therefore can never be legitimately shipped),
-//   so a real order is never hidden by this window.
-const DEDUP_WINDOW_SEC = 300 // 5 minutes — real-vs-real double-fire
-const GHOST_PAIR_WINDOW_SEC = 6 * 3600 // 6 hours — unpaid ghost ↔ real twin
-
 /**
- * Identify near-duplicate "double-fire" receipts ACROSS THE ENTIRE TABLE and
- * decide, for each cluster, which single receipt is authoritative.
- *
- * Etsy occasionally issues two distinct receipt_ids for what is effectively the
- * same order — a buyer double-taps "Buy Now", or Etsy's payment pipeline fires
- * twice. The losing receipt usually never clears payment (status stays "Payment
- * Processing"), so Etsy never computes its `expected_ship_date`. That ghost then
- * surfaces in Needs-shipping with NO "Ship by" date while the real order ships
- * normally.
- *
- * WHY THIS MUST BE GLOBAL (not per-page): the surviving sibling and its ghost
- * routinely land in DIFFERENT tab filters — the real order becomes
- * shipped/Completed (shipped=true) while the ghost stays unshipped
- * (shipped=false / Needs-shipping). A dedup pass that only sees one page's rows
- * can never pair them, so the ghost is never collapsed. Computing the suppressed
- * set over every receipt once, then excluding it from every query, hides each
- * duplicate consistently in EVERY view and keeps COUNT/pagination exact.
- *
- * Cluster key:  shop_id + buyer (user_id, else name+zip) + product (listing_id,
- *               else normalised title). Receipts that share that key AND form a
- *               chain of creations each within GHOST_PAIR_WINDOW_SEC of the
- *               previous one are examined together.
- *
- * Survivor = the most-progressed real order, scored shipped(8) > paid(4) >
- *            ship-by present(2), ties broken by the higher (latest) receipt_id.
- *            This guarantees a shipped/paid order always beats an unpaid
- *            "Payment Processing" ghost.
- *
- * A non-survivor is suppressed only when it is unmistakably a duplicate:
- *   • it is a PROVISIONAL ghost — unpaid, unshipped, and with no ship-by date
- *     (Etsy never committed it, so it can never be legitimately shipped). Paired
- *     to its survivor across the wide GHOST_PAIR_WINDOW_SEC to absorb payment-lag
- *     and retry gaps; OR
- *   • it is a real order that fired within the tight DEDUP_WINDOW_SEC of the
- *     survivor (the rare case where both halves of a double-fire cleared payment).
- * A real order created FAR from the survivor is treated as a genuine separate
- * purchase (same buyer re-buying the same product) and is intentionally kept —
- * so widening the ghost window never hides a real order.
+ * Read every non-manual receipt and delegate to the shared, unit-tested dedup
+ * engine (src/orders/dedup.js) to decide which Etsy double-fire "ghost" receipts
+ * to hide from every view. This wrapper owns only the DB read; all of the
+ * suppression reasoning — and its regression tests — live in the module.
  *
  * Manual orders (negative receipt_id, source='manual') are operator-authored,
- * never an Etsy double-fire, and are excluded entirely.
+ * never an Etsy double-fire, and are excluded from the candidate set here.
  *
  * @returns {{ suppressed: Set<number>, survivorOf: Map<number, number[]> }}
- *          suppressed  — receipt_ids to hide from every view.
- *          survivorOf  — survivor receipt_id → list of receipt_ids it absorbed
- *                        (for audit display on the surviving row).
+ *          suppressed — receipt_ids to hide from every view.
+ *          survivorOf — survivor receipt_id → list of receipt_ids it absorbed.
  */
-function computeDuplicateSuppression() {
-	const suppressed = new Set()
-	const survivorOf = new Map()
-
+function computeSuppressedDuplicates() {
 	let rows = []
 	try {
 		rows = db
@@ -1174,71 +1164,10 @@ function computeDuplicateSuppression() {
 			)
 			.all()
 	} catch {
-		return { suppressed, survivorOf }
+		return { suppressed: new Set(), survivorOf: new Map() }
 	}
 
-	const groups = new Map()
-	for (const o of rows) {
-		const buyerKey = o.buyer_user_id ? `uid:${o.buyer_user_id}` : `name:${(o.buyer_name || '').trim().toLowerCase()}|zip:${(o.shipping_zip || '').trim()}`
-		const productKey = o.first_listing_id ? `lid:${o.first_listing_id}` : `title:${(o.first_product_title || '').trim().toLowerCase().slice(0, 60)}`
-		const key = `${o.shop_id}|${buyerKey}|${productKey}`
-		if (!groups.has(key)) groups.set(key, [])
-		groups.get(key).push(o)
-	}
-
-	const score = (r) => (r.is_shipped ? 8 : 0) + (r.is_paid ? 4 : 0) + (r.first_ship_by ? 2 : 0)
-
-	// A receipt Etsy never committed: it never cleared payment, was never shipped,
-	// and Etsy never computed an expected ship-by date. This is the exact fingerprint
-	// of the losing half of a double-fire. Because it is unpaid it can never be
-	// legitimately shipped, so absorbing it into its real twin only ever removes
-	// noise — never a real order — which is why it is safe to pair over a wide window.
-	const isProvisional = (r) => !r.is_paid && !r.is_shipped && !r.first_ship_by
-
-	const collapseCluster = (cluster) => {
-		if (cluster.length < 2) return
-		let primary = cluster[0]
-		for (const c of cluster) {
-			const cs = score(c)
-			const ps = score(primary)
-			if (cs > ps || (cs === ps && c.receipt_id > primary.receipt_id)) primary = c
-		}
-		const absorbed = []
-		for (const c of cluster) {
-			if (c.receipt_id === primary.receipt_id) continue
-			const gap = Math.abs((c.etsy_created_at || 0) - (primary.etsy_created_at || 0))
-			// Suppress only a provisional ghost (any distance within the cluster) or a
-			// real order that fired within the tight window of the survivor. A real
-			// order far from the survivor is a genuine separate purchase — keep it.
-			if (isProvisional(c) || gap <= DEDUP_WINDOW_SEC) {
-				suppressed.add(c.receipt_id)
-				absorbed.push(c.receipt_id)
-			}
-		}
-		if (absorbed.length) survivorOf.set(primary.receipt_id, absorbed)
-	}
-
-	for (const group of groups.values()) {
-		if (group.length < 2) continue
-		group.sort((a, b) => (a.etsy_created_at || 0) - (b.etsy_created_at || 0))
-		// Chain same-key receipts into a candidate cluster while consecutive creations
-		// stay within the wide ghost-pairing window, so an unpaid ghost and its real
-		// twin created several minutes apart land in the SAME cluster. The suppression
-		// rule inside collapseCluster then decides which members are actually hidden.
-		let cluster = [group[0]]
-		for (let i = 1; i < group.length; i++) {
-			const gap = (group[i].etsy_created_at || 0) - (group[i - 1].etsy_created_at || 0)
-			if (gap <= GHOST_PAIR_WINDOW_SEC) {
-				cluster.push(group[i])
-			} else {
-				collapseCluster(cluster)
-				cluster = [group[i]]
-			}
-		}
-		collapseCluster(cluster)
-	}
-
-	return { suppressed, survivorOf }
+	return computeDuplicateSuppression(rows)
 }
 
 /**
@@ -1279,7 +1208,7 @@ app.get('/api/orders', (req, res) => {
 	// table, since a duplicate's surviving sibling often lives in a different tab —
 	// e.g. shipped — and a per-page pass could never pair them). Excluding the ids
 	// here, at the SQL level, also keeps COUNT(*) and pagination exact.
-	const { suppressed: suppressedDupIds, survivorOf: dupSurvivorOf } = computeDuplicateSuppression()
+	const { suppressed: suppressedDupIds, survivorOf: dupSurvivorOf } = computeSuppressedDuplicates()
 	if (suppressedDupIds.size > 0) {
 		// receipt_ids are integers from our own DB — inline them directly so we are
 		// never bound by SQLite's host-parameter limit.
@@ -1632,6 +1561,7 @@ app.get('/api/orders', (req, res) => {
 	const raByReceipt = {} // receipt_id → item_key → { status_case, status_grip, status_charm }
 	const issuesByReceipt = {} // receipt_id → item_key → issue row (fulfilment exceptions)
 	const exchangesByReceipt = {} // receipt_id → item_key → exchange row (wrong-model swaps)
+	const substitutionsByReceipt = {} // receipt_id → item_key → substitution row (design switches)
 	if (rows.length > 0) {
 		const ridList = rows.map((r) => r.receipt_id)
 		const ph = ridList.map(() => '?').join(',')
@@ -1659,8 +1589,16 @@ app.get('/api/orders', (req, res) => {
 				;(exchangesByReceipt[rid] ||= {})[ex.item_key] = ex
 			}
 		}
+		// Local design switches (buyer agreed to switch to another design). These
+		// override what we RENDER + PURCHASE for the line; Etsy is never touched.
+		const subsByRid = getSubstitutionsForReceipts(db, ridList)
+		for (const rid of Object.keys(subsByRid)) {
+			for (const s of subsByRid[rid]) {
+				;(substitutionsByReceipt[rid] ||= {})[s.item_key] = s
+			}
+		}
 	}
-	const PURCHASE_OUTSTANDING = new Set(['Pending', 'Out of Stock'])
+	const PURCHASE_OUTSTANDING = new Set(['Pending', 'Out of Stock', 'Wrong Stall'])
 
 	const enriched = rows.map((r) => {
 		let transactions = []
@@ -1671,6 +1609,7 @@ app.get('/api/orders', (req, res) => {
 		const raStates = raByReceipt[r.receipt_id] || {}
 		const issueStates = issuesByReceipt[r.receipt_id] || {}
 		const exchangeStates = exchangesByReceipt[r.receipt_id] || {}
+		const subStates = substitutionsByReceipt[r.receipt_id] || {}
 		const hasItemRows = Object.keys(itemStates).length > 0
 		// Inject cached image URL + per-line purchase state into each transaction:
 		//   • components[]   — present Case/Grip/Charm with their current status (from
@@ -1680,7 +1619,12 @@ app.get('/api/orders', (req, res) => {
 		//   • line_outstanding — true while this line still has something to buy.
 		const transactionsWithImages = transactions.map((t) => {
 			const itemKey = routeDashboard.lineItemKey(t.title || '', t.listing_id)
-			const { style } = routeDashboard.parseVariations(t.variations)
+			// A local design switch overrides what we render + purchase for this
+			// line. The style drives which Case/Grip/Charm chips appear, so we use
+			// the switched style when one is set (never touches Etsy).
+			const sub = subStates[itemKey] || null
+			const { style: origStyle } = routeDashboard.parseVariations(t.variations)
+			const style = sub && sub.new_style ? sub.new_style : origStyle
 			const sc = routeDashboard.styleComponents(style)
 			const a = raStates[itemKey] || {}
 			const components = []
@@ -1702,14 +1646,34 @@ app.get('/api/orders', (req, res) => {
 			const exchangeOpen = !!(exchange && exchange.status === 'open')
 			const lineOutstanding = issueOpen || exchangeOpen ? false : components.length ? components.some((c) => PURCHASE_OUTSTANDING.has(c.status)) : needsPurchase
 
+			// The switched image is either an uploaded blob (served from our endpoint)
+			// or a catalog CDN url; fall back to the original listing thumbnail.
+			const subImageUrl = sub ? (sub.has_image_data ? `/api/route/substitution-image/${sub.id}` : sub.image_url || imageMap[t.listing_id] || null) : (imageMap[t.listing_id] ?? null)
+
 			return {
 				...t,
-				image_url: imageMap[t.listing_id] ?? null,
+				image_url: subImageUrl,
 				item_key: itemKey,
 				components,
 				needs_purchase: needsPurchase,
 				purchased,
 				line_outstanding: lineOutstanding,
+				// Local design switch (buyer agreed to switch to another design).
+				// The UI shows the replacement product + a "switched from" note; the
+				// original Etsy title is preserved for reference. Etsy is untouched.
+				substitution: sub
+					? {
+							id: sub.id,
+							new_title: sub.new_title,
+							new_style: sub.new_style,
+							new_phone_model: sub.new_phone_model,
+							source: sub.source,
+							image_url: subImageUrl,
+							original_title: sub.original_title || t.title || '',
+							note: sub.note || '',
+							created_at: sub.created_at,
+						}
+					: null,
 				issue: issue
 					? {
 							id: issue.id,
@@ -2132,13 +2096,24 @@ app.post('/api/sync/trigger/:shop_id', async (req, res) => {
  * POST /api/sync/trigger-all
  * Manually trigger a sync for all authenticated shops.
  */
+// Debounce window for "sync all shops" so a double-click / impatient retry can't
+// launch overlapping full-fleet runs seconds apart (each spends real API budget).
+const SYNC_ALL_DEBOUNCE_MS = 60_000
+let _lastTriggerAllAt = 0
+
 app.post('/api/sync/trigger-all', async (req, res) => {
 	const allShops = getAllShops(config).filter((s) => tokenManager.hasTokens(s.shop_id))
 	if (allShops.length === 0) return res.status(400).json({ error: 'No authenticated shops' })
 
+	const sinceLast = Date.now() - _lastTriggerAllAt
+	if (sinceLast < SYNC_ALL_DEBOUNCE_MS) {
+		return res.status(429).json({ error: `Sync-all was just triggered — try again in ${Math.ceil((SYNC_ALL_DEBOUNCE_MS - sinceLast) / 1000)}s.` })
+	}
+
 	const alreadyRunning = allShops.filter((s) => _syncingShops.has(s.shop_id))
 	if (alreadyRunning.length === allShops.length) return res.status(409).json({ error: 'All shops already syncing' })
 
+	_lastTriggerAllAt = Date.now()
 	res.status(202).json({ ok: true, message: `Sync started for ${allShops.length} shops` })
 	_runManualSync(allShops)
 })
@@ -2152,7 +2127,9 @@ async function _runManualSync(shops) {
 	// instead of firing doomed requests that just burn into the cooldown.
 	const exhaustedKeys = new Set()
 
+	let _shopIdx = -1
 	for (const shopCfg of shops) {
+		_shopIdx++
 		if (_syncingShops.has(shopCfg.shop_id)) continue
 
 		if (exhaustedKeys.has(shopCfg.api_key)) {
@@ -2166,6 +2143,11 @@ async function _runManualSync(shops) {
 			continue
 		}
 
+		// Stagger consecutive shops in a multi-shop run so same-key shops don't fire
+		// back-to-back. The per-key QPS bucket already caps the rate, but this keeps
+		// the traffic shaped like the jittered background worker rather than a burst.
+		if (_shopIdx > 0) await new Promise((r) => setTimeout(r, 1500 + Math.floor(Math.random() * 2000)))
+
 		_syncingShops.add(shopCfg.shop_id)
 
 		broadcastSyncEvent({ type: 'sync_start', shop_id: shopCfg.shop_id, ts: Date.now() })
@@ -2174,7 +2156,8 @@ async function _runManualSync(shops) {
 			const groupCfg = config.groups.find((g) => g.group_id === shopCfg.group_id)
 			const proxyClient = createGroupClient(groupCfg, config.vpn_local_port)
 			const accessToken = await tokenManager.getAccessToken(shopCfg.shop_id, shopCfg.api_key, shopCfg.refresh_token ?? null, proxyClient)
-			const shopClient = buildShopClient(proxyClient, shopCfg.api_key, shopCfg.shared_secret, accessToken)
+			// Pre-flight fail-closed check: a proxied group must carry a proxy agent.
+			buildShopClient(proxyClient, shopCfg.api_key, shopCfg.shared_secret, accessToken, null, { requireProxy: usesGroupProxy(groupCfg) })
 
 			const result = await syncShop(shopCfg, groupCfg, config, proxyClient, tokenManager, db)
 			if (result?.status === 'rate_limited' && shopCfg.api_key) {
@@ -2388,11 +2371,20 @@ app.get('/api/finance/status', (req, res) => {
  * true) walks the entire history; otherwise an incremental sync from each shop's
  * high-water mark. Streams progress over SSE.
  */
+let _lastFinanceSyncAllAt = 0
+
 app.post('/api/finance/sync-all', (req, res) => {
 	if (_ledgerSyncRunning) return res.status(409).json({ error: 'An earnings sync is already running' })
 	const shops = getAllShops(config).filter((s) => tokenManager.hasTokens(s.shop_id))
 	if (shops.length === 0) return res.status(400).json({ error: 'No authenticated shops' })
+
+	const sinceLast = Date.now() - _lastFinanceSyncAllAt
+	if (sinceLast < SYNC_ALL_DEBOUNCE_MS) {
+		return res.status(429).json({ error: `Earnings sync-all was just triggered — try again in ${Math.ceil((SYNC_ALL_DEBOUNCE_MS - sinceLast) / 1000)}s.` })
+	}
+
 	const full = req.body?.full !== false
+	_lastFinanceSyncAllAt = Date.now()
 	res.status(202).json({ ok: true, message: `Earnings sync started for ${shops.length} shop(s)`, shops: shops.length, full })
 	_runLedgerSync(shops, { fullBackfill: full })
 })
@@ -2607,11 +2599,15 @@ app.post('/api/issues/:id/draft-message', async (req, res) => {
 	try {
 		// Resolve the order facts: buyer name + shop/brand name from the receipt,
 		// and the exact product variations (style / phone model) from the line.
-		const receipt = db.prepare(`
+		const receipt = db
+			.prepare(
+				`
 			SELECT r.name AS buyer_name, s.shop_name AS shop_name
 			FROM receipts r LEFT JOIN shops s ON s.shop_id = r.shop_id
 			WHERE r.receipt_id = ?
-		`).get(issue.receipt_id)
+		`,
+			)
+			.get(issue.receipt_id)
 		if (!receipt) return res.status(404).json({ error: 'Order not found for this issue.' })
 
 		// Pull the matching transaction line to recover style/model variations. We
@@ -2620,14 +2616,15 @@ app.post('/api/issues/:id/draft-message', async (req, res) => {
 		let phoneModel = issue.phone_model || ''
 		try {
 			const txns = db.prepare('SELECT title, listing_id, variations FROM transactions WHERE receipt_id = ?').all(issue.receipt_id)
-			const match = txns.find((t) => routeDashboard.lineItemKey(t.title, t.listing_id) === issue.item_key)
-				|| txns.find((t) => issue.listing_id && Number(t.listing_id) === Number(issue.listing_id))
+			const match = txns.find((t) => routeDashboard.lineItemKey(t.title, t.listing_id) === issue.item_key) || txns.find((t) => issue.listing_id && Number(t.listing_id) === Number(issue.listing_id))
 			if (match) {
 				const parsed = routeDashboard.parseVariations(match.variations)
 				style = parsed.style || ''
 				if (!phoneModel) phoneModel = parsed.phoneModel || ''
 			}
-		} catch { /* variations are best-effort context */ }
+		} catch {
+			/* variations are best-effort context */
+		}
 
 		const { message } = await generateBuyerIssueMessage({
 			shopName: receipt.shop_name || '',
@@ -2781,6 +2778,182 @@ app.delete('/api/issues/:id', (req, res) => {
 	res.json({ success: true })
 })
 
+// ─── Design switches (buyer agreed to switch to another design) ──────────────
+//
+// After a fulfilment issue is flagged and the buyer chooses to SWITCH design
+// (rather than refund), the operator picks a replacement — from the product
+// catalog or a custom upload. We record it as a LOCAL, non-destructive override:
+// the dashboard then renders + purchases the replacement design for this line,
+// while the Etsy receipt is NEVER modified and nothing is pushed to Etsy.
+//
+// Creating a switch auto-resolves any open issue on the line as 'switched' (so
+// the line un-holds and flows back into the purchasing queue) and resets its
+// purchase status so the new design starts as "still to buy".
+
+/** Resolve the original transaction title for a receipt line (for the snapshot). */
+function _origTitleForLine(receiptId, itemKey) {
+	try {
+		const row = db.prepare('SELECT all_transactions FROM receipts WHERE receipt_id = ?').get(receiptId)
+		const txs = JSON.parse(row?.all_transactions || '[]')
+		const match = (Array.isArray(txs) ? txs : []).find((t) => routeDashboard.lineItemKey(t.title || '', t.listing_id) === itemKey)
+		return match ? match.title || '' : ''
+	} catch {
+		return ''
+	}
+}
+
+/**
+ * POST /api/orders/:receipt_id/substitution
+ * Body: { item_key, new_title, new_style?, new_phone_model?, source?,
+ *         source_listing_id?, image_url?, image_b64?, image_mime?, note? }
+ * Creates / updates the local design switch for a line and un-holds it.
+ */
+app.post('/api/orders/:receipt_id/substitution', express.json({ limit: '25mb' }), (req, res) => {
+	const receiptId = Number(req.params.receipt_id)
+	const b = req.body || {}
+	const itemKey = b.item_key
+	const newTitle = String(b.new_title || '').trim()
+	if (!itemKey) return res.status(400).json({ error: 'item_key is required' })
+	if (!newTitle) return res.status(400).json({ error: 'A replacement product title is required.' })
+	const exists = db.prepare('SELECT 1 FROM receipts WHERE receipt_id = ?').get(receiptId)
+	if (!exists) return res.status(404).json({ error: 'Order not found' })
+
+	// Decode an optional base64 custom-product image (accepts data: URLs). When no
+	// image field is present at all, the stored image (if any) is preserved.
+	let imageArgs = {}
+	if (Object.prototype.hasOwnProperty.call(b, 'image_b64')) {
+		let imageData = null
+		let imageMime = String(b.image_mime || '').trim()
+		if (b.image_b64 && typeof b.image_b64 === 'string') {
+			let raw = b.image_b64.trim()
+			const m = /^data:([^;]+);base64,(.*)$/i.exec(raw)
+			if (m) {
+				imageMime = imageMime || m[1]
+				raw = m[2]
+			}
+			try {
+				const buf = Buffer.from(raw, 'base64')
+				if (buf.length) imageData = buf
+			} catch {
+				/* ignore */
+			}
+		}
+		imageArgs = { image_data: imageData, image_mime: imageMime }
+	}
+
+	let substitution
+	let resolvedIssue = null
+	const txn = db.transaction(() => {
+		substitution = upsertOrderSubstitution(db, {
+			receipt_id: receiptId,
+			item_key: String(itemKey),
+			original_title: b.original_title != null ? String(b.original_title) : _origTitleForLine(receiptId, String(itemKey)),
+			new_title: newTitle,
+			new_style: b.new_style != null ? String(b.new_style) : null,
+			new_phone_model: b.new_phone_model != null ? String(b.new_phone_model) : null,
+			source: b.source === 'catalog' || b.source === 'custom' ? b.source : b.source_listing_id ? 'catalog' : 'custom',
+			source_listing_id: b.source_listing_id != null && String(b.source_listing_id).trim() !== '' ? Number(b.source_listing_id) : null,
+			image_url: b.image_url != null ? String(b.image_url).trim() : null,
+			note: typeof b.note === 'string' ? b.note.trim().slice(0, 1000) : null,
+			...imageArgs,
+		})
+
+		// Auto-resolve an open issue on this line as 'switched' so it un-holds and
+		// flows back into purchasing with the new design.
+		const open = getIssuesForReceipt(db, receiptId).find((i) => i.item_key === String(itemKey) && i.status === 'open')
+		if (open) {
+			resolvedIssue = patchOrderIssue(db, open.id, { status: 'resolved', resolution: 'switched', resolved_at: Math.floor(Date.now() / 1000) })
+		}
+
+		// Reactivate the line for purchasing. The replacement is a different product
+		// the buyer just agreed to, so it must:
+		//   • start "still to buy" (statuses → Pending), and
+		//   • be pulled back into BOTH purchasing queues even if the original line was
+		//     previously EXCLUDED or DISMISSED (common for an already-shipped/completed
+		//     order whose line had been set aside). Without clearing those flags the
+		//     switched line stays invisible in the Route active list AND the Orders
+		//     "Needs purchase" view. We UPSERT so a Pending row always exists (a line
+		//     that never had an assignment still enters the queue), stamped with the
+		//     new title so the Route reads the switched product.
+		// The switched product is a DIFFERENT item, so the line's saved supplier
+		// context (from the ORIGINAL product) is now stale and must be cleared:
+		//   • a CUSTOM upload isn't in the catalog, so it should read as UNMATCHED —
+		//     the operator asks around, then fills in the supplier on the Route tab
+		//     (which persists as a fresh override), and
+		//   • a CATALOG switch should re-match its OWN supplier by the new title,
+		//     which only happens once the stale override is gone.
+		// So we wipe supplier_*_override + charm on switch, alongside re-activating
+		// the line (excluded/dismissed cleared, statuses → Pending).
+		try {
+			db.prepare(
+				`
+				INSERT INTO route_assignments (receipt_id, item_key, title, status_case, status_grip, status_charm, excluded, dismissed_at, supplier_shop_override, supplier_stall_override, charm_code, charm_shop, updated_at)
+				VALUES (@receipt_id, @item_key, @title, 'Pending', 'Pending', 'Pending', 0, NULL, '', '', '', '', strftime('%s','now'))
+				ON CONFLICT(receipt_id, item_key) DO UPDATE SET
+					title = @title,
+					status_case = 'Pending', status_grip = 'Pending', status_charm = 'Pending',
+					excluded = 0, dismissed_at = NULL,
+					supplier_shop_override = '', supplier_stall_override = '',
+					charm_code = '', charm_shop = '',
+					updated_at = strftime('%s','now')
+			`,
+			).run({ receipt_id: receiptId, item_key: String(itemKey), title: newTitle })
+			// No-component products fall back to the binary buy flag — force it on so
+			// a style-less replacement still shows as "to buy".
+			db.prepare(`UPDATE receipt_item_purchase SET needs_purchase=1, purchased_at=NULL WHERE receipt_id = ? AND item_key = ?`).run(receiptId, String(itemKey))
+		} catch (e) {
+			console.warn('[substitution] reactivate warning:', e.message)
+		}
+
+		recomputeNeedsPurchaseRollup(receiptId)
+	})
+	txn()
+
+	logEvent(db, {
+		event_type: 'ORDER_SUBSTITUTION',
+		shop_name: null,
+		listing_id: substitution.source_listing_id || null,
+		listing_title: newTitle,
+		detail: `Order ${receiptId} line switched to "${newTitle}"${resolvedIssue ? ' (issue resolved: switched)' : ''}`,
+		meta: { receipt_id: receiptId, item_key: String(itemKey), source: substitution.source },
+	})
+	console.log(`[substitution] receipt ${receiptId} line ${itemKey} → "${newTitle}"`)
+	res.json({ success: true, substitution, issue: resolvedIssue })
+})
+
+/**
+ * DELETE /api/orders/:receipt_id/substitution
+ * Body: { item_key }
+ * Removes the design switch, reverting the line to its original Etsy product.
+ */
+app.delete('/api/orders/:receipt_id/substitution', express.json(), (req, res) => {
+	const receiptId = Number(req.params.receipt_id)
+	const itemKey = (req.body || {}).item_key
+	if (!itemKey) return res.status(400).json({ error: 'item_key is required' })
+	const removed = deleteOrderSubstitution(db, receiptId, String(itemKey))
+	if (!removed) return res.status(404).json({ error: 'No design switch found for this line.' })
+	recomputeNeedsPurchaseRollup(receiptId)
+	res.json({ success: true })
+})
+
+/**
+ * GET /api/route/substitution-image/:id
+ * Streams the uploaded image bytes for a custom design switch.
+ */
+app.get('/api/route/substitution-image/:id', (req, res) => {
+	const id = parseInt(req.params.id, 10)
+	if (!Number.isInteger(id)) return res.status(400).end()
+	try {
+		const img = getSubstitutionImage(db, id)
+		if (!img) return res.status(404).end()
+		res.setHeader('Content-Type', img.mime || 'image/png')
+		res.setHeader('Cache-Control', 'private, max-age=300')
+		res.send(img.data)
+	} catch (err) {
+		if (!res.headersSent) res.status(404).end()
+	}
+})
+
 // ─── Wrong-model exchanges (item in hand, wrong model — swap at supplier) ────
 //
 // Distinct from order_issues: the buyer still receives exactly what they ordered.
@@ -2861,7 +3034,10 @@ app.post('/api/exchanges/:id/done', (req, res) => {
 		updated = patchOrderExchange(db, exchange.id, { status: 'done', done_at: Math.floor(Date.now() / 1000) })
 		// The swapped pieces are now the correct model and in hand → Purchased, so
 		// the line drops from every buy view and the order becomes ready to ship.
-		const comps = String(exchange.components || '').split(',').map((c) => c.trim()).filter(Boolean)
+		const comps = String(exchange.components || '')
+			.split(',')
+			.map((c) => c.trim())
+			.filter(Boolean)
 		if (comps.length) {
 			const patch = { receipt_id: exchange.receipt_id, item_key: exchange.item_key, title: exchange.title || undefined }
 			if (comps.includes('case')) patch.status_case = 'Purchased'
@@ -3160,12 +3336,11 @@ app.post('/api/orders/manual/:receipt_id/tracking', (req, res) => {
 //
 // Purely local/operational — never pushed to Etsy.
 
-const PURCHASE_OUTSTANDING_STATUSES = new Set(['Pending', 'Out of Stock'])
-const VALID_PURCHASE_STATUSES = new Set(['Pending', 'Purchased', 'Out of Stock', 'Out of Production'])
+const PURCHASE_OUTSTANDING_STATUSES = new Set(['Pending', 'Out of Stock', 'Wrong Stall'])
+const VALID_PURCHASE_STATUSES = new Set(['Pending', 'Purchased', 'Out of Stock', 'Out of Production', 'Wrong Stall', 'Model Unavailable'])
 
-/** Present Case/Grip/Charm components of a transaction (from its Style variation). */
-function txComponents(t) {
-	const { style } = routeDashboard.parseVariations(t.variations)
+/** Present Case/Grip/Charm components implied by a Style string. */
+function componentsFromStyle(style) {
 	const sc = routeDashboard.styleComponents(style)
 	const out = []
 	if (sc.hasCase) out.push('case')
@@ -3174,7 +3349,17 @@ function txComponents(t) {
 	return out
 }
 
-/** Parse a receipt's line items into [{ item_key, title, components[] }] (deduped). */
+/** Present Case/Grip/Charm components of a transaction (from its Style variation). */
+function txComponents(t) {
+	const { style } = routeDashboard.parseVariations(t.variations)
+	return componentsFromStyle(style)
+}
+
+/**
+ * Parse a receipt's line items into [{ item_key, title, components[] }] (deduped).
+ * Substitution-aware: a switched line's components/title reflect the REPLACEMENT
+ * design (so the purchasing rollup buys the right product), never the original.
+ */
 function orderLineItems(receiptId) {
 	const row = db.prepare('SELECT all_transactions FROM receipts WHERE receipt_id = ?').get(receiptId)
 	if (!row) return null
@@ -3184,10 +3369,24 @@ function orderLineItems(receiptId) {
 	} catch {
 		txs = []
 	}
+	// Load any design switches for this receipt once, keyed by item_key.
+	const subs = {}
+	try {
+		;(getSubstitutionsForReceipts(db, [Number(receiptId)])[receiptId] || []).forEach((s) => {
+			subs[s.item_key] = s
+		})
+	} catch {
+		/* table may not exist yet */
+	}
+
 	const seen = new Map()
 	for (const t of txs) {
 		const key = routeDashboard.lineItemKey(t.title || '', t.listing_id)
-		if (!seen.has(key)) seen.set(key, { item_key: key, title: t.title || '', components: txComponents(t) })
+		if (seen.has(key)) continue
+		const sub = subs[key]
+		const style = sub && sub.new_style ? sub.new_style : routeDashboard.parseVariations(t.variations).style
+		const title = sub ? sub.new_title : t.title || ''
+		seen.set(key, { item_key: key, title, components: componentsFromStyle(style) })
 	}
 	return [...seen.values()]
 }
@@ -3223,7 +3422,9 @@ function orderHasOutstanding(receiptId) {
 		db.prepare("SELECT item_key FROM order_exchanges WHERE receipt_id = ? AND status = 'open'")
 			.all(receiptId)
 			.forEach((x) => onHold.add(x.item_key))
-	} catch { /* table may not exist yet on first run */ }
+	} catch {
+		/* table may not exist yet on first run */
+	}
 	for (const it of items) {
 		if (onHold.has(it.item_key)) continue
 		if (it.components.length) {
@@ -3508,7 +3709,11 @@ async function shipEtsyReceipt(receiptId, opts = {}) {
 	// Mark this client 'critical': shipping/completing an order is an operator-
 	// initiated fulfilment action and must never be locked out by the background
 	// budget reserve. Etsy itself remains the sole authority on a true 429.
-	const shopClient = buildShopClient(proxyClient, shopCfg.api_key, shopCfg.shared_secret, accessToken, null, { priority: 'critical' })
+	const shopClient = buildShopClient(proxyClient, shopCfg.api_key, shopCfg.shared_secret, accessToken, null, {
+		priority: 'critical',
+		// Fail closed: a proxied group must never ship an order from the server's own IP.
+		requireProxy: usesGroupProxy(groupCfg),
+	})
 	const numericShopId = await resolveShopId(shopClient, shopCfg.shop_id)
 
 	// 5. Create the shipment on Etsy (marks shipped + notifies the buyer).
@@ -3883,7 +4088,11 @@ app.get('/api/4px/order/:receipt_id', (req, res) => {
 function shapeFreight(row) {
 	let breakdown = []
 	if (row.fourpx_freight_breakdown) {
-		try { breakdown = JSON.parse(row.fourpx_freight_breakdown) } catch { breakdown = [] }
+		try {
+			breakdown = JSON.parse(row.fourpx_freight_breakdown)
+		} catch {
+			breakdown = []
+		}
 	}
 	return {
 		amount: row.fourpx_freight_amount ?? null,
@@ -3906,9 +4115,11 @@ function shapeFreight(row) {
  */
 async function refreshFreightForReceipt(receiptId, { appKey, appSecret }) {
 	const row = db
-		.prepare(`SELECT receipt_id, source, tracking_code, fourpx_consignment_no, fourpx_tracking_no, fourpx_order_status,
+		.prepare(
+			`SELECT receipt_id, source, tracking_code, fourpx_consignment_no, fourpx_tracking_no, fourpx_order_status,
 		                 shipping_country_iso, fourpx_product_code, fourpx_weight_g, fourpx_freight_status
-		          FROM receipts WHERE receipt_id = ?`)
+		          FROM receipts WHERE receipt_id = ?`,
+		)
 		.get(receiptId)
 	if (!row) return { updated: false, status: 'none', reason: 'receipt_not_found' }
 	const isFourpx = row.fourpx_consignment_no || row.fourpx_tracking_no || /^4PX/i.test(row.tracking_code || '')
@@ -3938,12 +4149,14 @@ app.get('/api/4px/freight/:receipt_id', async (req, res) => {
 			await refreshFreightForReceipt(receipt_id, { appKey, appSecret })
 		}
 		const row = db
-			.prepare(`
+			.prepare(
+				`
 				SELECT fourpx_consignment_no, fourpx_freight_amount, fourpx_freight_currency,
 				       fourpx_billed_weight_g, fourpx_freight_breakdown, fourpx_freight_status,
 				       fourpx_freight_fetched_at
 				FROM receipts WHERE receipt_id = ?
-			`)
+			`,
+			)
 			.get(receipt_id)
 		if (!row) return res.status(404).json({ error: 'Receipt not found' })
 		res.json({ receipt_id: Number(receipt_id), freight: shapeFreight(row) })
@@ -4007,7 +4220,9 @@ app.get('/api/4px/shipping-summary', async (req, res) => {
 
 		// Live rates let the UI convert CNY → each shop's payout currency.
 		let rates = {}
-		try { rates = await getRates() } catch {}
+		try {
+			rates = await getRates()
+		} catch {}
 
 		res.json({ shops: Object.values(byShop), grandTotals, rates })
 	} catch (err) {
@@ -4211,8 +4426,7 @@ async function create4pxShipmentForReceipt({ appKey, appSecret, receipt_id, reci
 	// via ds.xms.estimated_cost.get (and reconcile to the billed cost later).
 	recordFourpxShipmentInputs(db, receipt_id, {
 		productCode: logistics_product_code || null,
-		weightG: parcel && Number.isFinite(parcel.weight_g) ? parcel.weight_g
-			: parcel && Number.isFinite(parcel.weight) ? parcel.weight : null,
+		weightG: parcel && Number.isFinite(parcel.weight_g) ? parcel.weight_g : parcel && Number.isFinite(parcel.weight) ? parcel.weight : null,
 	})
 
 	// Mirror into the main tracking_code field so pre-transit detection picks it up.
@@ -4558,6 +4772,12 @@ app.get('/api/4px/label-print/:receipt_id', async (req, res) => {
 				return res.json({ ok: true, mode: 'printed', printer: config.label_printer_name })
 			} catch (printErr) {
 				console.error('[4px] direct label print failed:', printErr.message)
+				// A printer that is offline / out of labels / jammed is an actionable
+				// hardware fault: surface it in every mode instead of silently opening
+				// the PDF, or the operator thinks it printed when nothing came out.
+				if (printErr.printerNotReady) {
+					return res.status(503).json({ error: printErr.message })
+				}
 				// In 'silent' mode the operator explicitly opted out of the fallback,
 				// so surface the failure. In 'auto' mode, degrade to opening the PDF.
 				if (mode === 'silent') {
@@ -4990,10 +5210,14 @@ app.post('/api/4px/balance', (req, res) => {
 app.post('/api/4px/track/refresh/:receipt_id', async (req, res) => {
 	try {
 		const receiptId = req.params.receipt_id
-		const row = db.prepare(`
+		const row = db
+			.prepare(
+				`
 			SELECT COALESCE(CASE WHEN tracking_code LIKE '4PX%' THEN tracking_code END, fourpx_tracking_no) AS tracking_no
 			FROM receipts WHERE receipt_id = ?
-		`).get(receiptId)
+		`,
+			)
+			.get(receiptId)
 		if (!row || !row.tracking_no) return res.status(404).json({ error: 'No 4PX tracking number for this order' })
 
 		const snap = await getTrackingSnapshot(row.tracking_no, {
@@ -5001,9 +5225,7 @@ app.post('/api/4px/track/refresh/:receipt_id', async (req, res) => {
 			appSecret: config.fourpx_app_secret ?? null,
 		})
 		if (snap.ok) {
-			const firstScanAt = ['in_transit', 'delivered', 'exception'].includes(snap.status)
-				? (snap.firstScanAt ?? Math.floor(Date.now() / 1000))
-				: null
+			const firstScanAt = ['in_transit', 'delivered', 'exception'].includes(snap.status) ? (snap.firstScanAt ?? Math.floor(Date.now() / 1000)) : null
 			updateTrackingDetail(db, receiptId, {
 				status: snap.status,
 				firstScanAt,
@@ -5138,7 +5360,10 @@ async function getShopClientForShopName(shopName) {
 		if (forceRefresh) tokenManager.invalidate(shopCfg.shop_id)
 		return tokenManager.getAccessToken(shopCfg.shop_id, shopCfg.api_key, shopCfg.refresh_token ?? null, proxyClient)
 	}
-	const shopClient = buildShopClient(proxyClient, shopCfg.api_key, shopCfg.shared_secret, accessToken, getToken)
+	const shopClient = buildShopClient(proxyClient, shopCfg.api_key, shopCfg.shared_secret, accessToken, getToken, {
+		// Fail closed: a proxied group must never egress on the server's own IP.
+		requireProxy: usesGroupProxy(groupCfg),
+	})
 	const numericShopId = await resolveShopId(shopClient, shopCfg.shop_id)
 	// Recorded OAuth scopes (null for legacy tokens) — lets callers pre-flight
 	// permission errors like a missing listings_w scope.
@@ -5240,21 +5465,73 @@ app.get('/api/listings', (req, res) => {
 
 /**
  * GET /api/listings/sync/:shop_name
- * Fetches all listings for a shop from Etsy and caches them locally.
+ * Fetches listings for a shop from Etsy and mirrors them into the local cache.
+ *
+ * Etsy's endpoint only accepts a single concrete state, so "all" is expanded to
+ * every state. After each state is fully paginated we reconcile the cache with
+ * pruneStaleListings(): listings Etsy no longer returns (deleted on Etsy, or
+ * moved to another state) are dropped so the Listings tab shows exactly what the
+ * shop currently lists — not a growing pile of stale rows that hide the new ones.
+ *
+ * We request the `Inventory` association (includeInventory), so each listing
+ * arrives with its full per-variation offerings inline. That lets us cache the
+ * per-style price + stock in the SAME pass — the Price/inventory strip is
+ * populated the moment a sync finishes, with no separate per-listing inventory
+ * fetch (one page call per 100 listings instead of one call per listing).
  */
+const ETSY_LISTING_STATES = ['active', 'inactive', 'draft', 'sold_out', 'expired']
+
+/**
+ * Cache a listing's embedded inventory (from includes=Inventory) into
+ * listing_inventory, then prune variation rows Etsy no longer returns.
+ * Returns the number of offering rows written (0 when the listing has none).
+ */
+function cacheListingInventory(listingId, inventory) {
+	const products = inventory?.products
+	if (!Array.isArray(products) || products.length === 0) return 0
+
+	const seenProductIds = new Set()
+	let written = 0
+	for (const product of products) {
+		if (product?.product_id != null) seenProductIds.add(product.product_id)
+		// A product always has ≥1 offering; guard anyway so a malformed payload
+		// can never throw and abort the whole sync.
+		for (const offering of product.offerings || []) {
+			upsertListingInventory(db, listingId, product, offering)
+			written++
+		}
+	}
+	pruneStaleInventory(db, listingId, seenProductIds)
+	return written
+}
+
 app.get('/api/listings/sync/:shop_name', async (req, res) => {
 	try {
 		const { shopClient, numericShopId, shopCfg } = await getShopClientForShopName(req.params.shop_name)
-		const state = req.query.state || 'active'
-		let count = 0
-		for await (const batch of paginateListings(shopClient, numericShopId, { state })) {
-			for (const listing of batch) {
-				upsertListing(db, shopCfg.shop_id, listing)
-				count++
+		const requested = req.query.state || 'active'
+		const states = requested === 'all' ? ETSY_LISTING_STATES : [requested]
+
+		let synced = 0
+		let removed = 0
+		let variations = 0
+		for (const state of states) {
+			// Track which listing_ids Etsy returned for this state so we can prune
+			// the locally-cached rows it no longer lists once the full walk succeeds.
+			const seenIds = new Set()
+			for await (const batch of paginateListings(shopClient, numericShopId, { state, includeInventory: true })) {
+				for (const listing of batch) {
+					upsertListing(db, shopCfg.shop_id, listing)
+					variations += cacheListingInventory(listing.listing_id, listing.inventory)
+					seenIds.add(listing.listing_id)
+					synced++
+				}
 			}
+			// Guarded inside pruneStaleListings: an empty result never wipes the cache.
+			removed += pruneStaleListings(db, shopCfg.shop_id, state, seenIds)
 		}
-		console.log(`[listings] Synced ${count} ${state} listings for ${req.params.shop_name}`)
-		res.json({ success: true, synced: count, shop: req.params.shop_name, state })
+
+		console.log(`[listings] Synced ${synced} listing(s) [${states.join(', ')}] for ${req.params.shop_name}; cached ${variations} variation(s); pruned ${removed} stale`)
+		res.json({ success: true, synced, variations, removed, shop: req.params.shop_name, state: requested })
 	} catch (err) {
 		console.error('[listings] Sync error:', err.response?.data || err.message)
 		res.status(err.status || err.response?.status || 500).json({ error: err.response?.data?.error || err.message })
@@ -6633,6 +6910,309 @@ function etsyThumb(url) {
 // endpoints (see SHOPPER_ALLOW in src/auth/access.js). Real-time collaboration
 // rides the _routeSseClients bus: every status change is pushed to all devices.
 
+// ── Canonical product identity across shops (perceptual image hash) ──────────
+// The SAME physical product is listed separately in each Etsy shop (different
+// listing_id AND — as the data shows — different SEO titles), so title can't
+// link them. The reliable signal is the product IMAGE. A raw byte hash only
+// matches byte-identical uploads; shops often re-encode/resize, so we use a
+// perceptual dHash (17×16 grayscale gradient) which is stable across encoding and
+// scaling → the same design links across shops. Hashes are persisted in
+// listing_phash (keyed by listing_id, invalidated when the source bytes change).
+
+const PRODUCT_HASH_ALGO = 'dhash256-v1'
+
+// dHash: compare each pixel to its right neighbour in a 17×16 grayscale image →
+// 256 bits. The larger fingerprint keeps visual similarity robust while avoiding
+// the collisions seen with the original 64-bit hash.
+async function computeDHash(buf) {
+	const raw = await sharp(buf).greyscale().resize(17, 16, { fit: 'fill' }).raw().toBuffer()
+	let hash = 0n
+	let bit = 0n
+	for (let row = 0; row < 16; row++) {
+		for (let col = 0; col < 16; col++) {
+			if (raw[row * 17 + col] < raw[row * 17 + col + 1]) hash |= 1n << bit
+			bit++
+		}
+	}
+	return hash.toString(16).padStart(64, '0')
+}
+
+// Compute + persist a listing's perceptual hash from its cached image bytes.
+// Skips work when already up-to-date. Returns the phash, or null if no image.
+async function ensureListingPhash(listingId) {
+	if (!listingId) return null
+	let img
+	try {
+		img = db.prepare('SELECT data FROM listing_image_data WHERE listing_id = ?').get(listingId)
+	} catch {
+		return null
+	}
+	if (!img || !img.data || !img.data.length) return null
+	const sha = crypto.createHash('sha256').update(img.data).digest('hex')
+	const existing = db.prepare('SELECT phash, sha, algo FROM listing_phash WHERE listing_id = ?').get(listingId)
+	if (existing && existing.sha === sha && existing.algo === PRODUCT_HASH_ALGO) return existing.phash
+	let phash
+	try {
+		phash = await computeDHash(img.data)
+	} catch (e) {
+		return existing ? existing.phash : null
+	}
+	db.prepare(
+		"INSERT INTO listing_phash (listing_id, phash, sha, algo, canonical_key, computed_at) VALUES (?,?,?,?,NULL,strftime('%s','now')) ON CONFLICT(listing_id) DO UPDATE SET phash=excluded.phash, sha=excluded.sha, algo=excluded.algo, canonical_key=NULL, computed_at=excluded.computed_at",
+	).run(listingId, phash, sha, PRODUCT_HASH_ALGO)
+	return phash
+}
+
+// Background pass: hash every cached image that doesn't have a current phash.
+let _phashBusy = false
+async function backfillPhashes() {
+	if (_phashBusy) return
+	_phashBusy = true
+	try {
+		const ids = db
+			.prepare(
+				'SELECT d.listing_id AS id FROM listing_image_data d LEFT JOIN listing_phash p ON p.listing_id = d.listing_id WHERE p.listing_id IS NULL OR p.algo IS NULL OR p.algo <> ?',
+			)
+			.all(PRODUCT_HASH_ALGO)
+			.map((r) => r.id)
+		for (const id of ids) {
+			try {
+				await ensureListingPhash(id)
+			} catch {
+				/* keep going */
+			}
+		}
+		if (ids.length) console.log(`[phash] computed ${ids.length} product image hash(es)`)
+		reconcileCanonicalProductKeys()
+	} catch (e) {
+		console.warn('[phash] backfill failed:', e.message)
+	} finally {
+		_phashBusy = false
+	}
+}
+
+let _imageIdentityHydrationBusy = false
+async function hydrateMissingProductIdentities(batchSize = 40) {
+	if (_imageIdentityHydrationBusy) return
+	_imageIdentityHydrationBusy = true
+	let rows = []
+	try {
+		rows = db
+			.prepare(`
+				SELECT i.listing_id, i.url
+				FROM listing_images i
+				LEFT JOIN listing_image_data d ON d.listing_id = i.listing_id
+				WHERE d.listing_id IS NULL
+				  AND i.url IS NOT NULL
+				  AND trim(i.url) <> ''
+				ORDER BY i.listing_id
+				LIMIT ?
+			`)
+			.all(batchSize)
+		if (rows.length) {
+			const images = new Map(rows.map((r) => [r.listing_id, r.url]))
+			await batchFetchRouteImages(db, images)
+			for (const row of rows) await ensureListingPhash(row.listing_id)
+			reconcileCanonicalProductKeys()
+			console.log(`[phash] hydrated ${rows.length} missing catalog image identity/identities`)
+		}
+	} catch (e) {
+		console.warn('[phash] image identity hydration failed:', e.message)
+	} finally {
+		_imageIdentityHydrationBusy = false
+	}
+	// Work in bounded batches so startup remains responsive.
+	if (rows.length === batchSize) setTimeout(() => hydrateMissingProductIdentities(batchSize).catch(() => {}), 3000)
+}
+
+function phashDistance(a, b) {
+	if (!/^[0-9a-f]{64}$/i.test(String(a || '')) || !/^[0-9a-f]{64}$/i.test(String(b || ''))) return 256
+	let x = BigInt(`0x${a}`) ^ BigInt(`0x${b}`)
+	let count = 0
+	while (x) {
+		count += Number(x & 1n)
+		x >>= 1n
+	}
+	return count
+}
+
+// Persist a durable canonical product identity. The 256-bit hash uses distance
+// <= 6 (the A223 encoding variant is distance 3). Supplier compatibility is a
+// hard guard: two known, different stalls can never auto-merge even if a visual
+// fingerprint collides or a generic promo image was reused.
+function reconcileCanonicalProductKeys() {
+	try {
+		const rows = db
+			.prepare(
+				'SELECT listing_id, phash, canonical_key, computed_at FROM listing_phash WHERE algo = ? ORDER BY listing_id',
+			)
+			.all(PRODUCT_HASH_ALGO)
+		if (!rows.length) return { groups: 0, updated: 0 }
+
+		const productByTitle = new Map()
+		db.prepare('SELECT title_norm, stall FROM product_map')
+			.all()
+			.forEach((r) => productByTitle.set(r.title_norm, String(r.stall || '').replace(/\s+/g, '').toUpperCase()))
+		const stallsByListing = new Map()
+		db.prepare('SELECT DISTINCT listing_id, title FROM transactions WHERE listing_id IS NOT NULL')
+			.all()
+			.forEach((r) => {
+				const stall = productByTitle.get(routeDashboard.normalizeTitle(r.title))
+				if (!stall) return
+				if (!stallsByListing.has(Number(r.listing_id))) stallsByListing.set(Number(r.listing_id), new Set())
+				stallsByListing.get(Number(r.listing_id)).add(stall)
+			})
+		const supplierCompatible = (a, b) => {
+			const as = stallsByListing.get(Number(a.listing_id))
+			const bs = stallsByListing.get(Number(b.listing_id))
+			if (!as?.size || !bs?.size) return true
+			for (const stall of as) if (bs.has(stall)) return true
+			return false
+		}
+
+		const parent = rows.map((_, i) => i)
+		const groupStalls = rows.map((row) => new Set(stallsByListing.get(Number(row.listing_id)) || []))
+		const root = (i) => {
+			while (parent[i] !== i) {
+				parent[i] = parent[parent[i]]
+				i = parent[i]
+			}
+			return i
+		}
+		const join = (a, b) => {
+			a = root(a)
+			b = root(b)
+			if (a === b) return
+			const as = groupStalls[a]
+			const bs = groupStalls[b]
+			if (as.size && bs.size) {
+				let overlap = false
+				for (const stall of as) {
+					if (bs.has(stall)) {
+						overlap = true
+						break
+					}
+				}
+				if (!overlap) return
+			}
+			parent[b] = a
+			for (const stall of bs) as.add(stall)
+		}
+		for (let i = 0; i < rows.length; i++) {
+			for (let j = i + 1; j < rows.length; j++) {
+				if (supplierCompatible(rows[i], rows[j]) && phashDistance(rows[i].phash, rows[j].phash) <= 6) join(i, j)
+			}
+		}
+
+		const groups = new Map()
+		rows.forEach((row, i) => {
+			const r = root(i)
+			if (!groups.has(r)) groups.set(r, [])
+			groups.get(r).push(row)
+		})
+
+		const update = db.prepare('UPDATE listing_phash SET canonical_key = ? WHERE listing_id = ?')
+		let updated = 0
+		const tx = db.transaction(() => {
+			for (const members of groups.values()) {
+				const key = `P-${Math.min(...members.map((m) => Number(m.listing_id)))}`
+				for (const member of members) {
+					if (member.canonical_key !== key) {
+						update.run(key, member.listing_id)
+						updated++
+					}
+				}
+			}
+		})
+		tx()
+
+		// Attach the same canonical key to every title alias in product_map. This
+		// makes the identity visible to the Product Catalog and survives Excel
+		// export/import instead of living only in the shopping UI.
+		db.exec(`
+			UPDATE product_map
+			SET canonical_product_key = (
+				SELECT lp.canonical_key
+				FROM transactions t
+				JOIN listing_phash lp ON lp.listing_id = t.listing_id
+				WHERE lower(trim(replace(t.title, '|', ','))) = product_map.title_norm
+				  AND lp.canonical_key IS NOT NULL
+				ORDER BY t.transaction_id DESC
+				LIMIT 1
+			)
+			WHERE EXISTS (
+				SELECT 1
+				FROM transactions t
+				JOIN listing_phash lp ON lp.listing_id = t.listing_id
+				WHERE lower(trim(replace(t.title, '|', ','))) = product_map.title_norm
+				  AND lp.canonical_key IS NOT NULL
+			)
+		`)
+		// Robust whitespace/case normalization pass (SQLite cannot collapse
+		// arbitrary whitespace like routeDashboard.normalizeTitle does).
+		const keyByTitleNorm = new Map()
+		db.prepare(
+			'SELECT t.title, lp.canonical_key FROM transactions t JOIN listing_phash lp ON lp.listing_id = t.listing_id WHERE lp.canonical_key IS NOT NULL',
+		)
+			.all()
+			.forEach((r) => {
+				const n = routeDashboard.normalizeTitle(r.title)
+				if (n && !keyByTitleNorm.has(n)) keyByTitleNorm.set(n, r.canonical_key)
+			})
+		const setProductCanonical = db.prepare('UPDATE product_map SET canonical_product_key = ? WHERE title_norm = ?')
+		const setProductKeys = db.transaction(() => {
+			for (const [titleNorm, key] of keyByTitleNorm) setProductCanonical.run(key, titleNorm)
+		})
+		setProductKeys()
+
+		// Reconcile shared catalog facts across title aliases of one physical
+		// product. Fill blanks only — never silently overwrite an operator's
+		// explicit conflicting supplier/charm/cost choice.
+		const aliases = db
+			.prepare(
+				'SELECT id, canonical_product_key, shop_name, stall, charm_shop, charm_code, cost_case, cost_grip FROM product_map WHERE canonical_product_key IS NOT NULL',
+			)
+			.all()
+		const byCanonical = new Map()
+		for (const row of aliases) {
+			if (!byCanonical.has(row.canonical_product_key)) byCanonical.set(row.canonical_product_key, [])
+			byCanonical.get(row.canonical_product_key).push(row)
+		}
+		const aliasUpdate = db.prepare(`
+			UPDATE product_map SET
+				shop_name = CASE WHEN trim(COALESCE(shop_name,'')) = '' THEN @shop_name ELSE shop_name END,
+				stall = CASE WHEN trim(COALESCE(stall,'')) = '' THEN @stall ELSE stall END,
+				charm_shop = CASE WHEN trim(COALESCE(charm_shop,'')) = '' THEN @charm_shop ELSE charm_shop END,
+				charm_code = CASE WHEN trim(COALESCE(charm_code,'')) = '' THEN @charm_code ELSE charm_code END,
+				cost_case = COALESCE(cost_case, @cost_case),
+				cost_grip = COALESCE(cost_grip, @cost_grip)
+			WHERE id = @id
+		`)
+		const firstValue = (members, field) => {
+			const hit = members.find((m) => m[field] !== null && String(m[field]).trim() !== '')
+			return hit ? hit[field] : null
+		}
+		const syncAliases = db.transaction(() => {
+			for (const members of byCanonical.values()) {
+				const shared = {
+					shop_name: firstValue(members, 'shop_name') || '',
+					stall: firstValue(members, 'stall') || '',
+					charm_shop: firstValue(members, 'charm_shop') || '',
+					charm_code: firstValue(members, 'charm_code') || '',
+					cost_case: firstValue(members, 'cost_case'),
+					cost_grip: firstValue(members, 'cost_grip'),
+				}
+				for (const member of members) aliasUpdate.run({ id: member.id, ...shared })
+			}
+		})
+		syncAliases()
+		return { groups: groups.size, updated }
+	} catch (e) {
+		console.warn('[phash] canonical reconciliation failed:', e.message)
+		return { groups: 0, updated: 0 }
+	}
+}
+
 /**
  * GET /api/shop/route
  * The active shopping list. Returns every line that still needs attention
@@ -6670,11 +7250,54 @@ app.get('/api/shop/route', (req, res) => {
 		const charmLoc = new Map()
 		try {
 			getCharmShopDirectory(db).forEach((c) => {
-				const k = String(c.shop_name || '').trim().toLowerCase()
+				const k = String(c.shop_name || '')
+					.trim()
+					.toLowerCase()
 				if (k && !charmLoc.has(k)) charmLoc.set(k, c.stall || '')
 			})
 		} catch (e) {
 			console.warn('[shop] charm-shop directory load failed:', e.message)
+		}
+
+		// Purchase costs: case/grip price per product (product_map), charm price per
+		// code (charm_library). Shown on the route so the shopper can pay the stall
+		// (WeChat) without asking. Keyed by normalised title / charm code.
+		const productCost = new Map()
+		const canonicalCost = new Map()
+		const charmCost = new Map()
+		try {
+			db.prepare(
+				'SELECT title_norm, cost_case, cost_grip, canonical_product_key FROM product_map WHERE cost_case IS NOT NULL OR cost_grip IS NOT NULL OR canonical_product_key IS NOT NULL',
+			)
+				.all()
+				.forEach((r) => {
+					productCost.set(r.title_norm, r)
+					if (r.canonical_product_key && (r.cost_case != null || r.cost_grip != null)) {
+						const current = canonicalCost.get(r.canonical_product_key) || {}
+						canonicalCost.set(r.canonical_product_key, {
+							cost_case: current.cost_case ?? r.cost_case ?? null,
+							cost_grip: current.cost_grip ?? r.cost_grip ?? null,
+						})
+					}
+				})
+			db.prepare('SELECT code, cost FROM charm_library WHERE cost IS NOT NULL')
+				.all()
+				.forEach((r) => charmCost.set(r.code, r.cost))
+		} catch (e) {
+			console.warn('[shop] cost load failed:', e.message)
+		}
+
+		// Perceptual-hash map (listing_id → phash) for cross-shop product unifying,
+		// plus the set of listings whose image bytes are already cached.
+		const phashMap = new Map()
+		const cachedImg = new Set()
+		try {
+			db.prepare('SELECT listing_id, canonical_key, phash FROM listing_phash WHERE algo = ?')
+				.all(PRODUCT_HASH_ALGO)
+				.forEach((r) => phashMap.set(r.listing_id, r.canonical_key || `p:${r.phash}`))
+			db.prepare('SELECT listing_id FROM listing_image_data').all().forEach((r) => cachedImg.add(r.listing_id))
+		} catch (e) {
+			console.warn('[shop] phash load failed:', e.message)
 		}
 
 		// Send ONLY the fields the mobile page uses — a much smaller payload than the
@@ -6684,10 +7307,24 @@ app.get('/api/shop/route', (req, res) => {
 		const lean = live.map((r) => {
 			const cs = String(r.charm_shop || '').trim()
 			const charmStall = cs ? charmLoc.get(cs.toLowerCase()) || '' : ''
+			const tn = routeDashboard.normalizeTitle
+				? routeDashboard.normalizeTitle(r.title)
+				: String(r.title || '')
+						.trim()
+						.toLowerCase()
+			const cc = String(r.charm_code || '').trim()
+			const pc = productCost.get(tn)
+			// Canonical product key: same product IMAGE across shops → same key
+			// (unifies cross-shop duplicates whose titles differ). Falls back to the
+			// normalised title until the image is cached + hashed (self-healed below).
+			const canonicalKey = r.listing_id ? phashMap.get(r.listing_id) : null
+			const productKey = r.product_key || canonicalKey || (pc && pc.canonical_product_key) || 't:' + tn
+			const sharedCost = canonicalCost.get(productKey)
 			return {
 				receipt_id: r.receipt_id,
 				item_key: r.item_key,
 				title: r.title,
+				product_key: productKey,
 				quantity: r.quantity,
 				phone_model: r.phone_model,
 				style: r.style,
@@ -6706,6 +7343,11 @@ app.get('/api/shop/route', (req, res) => {
 				supplier_stall: r.supplier_stall,
 				supplier_floor: r.supplier_floor,
 				is_pre_transit: r.is_pre_transit,
+				// Purchase costs (null = not priced yet): case & grip priced separately
+				// at the supplier stall; charm at the charm stall.
+				cost_case: sharedCost && sharedCost.cost_case != null ? sharedCost.cost_case : pc && pc.cost_case != null ? pc.cost_case : null,
+				cost_grip: sharedCost && sharedCost.cost_grip != null ? sharedCost.cost_grip : pc && pc.cost_grip != null ? pc.cost_grip : null,
+				charm_cost: cc && charmCost.has(cc) ? charmCost.get(cc) : null,
 			}
 		})
 
@@ -6738,7 +7380,12 @@ app.get('/api/shop/route', (req, res) => {
 			const supByKey = new Map()
 			enriched.forEach((r) => supByKey.set(r.receipt_id + '\x00' + r.item_key, r))
 			// Fallback lookup by receipt + normalised title when the item_key differs.
-			const norm = (s) => (routeDashboard.normalizeTitle ? routeDashboard.normalizeTitle(s || '') : String(s || '').trim().toLowerCase())
+			const norm = (s) =>
+				routeDashboard.normalizeTitle
+					? routeDashboard.normalizeTitle(s || '')
+					: String(s || '')
+							.trim()
+							.toLowerCase()
 			const findEnriched = (e) => {
 				const exact = supByKey.get(e.receipt_id + '\x00' + e.item_key)
 				if (exact) return exact
@@ -6752,7 +7399,9 @@ app.get('/api/shop/route', (req, res) => {
 				const ph = exLids.map(() => '?').join(',')
 				db.prepare(`SELECT listing_id, url FROM listing_images WHERE listing_id IN (${ph})`)
 					.all(exLids)
-					.forEach((r) => { exImg[r.listing_id] = r.url })
+					.forEach((r) => {
+						exImg[r.listing_id] = r.url
+					})
 			}
 			exchanges = openEx.map((e) => {
 				const enr = findEnriched(e)
@@ -6790,6 +7439,39 @@ app.get('/api/shop/route', (req, res) => {
 			statuses: routeDashboard.STATUS_OPTIONS,
 			server_time: Date.now(),
 		})
+
+		// ── Self-heal cross-shop product unifying (after responding) ───────────
+		// For any route line whose image isn't cached/hashed yet: fetch+cache the
+		// image, then compute its perceptual hash. Next load, same-image products
+		// across shops collapse into one card. Fire-and-forget; never blocks.
+		try {
+			const needImg = new Map()
+			const needHash = []
+			for (const r of live) {
+				if (!r.listing_id) continue
+				if (!cachedImg.has(r.listing_id) && r.image_url) needImg.set(r.listing_id, r.image_url)
+				else if (!phashMap.has(r.listing_id)) needHash.push(r.listing_id)
+			}
+			if (needImg.size || needHash.length) {
+				;(async () => {
+					try {
+						if (needImg.size) await batchFetchRouteImages(db, needImg)
+					} catch (e) {
+						console.warn('[shop] image cache (self-heal) failed:', e.message)
+					}
+					for (const id of new Set([...needImg.keys(), ...needHash])) {
+						try {
+							await ensureListingPhash(id)
+						} catch {
+							/* keep going */
+						}
+					}
+					reconcileCanonicalProductKeys()
+				})()
+			}
+		} catch (e) {
+			/* self-heal is best-effort */
+		}
 	} catch (err) {
 		console.error('[shop] route error:', err.message)
 		res.status(500).json({ error: err.message })
@@ -6892,6 +7574,104 @@ app.post('/api/shop/assign', express.json(), (req, res) => {
 		res.json({ ok: true, assignment: row })
 	} catch (err) {
 		console.error('[shop] assign error:', err.message)
+		res.status(500).json({ error: err.message })
+	}
+})
+
+/**
+ * POST /api/shop/cost
+ * Set the purchase cost of a product component or a charm, so the shopper can pay
+ * the supplier without asking. Case & grip are priced separately. Body:
+ *   { kind: 'product', title, part: 'case'|'grip', cost }  → product_map.cost_<part>
+ *   { kind: 'charm',   code,  cost }                        → charm_library.cost
+ * cost may be a number ≥ 0, or null/'' to clear. Broadcasts so every device
+ * updates its prices + stall subtotals live.
+ */
+app.post('/api/shop/cost', express.json(), (req, res) => {
+	const b = req.body ?? {}
+	const kind = b.kind
+	if (kind !== 'product' && kind !== 'charm') {
+		return res.status(400).json({ error: "kind must be 'product' or 'charm'." })
+	}
+	if (b.cost != null && b.cost !== '' && (!Number.isFinite(Number(b.cost)) || Number(b.cost) < 0)) {
+		return res.status(400).json({ error: 'cost must be a non-negative number (or empty to clear).' })
+	}
+	try {
+		let result
+		let part
+		if (kind === 'product') {
+			if (!b.title) return res.status(400).json({ error: 'title is required.' })
+			part = b.part === 'grip' ? 'grip' : 'case'
+			result = setProductCost(db, { title: b.title, [part === 'grip' ? 'cost_grip' : 'cost_case']: b.cost })
+		} else {
+			if (!b.code) return res.status(400).json({ error: 'code is required.' })
+			result = setCharmCost(db, { code: b.code, cost: b.cost })
+		}
+		broadcastRouteEvent({
+			type: 'cost',
+			kind,
+			part: kind === 'product' ? part : undefined,
+			title: kind === 'product' ? String(b.title) : undefined,
+			code: kind === 'charm' ? result.code : undefined,
+			cost: kind === 'product' ? (part === 'grip' ? result.cost_grip : result.cost_case) : result.cost,
+			by: (req.auth && req.auth.user) || 'shopper',
+		})
+		res.json({ ok: true, ...result })
+	} catch (err) {
+		console.error('[shop] cost error:', err.message)
+		res.status(err.code === 'REQUIRED' ? 400 : 500).json({ error: err.message })
+	}
+})
+
+/**
+ * GET /api/route/floor-map
+ * Returns the recorded physical floor layout (corridors → sides → blocks →
+ * stalls) for the in-person Map view. Each stall is enriched with the
+ * authoritative shop name from supplier_directory (falling back to the recorded
+ * name), plus a normalised code the client uses to match live route stalls.
+ */
+app.get('/api/route/floor-map', (req, res) => {
+	try {
+		// Authoritative shop name per normalised stall (first wins).
+		const byStall = new Map()
+		try {
+			getSupplierDirectory(db).forEach((s) => {
+				const k = normalizeStallCode(s.stall)
+				if (k && s.shop_name && !byStall.has(k)) byStall.set(k, String(s.shop_name).trim())
+			})
+		} catch (e) {
+			console.warn('[floor-map] supplier directory load failed:', e.message)
+		}
+		const floors = FLOOR_MAPS.map((f) => ({
+			mall: f.mall,
+			floor: f.floor,
+			label: f.label,
+			landmarks: f.landmarks || [],
+			corridors: f.corridors.map((c) => ({
+				id: c.id,
+				label: c.label,
+				sides: c.sides.map((sd) => ({
+					id: sd.id,
+					label: sd.label,
+					blocks: sd.blocks.map((blk) =>
+						blk.map((st) => {
+							const norm = normalizeStallCode(st.code)
+							const aliases = stallCodeAliases(st.code)
+							const dirName = aliases.map((alias) => byStall.get(alias)).find(Boolean)
+							// The on-site recording is ground truth for the physical map, so a
+							// recorded name wins over the catalog directory (which can carry a
+							// stall's OLD tenant, e.g. A209 had both 也壳 and 舒克). The directory
+							// only fills in stalls we didn't name on-site.
+							const name = (st.name || dirName || '').trim()
+							return { code: st.code, norm, aliases, name, named: !!name }
+						}),
+					),
+				})),
+			})),
+		}))
+		res.json({ floors })
+	} catch (err) {
+		console.error('[floor-map] error:', err.message)
 		res.status(500).json({ error: err.message })
 	}
 })
@@ -7423,8 +8203,10 @@ app.get('/api/route/product-map/export.csv', (req, res) => {
 	try {
 		const rows = getProductMap(db)
 		const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`
-		const header = ['Product Title', 'Shop Name', 'Stall', 'Charm Shop', 'Charm Code'].map(esc).join(',')
-		const body = rows.map((r) => [r.title, r.shop_name, r.stall, r.charm_shop, r.charm_code].map(esc).join(',')).join('\r\n')
+		const header = ['Product Title', 'Shop Name', 'Stall', 'Charm Shop', 'Charm Code', 'Canonical Product ID'].map(esc).join(',')
+		const body = rows
+			.map((r) => [r.title, r.shop_name, r.stall, r.charm_shop, r.charm_code, r.canonical_product_key].map(esc).join(','))
+			.join('\r\n')
 		const csv = `\uFEFF${header}\r\n${body}` // BOM for Excel UTF-8 auto-detect
 		res.setHeader('Content-Type', 'text/csv; charset=utf-8')
 		res.setHeader('Content-Disposition', `attachment; filename="product_catalog_${new Date().toISOString().slice(0, 10)}.csv"`)
@@ -8764,21 +9546,14 @@ app.get('/shop.webmanifest', (_req, res) => {
 
 // App icon (vector — scales to any size, no binary asset to ship).
 app.get('/shop-icon.svg', (_req, res) => {
-	res.type('image/svg+xml').send(
-		`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">` +
-			`<rect width="512" height="512" rx="96" fill="#0f1117"/>` +
-			`<path d="M160 176h224l-20 176a32 32 0 0 1-32 28H212a32 32 0 0 1-32-28z" fill="none" stroke="#f56400" stroke-width="24" stroke-linejoin="round"/>` +
-			`<path d="M200 176v-8a56 56 0 0 1 112 0v8" fill="none" stroke="#f56400" stroke-width="24" stroke-linecap="round"/>` +
-			`<path d="M226 268l26 26 52-58" fill="none" stroke="#6c8fff" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>` +
-			`</svg>`,
-	)
+	res.type('image/svg+xml').send(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">` + `<rect width="512" height="512" rx="96" fill="#0f1117"/>` + `<path d="M160 176h224l-20 176a32 32 0 0 1-32 28H212a32 32 0 0 1-32-28z" fill="none" stroke="#f56400" stroke-width="24" stroke-linejoin="round"/>` + `<path d="M200 176v-8a56 56 0 0 1 112 0v8" fill="none" stroke="#f56400" stroke-width="24" stroke-linecap="round"/>` + `<path d="M226 268l26 26 52-58" fill="none" stroke="#6c8fff" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>` + `</svg>`)
 })
 
 // Minimal service worker — caches the app shell for instant load + offline open
 // (data is always fetched fresh from the network; API is never cached).
 app.get('/shop-sw.js', (_req, res) => {
 	res.type('application/javascript').set('Cache-Control', 'no-cache').send(`
-const SHELL = 'shopping-route-shell-v8';
+const SHELL = 'shopping-route-shell-v34';
 const IMG = 'shopping-route-img-v1';
 const ASSETS = ['/shop', '/shop.webmanifest', '/shop-icon.svg'];
 // Anything that is an image we serve or proxy: product photos on the Etsy CDN,
@@ -8855,6 +9630,15 @@ app.use((err, req, res, next) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 const PORT = Number(process.env.PORT) || 4000
+// Precompute perceptual hashes for already-cached product images shortly after
+// boot, so the shopping route can unify same-image products across shops on the
+// first open (rather than waiting for the per-request self-heal).
+setTimeout(() => {
+	backfillPhashes().catch(() => {})
+}, 5000)
+setTimeout(() => {
+	hydrateMissingProductIdentities().catch(() => {})
+}, 8000)
 const httpServer = app.listen(PORT, () => {
 	const allShops = getAllShops(config)
 	const authedN = allShops.filter((s) => tokenManager.hasTokens(s.shop_id)).length
@@ -8930,7 +9714,6 @@ const httpServer = app.listen(PORT, () => {
 	console.log('  Status        : ✓ Safe — all keys under 30% of daily budget\n')
 	console.log(`  Open http://localhost:${PORT} here, or the Network URL on another computer.\n`)
 
-
 	// ── Embedded order + inventory sync ────────────────────────────────────────
 	// Runs the SAME receipt sync + order-triggered auto-restock that the standalone
 	// worker (`npm run sync`) performs, but in-process so a single `npm start`
@@ -8957,6 +9740,14 @@ const httpServer = app.listen(PORT, () => {
 				console.log(`[${label}] Previous sync still running — skipping this trigger`)
 				return
 			}
+			// Don't stack a scheduled cycle on top of an operator-initiated heavy job
+			// (full backfill / earnings sync). They share the same per-key QPD budget,
+			// so running them together would only burn budget faster. The QPS bucket
+			// already prevents any rate breach; this just avoids wasteful overlap.
+			if (_backfillRunning || _ledgerSyncRunning) {
+				console.log(`[${label}] A manual backfill/earnings sync is running — skipping this scheduled trigger`)
+				return
+			}
 			syncBusy = true
 			try {
 				await fn()
@@ -8967,8 +9758,10 @@ const httpServer = app.listen(PORT, () => {
 			}
 		}
 
-		const receiptCron = syncIntervalMin === 60 ? '0 * * * *' : `*/${Math.max(1, Math.ceil(syncIntervalMin))} * * * *`
-		const invCron = invWatchMin >= 60 ? (Math.ceil(invWatchMin / 60) === 1 ? '0 * * * *' : `0 */${Math.ceil(invWatchMin / 60)} * * *`) : `*/${Math.max(1, Math.ceil(invWatchMin))} * * * *`
+		// Robust cron builder handles intervals > 59 min correctly (a naive
+		// `*/90 * * * *` is invalid in the minute field and mis-fires).
+		const receiptCron = intervalToCron(syncIntervalMin)
+		const invCron = intervalToCron(invWatchMin)
 
 		console.log(`  Embedded sync: ON — receipts "${receiptCron}" (every ${syncIntervalMin}m), inventory watch "${invCron}" (every ${invWatchMin}m)`)
 		console.log('                 Auto-restock + order sync run automatically while the dashboard is open.\n')
@@ -9000,4 +9793,35 @@ httpServer.on('error', (err) => {
 		console.error(`\n[fatal] HTTP server error: ${err.message}\n`)
 	}
 	process.exit(1)
+})
+
+// ── Graceful shutdown: free advisory locks this process owns ──────────────────
+// A UI restart (POST /api/restart → process.exit(0)) or a PM2 reload takes this
+// process down directly. If the embedded sync cycle's advisory lock is still held
+// by our pid, the freshly-revived process cannot acquire it until the ~20-minute
+// heartbeat TTL lapses — so its boot sync is skipped and the Shops & Sync tab
+// shows "API unknown" (the in-memory Etsy budget is only learned from live sync
+// response headers) until the next top-of-hour cron. Releasing on the way out
+// lets the new process sync and re-learn the budget within seconds of boot.
+// releaseSyncLock is owner-scoped, so a genuinely separate live worker holding
+// the lock is never disturbed. better-sqlite3 is synchronous, so this is safe to
+// run inside the 'exit' handler (the catch-all that also covers process.exit).
+let _locksReleased = false
+function releaseOwnedLocks() {
+	if (_locksReleased) return
+	_locksReleased = true
+	try {
+		releaseSyncLock(db)
+	} catch {
+		/* best effort — never throw from a shutdown path */
+	}
+}
+process.on('exit', releaseOwnedLocks)
+process.on('SIGINT', () => {
+	releaseOwnedLocks()
+	process.exit(0)
+})
+process.on('SIGTERM', () => {
+	releaseOwnedLocks()
+	process.exit(0)
 })

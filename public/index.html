@@ -2926,6 +2926,169 @@
 				border-color: rgba(245, 158, 11, 0.5);
 				background: rgba(245, 158, 11, 0.08);
 			}
+			/* ── Design switch (buyer agreed to switch to another design) ────────── */
+			/* Violet accent — a distinct, positive "resolved by switching" language,
+			   separate from the rose "blocked" issue hue. */
+			.switched-badge {
+				display: inline-block;
+				margin-left: 6px;
+				padding: 1px 8px;
+				border-radius: 999px;
+				font-size: 10px;
+				font-weight: 700;
+				vertical-align: middle;
+				color: #ddd6fe;
+				background: rgba(167, 139, 250, 0.18);
+				border: 1px solid rgba(167, 139, 250, 0.42);
+			}
+			.switched-from {
+				margin-top: 2px;
+				font-size: 10.5px;
+				color: var(--muted);
+				text-decoration: line-through;
+				opacity: 0.8;
+			}
+			.product-thumb-switched {
+				cursor: pointer;
+				outline: 2px solid rgba(167, 139, 250, 0.55);
+				outline-offset: 1px;
+				border-radius: 8px;
+			}
+			.item-switch-edit {
+				display: inline-flex;
+				align-items: center;
+				gap: 4px;
+				margin-top: 6px;
+				padding: 2px 8px;
+				border-radius: 20px;
+				font-size: 10px;
+				font-weight: 600;
+				letter-spacing: 0.01em;
+				cursor: pointer;
+				white-space: nowrap;
+				color: #c4b5fd;
+				border: 1px dashed rgba(167, 139, 250, 0.45);
+				background: transparent;
+			}
+			.item-switch-edit:hover {
+				color: #ddd6fe;
+				border-color: rgba(167, 139, 250, 0.7);
+				background: rgba(167, 139, 250, 0.1);
+			}
+			.issue-switch-btn {
+				border-color: rgba(167, 139, 250, 0.5) !important;
+				background: linear-gradient(135deg, rgba(167, 139, 250, 0.22), rgba(129, 140, 248, 0.18)) !important;
+				color: #ddd6fe !important;
+			}
+			/* ── Design-switch picker modal ─────────────────────────────────────── */
+			.switch-tabs {
+				display: flex;
+				gap: 8px;
+				margin: 4px 0 14px;
+			}
+			.switch-tab {
+				flex: 1;
+				padding: 9px 12px;
+				border-radius: 10px;
+				border: 1px solid rgba(255, 255, 255, 0.14);
+				background: rgba(255, 255, 255, 0.04);
+				color: var(--muted);
+				font-size: 12.5px;
+				font-weight: 600;
+				cursor: pointer;
+				text-align: center;
+			}
+			.switch-tab.active {
+				color: #ddd6fe;
+				border-color: rgba(167, 139, 250, 0.55);
+				background: rgba(167, 139, 250, 0.14);
+			}
+			.switch-search {
+				width: 100%;
+				padding: 9px 12px;
+				border-radius: 10px;
+				border: 1px solid rgba(255, 255, 255, 0.14);
+				background: rgba(255, 255, 255, 0.05);
+				color: var(--text);
+				font-size: 13px;
+				margin-bottom: 10px;
+			}
+			.switch-grid {
+				display: grid;
+				grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+				gap: 14px;
+				max-height: 56vh;
+				overflow-y: auto;
+				padding: 2px 4px;
+			}
+			.switch-card {
+				border: 1px solid rgba(255, 255, 255, 0.12);
+				border-radius: 10px;
+				overflow: hidden;
+				cursor: pointer;
+				background: rgba(255, 255, 255, 0.03);
+				transition: border-color 0.12s, transform 0.12s;
+			}
+			.switch-card:hover { transform: translateY(-2px); border-color: rgba(167, 139, 250, 0.5); }
+			.switch-card.sel { border-color: #a78bfa; box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.4); }
+			.switch-card img, .switch-card .switch-card-ph {
+				width: 100%;
+				height: 170px;
+				object-fit: cover;
+				display: block;
+				background: rgba(255, 255, 255, 0.05);
+			}
+			.switch-card .switch-card-ph { display: flex; align-items: center; justify-content: center; font-size: 34px; }
+			.switch-card-title {
+				padding: 8px 10px;
+				font-size: 11.5px;
+				line-height: 1.4;
+				color: var(--text);
+				display: -webkit-box;
+				-webkit-line-clamp: 2;
+				-webkit-box-orient: vertical;
+				overflow: hidden;
+			}
+			.switch-grid-empty { grid-column: 1 / -1; padding: 24px; text-align: center; color: var(--muted); font-size: 12.5px; }
+			.switch-config {
+				display: grid;
+				grid-template-columns: 1fr 1fr;
+				gap: 10px 14px;
+				margin-top: 14px;
+				padding-top: 14px;
+				border-top: 1px solid rgba(255, 255, 255, 0.08);
+			}
+			.switch-config .full { grid-column: 1 / -1; }
+			.switch-field-label { font-size: 11px; font-weight: 600; color: var(--muted); margin-bottom: 4px; display: block; }
+			.switch-input, .switch-select {
+				width: 100%;
+				padding: 8px 10px;
+				border-radius: 8px;
+				border: 1px solid rgba(255, 255, 255, 0.14);
+				background: rgba(255, 255, 255, 0.05);
+				color: var(--text);
+				font-size: 12.5px;
+			}
+			.switch-upload {
+				border: 1.5px dashed rgba(167, 139, 250, 0.4);
+				border-radius: 10px;
+				padding: 14px;
+				text-align: center;
+				cursor: pointer;
+				color: var(--muted);
+				font-size: 12px;
+			}
+			.switch-upload:hover { border-color: rgba(167, 139, 250, 0.7); color: #ddd6fe; }
+			.switch-preview { max-height: 120px; border-radius: 8px; margin-top: 8px; }
+			.switch-selected-hint {
+				margin-top: 10px;
+				font-size: 12px;
+				color: #ddd6fe;
+				background: rgba(167, 139, 250, 0.12);
+				border: 1px solid rgba(167, 139, 250, 0.32);
+				border-radius: 8px;
+				padding: 8px 11px;
+			}
 			/* Order-level "exchange needed" badge (amber sibling of .issue-badge). */
 			.exchange-badge {
 				display: inline-flex;
@@ -3563,6 +3726,14 @@
 			.s-pill[data-s='Out of Production'] {
 				background: rgba(239, 68, 68, 0.16);
 				color: #f87171;
+			}
+			.s-pill[data-s='Wrong Stall'] {
+				background: rgba(245, 165, 36, 0.16);
+				color: #f5a524;
+			}
+			.s-pill[data-s='Model Unavailable'] {
+				background: rgba(251, 113, 133, 0.16);
+				color: #fb7185;
 			}
 			.sync-arrow {
 				color: var(--muted);
@@ -7865,10 +8036,29 @@
 				opacity: 0.5;
 			}
 			.pm-title-text {
+				display: block;
 				word-break: break-word;
 				line-height: 1.4;
 				color: var(--text);
 				font-weight: 500;
+			}
+			.pm-col-title > .pm-tag {
+				margin-top: 6px;
+			}
+			.pm-aliases {
+				margin-top: 7px;
+				color: var(--muted);
+				font-size: 11px;
+			}
+			.pm-aliases summary {
+				cursor: pointer;
+				color: var(--blue);
+				font-weight: 600;
+			}
+			.pm-aliases div {
+				padding: 5px 0;
+				border-bottom: 1px solid var(--border);
+				line-height: 1.35;
 			}
 			.pm-cell-stack {
 				display: flex;
@@ -9255,6 +9445,67 @@
 				background: rgba(250, 204, 21, 0.22);
 				border-color: rgba(250, 204, 21, 0.5);
 				color: #fde68a;
+			}
+			/* Activity-log per-person identity: colour-coded initial avatars + a
+			   filter bar so each user's actions read as a distinct, isolable stream. */
+			.audit-toolbar {
+				display: flex;
+				align-items: center;
+				gap: 10px;
+				margin: 12px 0 0;
+			}
+			.audit-filters {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 6px;
+				margin: 10px 0 2px;
+			}
+			/* Sticky day divider so the current date stays in view while scrolling
+			   a long chronological feed. Solid background = matches .modal-box. */
+			.audit-day td {
+				position: sticky;
+				top: 0;
+				z-index: 1;
+				background: #1c1e2a;
+				padding: 9px 10px 5px;
+				border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+			}
+			.audit-day-label {
+				font-size: 11px;
+				font-weight: 800;
+				letter-spacing: 0.04em;
+				text-transform: uppercase;
+				color: var(--muted);
+			}
+			.audit-day-count {
+				margin-left: 8px;
+				font-size: 10px;
+				font-weight: 700;
+				color: var(--muted);
+				opacity: 0.7;
+			}
+			.who-cell {
+				display: inline-flex;
+				align-items: center;
+				gap: 8px;
+			}
+			.who-avatar {
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				flex: 0 0 auto;
+				width: 22px;
+				height: 22px;
+				border-radius: 50%;
+				border: 1px solid transparent;
+				font-size: 11px;
+				font-weight: 800;
+				line-height: 1;
+			}
+			.who-avatar.sm {
+				width: 16px;
+				height: 16px;
+				font-size: 9px;
 			}
 			/* Small inline text button used inside banners / skip rows. */
 			.fbx-linkbtn {
@@ -14841,6 +15092,8 @@
 					{ re: /\/orders\/[^/]+\/issues$/, t: (d) => [`Flagged a fulfilment issue on ${orderRef(d)}`, ''] },
 					{ re: /\/issues\/[^/]+\/notify$/, t: (d) => [`Marked the buyer notified for issue #${val(d, 'id')}`, ''] },
 					{ re: /\/issues\/[^/]+\/draft-message$/, t: (d) => [`Drafted an AI buyer message for issue #${val(d, 'id')}`, ''] },
+					{ re: /\/orders\/[^/]+\/substitution$/, m: 'DELETE', t: (d) => [`Reverted a switched design on ${orderRef(d)}`, ''] },
+					{ re: /\/orders\/[^/]+\/substitution$/, t: (d) => [`Switched an order line to a new design (${orderRef(d)})`, ''] },
 					{ re: /\/issues\/[^/]+\/handle-listing-manual$/, t: (d) => [`Marked the listing handled (manually) for issue #${val(d, 'id')}`, ''] },
 					{ re: /\/issues\/[^/]+\/handle-listing$/, t: (d) => [`Updated the Etsy listing for issue #${val(d, 'id')}`, ''] },
 					{ re: /\/issues\/[^/]+\/resolve$/, t: (d) => [`Resolved fulfilment issue #${val(d, 'id')}`, ''] },
@@ -14991,6 +15244,34 @@
 					},
 					{ re: /\/route\/charms$/, m: 'DELETE', t: (d) => [`Removed a charm`, ctx(d, [['Code', 'charm_code']])] },
 					{ re: /\/route\/supplier-catalog\/open$/, t: () => [`Opened a supplier catalog`, ''] },
+					// ── Mobile shopper (purchasing floor) ─────────────────────
+					// The shopper's phone hits exactly two mutations. Translate the
+					// component + status snapshot into "who bought what for which order".
+					{
+						re: /\/shop\/assign$/,
+						t: (d) => {
+							const comps = [
+								['Case', d.status_case],
+								['Grip', d.status_grip],
+								['Charm', d.status_charm],
+							].filter(([, v]) => v != null && v !== '')
+							if (!comps.length) return [`Updated a purchase status on ${orderRef(d)}`, ctx(d, [['Product', 'title']])]
+							const names = comps.map(([n]) => n).join(' & ')
+							// One status across all touched components reads as a single
+							// verb; a mixed batch is spelled out per component instead.
+							const uniform = comps.every(([, v]) => v === comps[0][1])
+							const action = uniform ? `Marked ${names} as “${comps[0][1]}” on ${orderRef(d)}` : `Updated ${comps.map(([n, v]) => `${n} → ${v}`).join(', ')} on ${orderRef(d)}`
+							return [action, ctx(d, [['Product', 'title']])]
+						},
+					},
+					{
+						re: /\/shop\/cost$/,
+						t: (d) => {
+							const cleared = d.cost == null || d.cost === ''
+							const what = d.kind === 'charm' ? 'charm' : d.part === 'grip' ? 'grip' : 'case'
+							return [`${cleared ? 'Cleared' : 'Set'} the ${what} purchase cost`, ctx(d, [['Product', 'title'], ['Charm', 'code'], ['Cost', 'cost']])]
+						},
+					},
 					// ── Team / admin ──────────────────────────────────────────
 					{
 						re: /\/users$/,
@@ -15051,46 +15332,223 @@
 					}
 				}
 
-				async function open() {
-					overlay(true)
+				// ── Per-user identity ─────────────────────────────────────────
+				// A stable colour + initial avatar per person so every row is
+				// instantly attributable, and a filter bar to isolate one person.
+				// Colours are hashed from the name — consistent across sessions,
+				// no server state needed.
+				const PALETTE = ['#f87171', '#fb923c', '#fbbf24', '#a3e635', '#34d399', '#22d3ee', '#60a5fa', '#818cf8', '#c084fc', '#f472b6']
+				// Bootstrap/shared logins (the env master password) record user === role
+				// (e.g. 'owner'), which is the same human as the sole named account of
+				// that role. Fold them together for display so master-password actions
+				// and the named 'walter' actions read as one person. Derived from the
+				// data — no hardcoded names — and only when a role has exactly ONE named
+				// account, so it can never misattribute an ambiguous shared login.
+				let _roleAlias = {}
+				function computeRoleAlias(entries) {
+					const byRole = new Map()
+					for (const e of entries) {
+						if (e.user && e.role && e.user !== e.role) {
+							if (!byRole.has(e.role)) byRole.set(e.role, new Set())
+							byRole.get(e.role).add(e.user)
+						}
+					}
+					const alias = {}
+					for (const [role, names] of byRole) if (names.size === 1) alias[role] = [...names][0]
+					return alias
+				}
+				const whoOf = (e) => {
+					if (e.user && e.user !== e.role) return e.user
+					return (e.role && _roleAlias[e.role]) || e.user || e.role || '—'
+				}
+				function userColor(name) {
+					const s = String(name || '—')
+					let h = 0
+					for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0
+					return PALETTE[Math.abs(h) % PALETTE.length]
+				}
+				function avatar(name, cls) {
+					const s = String(name || '—').trim()
+					const initial = (s.charAt(0) || '—').toUpperCase()
+					const c = userColor(s)
+					return `<span class="who-avatar${cls ? ' ' + cls : ''}" style="color:${c};background:${c}22;border-color:${c}55">${_escHtml(initial)}</span>`
+				}
+
+				let _entries = []
+				let _tallies = [] // authoritative per-(user,role) counts for the range
+				let _activeUser = null // null = everyone
+				let _range = 'all' // 'today' | '7d' | '30d' | 'all'
+
+				// ── Day grouping ──────────────────────────────────────────────
+				const DAY_MS = 86400000
+				// Local-day boundaries for a range. `since` is a wall-clock day start
+				// so server filtering lines up with the day headers the client draws.
+				function rangeBounds(range) {
+					const now = new Date()
+					const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+					if (range === 'today') return { since: startOfToday }
+					if (range === '7d') return { since: startOfToday - 6 * DAY_MS }
+					if (range === '30d') return { since: startOfToday - 29 * DAY_MS }
+					return {} // all
+				}
+				const dayKey = (ts) => {
+					const d = new Date(ts)
+					return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
+				}
+				function dayLabel(ts) {
+					const d = new Date(ts)
+					const now = new Date()
+					const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+					const startThat = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+					const diff = Math.round((startToday - startThat) / DAY_MS)
+					if (diff === 0) return 'Today'
+					if (diff === 1) return 'Yesterday'
+					const sameYear = d.getFullYear() === now.getFullYear()
+					return d.toLocaleDateString(undefined, sameYear ? { weekday: 'long', month: 'short', day: 'numeric' } : { year: 'numeric', month: 'short', day: 'numeric' })
+				}
+				const dividerHtml = (ts, n) => `<tr class="audit-day"><td colspan="4"><span class="audit-day-label">${_escHtml(dayLabel(ts))}</span><span class="audit-day-count">${n} ${n === 1 ? 'change' : 'changes'}</span></td></tr>`
+
+				function rowHtml(e) {
+					const when = fmtWhen(e.ts)
+					const who = whoOf(e)
+					const { action, detail } = describe(e)
+					const { label, cls } = outcome(e.status)
+					const detailHtml = detail ? `<div style="color:var(--muted);font-size:12px;margin-top:2px">${_escHtml(detail)}</div>` : ''
+					// When the entry targets a single order, make the action a link
+					// that jumps straight to that order (bulk actions carry
+					// receipt_ids, not receipt_id, so they stay plain text).
+					const rid = e.details && e.details.receipt_id != null && /^-?\d+$/.test(String(e.details.receipt_id)) ? String(e.details.receipt_id) : null
+					const actionHtml = rid ? `<a href="#" class="activity-order-link" onclick="goToOrder('${rid}');return false" title="Open this order in the Orders tab">${_escHtml(action)}<span class="aol-arrow" aria-hidden="true">↗</span></a>` : `<div>${_escHtml(action)}</div>`
+					return `<tr>
+						<td style="color:var(--muted);font-size:12px;white-space:nowrap;vertical-align:top">${_escHtml(when)}</td>
+						<td style="vertical-align:top"><span class="who-cell">${avatar(who)}<b style="color:${userColor(who)}">${_escHtml(who)}</b></span></td>
+						<td style="vertical-align:top">${actionHtml}${detailHtml}</td>
+						<td style="text-align:right;vertical-align:top"><span class="badge ${cls}" title="HTTP ${e.status}">${label}</span></td>
+					</tr>`
+				}
+
+				function renderList() {
+					const body = document.getElementById('auditBody')
+					if (!body) return
+					const rows = _activeUser ? _entries.filter((e) => whoOf(e) === _activeUser) : _entries
+					if (!rows.length) {
+						body.innerHTML = `<tr><td colspan="4" class="empty">No activity${_activeUser ? ' for ' + _escHtml(_activeUser) : ''} in this range.</td></tr>`
+						return
+					}
+					// Rows arrive newest-first and ts is monotonic with id, so same-day
+					// entries are already contiguous — one pass emits a header per day.
+					const out = []
+					let group = []
+					const flush = () => {
+						if (!group.length) return
+						out.push(dividerHtml(group[0].ts, group.length))
+						for (const e of group) out.push(rowHtml(e))
+						group = []
+					}
+					let curKey = null
+					for (const e of rows) {
+						const k = dayKey(e.ts)
+						if (k !== curKey) {
+							flush()
+							curKey = k
+						}
+						group.push(e)
+					}
+					flush()
+					body.innerHTML = out.join('')
+				}
+
+				function setUser(name) {
+					_activeUser = name
+					renderFilters()
+					renderList()
+				}
+
+				function renderFilters() {
+					const host = document.getElementById('auditFilters')
+					if (!host) return
+					// Counts come from the server tally (accurate for the whole range),
+					// folded by the same identity rule as the rows.
+					const counts = new Map()
+					let total = 0
+					for (const t of _tallies) {
+						const w = whoOf(t)
+						counts.set(w, (counts.get(w) || 0) + t.n)
+						total += t.n
+					}
+					// Busiest people first, then alphabetical — the useful triage order.
+					const users = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+					host.innerHTML = ''
+					const chip = (label, name, count) => {
+						const b = document.createElement('button')
+						b.type = 'button'
+						b.className = 'fbx-filter-chip' + (_activeUser === name ? ' active' : '')
+						if (name) {
+							const c = userColor(name)
+							if (_activeUser === name) {
+								b.style.background = c + '22'
+								b.style.borderColor = c + '88'
+								b.style.color = c
+							}
+							b.innerHTML = avatar(name, 'sm') + `<span>${_escHtml(label)}</span><span class="fbx-chip-n">${count}</span>`
+						} else {
+							b.innerHTML = `<span>${_escHtml(label)}</span><span class="fbx-chip-n">${count}</span>`
+						}
+						b.addEventListener('click', () => setUser(name))
+						return b
+					}
+					host.appendChild(chip('Everyone', null, total))
+					for (const [name, count] of users) host.appendChild(chip(name, name, count))
+				}
+
+				function syncRangeButtons() {
+					for (const b of document.querySelectorAll('#auditRange .earn-seg-btn')) b.classList.toggle('active', b.dataset.range === _range)
+				}
+
+				async function load() {
 					const body = document.getElementById('auditBody')
 					if (!body) return
 					body.innerHTML = '<tr><td colspan="4" class="loading">Loading…</td></tr>'
 					try {
-						const data = await fetch(API + '/api/audit?limit=200', { credentials: 'same-origin' }).then((r) => r.json())
-						const rows = data.entries || []
-						if (!rows.length) {
-							body.innerHTML = '<tr><td colspan="4" class="empty">No activity recorded yet.</td></tr>'
-							return
-						}
-						body.innerHTML = rows
-							.map((e) => {
-								const when = fmtWhen(e.ts)
-								const who = e.user || e.role || '—'
-								const { action, detail } = describe(e)
-								const { label, cls } = outcome(e.status)
-								const detailHtml = detail ? `<div style="color:var(--muted);font-size:12px;margin-top:2px">${_escHtml(detail)}</div>` : ''
-								// When the entry targets a single order, make the action a
-								// link that jumps straight to that order (bulk actions carry
-								// receipt_ids, not receipt_id, so they stay plain text).
-								const rid = e.details && e.details.receipt_id != null && /^-?\d+$/.test(String(e.details.receipt_id)) ? String(e.details.receipt_id) : null
-								const actionHtml = rid ? `<a href="#" class="activity-order-link" onclick="goToOrder('${rid}');return false" title="Open this order in the Orders tab">${_escHtml(action)}<span class="aol-arrow" aria-hidden="true">↗</span></a>` : `<div>${_escHtml(action)}</div>`
-								return `<tr>
-									<td style="color:var(--muted);font-size:12px;white-space:nowrap;vertical-align:top">${_escHtml(when)}</td>
-									<td style="vertical-align:top"><b>${_escHtml(who)}</b></td>
-									<td style="vertical-align:top">${actionHtml}${detailHtml}</td>
-									<td style="text-align:right;vertical-align:top"><span class="badge ${cls}" title="HTTP ${e.status}">${label}</span></td>
-								</tr>`
-							})
-							.join('')
+						const { since } = rangeBounds(_range)
+						const qs = new URLSearchParams({ limit: '2000' })
+						if (since != null) qs.set('since', String(since))
+						const data = await fetch(API + '/api/audit?' + qs.toString(), { credentials: 'same-origin' }).then((r) => r.json())
+						_entries = data.entries || []
+						_tallies = data.tallies || []
+						// Fold identities from the authoritative tally so it covers people
+						// who may not appear in the (capped) rendered rows.
+						_roleAlias = computeRoleAlias(_tallies)
+						renderFilters()
+						renderList()
 					} catch (e) {
 						body.innerHTML = `<tr><td colspan="4" class="empty">Failed to load: ${_escHtml(e.message)}</td></tr>`
 					}
 				}
+
+				// Changing the range refetches (server-side window); the person filter
+				// resets so you never end up staring at an empty, over-narrowed view.
+				function setRange(range) {
+					if (range === _range) return
+					_range = range
+					_activeUser = null
+					syncRangeButtons()
+					load()
+				}
+
+				async function open() {
+					overlay(true)
+					_activeUser = null
+					_range = 'all'
+					syncRangeButtons()
+					const host = document.getElementById('auditFilters')
+					if (host) host.innerHTML = ''
+					await load()
+				}
 				function close() {
 					overlay(false)
 				}
-				return { open, close }
+				return { open, close, setRange }
 			})()
 
 			// ── State ─────────────────────────────────────────────────────
@@ -16390,9 +16848,16 @@
 
 						const itemsHtml = txs
 							.map((tx) => {
+								// A local design switch overrides the displayed product (title +
+								// image) — the buyer agreed to switch and we purchase the new design.
+								const _sub = tx.substitution || null
 								const listingUrl = tx.listing_id ? `https://www.etsy.com/listing/${tx.listing_id}` : null
-								const imgTag = tx.image_url ? `<img src="${tx.image_url}" alt="" loading="lazy" onerror="this.replaceWith(document.createTextNode('🛍️'))">` : `🛍️`
-								const thumb = listingUrl ? `<a href="${listingUrl}" target="_blank" class="product-thumb" title="View on Etsy">${imgTag}</a>` : `<div class="product-thumb">${imgTag}</div>`
+								const imgTag = tx.image_url ? `<img src="${tx.image_url}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('🛍️'))">` : `🛍️`
+								// Switched lines link the thumb to the switch manager (not the old
+								// Etsy listing); original lines keep the Etsy listing link.
+								const thumb = _sub
+									? `<div class="product-thumb product-thumb-switched" title="Switched design — click to change or revert" onclick="openSwitchModal(${o.receipt_id},'${jsAttr(tx.item_key)}')">${imgTag}</div>`
+									: (listingUrl ? `<a href="${listingUrl}" target="_blank" class="product-thumb" title="View on Etsy">${imgTag}</a>` : `<div class="product-thumb">${imgTag}</div>`)
 
 								const metaRows = []
 								if (tx.quantity)
@@ -16455,12 +16920,26 @@
 									flagExchangeCtrl = `<button class="item-flag-exchange" onclick="openExchangeModalForOrder(${o.receipt_id},'${jsAttr(tx.item_key)}')" title="Need a different model than ordered — a wrong model in hand to swap, or a buyer model-change to buy? Flag it so the correct model is tracked and the line is held out of the normal buy list until it's sorted.">🔁 Fix model</button>`
 								}
 
+								// "Change design" control on an already-switched line so the operator
+								// can pick a different replacement or revert to the original.
+								const switchCtrl = _sub && tx.item_key
+									? `<button class="item-switch-edit" onclick="openSwitchModal(${o.receipt_id},'${jsAttr(tx.item_key)}')" title="Buyer switched design — click to change the replacement or revert to the original. Never affects Etsy.">🔄 Change design</button>`
+									: ''
+
+								// Title cell: switched lines show the new design + a badge and the
+								// original ("was: …") for reference; normal lines show the title.
+								const titleHtml = _sub
+									? `<div class="product-title">${escHtml(_sub.new_title)} <span class="switched-badge" title="Buyer agreed to switch. We purchase this design instead of the original — Etsy is never changed.">🔄 Switched</span></div>
+          <div class="switched-from" title="Originally ordered">was: ${escHtml(_sub.original_title || tx.title || '')}</div>`
+									: `<div class="product-title">${tx.title || '—'}</div>`
+
 								return `<div class="product-item">
         ${thumb}
         <div class="product-info">
-          <div class="product-title">${tx.title || '—'}</div>
+          ${titleHtml}
           ${metaRows.length ? `<div class="product-meta">${metaRows.join('')}</div>` : ''}
           ${ppCtrl}
+          ${switchCtrl}
           ${flagIssueCtrl}${flagExchangeCtrl}
         </div>
       </div>`
@@ -17339,23 +17818,71 @@
 			}
 
 			// Build a ready-to-send buyer message for the given issue context.
+			// Shorten a long Etsy SEO title to a human "core" name (the text before the
+			// first comma, length-capped) so a multi-item message can point at exactly
+			// which product is affected without pasting a 140-char title.
+			function _shortTitle(t) {
+				const s = String(t || '').trim()
+				if (!s) return 'your item'
+				let core = s.split(/[,|]/)[0].trim()
+				if (core.length > 60) core = core.slice(0, 57).trim() + '…'
+				return core
+			}
+
 			function _composeIssueMessage(ctx) {
 				const buyer = (ctx.order.buyer_name || '').trim() || 'there'
-				const title = (ctx.tx.title || 'your item').trim()
+				const fullTitle = (ctx.tx.title || 'your item').trim()
 				const type = ctx.issue ? ctx.issue.issue_type : ctx.draftType
 				const model = (ctx.issue && ctx.issue.phone_model) || _txPhoneModel(ctx.tx)
-				// The exact combo the buyer purchased (case / grip / charm), described
-				// naturally so the message can name what they ordered. Empty when it
-				// can't be determined — the sentence is then omitted cleanly.
+				// The exact combo the buyer purchased (case / grip / charm).
 				const combo = _txComponentsPhrase(ctx.tx)
-				const comboLine = combo ? `Your order is for a ${combo}, and ` : ''
+				// Multi-item awareness: when the order has several products, the message
+				// must make crystal-clear that ONLY this one item is affected and the
+				// rest of the order ships as normal — otherwise the buyer fears their
+				// whole order is cancelled.
+				const allTx = Array.isArray(ctx.order.transactions) ? ctx.order.transactions : []
+				const multi = allTx.length > 1
+				const others = Math.max(0, allTx.length - 1)
+				// How we name the affected product: the full title for a single-item
+				// order; a short, readable name for a multi-item order.
+				const itemName = multi ? `your "${_shortTitle(fullTitle)}"` : `"${fullTitle}"`
+				const oneOf = multi ? ` (one of the ${allTx.length} items you ordered)` : ''
+				// Reassurance sentence — multi-item only.
+				const restNote = multi
+					? ` Please don't worry — the ${others > 1 ? `other ${others} items` : 'other item'} in your order ${others > 1 ? 'are' : 'is'} all completely fine and will be made and shipped to you as normal; this only affects ${itemName}.`
+					: ''
+				// Switch/refund phrasing, scoped to the one item on a multi-item order.
+				const switchWhat = multi ? 'just this item' : `your ${combo || 'order'}`
+				const refundBullet = multi ? '  • or a refund for just this item — no worries at all.' : '  • or a full refund — no worries at all.'
+
 				if (type === 'model_unavailable') {
-					return `Hi ${buyer}, 🌸\n\n` + `Thank you so much for your order of "${title}" — it really means a lot to us!\n\n` + `${comboLine}I'm reaching out with a little apology — sadly, the "${model || 'selected'}" case base we use to handcraft this design has sold out and we're no longer able to restock it, so we can't make this piece for that phone anymore.\n\n` + `We'd love to make this right for you — you're very welcome to either:\n` + `  • choose a different design that fits your phone (we'll move your ${combo || 'order'} over to it at no extra cost), or\n` + `  • receive a full refund, no worries at all.\n\n` + `Just let us know which you'd prefer and we'll take care of it right away. Thank you so much for your patience and understanding 💕`
+					return (
+						`Hi ${buyer}, 🌸\n\n` +
+						`Thank you so much for your order — it really means a lot to us!\n\n` +
+						`I'm reaching out about ${itemName}${oneOf}. Sadly, the "${model || 'selected'}" case base we use to handcraft this design has sold out and we're no longer able to restock it, so we can't make it for that phone anymore.${restNote}\n\n` +
+						`To make it right, you're very welcome to either:\n` +
+						`  • switch ${switchWhat} to a different design that fits your phone (at no extra cost),\n` +
+						refundBullet + `\n\n` +
+						`Just let us know which you'd prefer and we'll take care of it right away. Thank you so much for your patience and understanding 💕`
+					)
 				}
 				if (type === 'out_of_production') {
-					return `Hi ${buyer}, 🌸\n\n` + `Thank you so much for your order of "${title}" — we were so happy to see it come through!\n\n` + `${comboLine}I'm reaching out with a little apology — sadly, one of the special materials we use to handcraft this design is no longer available to us, so we're no longer able to make this particular piece.\n\n` + `We'd love to make it up to you — you're very welcome to either:\n` + `  • choose another design you'll adore just as much (we'll happily switch your ${combo || 'order'} over to it), or\n` + `  • receive a full refund, completely hassle-free.\n\n` + `Just reply with your preference and we'll sort it out straight away. Thank you for being so lovely and understanding 💕`
+					return (
+						`Hi ${buyer}, 🌸\n\n` +
+						`Thank you so much for your order — we were so happy to see it come through!\n\n` +
+						`I'm reaching out about ${itemName}${oneOf}. Sadly, one of the special materials we use to handcraft this design is no longer available to us, so we're no longer able to make it.${restNote}\n\n` +
+						`To make it up to you, you're very welcome to either:\n` +
+						`  • switch ${switchWhat} to another design you'll adore just as much (we'll set it up at no extra cost),\n` +
+						refundBullet + `\n\n` +
+						`Just reply with your preference and we'll sort it out straight away. Thank you for being so lovely and understanding 💕`
+					)
 				}
-				return `Hi ${buyer}, 🌸\n\n` + `Thank you so much for your order of "${title}" — we really appreciate you!\n\n` + `${combo ? `Your order is for a ${combo}, and we` : 'We'}'ve run into a little hiccup fulfilling it as ordered and wanted to reach out personally. ` + `We'd be so happy to either switch you to a lovely alternative or issue a full refund — whatever feels best for you. Just let us know and we'll take care of it right away. Thank you for your patience 💕`
+				return (
+					`Hi ${buyer}, 🌸\n\n` +
+					`Thank you so much for your order — we really appreciate you!\n\n` +
+					`I'm reaching out about ${itemName}${oneOf} — we've run into a little hiccup fulfilling it as ordered.${restNote}\n\n` +
+					`We'd be so happy to either switch ${switchWhat} to a lovely alternative or offer ${multi ? 'a refund for just this item' : 'a full refund'} — whatever feels best for you. Just let us know and we'll take care of it right away. Thank you for your patience 💕`
+				)
 			}
 
 			let _issueCtx = null // { receiptId, itemKey, order, tx, issue, draftType }
@@ -17478,7 +18005,7 @@
 				const resolveBar = resolved
 					? ''
 					: `<div class="modal-field"><label class="modal-label">Resolve as</label><div class="issue-msg-actions">
-							<button class="issue-mini-btn" onclick="resolveIssue('switched')">↔ Buyer switched design</button>
+							<button class="issue-mini-btn issue-switch-btn" onclick="openSwitchFromIssue()" title="Buyer wants a different design — pick a replacement from your catalog or upload a custom one. It flows back into your purchasing queue to be bought. Etsy is never changed.">🔄 Switch to a new design</button>
 							<button class="issue-mini-btn" onclick="resolveIssue('refunded')">↩ Refunded</button>
 							<button class="issue-mini-btn" onclick="resolveIssue('cancelled')">✕ Cancelled</button>
 						</div></div>`
@@ -17722,6 +18249,279 @@
 					await fetchOrders()
 				} catch (e) {
 					_issueError(e.message)
+				}
+			}
+
+			// ── Design-switch picker (buyer agreed to switch to another design) ─────
+			// When a buyer chooses to switch instead of refunding, the operator picks
+			// a replacement design — from the product catalog or a custom upload. The
+			// switch is a LOCAL override: the dashboard renders + purchases the new
+			// design for this order line, and NOTHING is pushed to Etsy. Creating a
+			// switch auto-resolves the line's open issue as "switched" so it flows back
+			// into the purchasing queue to be bought.
+			const SWITCH_STYLES = ['Case Only', 'Case+Grip', 'Case+Charm', 'Case+Grip+Charm', 'Grip Only', 'Charm Only']
+			let _switchCtx = null // { receiptId, itemKey, order, tx, sub }
+			let _switchMode = 'catalog'
+			let _switchProducts = []
+			let _switchLoaded = false
+			let _switchSel = null // chosen catalog product { title, listing_id, image_url, shop_name }
+			let _switchImageB64 = null
+			let _switchImageMime = ''
+
+			/** Open the switch picker for a specific order line. */
+			function openSwitchModal(receiptId, itemKey) {
+				const order = _ordersMap.get(Number(receiptId)) || _ordersMap.get(receiptId)
+				if (!order) return alert('Could not load this order — please reload the page.')
+				const tx = (order.transactions || []).find((t) => t.item_key === itemKey)
+				if (!tx) return alert('Could not find this product on the order — please reload the page.')
+				_switchCtx = { receiptId: Number(receiptId), itemKey, order, tx, sub: tx.substitution || null }
+				_switchMode = 'catalog'
+				_switchSel = null
+				_switchImageB64 = null
+				_switchImageMime = ''
+				document.getElementById('switchError').classList.remove('show')
+				const origTitle = (tx.substitution && tx.substitution.original_title) || tx.title || 'this product'
+				document.getElementById('switchModalSubtitle').textContent = `${order.shop_name || ''} · ${String(origTitle).slice(0, 70)}`
+				_renderSwitchModal()
+				document.getElementById('switchModal').classList.add('open')
+				_loadSwitchProducts()
+			}
+
+			/** Launch the picker from inside the issue modal (closes the issue modal). */
+			function openSwitchFromIssue() {
+				if (!_issueCtx) return
+				const { receiptId, itemKey } = _issueCtx
+				closeIssueModal()
+				openSwitchModal(receiptId, itemKey)
+			}
+
+			function closeSwitchModal() {
+				document.getElementById('switchModal').classList.remove('open')
+				_switchCtx = null
+			}
+
+			function setSwitchMode(mode) {
+				_switchMode = mode
+				;['catalog', 'custom'].forEach((m) => {
+					const tab = document.getElementById(`switchTab-${m}`)
+					const pane = document.getElementById(`switchPane-${m}`)
+					if (tab) tab.classList.toggle('active', m === mode)
+					if (pane) pane.style.display = m === mode ? '' : 'none'
+				})
+			}
+
+			/** Prefill helpers — reuse the line's current model/style as sensible defaults. */
+			function _switchDefaultModel() {
+				const tx = _switchCtx?.tx
+				if (!tx) return ''
+				return (tx.substitution && tx.substitution.new_phone_model) || _txPhoneModel(tx) || ''
+			}
+			function _switchDefaultStyle() {
+				const tx = _switchCtx?.tx
+				if (!tx) return ''
+				if (tx.substitution && tx.substitution.new_style) return tx.substitution.new_style
+				for (const v of tx.variations || []) {
+					if (/style/i.test(v.formatted_name || '')) return v.formatted_value || ''
+				}
+				return ''
+			}
+
+			function _renderSwitchModal() {
+				const ctx = _switchCtx
+				if (!ctx) return
+				const defModel = _switchDefaultModel()
+				const defStyle = _switchDefaultStyle()
+				const styleOpts = SWITCH_STYLES.map((s) => {
+					const norm = (x) => String(x).toLowerCase().replace(/[^a-z+]/g, '')
+					const sel = norm(s) === norm(defStyle) ? ' selected' : ''
+					return `<option value="${escAttr(s)}"${sel}>${escHtml(s)}</option>`
+				}).join('')
+				const removeBtn = ctx.sub
+					? `<button class="modal-cancel" onclick="removeSwitch()" title="Revert this line to the originally ordered design.">↩ Revert to original</button>`
+					: `<button class="modal-cancel" onclick="closeSwitchModal()">Cancel</button>`
+
+				document.getElementById('switchModalBody').innerHTML = `
+					<div class="modal-note">Pick the replacement design the buyer agreed to. It's tracked <strong>only in this dashboard</strong> and flows back into your purchasing queue to be bought — your Etsy shop is never changed.</div>
+					<div class="switch-tabs">
+						<button class="switch-tab active" id="switchTab-catalog" onclick="setSwitchMode('catalog')">🗂️ From your catalog</button>
+						<button class="switch-tab" id="switchTab-custom" onclick="setSwitchMode('custom')">⬆️ Custom upload</button>
+					</div>
+					<div id="switchPane-catalog">
+						<input class="switch-search" id="switchSearch" placeholder="Search your products by title or shop…" oninput="renderSwitchGrid()" />
+						<div class="switch-grid" id="switchGrid"><div class="switch-grid-empty">Loading products…</div></div>
+						<div id="switchSelHint"></div>
+					</div>
+					<div id="switchPane-custom" style="display:none">
+						<div class="switch-config" style="border-top:none;margin-top:0;padding-top:0">
+							<div class="full">
+								<label class="switch-field-label">Product title *</label>
+								<input class="switch-input" id="switchCustomTitle" placeholder="e.g. Sanrio Cinnamoroll Blue Clear Case with Charm" oninput="_syncSwitchCustom()" />
+							</div>
+							<div class="full">
+								<label class="switch-field-label">Product image (optional)</label>
+								<label class="switch-upload" for="switchFile">Click to upload a photo of the replacement design</label>
+								<input type="file" id="switchFile" accept="image/*" style="display:none" onchange="onSwitchImageFile(this)" />
+								<div id="switchPreviewWrap"></div>
+							</div>
+						</div>
+					</div>
+					<div class="switch-config">
+						<div>
+							<label class="switch-field-label">Style (drives what to buy)</label>
+							<select class="switch-select" id="switchStyle">${styleOpts}</select>
+						</div>
+						<div>
+							<label class="switch-field-label">Phone model</label>
+							<input class="switch-input" id="switchModel" value="${escAttr(defModel)}" placeholder="e.g. iPhone 17 Pro Max" />
+						</div>
+					</div>
+					<div class="modal-actions">
+						${removeBtn}
+						<button class="modal-submit" id="switchSubmitBtn" onclick="submitSwitch()">🔄 Switch this order</button>
+					</div>`
+				setSwitchMode(_switchMode)
+				_renderSwitchSelHint()
+			}
+
+			async function _loadSwitchProducts() {
+				const grid = document.getElementById('switchGrid')
+				if (_switchLoaded) { renderSwitchGrid(); return }
+				try {
+					const res = await fetch(`${API}/api/route/products`)
+					const data = await res.json()
+					if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
+					_switchProducts = data.products || []
+					_switchLoaded = true
+					renderSwitchGrid()
+				} catch (err) {
+					if (grid) grid.innerHTML = `<div class="switch-grid-empty">${escHtml(err.message)}</div>`
+				}
+			}
+
+			function renderSwitchGrid() {
+				const grid = document.getElementById('switchGrid')
+				if (!grid) return
+				const q = (document.getElementById('switchSearch')?.value || '').toLowerCase().trim()
+				const list = q ? _switchProducts.filter((p) => (p.title || '').toLowerCase().includes(q) || (p.shop_name || '').toLowerCase().includes(q)) : _switchProducts
+				if (!list.length) {
+					grid.innerHTML = `<div class="switch-grid-empty">${_switchProducts.length ? 'No products match your search.' : 'No products found in your order history yet — use Custom upload.'}</div>`
+					grid._list = []
+					return
+				}
+				grid._list = list.slice(0, 300)
+				grid.innerHTML = grid._list
+					.map((p, i) => {
+						const selCls = _switchSel && ((p.listing_id && _switchSel.listing_id === p.listing_id) || _switchSel.title === p.title) ? ' sel' : ''
+						const thumb = p.image_url ? `<img src="${escAttr(p.image_url)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'switch-card-ph',textContent:'📦'}))">` : `<div class="switch-card-ph">📦</div>`
+						return `<div class="switch-card${selCls}" onclick="selectSwitchCatalog(${i})" title="${escAttr(p.title)}">${thumb}<div class="switch-card-title">${escHtml(p.title)}</div></div>`
+					})
+					.join('')
+			}
+
+			function selectSwitchCatalog(idx) {
+				const grid = document.getElementById('switchGrid')
+				const p = grid && grid._list ? grid._list[idx] : null
+				if (!p) return
+				_switchSel = { source: 'catalog', title: p.title, listing_id: p.listing_id || null, image_url: p.image_url || '', shop_name: p.shop_name || '' }
+				// If the chosen product has exactly one known style, prefill it.
+				if (p.styles && p.styles.length === 1) {
+					const sel = document.getElementById('switchStyle')
+					const norm = (x) => String(x).toLowerCase().replace(/[^a-z+]/g, '')
+					const hit = SWITCH_STYLES.find((s) => norm(s) === norm(p.styles[0]))
+					if (sel && hit) sel.value = hit
+				}
+				renderSwitchGrid()
+				_renderSwitchSelHint()
+			}
+
+			function _renderSwitchSelHint() {
+				const el = document.getElementById('switchSelHint')
+				if (!el) return
+				el.innerHTML = _switchSel && _switchMode === 'catalog'
+					? `<div class="switch-selected-hint">Selected: <strong>${escHtml(_switchSel.title)}</strong></div>`
+					: ''
+			}
+
+			/** Custom mode: typing a title clears any catalog selection. */
+			function _syncSwitchCustom() {
+				if (_switchMode === 'custom') { _switchSel = null; _renderSwitchSelHint() }
+			}
+
+			function onSwitchImageFile(input) {
+				const file = input.files && input.files[0]
+				if (!file) return
+				const reader = new FileReader()
+				reader.onload = () => {
+					_switchImageB64 = String(reader.result || '')
+					_switchImageMime = file.type || 'image/png'
+					const wrap = document.getElementById('switchPreviewWrap')
+					if (wrap) wrap.innerHTML = `<img class="switch-preview" src="${_switchImageB64}" alt="preview" />`
+				}
+				reader.readAsDataURL(file)
+			}
+
+			function _switchError(msg) {
+				const el = document.getElementById('switchError')
+				el.textContent = msg
+				el.classList.add('show')
+			}
+
+			async function submitSwitch() {
+				if (!_switchCtx) return
+				const btn = document.getElementById('switchSubmitBtn')
+				document.getElementById('switchError').classList.remove('show')
+				const style = document.getElementById('switchStyle')?.value || ''
+				const model = (document.getElementById('switchModel')?.value || '').trim()
+
+				let payload = { item_key: _switchCtx.itemKey, new_style: style, new_phone_model: model }
+				if (_switchMode === 'catalog') {
+					if (!_switchSel) return _switchError('Pick a product from your catalog, or switch to Custom upload.')
+					payload.new_title = _switchSel.title
+					payload.source = 'catalog'
+					payload.source_listing_id = _switchSel.listing_id || null
+					payload.image_url = _switchSel.image_url || ''
+				} else {
+					const title = (document.getElementById('switchCustomTitle')?.value || '').trim()
+					if (!title) return _switchError('Enter a product title for the custom design.')
+					payload.new_title = title
+					payload.source = 'custom'
+					if (_switchImageB64) { payload.image_b64 = _switchImageB64; payload.image_mime = _switchImageMime }
+				}
+
+				if (btn) { btn.disabled = true; btn.textContent = 'Switching…' }
+				try {
+					const res = await fetch(`${API}/api/orders/${_switchCtx.receiptId}/substitution`, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify(payload),
+					})
+					const data = await res.json()
+					if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`)
+					showRouteToast('🔄 Order switched — now in your purchasing queue')
+					closeSwitchModal()
+					await fetchOrders()
+				} catch (e) {
+					_switchError('Could not switch: ' + e.message)
+					if (btn) { btn.disabled = false; btn.textContent = '🔄 Switch this order' }
+				}
+			}
+
+			async function removeSwitch() {
+				if (!_switchCtx) return
+				if (!confirm('Revert this line to the originally ordered design? The replacement will be removed from your purchasing queue.')) return
+				try {
+					const res = await fetch(`${API}/api/orders/${_switchCtx.receiptId}/substitution`, {
+						method: 'DELETE',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ item_key: _switchCtx.itemKey }),
+					})
+					const data = await res.json()
+					if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`)
+					showRouteToast('Reverted to the original design')
+					closeSwitchModal()
+					await fetchOrders()
+				} catch (e) {
+					_switchError('Could not revert: ' + e.message)
 				}
 			}
 
@@ -18655,6 +19455,16 @@
 					label = `${c.label} · n/a`
 					next = 'Purchased'
 					tip = `${c.label} out of production — click to mark purchased`
+				} else if (st === 'Wrong Stall') {
+					cls = 'pp-comp-oos'
+					label = `${c.label} · ✗stall`
+					next = 'Purchased'
+					tip = `${c.label} wrong stall location — click to mark purchased`
+				} else if (st === 'Model Unavailable') {
+					cls = 'pp-comp-oop'
+					label = `${c.label} · no model`
+					next = 'Purchased'
+					tip = `${c.label} model unavailable — click to mark purchased`
 				} else {
 					cls = 'pp-comp-need'
 					label = c.label
@@ -20312,10 +21122,13 @@
 					}
 				} catch (err) {
 					console.error('[4px] row label print error:', err)
+					const reason = err.message || 'Unknown error'
 					if (btn) {
 						btn.innerHTML = `<span style="color:var(--red)">⚠</span> Failed`
-						setTimeout(resetBtn, 2600)
+						btn.title = reason
+						setTimeout(resetBtn, 4000)
 					}
+					alert(`Label did not print:\n\n${reason}`)
 				}
 			}
 
@@ -21168,8 +21981,10 @@
 				const btn = document.getElementById('listingsSyncBtn')
 				btn.disabled = true
 
-				// Collect shop names to sync
-				const shopNames = shopId ? [shopSel.options[shopSel.selectedIndex]?.textContent.trim()] : [...shopSel.querySelectorAll('option')].map((o) => o.textContent.trim()).filter(Boolean)
+				// Collect shop names to sync. When "All shops" is selected we must skip
+				// the placeholder <option value=""> — otherwise its label ("All shops")
+				// is sent as a shop name and the server 404s ("No config for shop All shops").
+				const shopNames = shopId ? [shopSel.options[shopSel.selectedIndex]?.textContent.trim()] : [...shopSel.querySelectorAll('option')].filter((o) => o.value).map((o) => o.textContent.trim()).filter(Boolean)
 
 				for (const name of shopNames) {
 					btn.textContent = `Syncing ${name}…`
@@ -27021,7 +27836,7 @@
 
 			// ── Orders Sorting Dashboard ────────────────────────────────────────────────
 
-			const ROUTE_STATUS_OPTIONS = ['Pending', 'Purchased', 'Out of Stock', 'Out of Production']
+			const ROUTE_STATUS_OPTIONS = ['Pending', 'Purchased', 'Out of Stock', 'Out of Production', 'Wrong Stall', 'Model Unavailable']
 			let _routeRows = [] // last-loaded dashboard rows
 			let _charmList = [] // charm catalog from OSP
 			let _charmByCode = {} // code → charm
@@ -29133,14 +29948,28 @@
 				// product_map rows are untouched, so route generation is unaffected.
 				const withImg = _pmRows.filter((r) => !!r.image_url)
 				const searched = q ? withImg.filter((r) => (r.title || '').toLowerCase().includes(q) || (r.shop_name || '').toLowerCase().includes(q) || (r.stall || '').toLowerCase().includes(q) || (r.charm_shop || '').toLowerCase().includes(q) || (r.charm_code || '').toLowerCase().includes(q)) : withImg
-				const filtered = _pmSortBySupplier(searched)
+				// Product Catalog is a PHYSICAL-product view: multiple Etsy listing
+				// titles linked to one canonical ID render as one row/image. Keep the
+				// aliases on the representative so they remain reviewable.
+				const groupedMap = new Map()
+				for (const row of searched) {
+					const key = row.canonical_product_key || `row:${row.id}`
+					if (!groupedMap.has(key)) groupedMap.set(key, [])
+					groupedMap.get(key).push(row)
+				}
+				const filtered = _pmSortBySupplier(
+					[...groupedMap.values()].map((aliases) => ({
+						...aliases[0],
+						_aliases: aliases,
+					})),
+				)
 
 				const tbody = document.getElementById('pmTableBody')
 				const empty = document.getElementById('pmEmpty')
 				const count = document.getElementById('pmCount')
 				if (!tbody) return
 
-				count.textContent = `${filtered.length} of ${withImg.length} entr${withImg.length === 1 ? 'y' : 'ies'}`
+				count.textContent = `${filtered.length} physical product${filtered.length === 1 ? '' : 's'} · ${searched.length} listing entr${searched.length === 1 ? 'y' : 'ies'}`
 
 				if (!filtered.length) {
 					tbody.innerHTML = ''
@@ -29174,19 +30003,29 @@
 					const img = `<img class="pm-thumb${r.image_approx ? ' approx' : ''}" src="${escA(r.image_url)}" loading="lazy" referrerpolicy="no-referrer" title="${r.image_approx ? 'Approximate match — a similar listing, not necessarily this exact product. Click to view full size' : 'Click to view full size'}" onclick="window.open(this.src,'_blank','noopener')" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'pm-thumb-ph',textContent:'📦'}))">`
 					return r.image_approx ? `<div class="pm-thumb-wrap">${img}<span class="pm-thumb-approx" title="Approximate match — a similar listing, not necessarily this exact product.">≈</span></div>` : img
 				}
+				const titleCell = (r) => {
+					const aliases = r._aliases || [r]
+					if (aliases.length === 1) return `<span class="pm-title-text">${esc(r.title)}</span>`
+					return `<span class="pm-title-text">${esc(r.title)}</span>
+						<span class="pm-tag accent">Same product ×${aliases.length}</span>
+						<details class="pm-aliases">
+							<summary>View ${aliases.length} Etsy listing titles</summary>
+							${aliases.map((a) => `<div>${esc(a.title)}</div>`).join('')}
+						</details>`
+				}
 
 				tbody.innerHTML = filtered
 					.map(
 						(r) => `
 					<tr>
 						<td class="pm-col-img">${thumb(r)}</td>
-						<td class="pm-col-title"><span class="pm-title-text">${esc(r.title)}</span></td>
+						<td class="pm-col-title">${titleCell(r)}</td>
 						<td class="pm-col-supplier">${supplierCell(r)}</td>
 						<td class="pm-col-charm">${charmCell(r)}</td>
 						<td class="pm-col-actions">
 							<div class="pm-row-actions">
-								<button class="pm-btn-icon" onclick="openPmEditor(${r.id})" title="Edit">✎</button>
-								<button class="pm-btn-icon danger" onclick="deletePmEntry(${r.id}, '${escA(r.title)}')" title="Delete">✕</button>
+								<button class="pm-btn-icon" onclick="openPmEditor(${r.id})" title="${(r._aliases || []).length > 1 ? 'Edit shared physical-product mapping (applies to all listing aliases)' : 'Edit'}">✎</button>
+								${(r._aliases || []).length > 1 ? '' : `<button class="pm-btn-icon danger" onclick="deletePmEntry(${r.id}, '${escA(r.title)}')" title="Delete">✕</button>`}
 							</div>
 						</td>
 					</tr>`,
@@ -29659,8 +30498,8 @@
 
 				for (const r of rows) {
 					const st = r.status_charm || 'Pending'
-					// Never clobber terminal statuses set via the dropdown.
-					if (st === 'Out of Stock' || st === 'Out of Production') continue
+					// Never clobber non-Pending decisions set via the dropdown.
+					if (st === 'Out of Stock' || st === 'Out of Production' || st === 'Wrong Stall' || st === 'Model Unavailable') continue
 
 					const lineQty = r.quantity || 1
 					// Allocate as many pieces as we have budget for.
@@ -30803,7 +31642,16 @@
 		<div class="modal-overlay" id="auditModal">
 			<div class="modal-box" style="width: 720px; max-width: 95vw">
 				<div class="modal-title">📋 Activity log</div>
-				<div class="modal-subtitle">Every change made in the dashboard, newest first — who did what, to which order, and when.</div>
+				<div class="modal-subtitle">Every change made in the dashboard, grouped by day — who did what, to which order, and when. Pick a person or a time range to focus.</div>
+				<div class="audit-toolbar">
+					<div id="auditRange" class="earn-segmented" role="group" aria-label="Filter activity by time range">
+						<button type="button" class="earn-seg-btn" data-range="today" onclick="ACTIVITY.setRange('today')">Today</button>
+						<button type="button" class="earn-seg-btn" data-range="7d" onclick="ACTIVITY.setRange('7d')">7 days</button>
+						<button type="button" class="earn-seg-btn" data-range="30d" onclick="ACTIVITY.setRange('30d')">30 days</button>
+						<button type="button" class="earn-seg-btn active" data-range="all" onclick="ACTIVITY.setRange('all')">All</button>
+					</div>
+				</div>
+				<div id="auditFilters" class="audit-filters" aria-label="Filter activity by person"></div>
 				<div class="table-wrap" style="max-height: 60vh; overflow: auto">
 					<table>
 						<thead>
@@ -31020,6 +31868,16 @@
 				<div class="modal-subtitle" id="issueModalSubtitle">—</div>
 				<div id="issueModalBody"></div>
 				<div class="modal-error" id="issueError"></div>
+			</div>
+		</div>
+
+		<!-- ── Design-switch picker (buyer agreed to switch to another design) ──── -->
+		<div class="modal-overlay" id="switchModal" onclick="if (event.target === this) closeSwitchModal()">
+			<div class="modal-box" style="max-width: 1040px; width: 94vw">
+				<div class="modal-title">🔄 Switch to a new design</div>
+				<div class="modal-subtitle" id="switchModalSubtitle">—</div>
+				<div id="switchModalBody"></div>
+				<div class="modal-error" id="switchError"></div>
 			</div>
 		</div>
 
