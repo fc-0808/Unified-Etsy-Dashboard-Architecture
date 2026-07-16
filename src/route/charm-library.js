@@ -90,6 +90,68 @@ function allocateNextCode(db) {
   return `CH-${String(max + 1).padStart(5, '0')}`;
 }
 
+/**
+ * Short cache-busting version token for one image file, derived from its
+ * on-disk mtime + size. Any upload/replace/rename/renumber changes at least one
+ * of these, so the token changes and the content-addressed URL (…?code=X&v=TOKEN)
+ * becomes a brand-new URL that every cache misses — while an UNCHANGED file keeps
+ * the same token and stays immutably cached. Returns '' when the file is absent.
+ * @param {string} dir       absolute charm_images directory
+ * @param {string} imageFile bare filename (no path separators)
+ */
+function imageVersionFor(dir, imageFile) {
+  if (!dir || !imageFile || /[/\\]/.test(imageFile)) return '';
+  try {
+    const st = fs.statSync(path.join(dir, imageFile));
+    return `${Math.floor(st.mtimeMs).toString(36)}-${st.size.toString(36)}`;
+  } catch { return ''; }
+}
+
+/** First existing <code>.<ext> filename in `dir`, or '' when none exists. */
+function findImageFile(dir, code) {
+  if (!dir || !CODE_RE.test(code)) return '';
+  for (const ext of ALLOWED_EXT) {
+    if (fs.existsSync(path.join(dir, `${code}.${ext}`))) return `${code}.${ext}`;
+  }
+  return '';
+}
+
+/**
+ * Resolve the cache-busting version token for a single charm. Prefers the
+ * library's recorded image_file, falling back to on-disk <code>.<ext> lookup so
+ * the token is correct even when the DB image_file is stale/blank.
+ */
+function charmImageVersion(config, code, imageFile) {
+  const dir = charmImagesDir(config);
+  if (!dir) return '';
+  const file = (imageFile && !/[/\\]/.test(imageFile) && fs.existsSync(path.join(dir, imageFile)))
+    ? imageFile
+    : findImageFile(dir, code);
+  return imageVersionFor(dir, file);
+}
+
+/**
+ * Build a Map<code, versionToken> for every charm in the library in ONE folder
+ * pass, so per-request payloads (charms list, shop route) can attach an image
+ * version to each charm without stat-ing the directory once per charm.
+ * @param {import('better-sqlite3').Database} db
+ * @param {object} config
+ * @returns {Map<string,string>}
+ */
+function charmImageVersionMap(db, config) {
+  const map = new Map();
+  const dir = charmImagesDir(config);
+  if (!dir) return map;
+  for (const r of getCharmLibrary(db)) {
+    const file = (r.image_file && !/[/\\]/.test(r.image_file) && fs.existsSync(path.join(dir, r.image_file)))
+      ? r.image_file
+      : findImageFile(dir, r.code);
+    const v = imageVersionFor(dir, file);
+    if (v) map.set(r.code, v);
+  }
+  return map;
+}
+
 /** Strip a data-URL prefix and return { buffer, ext } or throw. */
 function decodeImage(imageBase64, explicitExt) {
   if (!imageBase64) throw Object.assign(new Error('No image data provided.'), { code: 'REQUIRED' });
@@ -191,4 +253,6 @@ module.exports = {
   renameCharmImage,
   deleteCharmImage,
   reorderCharmImages,
+  charmImageVersion,
+  charmImageVersionMap,
 };

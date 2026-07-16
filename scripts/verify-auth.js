@@ -45,6 +45,16 @@ function buildApp(store) {
 	app.get('/api/etsy/budget', (_req, res) => res.json({ budget: 1 }))
 	app.get('/api/orders', (_req, res) => res.json({ orders: [], total: 0 }))
 	app.post('/api/orders/:id/ship', (_req, res) => res.json({ ok: true }))
+	// Needs-purchase (buy) queue — the employee-facing purchase-state surface.
+	app.post('/api/orders/:id/needs-purchase', (_req, res) => res.json({ ok: true }))
+	app.post('/api/orders/:id/clear-needs-purchase', (_req, res) => res.json({ ok: true }))
+	app.post('/api/orders/:id/items/component-status', (_req, res) => res.json({ ok: true }))
+	app.post('/api/orders/:id/items/purchase-state', (_req, res) => res.json({ ok: true }))
+	app.post('/api/orders/bulk-needs-purchase', (_req, res) => res.json({ ok: true }))
+	// Charm shopping list: read-only bundle is employee-safe; the full route planner is not.
+	app.get('/api/route/charms-to-buy', (_req, res) => res.json({ ok: true, rows: [], charms: [], charm_shops: [], progress: {} }))
+	app.get('/api/route/dashboard', (_req, res) => res.json({ rows: [] }))
+	app.post('/api/route/assign', (_req, res) => res.json({ ok: true }))
 	app.post('/api/listings', (_req, res) => res.json({ created: true }))
 	app.use('/api', (_req, res) => res.status(404).json({ error: 'unknown' }))
 	return app
@@ -74,6 +84,29 @@ async function suiteA() {
 	check('Employee CAN see orders (200)', r.status === 200, `got ${r.status}`)
 	r = await fetch(base + '/api/orders/5/ship', { method: 'POST', headers: { cookie: packer, 'Content-Type': 'application/json' }, body: '{}' })
 	check('Employee CAN ship an order (200)', r.status === 200, `got ${r.status}`)
+
+	// Needs-purchase (buy) queue — employees source products and mark them bought.
+	const post = (path) => fetch(base + path, { method: 'POST', headers: { cookie: packer, 'Content-Type': 'application/json' }, body: '{}' })
+	r = await post('/api/orders/5/items/component-status')
+	check('Employee CAN set a component purchase status (200)', r.status === 200, `got ${r.status}`)
+	r = await post('/api/orders/5/items/purchase-state')
+	check('Employee CAN mark a product purchased (200)', r.status === 200, `got ${r.status}`)
+	r = await post('/api/orders/5/needs-purchase')
+	check('Employee CAN flag an order needs-purchase (200)', r.status === 200, `got ${r.status}`)
+	r = await post('/api/orders/5/clear-needs-purchase')
+	check('Employee CAN clear an order needs-purchase (200)', r.status === 200, `got ${r.status}`)
+	// Bulk needs-purchase stays owner-only (the packer UI never exposes it).
+	r = await post('/api/orders/bulk-needs-purchase')
+	check('Employee BLOCKED from bulk needs-purchase (403)', r.status === 403, `got ${r.status}`)
+
+	// Charms-to-buy list is read-only + employee-safe; the owner route planner and
+	// its assign endpoint stay blocked (employees persist via component-status).
+	r = await fetch(base + '/api/route/charms-to-buy', { headers: { cookie: packer } })
+	check('Employee CAN read the charm shopping list (200)', r.status === 200, `got ${r.status}`)
+	r = await fetch(base + '/api/route/dashboard', { headers: { cookie: packer } })
+	check('Employee BLOCKED from the owner route planner (403)', r.status === 403, `got ${r.status}`)
+	r = await post('/api/route/assign')
+	check('Employee BLOCKED from route/assign (403)', r.status === 403, `got ${r.status}`)
 
 	r = await login(base, { password: process.env.DASHBOARD_OWNER_PASSWORD })
 	const owner = cookieHeader(r)

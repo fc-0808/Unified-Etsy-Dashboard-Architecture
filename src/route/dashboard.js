@@ -34,6 +34,7 @@ const {
   getProductMapByNorm, getManualItems,
   getCharmLibrary, getCharmShopDirectory,
   getOpenIssueMap, getOpenExchangeMap, getSubstitutionMap,
+  getListingStyleImageMap, normalizeStyleKey,
   MANUAL_SHOP_ID,
 } = require('../db/setup');
 const enginePaths = require('./engine-paths');
@@ -43,7 +44,7 @@ const enginePaths = require('./engine-paths');
  *                     Behaves like Out of Stock: still OUTSTANDING (needs action).
  *   Model Unavailable (没有此型号) — this phone model isn't carried here; a dead
  *                     end like Out of Production (terminal, not outstanding). */
-const STATUS_OPTIONS = ['Pending', 'Purchased', 'Out of Stock', 'Out of Production', 'Wrong Stall', 'Model Unavailable'];
+const STATUS_OPTIONS = ['Pending', 'Purchased', 'Out of Stock', 'Out of Production', 'Model Unavailable', 'Wrong Stall'];
 const DEFAULT_STATUS = 'Pending';
 
 /**
@@ -137,6 +138,41 @@ function rowFullyPurchased(row) {
   if (row.has_grip)  present.push(row.status_grip  || DEFAULT_STATUS);
   if (row.has_charm) present.push(row.status_charm || DEFAULT_STATUS);
   return present.length > 0 && present.every(s => s === 'Purchased');
+}
+
+/**
+ * Does an active design switch SUPERSEDE an open fulfilment issue on the same
+ * line — i.e. should the line flow into purchasing DESPITE the "on hold" flag?
+ *
+ * This is the SINGLE SOURCE OF TRUTH for that precedence rule, shared by the
+ * Route builder, the Orders API/UI, and the startup self-heal migration, so all
+ * three agree on exactly when a switched line is buyable.
+ *
+ * A design switch resolves the fulfilment problem that prompted it and makes the
+ * replacement buyable — so it supersedes any issue that PRE-DATES it. But if the
+ * REPLACEMENT itself later turns out to be unavailable, that new hold is raised
+ * AFTER the switch and must stick. The discriminator is therefore pure recency
+ * (no matter who raised the issue or how):
+ *
+ *   1. No switch                       → nothing supersedes the hold (held stays).
+ *   2. Switch, no open issue           → trivially buyable.
+ *   3. Switch at/after the issue       → the switch resolved it → SUPERSEDED
+ *                                        (also self-heals a stale pre-switch flag
+ *                                        whose resolve never ran).
+ *   4. Issue raised AFTER the switch   → a new problem with the REPLACEMENT →
+ *                                        the line stays HELD and shows in Issues.
+ *
+ * Timestamps are epoch seconds (`updated_at` = last time each was asserted), so
+ * the rule is correct across re-raises, reopens and switch edits.
+ *
+ * @param {{updated_at?:number}|null|undefined} sub   active substitution, or null
+ * @param {{updated_at?:number}|null|undefined} issue open issue, or null
+ * @returns {boolean} true when the switch un-holds the line
+ */
+function substitutionSupersedesIssue(sub, issue) {
+  if (!sub) return false;   // no switch → nothing supersedes the hold
+  if (!issue) return true;  // switch, no open issue → trivially buyable
+  return (sub.updated_at || 0) >= (issue.updated_at || 0);
 }
 
 /**
@@ -362,6 +398,11 @@ function buildRouteRows(db, config, filters = {}) {
       .forEach(row => { imageMap[row.listing_id] = row.url; });
   }
 
+  // Operator-supplied per-variant clarifying images, keyed by
+  // `${listing_id}\x00${style_key}`. These override the ambiguous listing hero
+  // shot for a specific style (e.g. show the grip for a "Grip 3 Only" line).
+  const styleImageMap = getListingStyleImageMap(db, listingIds);
+
   // Saved per-order assignments, keyed by `${receipt_id}\x00${item_key}`.
   const assignMap = {};
   try {
@@ -452,16 +493,41 @@ function buildRouteRows(db, config, filters = {}) {
       line = {
         ...line,
         image_url: sub.has_image_data
-          ? `/api/route/substitution-image/${sub.id}`
+          // Content-addressed: the `v` token changes whenever the operator
+          // re-uploads the switched-design photo (updated_at moves), so the URL
+          // changes too and the mobile service worker's cache-first image cache
+          // can never serve the previous/original photo. Without it, a re-uploaded
+          // switched image stays stale on the shopping floor (desktop, which has
+          // no service worker, showed the new one — the source of the mismatch).
+          ? `/api/route/substitution-image/${sub.id}?v=${sub.updated_at || 0}`
           : (sub.image_url || line.image_url),
       };
     }
     const saved    = assignMap[`${meta.receipt_id}\x00${key}`] || {};
     const product  = productMap[key] || {};
     const excelPM  = excelProductMap.get(titleNorm) || {};
-    const canonicalProductKey = canonicalByListing.get(Number(line.listing_id))
-      || excelPM.canonical_product_key
-      || '';
+    // Canonical physical-product identity — the key the shopping view uses to MERGE
+    // order lines into a single product card. It MUST describe the product we will
+    // actually BUY.
+    //
+    // For a SWITCHED line that product is the REPLACEMENT design, NOT the originally
+    // ordered listing. Deriving it from the original `line.listing_id` (as an
+    // unswitched line does) makes the switched line inherit the ORIGINAL design's
+    // canonical key, so it merges into the wrong product card — the switched design
+    // then shows other designs' models (and vice-versa) in the shopping route. So a
+    // switched line takes its identity from the replacement instead:
+    //   • catalog switch → the replacement listing's canonical (via source_listing_id),
+    //   • else (custom upload, or no canonical on file) → the Excel map keyed by the
+    //     switched title, and finally '' so it merges by its switched title downstream.
+    // `excelPM` is already keyed by the effective (switched) title, so it's correct
+    // for both branches; only the listing-derived lookup must avoid the original.
+    const canonicalProductKey = sub
+      ? ((sub.source_listing_id != null && canonicalByListing.get(Number(sub.source_listing_id)))
+          || excelPM.canonical_product_key
+          || '')
+      : (canonicalByListing.get(Number(line.listing_id))
+          || excelPM.canonical_product_key
+          || '');
 
     // Durably removed lines drop out of the dashboard AND route generation
     // entirely. They are only materialised when the caller explicitly asks for
@@ -473,7 +539,16 @@ function buildRouteRows(db, config, filters = {}) {
     // is held out of purchasing entirely — buying it would waste money on a
     // product the buyer may cancel or swap. Materialised only when the caller
     // opts in (e.g. an audit view), and always tagged so the UI can flag it.
-    const issue = issueMap.get(`${meta.receipt_id}\x00${key}`) || null;
+    //
+    // CRITICAL SAFETY NET: a line the operator has SWITCHED to a new design must
+    // never be silently withheld by a stale hold. A switch is an explicit "buy
+    // this replacement instead" decision, so when it is at least as recent as the
+    // issue (see substitutionSupersedesIssue) it CLEARS the hold and the line
+    // flows into the route as the replacement. Without this, a switched line
+    // whose issue was left open (legacy data, a re-raise, or a resolve that never
+    // ran) drops out of the shopping route entirely — the buyer's item is missed.
+    const rawIssue = issueMap.get(`${meta.receipt_id}\x00${key}`) || null;
+    const issue = substitutionSupersedesIssue(sub, rawIssue) ? null : rawIssue;
     if (issue && !filters.include_issues) return;
 
     // Open wrong-model exchange for this line (we hold it, but in the wrong model).
@@ -556,6 +631,13 @@ function buildRouteRows(db, config, filters = {}) {
       status_case: statusCase,   status_grip: statusGrip,   status_charm: statusCharm,
     });
 
+    // Per-variant clarifying image (operator upload for this listing + style).
+    // Skipped when the line was switched to another design — that product is a
+    // different item and carries its own image via line.image_url above.
+    const styleImg = (!sub && line.listing_id)
+      ? (styleImageMap[`${line.listing_id}\x00${normalizeStyleKey(style)}`] || null)
+      : null;
+
     out.push({
       receipt_id:  meta.receipt_id,
       item_key:    key,
@@ -575,7 +657,11 @@ function buildRouteRows(db, config, filters = {}) {
       style,
       image_url:   line.image_url != null
         ? line.image_url
-        : (line.listing_id ? (imageMap[line.listing_id] || null) : null),
+        : (styleImg
+            // Content-addressed (see substitution image): busts the mobile
+            // service-worker cache when the variant photo is replaced.
+            ? `/api/route/style-image/${styleImg.id}?v=${styleImg.updated_at || 0}`
+            : (line.listing_id ? (imageMap[line.listing_id] || null) : null)),
       has_case:    comps.hasCase,
       has_grip:    comps.hasGrip,
       has_charm:   comps.hasCharm,
@@ -742,7 +828,9 @@ function buildRouteRows(db, config, filters = {}) {
         // own endpoint. Fall back to the cached listing image when neither set.
         image_url:  m.image_url
           ? m.image_url
-          : (m.has_image_data ? `/api/route/manual-image/${m.id}` : (m.listing_id ? (imageMap[m.listing_id] || null) : null)),
+          // Content-addressed (see substitution image): busts the mobile
+          // service-worker cache when a manual order's photo is replaced.
+          : (m.has_image_data ? `/api/route/manual-image/${m.id}?v=${m.updated_at || m.created_at || 0}` : (m.listing_id ? (imageMap[m.listing_id] || null) : null)),
         is_manual:  true,
         manual_id:  m.id,
       });
@@ -1577,6 +1665,7 @@ module.exports = {
   lineItemKey,
   LINE_KEY_MARKER,
   rowFullyPurchased,
+  substitutionSupersedesIssue,
   styleComponents,
   parseVariations,
   buildRouteRows,

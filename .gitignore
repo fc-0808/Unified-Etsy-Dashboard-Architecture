@@ -40,6 +40,19 @@ __pycache__/
 # Local API scratch scripts (may contain credentials)
 _fpx_test.js
 
+# Local backups of secret files (API keys / OAuth tokens) — e.g.
+# config.json.bak-<timestamp>, tokens.json.bak-<timestamp>. NEVER commit.
+*.bak
+*.bak-*
+config.json.*
+tokens.json.*
+
+# Scratch / diagnostic scripts (throwaway, never part of the app)
+_tmp_*
+
+# Editor workspace settings (personal)
+.vscode/
+
 # OS junk
 .DS_Store
 Thumbs.db

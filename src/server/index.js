@@ -38,6 +38,7 @@ const cron = require('node-cron')
 const contentDisposition = require('content-disposition')
 
 const { loadConfig, getAllShops, usesGroupProxy } = require('../config/schema')
+const { analyzeSuspensionRisks, formatRiskReport, summarizeRisks, assertShipRateOk, warnPreTransitShip, chunk: chunkArray, sleep: complianceSleep, BULK_SHIP_CHUNK_SIZE, BULK_SHIP_INTER_REQUEST_MS, BULK_SHIP_INTER_BATCH_MS, BULK_SHIP_ABSOLUTE_MAX, INV_WATCH_STARTUP_DELAY_MS } = require('../compliance/suspension-guard')
 const { TokenManager } = require('../auth/token-manager')
 const { initDb, syncConfigToDb } = require('../db/setup')
 // Single source of truth for the Ready-to-pack ("To pack & ship") queue scope,
@@ -123,6 +124,7 @@ const {
 	getIssuesForReceipts,
 	getIssuesForReceipt,
 	getIssueById,
+	getOrderIssue,
 	upsertOrderIssue,
 	patchOrderIssue,
 	deleteOrderIssue,
@@ -139,10 +141,17 @@ const {
 	upsertOrderSubstitution,
 	deleteOrderSubstitution,
 	getSubstitutionImage,
+	normalizeStyleKey,
+	upsertListingStyleImage,
+	deleteListingStyleImage,
+	getListingStyleImageMeta,
+	getListingStyleImage,
+	getListingStyleImageMap,
 } = require('../db/setup')
 const routeDashboard = require('../route/dashboard')
 const { FLOOR_MAPS, normalizeStallCode, stallCodeAliases } = require('../route/floor-map')
 const { generateBuyerIssueMessage } = require('../support/buyer-message')
+const { checkMessageCompliance } = require('../support/message-compliance')
 const enginePaths = require('../route/engine-paths')
 const statusImport = require('../route/status-import')
 const { buildSyncReportWorkbook } = require('../route/sync-report-xlsx')
@@ -198,6 +207,20 @@ function broadcastRouteEvent(payload) {
 			res.write(data)
 		} catch {}
 	})
+}
+
+/**
+ * Tell every live Route/Shopping client that this order's ROUTE MEMBERSHIP or
+ * CONTENT changed in a way a per-line 'assign' patch can't express — a design was
+ * switched (a line enters the route, or its title/supplier/image change), a switch
+ * was reverted, or a fulfilment issue was flagged / resolved / reopened / deleted
+ * (a line leaves or re-enters the purchasing route). Clients respond by re-fetching
+ * so the new/removed line appears instantly, instead of only after a manual reload.
+ * Without this, such changes show in the Orders tab (where they're made) but the
+ * Route tab and mobile Shopping page stay stale.
+ */
+function broadcastRouteRefresh(receiptId, reason) {
+	broadcastRouteEvent({ type: 'refresh', receipt_id: Number(receiptId) || null, reason: reason || 'change' })
 }
 
 // ─── Shopping Route generation job state ──────────────────────────────────────
@@ -1550,6 +1573,10 @@ app.get('/api/orders', (req, res) => {
 				imageMap[row.listing_id] = row.url
 			})
 	}
+	// Operator-supplied per-variant clarifying images, keyed by
+	// `${listing_id}\x00${style_key}`. These override the ambiguous listing hero
+	// shot for a specific style (e.g. show the grip for a "Grip 3 Only" line).
+	const styleImageMap = getListingStyleImageMap(db, allListingIds)
 
 	// Per-line purchase state for the page's receipts, so the Orders tab can show a
 	// purchasing control per product — and, when a product is a Case/Grip/Charm style,
@@ -1558,10 +1585,20 @@ app.get('/api/orders', (req, res) => {
 	// perfect sync. For products with no recognised components we fall back to the binary
 	// receipt_item_purchase flag.
 	const purchaseByReceipt = {} // receipt_id → item_key → needs_purchase (0/1)  (no-component lines)
-	const raByReceipt = {} // receipt_id → item_key → { status_case, status_grip, status_charm }
+	const raByReceipt = {} // receipt_id → item_key → { status_case, status_grip, status_charm, charm_code, charm_shop }
 	const issuesByReceipt = {} // receipt_id → item_key → issue row (fulfilment exceptions)
 	const exchangesByReceipt = {} // receipt_id → item_key → exchange row (wrong-model swaps)
 	const substitutionsByReceipt = {} // receipt_id → item_key → substitution row (design switches)
+	// ── Charm resolution maps (for the "which charm to buy" detail on outstanding
+	// charm lines) ─────────────────────────────────────────────────────────────
+	// Built once per request and reused for every line. They mirror the SAME
+	// confirmed-charm priority chain the Route tab / shopping route use
+	// (route_assignments → product_assignments), so the packer's buy detail can
+	// never disagree with the Route. Best-effort: any failure leaves charms with a
+	// plain status chip and never breaks the orders list.
+	const productCharmByKey = {} // item_key → { charm_code, charm_shop }  (per-product default)
+	const charmStallByShop = new Map() // lower(shop_name) → stall  (where to buy)
+	let charmImgVerMap = new Map() // charm_code → image version token (cache-bust)
 	if (rows.length > 0) {
 		const ridList = rows.map((r) => r.receipt_id)
 		const ph = ridList.map(() => '?').join(',')
@@ -1570,11 +1607,28 @@ app.get('/api/orders', (req, res) => {
 			.forEach((row) => {
 				;(purchaseByReceipt[row.receipt_id] ||= {})[row.item_key] = row.needs_purchase
 			})
-		db.prepare(`SELECT receipt_id, item_key, status_case, status_grip, status_charm FROM route_assignments WHERE receipt_id IN (${ph})`)
+		db.prepare(`SELECT receipt_id, item_key, status_case, status_grip, status_charm, charm_code, charm_shop FROM route_assignments WHERE receipt_id IN (${ph})`)
 			.all(ridList)
 			.forEach((row) => {
 				;(raByReceipt[row.receipt_id] ||= {})[row.item_key] = row
 			})
+		// Per-product charm defaults + charm-shop → stall directory + charm image
+		// versions. All small/bounded and wrapped so a charm-catalog hiccup can
+		// never take down the orders list.
+		try {
+			db.prepare('SELECT item_key, charm_code, charm_shop FROM product_assignments').all().forEach((a) => {
+				productCharmByKey[a.item_key] = { charm_code: a.charm_code || '', charm_shop: a.charm_shop || '' }
+			})
+		} catch {}
+		try {
+			getCharmShopDirectory(db).forEach((c) => {
+				const k = String(c.shop_name || '').trim().toLowerCase()
+				if (k && !charmStallByShop.has(k)) charmStallByShop.set(k, c.stall || '')
+			})
+		} catch {}
+		try {
+			charmImgVerMap = charmLibrary.charmImageVersionMap(db, config)
+		} catch {}
 		// Fulfilment issues (out of production / model unavailable) for the page.
 		const issuesByRid = getIssuesForReceipts(db, ridList)
 		for (const rid of Object.keys(issuesByRid)) {
@@ -1630,15 +1684,37 @@ app.get('/api/orders', (req, res) => {
 			const components = []
 			if (sc.hasCase) components.push({ comp: 'case', label: 'Case', status: a.status_case || 'Pending' })
 			if (sc.hasGrip) components.push({ comp: 'grip', label: 'Grip', status: a.status_grip || 'Pending' })
-			if (sc.hasCharm) components.push({ comp: 'charm', label: 'Charm', status: a.status_charm || 'Pending' })
+			if (sc.hasCharm) {
+				// Attach the CONFIRMED charm assignment (never suggestions) so the buy
+				// queue can show exactly which charm to source, and where. Same chain
+				// the Route tab uses: per-order save → per-product default.
+				const pd = productCharmByKey[itemKey] || {}
+				const charmCode = (a.charm_code || pd.charm_code || '').trim()
+				const charmShop = (a.charm_shop || pd.charm_shop || '').trim()
+				const charmStall = charmShop ? charmStallByShop.get(charmShop.toLowerCase()) || '' : ''
+				components.push({
+					comp: 'charm',
+					label: 'Charm',
+					status: a.status_charm || 'Pending',
+					charm_code: charmCode,
+					charm_shop: charmShop,
+					charm_stall: charmStall,
+					charm_floor: charmStall && routeDashboard.stallFloor ? routeDashboard.stallFloor(charmStall) : null,
+					charm_image_version: charmCode ? charmImgVerMap.get(charmCode) || '' : '',
+					has_charm_image: charmCode ? charmImgVerMap.has(charmCode) : false,
+				})
+			}
 
 			const raw = itemStates[itemKey]
 			const needsPurchase = raw != null ? raw === 1 : !hasItemRows && r.needs_purchase_at ? true : false
 			const purchased = raw === 0
 			// A line with an OPEN fulfilment issue is held out of purchasing entirely
-			// (it's pending a buyer swap/refund decision), so it is never "outstanding".
+			// (it's pending a buyer swap/refund decision), so it is never "outstanding"
+			// — UNLESS a more recent design switch supersedes the hold, in which case
+			// the replacement is buyable and the line IS outstanding again. Same rule
+			// the route builder enforces, so Orders counts and the route never disagree.
 			const issue = issueStates[itemKey] || null
-			const issueOpen = !!(issue && issue.status === 'open')
+			const issueOpen = !!(issue && issue.status === 'open') && !routeDashboard.substitutionSupersedesIssue(sub, issue)
 			// A line with an OPEN wrong-model exchange is already in hand (wrong model),
 			// so it is NOT outstanding to buy — but the physical swap is still owed, so
 			// it must not count as plainly "purchased/done" either (see _fullyPurchased).
@@ -1646,13 +1722,36 @@ app.get('/api/orders', (req, res) => {
 			const exchangeOpen = !!(exchange && exchange.status === 'open')
 			const lineOutstanding = issueOpen || exchangeOpen ? false : components.length ? components.some((c) => PURCHASE_OUTSTANDING.has(c.status)) : needsPurchase
 
-			// The switched image is either an uploaded blob (served from our endpoint)
-			// or a catalog CDN url; fall back to the original listing thumbnail.
-			const subImageUrl = sub ? (sub.has_image_data ? `/api/route/substitution-image/${sub.id}` : sub.image_url || imageMap[t.listing_id] || null) : (imageMap[t.listing_id] ?? null)
+			// A per-variant clarifying image (operator upload for this listing +
+			// original style) overrides the ambiguous listing hero shot — but only
+			// when the line hasn't been switched to another design (a switch is a
+			// different product and carries its own image, which always wins).
+			const styleImg = t.listing_id ? styleImageMap[`${t.listing_id}\x00${normalizeStyleKey(origStyle)}`] || null : null
+
+			// The switched-design image (uploaded blob served from our endpoint, or a
+			// catalog CDN url), falling back to the listing thumbnail. Computed once
+			// and reused for both the line image and the substitution payload below.
+			// Content-addressed (`?v=updated_at`) so re-uploading the switched-design
+			// photo changes the URL and the mobile service worker can't serve a stale
+			// image — see route/dashboard.js emitRow for the full rationale.
+			const subImageUrl = sub ? (sub.has_image_data ? `/api/route/substitution-image/${sub.id}?v=${sub.updated_at || 0}` : sub.image_url || imageMap[t.listing_id] || null) : null
+
+			// Image priority: design switch → per-variant override → listing thumb.
+			let imageUrl
+			if (sub) {
+				imageUrl = subImageUrl
+			} else if (styleImg) {
+				imageUrl = `/api/route/style-image/${styleImg.id}?v=${styleImg.updated_at || 0}`
+			} else {
+				imageUrl = imageMap[t.listing_id] ?? null
+			}
 
 			return {
 				...t,
-				image_url: subImageUrl,
+				image_url: imageUrl,
+				// Present when a per-variant clarifying image exists for this line's
+				// listing + style, so the UI can badge the thumbnail and offer revert.
+				style_image_id: styleImg ? styleImg.id : null,
 				item_key: itemKey,
 				components,
 				needs_purchase: needsPurchase,
@@ -1672,6 +1771,10 @@ app.get('/api/orders', (req, res) => {
 							original_title: sub.original_title || t.title || '',
 							note: sub.note || '',
 							created_at: sub.created_at,
+							// Last time the switch was asserted — the UI compares this
+							// against the issue's updated_at (same rule the route uses) to
+							// decide whether the switch supersedes a stale on-hold flag.
+							updated_at: sub.updated_at,
 						}
 					: null,
 				issue: issue
@@ -1679,6 +1782,11 @@ app.get('/api/orders', (req, res) => {
 							id: issue.id,
 							issue_type: issue.issue_type,
 							status: issue.status,
+							// Authoritative "is this line currently held out of purchasing?"
+							// flag — an open issue NOT superseded by a newer design switch.
+							// The UI reads this (never re-deriving the rule) so the on-hold
+							// chip/badge and the purchasing route always agree.
+							on_hold: issueOpen,
 							phone_model: issue.phone_model,
 							note: issue.note,
 							buyer_notified_at: issue.buyer_notified_at,
@@ -1686,6 +1794,8 @@ app.get('/api/orders', (req, res) => {
 							listing_action: issue.listing_action,
 							resolution: issue.resolution,
 							resolved_at: issue.resolved_at,
+							// Last time the hold was (re-)raised — see substitution.updated_at.
+							updated_at: issue.updated_at,
 						}
 					: null,
 				exchange: exchange
@@ -1964,6 +2074,16 @@ app.post('/api/admin/reload-tokens', (req, res) => {
 		console.error('[admin] Failed to reload:', err.message)
 		res.status(500).json({ error: err.message })
 	}
+})
+
+/**
+ * GET /api/admin/suspension-risk
+ * Structured compliance report — surfaces config + operational signals that
+ * correlate with Etsy shop suspension (linked accounts, overselling, bot bursts).
+ */
+app.get('/api/admin/suspension-risk', (req, res) => {
+	const summary = summarizeRisks(analyzeSuspensionRisks(config))
+	res.json(summary)
 })
 
 /**
@@ -2542,16 +2662,26 @@ app.post('/api/orders/:receipt_id/issues', (req, res) => {
 	const exists = db.prepare('SELECT 1 FROM receipts WHERE receipt_id = ?').get(receiptId)
 	if (!exists) return res.status(404).json({ error: 'Order not found' })
 
+	// Authoritative product context: if this line was switched to a replacement,
+	// the issue is about THAT replacement (the buyer already moved on from the
+	// original), so its title/model must describe the switched design regardless of
+	// what the client sent. This keeps the held product, the buyer message and the
+	// AI draft all speaking about the item actually being fulfilled.
+	const sub = getSubstitutionForLine(db, receiptId, String(itemKey))
+	const effectiveTitle = sub && sub.new_title ? sub.new_title : title
+	const effectivePhoneModel = sub && sub.new_phone_model ? sub.new_phone_model : phoneModel
+
 	let issue
 	const txn = db.transaction(() => {
 		issue = upsertOrderIssue(db, {
 			receipt_id: receiptId,
 			item_key: String(itemKey),
 			listing_id: listingId,
-			title,
-			phone_model: phoneModel,
+			title: effectiveTitle,
+			phone_model: effectivePhoneModel,
 			issue_type: issueType,
 			note: typeof note === 'string' ? note.trim().slice(0, 1000) : null,
+			source: 'manual',
 		})
 		// Holding a line out of purchasing must also clear any stale needs-purchase
 		// rollup so the order can't simultaneously be "buy this" and "on hold".
@@ -2560,6 +2690,9 @@ app.post('/api/orders/:receipt_id/issues', (req, res) => {
 	txn()
 
 	console.log(`[issue] receipt ${receiptId} line ${itemKey} flagged as ${issueType}`)
+	// Flagging holds the line out of purchasing — refresh live Route/Shopping views
+	// so it drops off there immediately.
+	broadcastRouteRefresh(receiptId, 'issue-flagged')
 	res.json({ success: true, issue })
 })
 
@@ -2591,9 +2724,10 @@ app.post('/api/issues/:id/draft-message', async (req, res) => {
 	if (!issue) return res.status(404).json({ error: 'Issue not found' })
 
 	// If a message already exists and the caller isn't explicitly regenerating,
-	// return the saved one so the copy is stable across reopens.
+	// return the saved one so the copy is stable across reopens. Re-run the
+	// compliance check so a draft saved before this guard existed is still vetted.
 	if (issue.buyer_message && !req.body?.regenerate) {
-		return res.json({ success: true, message: issue.buyer_message, issue, cached: true })
+		return res.json({ success: true, message: issue.buyer_message, issue, cached: true, compliance: checkMessageCompliance(issue.buyer_message) })
 	}
 
 	try {
@@ -2626,24 +2760,53 @@ app.post('/api/issues/:id/draft-message', async (req, res) => {
 			/* variations are best-effort context */
 		}
 
-		const { message } = await generateBuyerIssueMessage({
+		// If the line was switched, the message is about the REPLACEMENT the buyer
+		// chose — so the design title, style and (if changed) model all come from the
+		// substitution, never the original the buyer already moved away from.
+		const sub = getSubstitutionForLine(db, issue.receipt_id, issue.item_key)
+		const productTitle = (sub && sub.new_title) || issue.title || ''
+		if (sub && sub.new_style) style = sub.new_style
+		if (sub && sub.new_phone_model) phoneModel = sub.new_phone_model
+
+		const { message, compliance } = await generateBuyerIssueMessage({
 			shopName: receipt.shop_name || '',
 			buyerName: receipt.buyer_name || '',
-			productTitle: issue.title || '',
+			productTitle,
 			issueType: issue.issue_type,
 			phoneModel: issue.issue_type === 'model_unavailable' ? phoneModel : '',
 			style,
 			note: issue.note || '',
+			isReplacement: !!sub,
 			tone: typeof req.body?.tone === 'string' ? req.body.tone.slice(0, 200) : '',
 			extraInstructions: typeof req.body?.instructions === 'string' ? req.body.instructions.slice(0, 500) : '',
 		})
 
 		const updated = patchOrderIssue(db, issue.id, { buyer_message: message, buyer_message_at: Math.floor(Date.now() / 1000) })
-		res.json({ success: true, message, issue: updated })
+		res.json({ success: true, message, issue: updated, compliance })
 	} catch (err) {
 		console.error('[issue] draft-message error:', err.response?.data || err.message)
-		res.status(err.status || err.response?.status || 500).json({ error: err.response?.data?.error?.message || err.message || 'Could not generate the message.' })
+		// A 422 from the compliance guard means every draft kept violating policy;
+		// surface its structured findings so the UI can explain what to fix.
+		res.status(err.status || err.response?.status || 500).json({
+			error: err.response?.data?.error?.message || err.message || 'Could not generate the message.',
+			...(err.compliance ? { compliance: err.compliance } : {}),
+		})
 	}
+})
+
+/**
+ * POST /api/support/message-check
+ * Body: { message }
+ * Vets ANY buyer message — AI-drafted OR hand-typed — against Etsy's messaging
+ * policy BEFORE it is pasted into an Etsy conversation. Etsy v3 has no messaging
+ * API, so the human paste is the moment of risk; this is the last automated
+ * checkpoint that catches off-Etsy contact/payment/links/steering — the content
+ * classes that get shops suspended. Pure + local (no Etsy call, no AI).
+ */
+app.post('/api/support/message-check', express.json({ limit: '256kb' }), (req, res) => {
+	const message = typeof req.body?.message === 'string' ? req.body.message : ''
+	if (!message.trim()) return res.status(400).json({ error: 'A message is required.' })
+	res.json({ success: true, ...checkMessageCompliance(message) })
 })
 
 /**
@@ -2743,6 +2906,9 @@ app.post('/api/issues/:id/resolve', (req, res) => {
 	})
 	txn()
 	console.log(`[issue] ${issue.id} resolved (${resolution})`)
+	// Resolving un-holds a switched/re-ordered line (it flows back into purchasing)
+	// — refresh live Route/Shopping views.
+	broadcastRouteRefresh(issue.receipt_id, 'issue-resolved')
 	res.json({ success: true, issue: updated })
 })
 
@@ -2755,10 +2921,17 @@ app.post('/api/issues/:id/reopen', (req, res) => {
 	if (!issue) return res.status(404).json({ error: 'Issue not found' })
 	let updated
 	const txn = db.transaction(() => {
-		updated = patchOrderIssue(db, issue.id, { status: 'open', resolution: null, resolved_at: null })
+		// Reopening is a DELIBERATE operator hold, so it takes 'manual' ownership.
+		// This matters for a switched line: an operator-owned hold raised after a
+		// switch is respected (it wins over the switch), whereas an automated shop
+		// signal never reverses a switch. Taking ownership here keeps that boundary
+		// crisp — a human re-hold sticks, an auto re-raise does not.
+		updated = patchOrderIssue(db, issue.id, { status: 'open', resolution: null, resolved_at: null, source: 'manual' })
 		recomputeNeedsPurchaseRollup(issue.receipt_id)
 	})
 	txn()
+	// Reopening re-holds the line — refresh live Route/Shopping views.
+	broadcastRouteRefresh(issue.receipt_id, 'issue-reopened')
 	res.json({ success: true, issue: updated })
 })
 
@@ -2775,6 +2948,8 @@ app.delete('/api/issues/:id', (req, res) => {
 		recomputeNeedsPurchaseRollup(issue.receipt_id)
 	})
 	txn()
+	// Deleting the issue returns the line to purchasing — refresh live views.
+	broadcastRouteRefresh(issue.receipt_id, 'issue-deleted')
 	res.json({ success: true })
 })
 
@@ -2918,6 +3093,10 @@ app.post('/api/orders/:receipt_id/substitution', express.json({ limit: '25mb' })
 		meta: { receipt_id: receiptId, item_key: String(itemKey), source: substitution.source },
 	})
 	console.log(`[substitution] receipt ${receiptId} line ${itemKey} → "${newTitle}"`)
+	// A switch pulls the (un-held) replacement line into the purchasing route with a
+	// new title/supplier/image — push a refresh so live Route/Shopping views show it
+	// immediately rather than only after a manual reload.
+	broadcastRouteRefresh(receiptId, 'substitution')
 	res.json({ success: true, substitution, issue: resolvedIssue })
 })
 
@@ -2933,6 +3112,9 @@ app.delete('/api/orders/:receipt_id/substitution', express.json(), (req, res) =>
 	const removed = deleteOrderSubstitution(db, receiptId, String(itemKey))
 	if (!removed) return res.status(404).json({ error: 'No design switch found for this line.' })
 	recomputeNeedsPurchaseRollup(receiptId)
+	// Reverting a switch changes the line back to the original product (title/
+	// supplier/image) — refresh live Route/Shopping views.
+	broadcastRouteRefresh(receiptId, 'substitution-removed')
 	res.json({ success: true })
 })
 
@@ -2945,6 +3127,117 @@ app.get('/api/route/substitution-image/:id', (req, res) => {
 	if (!Number.isInteger(id)) return res.status(400).end()
 	try {
 		const img = getSubstitutionImage(db, id)
+		if (!img) return res.status(404).end()
+		res.setHeader('Content-Type', img.mime || 'image/png')
+		res.setHeader('Cache-Control', 'private, max-age=300')
+		res.send(img.data)
+	} catch (err) {
+		if (!res.headersSent) res.status(404).end()
+	}
+})
+
+// ─── Per-variant clarifying images (listing_id + style → uploaded photo) ──────
+//
+// Etsy serves one hero image per listing, so a line bought as a single component
+// (e.g. "Grip 3 Only") still shows the whole case+grip shot — ambiguous for
+// whoever sources or packs it. An operator uploads a photo of exactly what the
+// buyer gets FOR THAT VARIANT; it then overrides the thumbnail on every order
+// (past + future) of the same listing+style, in the Orders tab, the Route and
+// mobile picking. It touches ONLY the displayed image — never Etsy, the title,
+// the supplier or the purchase state (that's what order_line_substitutions is
+// for). A design switch always wins over it.
+
+/**
+ * Decode an optional base64 image field (accepts data: URLs) into { data, mime }.
+ * Returns { data: null } when no usable image was supplied.
+ */
+function _decodeBase64Image(b64, mimeHint) {
+	let mime = String(mimeHint || '').trim()
+	if (!b64 || typeof b64 !== 'string') return { data: null, mime }
+	let raw = b64.trim()
+	const m = /^data:([^;]+);base64,(.*)$/i.exec(raw)
+	if (m) {
+		mime = mime || m[1]
+		raw = m[2]
+	}
+	try {
+		const buf = Buffer.from(raw, 'base64')
+		if (buf.length) return { data: buf, mime: mime || 'image/png' }
+	} catch {
+		/* ignore malformed base64 */
+	}
+	return { data: null, mime }
+}
+
+/**
+ * GET /api/listings/:listing_id/style-image?style=...
+ * Returns whether a clarifying image exists for a variant (metadata only), so
+ * the editor can show the current photo and offer "revert".
+ */
+app.get('/api/listings/:listing_id/style-image', (req, res) => {
+	const listingId = Number(req.params.listing_id)
+	if (!Number.isInteger(listingId)) return res.status(400).json({ error: 'Invalid listing id' })
+	const meta = getListingStyleImageMeta(db, listingId, String(req.query.style || ''))
+	res.json({
+		success: true,
+		exists: !!meta,
+		style_image: meta ? { id: meta.id, style_value: meta.style_value, note: meta.note, updated_at: meta.updated_at, image_url: `/api/route/style-image/${meta.id}?v=${meta.updated_at || 0}` } : null,
+	})
+})
+
+/**
+ * POST /api/listings/:listing_id/style-image
+ * Body: { style?, image_b64, image_mime?, note? }
+ * Upserts the clarifying image for (listing_id, style).
+ */
+app.post('/api/listings/:listing_id/style-image', express.json({ limit: '25mb' }), (req, res) => {
+	const listingId = Number(req.params.listing_id)
+	if (!Number.isInteger(listingId)) return res.status(400).json({ error: 'Invalid listing id' })
+	const b = req.body || {}
+	const { data, mime } = _decodeBase64Image(b.image_b64, b.image_mime)
+	if (!data) return res.status(400).json({ error: 'A valid image is required.' })
+
+	const styleImage = upsertListingStyleImage(db, {
+		listing_id: listingId,
+		style_value: b.style != null ? String(b.style) : '',
+		image_data: data,
+		image_mime: mime,
+		note: typeof b.note === 'string' ? b.note.trim().slice(0, 1000) : '',
+	})
+
+	logEvent(db, {
+		event_type: 'LISTING_STYLE_IMAGE',
+		shop_name: null,
+		listing_id: listingId,
+		listing_title: null,
+		detail: `Custom variant image set for listing ${listingId}${styleImage.style_value ? ` (${styleImage.style_value})` : ''}`,
+		meta: { listing_id: listingId, style: styleImage.style_value },
+	})
+	res.json({ success: true, style_image: { ...styleImage, image_url: `/api/route/style-image/${styleImage.id}?v=${styleImage.updated_at || 0}` } })
+})
+
+/**
+ * DELETE /api/listings/:listing_id/style-image
+ * Body: { style? }
+ * Removes the override, reverting the variant to the Etsy listing image.
+ */
+app.delete('/api/listings/:listing_id/style-image', express.json(), (req, res) => {
+	const listingId = Number(req.params.listing_id)
+	if (!Number.isInteger(listingId)) return res.status(400).json({ error: 'Invalid listing id' })
+	const removed = deleteListingStyleImage(db, listingId, String((req.body || {}).style || ''))
+	if (!removed) return res.status(404).json({ error: 'No custom image found for this variant.' })
+	res.json({ success: true })
+})
+
+/**
+ * GET /api/route/style-image/:id
+ * Streams the uploaded clarifying image bytes for a variant.
+ */
+app.get('/api/route/style-image/:id', (req, res) => {
+	const id = parseInt(req.params.id, 10)
+	if (!Number.isInteger(id)) return res.status(400).end()
+	try {
+		const img = getListingStyleImage(db, id)
 		if (!img) return res.status(404).end()
 		res.setHeader('Content-Type', img.mime || 'image/png')
 		res.setHeader('Cache-Control', 'private, max-age=300')
@@ -3460,6 +3753,124 @@ function recomputeNeedsPurchaseRollup(receiptId) {
 	return outstanding
 }
 
+// ─── Purchase-status → Orders-tab fulfilment-issue bridge ───────────────────
+// Marking a component Discontinued (Out of Production) / No-model (Model
+// Unavailable) is exactly the signal the Orders tab's fulfilment-issue workflow
+// needs, so we mirror it automatically — the operator sees the hold (and can
+// notify the buyer / handle the listing) without re-entering anything.
+//
+// CRITICAL: this bridge must fire from EVERY surface that can set a purchase
+// status — the mobile shopping route, the desktop Route tab, the Orders-tab
+// per-component control, and the bulk route-status import — otherwise the same
+// action ("mark Out of Production") produces an on-hold issue on one screen but
+// silently nothing on another, and the order never appears in Issues/on-hold.
+// It is therefore keyed by (receipt_id, item_key) and reads the line's CURRENT
+// stored statuses, so any caller only has to upsert the assignment and then call
+// syncAssignmentIssue(receipt_id, item_key). `source: 'shop'` here means
+// "auto-derived from a status change" (any surface) — as opposed to 'manual',
+// the operator's deliberate "Flag issue" workflow.
+const SHOP_STATUS_TO_ISSUE = { 'Out of Production': 'out_of_production', 'Model Unavailable': 'model_unavailable' }
+// Severity order when a line's components disagree: a discontinued product (gone
+// entirely) outranks a single unavailable model.
+const SHOP_ISSUE_PRIORITY = ['out_of_production', 'model_unavailable']
+
+/**
+ * Recover the line's product context (listing_id / title / phone_model) from the
+ * order's transactions, so an auto-created issue carries everything the operator
+ * workflow needs (buyer message, delete-listing / remove-model actions).
+ */
+function deriveLineContext(receiptId, itemKey) {
+	try {
+		const txns = db.prepare('SELECT title, listing_id, variations FROM transactions WHERE receipt_id = ?').all(receiptId)
+		const match = txns.find((t) => routeDashboard.lineItemKey(t.title, t.listing_id) === itemKey)
+		if (!match) return {}
+		const parsed = routeDashboard.parseVariations(match.variations)
+		// If the line was switched, any issue on it concerns the REPLACEMENT the
+		// buyer chose, so its title/model must describe the switched design — never
+		// the original the buyer already moved away from.
+		const sub = getSubstitutionForLine(db, receiptId, itemKey)
+		return {
+			title: (sub && sub.new_title) || match.title,
+			listing_id: match.listing_id,
+			phone_model: (sub && sub.new_phone_model) || parsed.phoneModel || null,
+		}
+	} catch {
+		return {}
+	}
+}
+
+// An auto-flag Shopping Mode is free to CLEAR on revert: created by Shopping Mode,
+// still open, and untouched by the operator (no buyer message drafted/sent,
+// listing not handled, no resolution). Manual issues — or ones the operator has
+// started working — are never auto-cleared.
+function isRevertibleShopIssue(iss) {
+	return !!(iss && iss.source === 'shop' && iss.status === 'open' && !iss.buyer_notified_at && !iss.listing_handled_at && !iss.buyer_message && !iss.resolution)
+}
+// An OPEN issue the operator owns, which Shopping Mode must never overwrite: a
+// manual flag, or a shop flag the operator has begun working (notified / handled
+// / drafted a message). A RESOLVED issue is NOT owned — it's closed, so a fresh
+// shopper assertion may re-raise it.
+function isOperatorActiveOpen(iss) {
+	return !!(iss && iss.status === 'open' && (iss.source !== 'shop' || iss.buyer_notified_at || iss.listing_handled_at || iss.buyer_message))
+}
+
+/**
+ * Reconcile a line's Orders-tab fulfilment issue with its current component
+ * statuses (from ANY surface). Idempotent: safe to call after every assign.
+ *   • any component Discontinued / No-model → ensure an OPEN issue of the mapped
+ *     type. Creates one, retypes our own untouched flag, or re-raises a closed
+ *     one — but never disturbs an actively-worked operator issue.
+ *   • none → clear our own untouched auto-flag (never a manual / worked one).
+ * Returns a short descriptor for logging, or null when nothing changed.
+ *
+ * @param {number|string} receiptId
+ * @param {string} itemKey
+ */
+function syncAssignmentIssue(receiptId, itemKey) {
+	receiptId = Number(receiptId)
+	itemKey = String(itemKey)
+	// Read the line's CURRENT stored statuses so the bridge is correct no matter
+	// which surface changed them (and works even when the caller only touched one
+	// component). Inside a caller's transaction this sees the just-upserted values.
+	const ra = db.prepare('SELECT status_case, status_grip, status_charm, title FROM route_assignments WHERE receipt_id = ? AND item_key = ?').get(receiptId, itemKey) || {}
+	const statuses = [ra.status_case, ra.status_grip, ra.status_charm]
+	const desired = SHOP_ISSUE_PRIORITY.find((type) => statuses.some((s) => SHOP_STATUS_TO_ISSUE[s] === type)) || null
+	const existing = getOrderIssue(db, receiptId, itemKey)
+
+	if (desired) {
+		// Already flagged correctly (by anyone) → nothing to do.
+		if (existing && existing.status === 'open' && existing.issue_type === desired) return null
+		// Never override an operator's actively-open issue.
+		if (isOperatorActiveOpen(existing)) return null
+		// Create / retype / re-raise as an auto (status-derived) open issue. On a
+		// SWITCHED line this is exactly right: the buyer already moved to the
+		// replacement, so marking the replacement's component terminal means the
+		// REPLACEMENT is now unavailable — a genuine new hold. deriveLineContext
+		// resolves the switched design's title/model, and the route only treats it
+		// as a hold when it post-dates the switch (substitutionSupersedesIssue), so
+		// a switch can never be silently reversed by a stale pre-switch flag.
+		const ctx = deriveLineContext(receiptId, itemKey)
+		upsertOrderIssue(db, {
+			receipt_id: receiptId,
+			item_key: itemKey,
+			listing_id: ctx.listing_id,
+			title: ctx.title || ra.title,
+			phone_model: ctx.phone_model,
+			issue_type: desired,
+			source: 'shop',
+		})
+		const action = !existing ? 'flagged' : existing.status !== 'open' ? 'reraised' : 'retyped'
+		return { action, issue_type: desired }
+	}
+
+	// No terminal component anymore → clear our own untouched auto-flag.
+	if (isRevertibleShopIssue(existing)) {
+		deleteOrderIssue(db, existing.id)
+		return { action: 'cleared' }
+	}
+	return null
+}
+
 const _ripUpsert = db.prepare(`
   INSERT INTO receipt_item_purchase (receipt_id, item_key, title, needs_purchase, note, flagged_at, purchased_at, updated_at)
   VALUES (@receipt_id, @item_key, @title, @needs_purchase, @note, @flagged_at, @purchased_at, @updated_at)
@@ -3495,6 +3906,11 @@ function setAllComponentsPurchased(receiptId) {
 		const patch = { receipt_id: Number(receiptId), item_key: it.item_key, title: it.title }
 		for (const c of it.components) patch[`status_${c}`] = 'Purchased'
 		upsertRouteAssignment(db, patch)
+		// Everything on this line is now Purchased (no terminal status left), so
+		// clear any auto-derived on-hold flag it carried — keeping the issue state a
+		// faithful reflection of the purchase status, consistent with every other
+		// status path. A manual / operator-worked issue is deliberately left intact.
+		syncAssignmentIssue(receiptId, it.item_key)
 	}
 }
 
@@ -3567,6 +3983,9 @@ app.post('/api/orders/:receipt_id/items/component-status', (req, res) => {
 		const patch = { receipt_id: receiptId, item_key: String(itemKey), title }
 		patch[`status_${comp}`] = status
 		upsertRouteAssignment(db, patch)
+		// Bridge terminal statuses to the fulfilment-issue workflow, identically to
+		// the Route tab and mobile route, so on-hold state is consistent everywhere.
+		syncAssignmentIssue(receiptId, String(itemKey))
 		outstanding = recomputeNeedsPurchaseRollup(receiptId)
 	})
 	txn()
@@ -3671,7 +4090,7 @@ async function shipEtsyReceipt(receiptId, opts = {}) {
 	}
 
 	// 1. Resolve which shop this receipt belongs to (receipts store shop_id).
-	const order = db.prepare('SELECT shop_id, source FROM receipts WHERE receipt_id = ?').get(receiptId)
+	const order = db.prepare('SELECT shop_id, source, tracking_code, carrier_confirmed_at FROM receipts WHERE receipt_id = ?').get(receiptId)
 	if (!order) {
 		const e = new Error('Order not found')
 		e.status = 404
@@ -3699,6 +4118,14 @@ async function shipEtsyReceipt(receiptId, opts = {}) {
 		const e = new Error(`No config found for shop ${order.shop_id}`)
 		e.status = 500
 		throw e
+	}
+
+	if (mode !== 'update') {
+		// pacedBulk: the bulk-complete endpoint owns pacing (chunk + sleeps), so the
+		// per-shop hourly hard-stop is recorded but not thrown for that flow — a paced
+		// completion of real, already-labeled orders must never be blocked.
+		assertShipRateOk(order.shop_id, { paced: opts.pacedBulk === true })
+		warnPreTransitShip(order, order.shop_id)
 	}
 
 	// 3. Fresh access token (same flow as the sync worker).
@@ -5008,44 +5435,85 @@ app.get('/api/4px/bulk-labels.zip', async (req, res) => {
 /**
  * POST /api/4px/bulk-complete
  *
- * Mark several Etsy receipts as shipped, each with its OWN tracking number.
+ * Mark any number of Etsy receipts as shipped, each with its OWN tracking number.
  * Body: { orders: [{ receipt_id, tracking_code, carrier_name? }], carrier_name? }
  *
  * Designed to run right after bulk-create-order: the frontend feeds back each
  * order's 4PX tracking number so completion is fully automated and every order
  * gets the correct, corresponding tracking number on Etsy.
  *
- * Returns per-order results; one Etsy failure never blocks the others.
+ * ─── Auto-chunk + pace (never reject legitimate work) ─────────────────────────
+ * Etsy's anti-abuse systems care about the RATE of writes, not the size of an
+ * operator's queue. Blocking a large batch just makes real, already-labeled
+ * orders ship late — a worse suspension signal than a paced burst. So we accept
+ * any size and process it SEQUENTIALLY in chunks of BULK_SHIP_CHUNK_SIZE:
+ *   • BULK_SHIP_INTER_REQUEST_MS pause between each ship,
+ *   • BULK_SHIP_INTER_BATCH_MS cooldown between chunks.
+ * This keeps the effective rate low and human-like while completing everything.
+ *
+ * Returns per-order results; one Etsy failure never blocks the others. The
+ * response shape is unchanged (total/completed/failed/results) so the existing
+ * frontend keeps working; chunk metadata is added for observability.
  */
 app.post('/api/4px/bulk-complete', async (req, res) => {
+	// Paced completion can legitimately run for minutes on a large batch. Disable
+	// the per-socket inactivity timeout for this one long-running request so the
+	// connection is never dropped mid-flight (Node's default is already 0/off; this
+	// is explicit + future-proof against very large batches or intermediary limits).
+	req.setTimeout(0)
+	res.setTimeout(0)
+
 	const orders = Array.isArray(req.body?.orders) ? req.body.orders : []
 	if (!orders.length) return res.status(400).json({ error: 'orders[] is required and must be non-empty' })
-	if (orders.length > 200) return res.status(400).json({ error: 'A maximum of 200 orders can be completed per batch' })
+	// Sanity ceiling only — guards against a malformed payload, not a compliance cap.
+	if (orders.length > BULK_SHIP_ABSOLUTE_MAX) {
+		return res.status(400).json({
+			error: `Received ${orders.length} orders, which exceeds the safety ceiling of ${BULK_SHIP_ABSOLUTE_MAX}. ` + 'This looks like a malformed request — split it into separate completions.',
+		})
+	}
 
 	const batchCarrier = req.body.carrier_name || '4PX'
+	const chunks = chunkArray(orders, BULK_SHIP_CHUNK_SIZE)
+	const paced = orders.length > 1
+	const etaSec = paced ? Math.round(((orders.length - 1) * BULK_SHIP_INTER_REQUEST_MS + (chunks.length - 1) * BULK_SHIP_INTER_BATCH_MS) / 1000) : 0
+	console.log(`[4px/bulk] complete: ${orders.length} order(s) in ${chunks.length} chunk(s) of ≤${BULK_SHIP_CHUNK_SIZE}` + (paced ? ` — paced, ~${etaSec}s` : ''))
 
-	// Etsy completion is sequential (token refresh + per-shop rate limits make
-	// parallelism risky); a small batch of orders completes quickly enough.
 	const results = []
-	for (const o of orders) {
-		try {
-			await shipEtsyReceipt(o.receipt_id, {
-				tracking_code: o.tracking_code,
-				carrier_name: o.carrier_name || batchCarrier,
-			})
-			results.push({ receipt_id: o.receipt_id, success: true, tracking_code: (o.tracking_code || '').trim() })
-		} catch (err) {
-			const etsyBody = err.response?.data
-			const errMsg = (typeof etsyBody === 'object' ? etsyBody?.error_description || etsyBody?.error : null) || err.message
-			console.error(`[4px/bulk] complete receipt ${o.receipt_id} failed:`, errMsg)
-			results.push({ receipt_id: o.receipt_id, success: false, error: errMsg })
+	for (const [chunkIdx, group] of chunks.entries()) {
+		// Cooldown between chunks (not before the first) to keep the write rate low.
+		if (chunkIdx > 0) await complianceSleep(BULK_SHIP_INTER_BATCH_MS)
+
+		for (const [i, o] of group.entries()) {
+			const isFirstOverall = chunkIdx === 0 && i === 0
+			if (!isFirstOverall) await complianceSleep(BULK_SHIP_INTER_REQUEST_MS)
+			try {
+				await shipEtsyReceipt(o.receipt_id, {
+					tracking_code: o.tracking_code,
+					carrier_name: o.carrier_name || batchCarrier,
+					pacedBulk: true,
+				})
+				results.push({ receipt_id: o.receipt_id, success: true, tracking_code: (o.tracking_code || '').trim() })
+			} catch (err) {
+				const etsyBody = err.response?.data
+				const errMsg = (typeof etsyBody === 'object' ? etsyBody?.error_description || etsyBody?.error : null) || err.message
+				console.error(`[4px/bulk] complete receipt ${o.receipt_id} failed:`, errMsg)
+				results.push({ receipt_id: o.receipt_id, success: false, error: errMsg })
+			}
 		}
 	}
 
 	const ok = results.filter((r) => r.success).length
 	const failed = results.length - ok
 	console.log(`[4px/bulk] complete batch: ${ok} completed, ${failed} failed (of ${results.length})`)
-	res.json({ success: failed === 0, total: results.length, completed: ok, failed, results })
+	res.json({
+		success: failed === 0,
+		total: results.length,
+		completed: ok,
+		failed,
+		chunks: chunks.length,
+		chunk_size: BULK_SHIP_CHUNK_SIZE,
+		results,
+	})
 })
 
 /**
@@ -5166,6 +5634,74 @@ app.get('/api/4px/shipments', (req, res) => {
 		res.json({ ...result, stuck_days: _stuckDays() })
 	} catch (err) {
 		console.error('[4px] GET /api/4px/shipments:', err.message)
+		res.status(500).json({ error: err.message })
+	}
+})
+
+/**
+ * GET /api/4px/shipments/export.csv — download the filtered parcel list as CSV.
+ *
+ * Honours the SAME filters as GET /api/4px/shipments (status, shop_id, q, from,
+ * to) so "what you see is what you download". The Shipping tab's "Download stuck"
+ * button calls this with status=stuck, producing a ready-to-escalate sheet of the
+ * tracking numbers currently held/looping in customs — the whole point of the
+ * feature. Not paginated: every matching parcel is exported in one file.
+ *
+ * The first column is the bare tracking number so the file doubles as a paste-list
+ * for the 4PX portal's batch-query box; the remaining columns give an ops-desk the
+ * context needed to file a complaint (buyer, destination, why it's stuck, how long).
+ */
+app.get('/api/4px/shipments/export.csv', (req, res) => {
+	try {
+		// Default to the stuck bucket (the feature's primary use) but respect an
+		// explicit status so the same endpoint can export any filtered view.
+		const status = req.query.status || 'stuck'
+		const { rows } = getShipments(db, {
+			status: status === 'all' ? undefined : status,
+			shopId: req.query.shop_id || undefined,
+			q: req.query.q || undefined,
+			from: req.query.from ? parseInt(req.query.from, 10) : undefined,
+			to: req.query.to ? parseInt(req.query.to, 10) : undefined,
+			stuckDays: _stuckDays(),
+			limit: 100000, // export everything that matches — no pagination
+			offset: 0,
+		})
+
+		const nowSec = Math.floor(Date.now() / 1000)
+		const iso = (ts) => (ts ? new Date(ts * 1000).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : '')
+		const daysSince = (ts) => (ts ? Math.floor((nowSec - ts) / 86400) : '')
+		const healthLabel = (h) => (h === 'critical' ? 'stuck' : h === 'warning' ? 'delayed' : h || 'ok')
+		const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`
+
+		const columns = [
+			['Tracking Number', (r) => r.tracking_no],
+			['Consignment No', (r) => r.fourpx_consignment_no],
+			['Shop', (r) => r.shop_name],
+			['Buyer', (r) => r.buyer_name],
+			['Destination', (r) => r.shipping_country_iso],
+			['Status', (r) => r.tracking_status],
+			['Health', (r) => healthLabel(r.tracking_health)],
+			['Reason', (r) => r.tracking_health_reason],
+			['Last Event', (r) => r.tracking_last_event],
+			['Last Location', (r) => r.tracking_last_location],
+			['Last Update (UTC)', (r) => iso(r.tracking_last_event_at)],
+			['Days Since Update', (r) => daysSince(r.tracking_last_event_at)],
+			['Ship Date (UTC)', (r) => iso(r.shipment_notified_at || r.etsy_created_at)],
+			['Days In Transit', (r) => daysSince(r.carrier_confirmed_at || r.shipment_notified_at || r.etsy_created_at)],
+			['Shipping Cost', (r) => (r.fourpx_freight_amount != null ? `${r.fourpx_freight_amount} ${r.fourpx_freight_currency || ''}`.trim() : '')],
+		]
+
+		const header = columns.map((c) => esc(c[0])).join(',')
+		const body = rows.map((r) => columns.map((c) => esc(c[1](r))).join(',')).join('\r\n')
+		const csv = `\uFEFF${header}\r\n${body}` // BOM so Excel auto-detects UTF-8
+
+		const stamp = new Date().toISOString().slice(0, 10)
+		const fname = `4PX-${status}-tracking-${stamp}.csv`
+		res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+		res.setHeader('Content-Disposition', contentDisposition(fname))
+		res.send(csv)
+	} catch (err) {
+		console.error('[4px] GET /api/4px/shipments/export.csv:', err.message)
 		res.status(500).json({ error: err.message })
 	}
 })
@@ -6855,14 +7391,20 @@ app.post('/api/route/assign', express.json(), (req, res) => {
 			}
 		}
 
-		// Keep the Orders-tab purchasing rollup in sync: if a component status changed
-		// here in the Route, re-roll the order flag (auto-clears a flagged pre-transit
-		// order once everything is bought; auto-includes one that still has work).
+		// If a component status changed here in the Route, bridge it to the Orders-tab
+		// fulfilment-issue workflow (mark Out of Production / Model Unavailable → the
+		// line goes on hold and appears in Issues, exactly like the mobile route), then
+		// re-roll the order's purchasing flag. Done in ONE transaction so the hold and
+		// the rollup can never disagree. Without this, a terminal status set here would
+		// silently never surface as an issue.
 		if (b.status_case != null || b.status_grip != null || b.status_charm != null) {
 			try {
-				recomputeNeedsPurchaseRollup(Number(b.receipt_id))
-			} catch {
-				/* non-fatal */
+				db.transaction(() => {
+					syncAssignmentIssue(row.receipt_id, row.item_key)
+					recomputeNeedsPurchaseRollup(Number(b.receipt_id))
+				})()
+			} catch (e) {
+				console.warn('[route] issue sync failed:', e.message)
 			}
 		}
 
@@ -6957,9 +7499,7 @@ async function ensureListingPhash(listingId) {
 	} catch (e) {
 		return existing ? existing.phash : null
 	}
-	db.prepare(
-		"INSERT INTO listing_phash (listing_id, phash, sha, algo, canonical_key, computed_at) VALUES (?,?,?,?,NULL,strftime('%s','now')) ON CONFLICT(listing_id) DO UPDATE SET phash=excluded.phash, sha=excluded.sha, algo=excluded.algo, canonical_key=NULL, computed_at=excluded.computed_at",
-	).run(listingId, phash, sha, PRODUCT_HASH_ALGO)
+	db.prepare("INSERT INTO listing_phash (listing_id, phash, sha, algo, canonical_key, computed_at) VALUES (?,?,?,?,NULL,strftime('%s','now')) ON CONFLICT(listing_id) DO UPDATE SET phash=excluded.phash, sha=excluded.sha, algo=excluded.algo, canonical_key=NULL, computed_at=excluded.computed_at").run(listingId, phash, sha, PRODUCT_HASH_ALGO)
 	return phash
 }
 
@@ -6970,9 +7510,7 @@ async function backfillPhashes() {
 	_phashBusy = true
 	try {
 		const ids = db
-			.prepare(
-				'SELECT d.listing_id AS id FROM listing_image_data d LEFT JOIN listing_phash p ON p.listing_id = d.listing_id WHERE p.listing_id IS NULL OR p.algo IS NULL OR p.algo <> ?',
-			)
+			.prepare('SELECT d.listing_id AS id FROM listing_image_data d LEFT JOIN listing_phash p ON p.listing_id = d.listing_id WHERE p.listing_id IS NULL OR p.algo IS NULL OR p.algo <> ?')
 			.all(PRODUCT_HASH_ALGO)
 			.map((r) => r.id)
 		for (const id of ids) {
@@ -6998,7 +7536,8 @@ async function hydrateMissingProductIdentities(batchSize = 40) {
 	let rows = []
 	try {
 		rows = db
-			.prepare(`
+			.prepare(
+				`
 				SELECT i.listing_id, i.url
 				FROM listing_images i
 				LEFT JOIN listing_image_data d ON d.listing_id = i.listing_id
@@ -7007,7 +7546,8 @@ async function hydrateMissingProductIdentities(batchSize = 40) {
 				  AND trim(i.url) <> ''
 				ORDER BY i.listing_id
 				LIMIT ?
-			`)
+			`,
+			)
 			.all(batchSize)
 		if (rows.length) {
 			const images = new Map(rows.map((r) => [r.listing_id, r.url]))
@@ -7042,17 +7582,20 @@ function phashDistance(a, b) {
 // fingerprint collides or a generic promo image was reused.
 function reconcileCanonicalProductKeys() {
 	try {
-		const rows = db
-			.prepare(
-				'SELECT listing_id, phash, canonical_key, computed_at FROM listing_phash WHERE algo = ? ORDER BY listing_id',
-			)
-			.all(PRODUCT_HASH_ALGO)
+		const rows = db.prepare('SELECT listing_id, phash, canonical_key, computed_at FROM listing_phash WHERE algo = ? ORDER BY listing_id').all(PRODUCT_HASH_ALGO)
 		if (!rows.length) return { groups: 0, updated: 0 }
 
 		const productByTitle = new Map()
 		db.prepare('SELECT title_norm, stall FROM product_map')
 			.all()
-			.forEach((r) => productByTitle.set(r.title_norm, String(r.stall || '').replace(/\s+/g, '').toUpperCase()))
+			.forEach((r) =>
+				productByTitle.set(
+					r.title_norm,
+					String(r.stall || '')
+						.replace(/\s+/g, '')
+						.toUpperCase(),
+				),
+			)
 		const stallsByListing = new Map()
 		db.prepare('SELECT DISTINCT listing_id, title FROM transactions WHERE listing_id IS NOT NULL')
 			.all()
@@ -7151,9 +7694,7 @@ function reconcileCanonicalProductKeys() {
 		// Robust whitespace/case normalization pass (SQLite cannot collapse
 		// arbitrary whitespace like routeDashboard.normalizeTitle does).
 		const keyByTitleNorm = new Map()
-		db.prepare(
-			'SELECT t.title, lp.canonical_key FROM transactions t JOIN listing_phash lp ON lp.listing_id = t.listing_id WHERE lp.canonical_key IS NOT NULL',
-		)
+		db.prepare('SELECT t.title, lp.canonical_key FROM transactions t JOIN listing_phash lp ON lp.listing_id = t.listing_id WHERE lp.canonical_key IS NOT NULL')
 			.all()
 			.forEach((r) => {
 				const n = routeDashboard.normalizeTitle(r.title)
@@ -7168,11 +7709,7 @@ function reconcileCanonicalProductKeys() {
 		// Reconcile shared catalog facts across title aliases of one physical
 		// product. Fill blanks only — never silently overwrite an operator's
 		// explicit conflicting supplier/charm/cost choice.
-		const aliases = db
-			.prepare(
-				'SELECT id, canonical_product_key, shop_name, stall, charm_shop, charm_code, cost_case, cost_grip FROM product_map WHERE canonical_product_key IS NOT NULL',
-			)
-			.all()
+		const aliases = db.prepare('SELECT id, canonical_product_key, shop_name, stall, charm_shop, charm_code, cost_case, cost_grip FROM product_map WHERE canonical_product_key IS NOT NULL').all()
 		const byCanonical = new Map()
 		for (const row of aliases) {
 			if (!byCanonical.has(row.canonical_product_key)) byCanonical.set(row.canonical_product_key, [])
@@ -7266,9 +7803,7 @@ app.get('/api/shop/route', (req, res) => {
 		const canonicalCost = new Map()
 		const charmCost = new Map()
 		try {
-			db.prepare(
-				'SELECT title_norm, cost_case, cost_grip, canonical_product_key FROM product_map WHERE cost_case IS NOT NULL OR cost_grip IS NOT NULL OR canonical_product_key IS NOT NULL',
-			)
+			db.prepare('SELECT title_norm, cost_case, cost_grip, canonical_product_key FROM product_map WHERE cost_case IS NOT NULL OR cost_grip IS NOT NULL OR canonical_product_key IS NOT NULL')
 				.all()
 				.forEach((r) => {
 					productCost.set(r.title_norm, r)
@@ -7287,6 +7822,16 @@ app.get('/api/shop/route', (req, res) => {
 			console.warn('[shop] cost load failed:', e.message)
 		}
 
+		// Per-charm image version (mtime+size) so the mobile page builds
+		// content-addressed charm-image URLs that self-invalidate when a charm
+		// photo is replaced/renamed/renumbered — no stale thumbnails on the floor.
+		let charmImgVer = new Map()
+		try {
+			charmImgVer = charmLibrary.charmImageVersionMap(db, config)
+		} catch (e) {
+			console.warn('[shop] charm image version load failed:', e.message)
+		}
+
 		// Perceptual-hash map (listing_id → phash) for cross-shop product unifying,
 		// plus the set of listings whose image bytes are already cached.
 		const phashMap = new Map()
@@ -7295,7 +7840,9 @@ app.get('/api/shop/route', (req, res) => {
 			db.prepare('SELECT listing_id, canonical_key, phash FROM listing_phash WHERE algo = ?')
 				.all(PRODUCT_HASH_ALGO)
 				.forEach((r) => phashMap.set(r.listing_id, r.canonical_key || `p:${r.phash}`))
-			db.prepare('SELECT listing_id FROM listing_image_data').all().forEach((r) => cachedImg.add(r.listing_id))
+			db.prepare('SELECT listing_id FROM listing_image_data')
+				.all()
+				.forEach((r) => cachedImg.add(r.listing_id))
 		} catch (e) {
 			console.warn('[shop] phash load failed:', e.message)
 		}
@@ -7336,6 +7883,7 @@ app.get('/api/shop/route', (req, res) => {
 				status_grip: r.status_grip,
 				status_charm: r.status_charm,
 				charm_code: r.charm_code,
+				charm_image_version: cc ? charmImgVer.get(cc) || '' : '',
 				charm_shop: r.charm_shop,
 				charm_stall: charmStall,
 				charm_floor: charmStall && routeDashboard.stallFloor ? routeDashboard.stallFloor(charmStall) : null,
@@ -7549,12 +8097,21 @@ app.post('/api/shop/assign', express.json(), (req, res) => {
 			status_charm: b.status_charm,
 		})
 
-		// Keep the Orders-tab purchasing rollup in sync (auto-clears a pre-transit
-		// order once everything it needs is bought).
+		// Mirror Discontinued / No-model into the Orders-tab fulfilment-issue
+		// workflow, then keep the purchasing rollup in sync (a line held as an
+		// issue is on hold, so it must not also read as "still to buy"). Done in
+		// ONE transaction so the flag and the rollup can never disagree.
+		let issueSync = null
 		try {
-			recomputeNeedsPurchaseRollup(Number(b.receipt_id))
-		} catch {
-			/* non-fatal */
+			db.transaction(() => {
+				issueSync = syncAssignmentIssue(row.receipt_id, row.item_key)
+				recomputeNeedsPurchaseRollup(Number(b.receipt_id))
+			})()
+		} catch (e) {
+			console.warn('[shop] issue sync failed:', e.message)
+		}
+		if (issueSync) {
+			console.log(`[shop] issue ${issueSync.action}${issueSync.issue_type ? ' (' + issueSync.issue_type + ')' : ''} for receipt ${row.receipt_id} line ${row.item_key}`)
 		}
 
 		broadcastRouteEvent({
@@ -7686,6 +8243,38 @@ app.get('/api/route/charm-progress', (req, res) => {
 		res.json({ ok: true, progress: getCharmPurchaseProgress(db) })
 	} catch (err) {
 		console.error('[route] charm-progress GET error:', err.message)
+		res.status(500).json({ error: err.message })
+	}
+})
+
+/**
+ * GET /api/route/charms-to-buy
+ * A self-contained bundle powering the "Charms to Buy" list for the buy queue:
+ * the charm-bearing route rows, the charm catalog, the charm-shop directory, and
+ * the per-charm purchase progress — everything the client aggregation needs in a
+ * SINGLE round-trip.
+ *
+ * WHY a dedicated endpoint (vs. reusing /api/route/dashboard + /charms +
+ * /charm-progress): those three are the owner's full purchasing planner and are
+ * NOT on the packer allowlist. Packing Mode's "Need to purchase" tab needs the
+ * same charm shopping list, so we expose ONLY the charm/purchase/supplier data
+ * (never revenue) through one packer-safe route. Employees persist status changes
+ * through the already-allowed per-item component-status endpoint, so this stays
+ * read-only for them. Scope mirrors the Needs-purchase queue: pending (unshipped,
+ * paid) orders plus pre-transit orders explicitly flagged needs-purchase — the
+ * exact set buildRouteRows returns by default.
+ */
+app.get('/api/route/charms-to-buy', (req, res) => {
+	try {
+		const rows = routeDashboard.buildRouteRows(db, config, {
+			include_needs_purchase: true,
+			enrich_supplier: true,
+			include_dismissed: false,
+		})
+		const { charms, charm_shops } = _charmsPayload()
+		res.json({ ok: true, rows, charms, charm_shops, progress: getCharmPurchaseProgress(db) })
+	} catch (err) {
+		console.error('[route] charms-to-buy error:', err.message)
 		res.status(500).json({ error: err.message })
 	}
 })
@@ -8204,9 +8793,7 @@ app.get('/api/route/product-map/export.csv', (req, res) => {
 		const rows = getProductMap(db)
 		const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`
 		const header = ['Product Title', 'Shop Name', 'Stall', 'Charm Shop', 'Charm Code', 'Canonical Product ID'].map(esc).join(',')
-		const body = rows
-			.map((r) => [r.title, r.shop_name, r.stall, r.charm_shop, r.charm_code, r.canonical_product_key].map(esc).join(','))
-			.join('\r\n')
+		const body = rows.map((r) => [r.title, r.shop_name, r.stall, r.charm_shop, r.charm_code, r.canonical_product_key].map(esc).join(',')).join('\r\n')
 		const csv = `\uFEFF${header}\r\n${body}` // BOM for Excel UTF-8 auto-detect
 		res.setHeader('Content-Type', 'text/csv; charset=utf-8')
 		res.setHeader('Content-Disposition', `attachment; filename="product_catalog_${new Date().toISOString().slice(0, 10)}.csv"`)
@@ -8243,6 +8830,10 @@ function _charmsPayload() {
 	getCharmShopDirectory(db).forEach((s) => {
 		stallByShop[s.shop_name] = s.stall
 	})
+	// Per-charm image version (mtime+size) computed in one folder pass, so the UI
+	// can build content-addressed image URLs (…&v=TOKEN) that self-invalidate on
+	// any upload/replace/rename/renumber — no stale thumbnails, ever.
+	const imgVer = charmLibrary.charmImageVersionMap(db, config)
 	const charms = getCharmLibrary(db).map((c) => ({
 		code: c.code,
 		sku: c.sku || '',
@@ -8251,6 +8842,7 @@ function _charmsPayload() {
 		notes: c.notes || '',
 		image_file: c.image_file || '',
 		has_image: !!c.image_file,
+		image_version: imgVer.get(c.code) || '',
 		sort_order: c.sort_order,
 	}))
 	return { charms, charm_shops: getCharmShopDirectory(db) }
@@ -8402,9 +8994,16 @@ app.get('/api/route/charm-image', (req, res) => {
 	const code = (req.query.code || '').trim()
 	if (!code) return res.status(404).end()
 
-	// Cache charm photos in the browser for a week — they rarely change, so this
-	// stops the phone re-downloading them (through the tunnel) on every render.
-	const sendOpts = { maxAge: '7d', headers: { 'Cache-Control': 'public, max-age=604800' } }
+	// Content-addressed caching. When the URL carries a version token (…&v=TOKEN,
+	// derived from the file's mtime+size), the bytes for THAT url can never change
+	// — a new photo yields a new token → a new url — so we cache it hard for a
+	// year and mark it `immutable`. Requests WITHOUT a version (legacy links, hand-
+	// typed urls) must always revalidate so a replaced charm photo is never served
+	// stale; the ETag/Last-Modified that `sendFile` emits keep that revalidation a
+	// cheap 304. This kills the "every charm shows the same old thumbnail" bug at
+	// the root: a stale cache entry can no longer survive a photo swap/renumber.
+	const versioned = !!String(req.query.v || '').trim()
+	const sendOpts = versioned ? { maxAge: '365d', immutable: true, headers: { 'Cache-Control': 'public, max-age=31536000, immutable' } } : { maxAge: 0, headers: { 'Cache-Control': 'public, max-age=0, must-revalidate' } }
 
 	// Try the library's recorded image_file first.
 	try {
@@ -9073,6 +9672,10 @@ app.post('/api/route/import-status', express.json({ limit: '60mb' }), (req, res)
 				}
 				if (!touched) continue
 				upsertRouteAssignment(db, patch)
+				// Bridge terminal statuses arriving from the field (Excel / paper route)
+				// to the fulfilment-issue workflow, so a shopper's "Out of Production"
+				// mark surfaces as an on-hold issue no matter which surface recorded it.
+				syncAssignmentIssue(o.receipt_id, o.item_key)
 				affected.add(o.receipt_id)
 				upsertedLines++
 			}
@@ -9144,7 +9747,7 @@ app.post('/api/route/import-status', express.json({ limit: '60mb' }), (req, res)
 		entry.lines.push({
 			title: titleByLine.get(lk) || o.item_key,
 			listing_id: lid,
-			image_url: lid ? `/api/route/listing-image/${lid}` : o.receipt_id <= 0 && manualMeta.has(o.receipt_id) && manualMeta.get(o.receipt_id).has_image_data ? `/api/route/manual-image/${manualMeta.get(o.receipt_id).id}` : null,
+			image_url: lid ? `/api/route/listing-image/${lid}` : o.receipt_id <= 0 && manualMeta.has(o.receipt_id) && manualMeta.get(o.receipt_id).has_image_data ? `/api/route/manual-image/${manualMeta.get(o.receipt_id).id}?v=${manualMeta.get(o.receipt_id).updated_at || manualMeta.get(o.receipt_id).created_at || 0}` : null,
 			changes,
 		})
 	}
@@ -9553,16 +10156,25 @@ app.get('/shop-icon.svg', (_req, res) => {
 // (data is always fetched fresh from the network; API is never cached).
 app.get('/shop-sw.js', (_req, res) => {
 	res.type('application/javascript').set('Cache-Control', 'no-cache').send(`
-const SHELL = 'shopping-route-shell-v34';
-const IMG = 'shopping-route-img-v1';
+const SHELL = 'shopping-route-shell-v35';
+// v3: ALL of our own image endpoints (charm, substitution/switched-design, style
+// variant, manual) are now content-addressed (…?v=TOKEN / …&v=TOKEN) — the token
+// moves whenever the underlying photo is replaced, so the URL changes and this
+// cache-first store can never serve a stale thumbnail. Bumping the cache name
+// evicts entries cached under the OLD un-versioned URLs (e.g. a switched-design
+// photo that kept showing the original image on the shopping floor).
+const IMG = 'shopping-route-img-v3';
 const ASSETS = ['/shop', '/shop.webmanifest', '/shop-icon.svg'];
 // Anything that is an image we serve or proxy: product photos on the Etsy CDN,
-// and our own charm/listing image endpoints.
+// and our own charm / listing / switched-design / variant / manual endpoints.
 function isImage(url, req) {
   return req.destination === 'image'
     || /(^|\\.)etsystatic\\.com$/.test(url.hostname)
     || url.pathname.startsWith('/api/route/charm-image')
-    || url.pathname.startsWith('/api/route/listing-image');
+    || url.pathname.startsWith('/api/route/listing-image')
+    || url.pathname.startsWith('/api/route/style-image')
+    || url.pathname.startsWith('/api/route/substitution-image')
+    || url.pathname.startsWith('/api/route/manual-image');
 }
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SHELL).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
@@ -9712,6 +10324,16 @@ const httpServer = app.listen(PORT, () => {
 	console.log(`\n  Sync interval : ${syncIntervalH}h (cron) + 0–90s jitter per shop`)
 	console.log('  QPS at burst  : ≤2 per shop (staggered by jitter, well under 5 QPS)')
 	console.log('  Status        : ✓ Safe — all keys under 30% of daily budget\n')
+
+	const suspensionRisks = analyzeSuspensionRisks(config)
+	const riskSummary = summarizeRisks(suspensionRisks)
+	console.log('  ── Suspension risk compliance ──')
+	console.log(formatRiskReport(suspensionRisks))
+	if (riskSummary.status !== 'ok') {
+		console.log(`  Compliance    : ${riskSummary.status.toUpperCase()} — review risks above`)
+		console.log('  API endpoint  : GET /api/admin/suspension-risk\n')
+	}
+
 	console.log(`  Open http://localhost:${PORT} here, or the Network URL on another computer.\n`)
 
 	// ── Embedded order + inventory sync ────────────────────────────────────────
@@ -9766,10 +10388,14 @@ const httpServer = app.listen(PORT, () => {
 		console.log(`  Embedded sync: ON — receipts "${receiptCron}" (every ${syncIntervalMin}m), inventory watch "${invCron}" (every ${invWatchMin}m)`)
 		console.log('                 Auto-restock + order sync run automatically while the dashboard is open.\n')
 
-		// Kick off shortly after boot so the dashboard is responsive first, then on cron.
+		// Kick off receipt sync shortly after boot; defer inventory sweep to avoid a
+		// startup burst of GET+PUT inventory writes on top of the boot order sync.
 		setTimeout(() => {
-			runGuarded('sync', () => runSyncCycle(config, tokenManager, db)).then(() => runGuarded('inventory-watch', () => runInventoryWatchCycle(config, tokenManager, db)))
+			runGuarded('sync', () => runSyncCycle(config, tokenManager, db))
 		}, 8000)
+		setTimeout(() => {
+			runGuarded('inventory-watch', () => runInventoryWatchCycle(config, tokenManager, db))
+		}, INV_WATCH_STARTUP_DELAY_MS)
 
 		cron.schedule(receiptCron, () => {
 			runGuarded('sync', () => runSyncCycle(config, tokenManager, db))

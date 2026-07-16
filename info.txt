@@ -43,8 +43,7 @@ The first one registeredwith waltercheung1388@gmail.com will be used to connect 
 23.	Email: waltercheung38@gmail.com (Y2KASEstore) 
 24.	Email: canadadigital01@gmail.com (Y2KiPhoneCases)" 
 and the second one registered with walterfung19950808@gmail.com will be used to connect with 
-"25.	Email: eproductheaven@gmail.com (Y2KASEowo) 
-26.	Email: cheapcconline@gmail.com (KawaiiiPhoneCases)" 
+"26.	Email: cheapcconline@gmail.com (KawaiiiPhoneCases)" 
 and the last one registered with walterfung0808@gmail.com will be used to connect with 
 "27.	Email: walterfung0808@gmail.com (IPhoneCasesDesignArt) 
 28.	Email: harlo9shutzpj@outlook.com (IPhoneCasesByTwily) 
@@ -58,7 +57,6 @@ Lets say the 7 accounts of
 22.	Email: barefootproject01@gmail.com (Y2KASEshop) 
 23.	Email: waltercheung38@gmail.com (Y2KASEstore) 
 24.	Email: canadadigital01@gmail.com (Y2KiPhoneCases) 
-25.	Email: eproductheaven@gmail.com (Y2KASEowo) 
 26.	Email: cheapcconline@gmail.com (KawaiiiPhoneCases)" 
 will be using one proxy and another of 
 "27.	Email: walterfung0808@gmail.com (IPhoneCasesDesignArt) 

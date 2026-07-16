@@ -50,7 +50,7 @@
   "label_print_mode": "auto",
   "label_printer_name": "Deli DL-720W",
   "label_width_mm": 80,
-  "label_height_mm": 80,
+  "label_height_mm": 60,
   "label_dpi": 203,
   "label_print_threshold": 160,
   "label_print_copies": 1,
@@ -69,6 +69,9 @@
   "osp_output_dir": null,
 
   "_auth_note": "OAuth access tokens expire in 1 HOUR. Store the refresh_token here (valid 90 days). The TokenManager handles refreshing automatically. If refresh_token expires after 90 days, re-run oauth:setup for that shop.",
+
+  "_compliance_note": "Etsy suspension prevention: (1) max 5 shops per api_key — enforced at startup unless allow_overloaded_api_keys: true. (2) auto_restock_enabled: false unless you have real physical stock (overselling is the #1 organic suspension cause). (3) sync_interval_minutes >= 15, inv_watch_interval_minutes >= 60. Run npm run compliance:check for a full report. GET /api/admin/suspension-risk when the dashboard is running.",
+  "allow_overloaded_api_keys": false,
 
   "_email_imap_comment": "OPTIONAL — per-shop email_imap block enables the Messages tab email sync feature. Etsy sends a notification email to the shop's linked Gmail/Outlook account whenever a buyer sends a message. This dashboard polls that inbox via IMAP, parses the emails, and displays the conversations here. GMAIL SETUP: (1) Enable 2-Step Verification on the Google account. (2) Go to Google Account → Security → App Passwords. (3) Choose 'Mail' and generate a 16-character app password. (4) Use that code as `password` — NOT your regular Gmail login. OUTLOOK: use your regular password or an app password if MFA is enabled. Leave out the email_imap block entirely to skip email sync for that shop.",
 

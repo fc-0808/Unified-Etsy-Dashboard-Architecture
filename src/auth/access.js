@@ -54,6 +54,16 @@ const PACKER_ALLOW = [
 	{ m: 'GET', re: /^\/api\/orders$/ },
 	{ m: '*', re: /^\/api\/orders\/[^/]+\/note$/ },
 	{ m: 'GET', re: /^\/api\/orders\/[^/]+\/issues$/ },
+	// Needs-purchase (buy) queue — an employee working the floor sees the
+	// "still have to BUY these" list (Orders → Need-to-purchase preset) and marks
+	// products/components purchased as they source them. This is the SAME
+	// purchase-state surface a `shopper` gets through /api/shop/assign, just
+	// exposed on the Orders tab; it only ever mutates purchase status (never
+	// finance/listings/admin), so it stays inside the packer's remit.
+	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/needs-purchase$/ },
+	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/clear-needs-purchase$/ },
+	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/items\/component-status$/ },
+	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/items\/purchase-state$/ },
 	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/mark-packaged$/ },
 	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/unmark-packaged$/ },
 	{ m: 'POST', re: /^\/api\/orders\/bulk-mark-packaged$/ },
@@ -86,6 +96,10 @@ const PACKER_ALLOW = [
 	{ m: 'GET', re: /^\/api\/route\/manual-image\/[^/]+$/ },
 	{ m: 'GET', re: /^\/api\/route\/substitution-image\/[^/]+$/ },
 	{ m: 'GET', re: /^\/api\/route\/charm-image$/ },
+	// Read-only charm shopping list for the Need-to-purchase tab (aggregated charm
+	// pieces + supplier/stall + progress). Status changes go through the per-item
+	// component-status endpoint above, so this stays a read of purchasing data.
+	{ m: 'GET', re: /^\/api\/route\/charms-to-buy$/ },
 ]
 
 // Endpoints a `shopper` session may call — the mobile shopping-route experience

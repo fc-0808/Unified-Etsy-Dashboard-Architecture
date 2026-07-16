@@ -12,6 +12,12 @@
 
 const fs = require('fs');
 const path = require('path');
+const {
+  MIN_SYNC_INTERVAL_MINUTES,
+  MIN_INV_WATCH_INTERVAL_MINUTES,
+  analyzeSuspensionRisks,
+  enforceConfigCompliance,
+} = require('../compliance/suspension-guard');
 
 const CONFIG_PATH = path.resolve(__dirname, '../../config.json');
 
@@ -275,35 +281,23 @@ function loadConfig() {
 
   // ── OpSec: enforce Etsy's Personal Access "5 shops per app key" limit ─────────
   // Etsy caps each app (keystring) at 5 authorized shops. Exceeding it is itself a
-  // review/anti-abuse trigger, so surface it loudly at startup rather than letting
-  // a 6th shop silently attach to a key. This is a WARNING (never fatal) so an
-  // operator mid-migration is not locked out of the dashboard.
-  const ETSY_SHOPS_PER_KEY = 5;
-  const shopsPerKey = new Map();
-  for (const group of raw.groups) {
-    for (const shop of group.shops) {
-      const key = shop.api_key;
-      if (!key) continue;
-      if (!shopsPerKey.has(key)) shopsPerKey.set(key, []);
-      shopsPerKey.get(key).push(shop.shop_name || shop.shop_id);
-    }
-  }
-  for (const [key, names] of shopsPerKey) {
-    if (names.length > ETSY_SHOPS_PER_KEY) {
-      const masked = `${String(key).slice(0, 6)}…`;
-      console.warn(
-        `[config] ⚠ API key ${masked} is mapped to ${names.length} shops ` +
-        `(${names.join(', ')}), exceeding Etsy's Personal Access limit of ${ETSY_SHOPS_PER_KEY} ` +
-        `shops per app key. Move the extra shop(s) to a separate app/key to avoid an ` +
-        `Etsy anti-abuse review.`
-      );
-    }
-  }
+  // review/anti-abuse trigger. analyzeSuspensionRisks() collects every signal;
+  // enforceConfigCompliance() refuses to start on critical violations unless the
+  // operator explicitly opts out (allow_overloaded_api_keys).
+  const complianceRisks = analyzeSuspensionRisks({
+    groups: raw.groups,
+    sync_interval_minutes: raw.sync_interval_minutes,
+    inv_watch_interval_minutes: raw.inv_watch_interval_minutes,
+    auto_restock_enabled: raw.auto_restock_enabled,
+  });
+  enforceConfigCompliance(raw, complianceRisks);
 
   // Apply defaults for optional fields
   const config = {
     vpn_local_port: raw.vpn_local_port ?? 7897,
-    sync_interval_minutes: raw.sync_interval_minutes ?? 60,
+    sync_interval_minutes: typeof raw.sync_interval_minutes === 'number'
+      ? Math.max(MIN_SYNC_INTERVAL_MINUTES, Math.floor(raw.sync_interval_minutes))
+      : 60,
     max_orders_per_sync: raw.max_orders_per_sync ?? 100,
     // How many days after label creation an order is still considered "Pre-transit".
     // The Etsy v3 Receipt API does NOT expose carrier scan status — there is no field that
@@ -350,7 +344,7 @@ function loadConfig() {
     // How often the full-shop inventory sweep runs in minutes (default 4h, min 15m).
     // Order-triggered checks fire on every receipt sync regardless of this value.
     inv_watch_interval_minutes: typeof raw.inv_watch_interval_minutes === 'number'
-      ? Math.max(15, Math.floor(raw.inv_watch_interval_minutes))
+      ? Math.max(MIN_INV_WATCH_INTERVAL_MINUTES, Math.floor(raw.inv_watch_interval_minutes))
       : 240,
 
     // ── 4PX Official Tracking API ──────────────────────────────────────────────

@@ -84,6 +84,11 @@ const {
   formatStyleLabel,
 } = require('../inventory/helpers');
 
+const {
+  MAX_INV_WATCH_CHECKS_PER_CYCLE,
+  INV_WATCH_STARTUP_DELAY_MS,
+} = require('../compliance/suspension-guard');
+
 const TOKENS_PATH = path.resolve(__dirname, '../../tokens.json');
 
 // ─── API-call frugality knobs ─────────────────────────────────────────────────
@@ -1127,7 +1132,16 @@ async function runInventoryWatchCycle(config, tokenManager, db) {
   }
 
   const listingEntries = Object.entries(byListing);
-  for (const [idx, [listingIdStr, rows]] of listingEntries.entries()) {
+  const capped = listingEntries.slice(0, MAX_INV_WATCH_CHECKS_PER_CYCLE);
+  if (listingEntries.length > MAX_INV_WATCH_CHECKS_PER_CYCLE) {
+    console.warn(
+      `[inventory-watch] Capping sweep at ${MAX_INV_WATCH_CHECKS_PER_CYCLE} listing(s) this cycle ` +
+      `(${listingEntries.length} zero-stock listings total — remainder next cycle). ` +
+      'Unbounded inventory PUT bursts are an Etsy bot/abuse signal.'
+    );
+  }
+
+  for (const [idx, [listingIdStr, rows]] of capped.entries()) {
     if (idx > 0) await sleep(300);
 
     const listingId = parseInt(listingIdStr);
@@ -1317,9 +1331,13 @@ async function main() {
     return `*/${Math.ceil(INV_WATCH_INTERVAL_MIN)} * * * *`;
   })();
 
-  // Run inventory watch immediately then on the configured interval
+  // Defer the first inventory sweep so a cold start never fires a burst of
+  // inventory PUTs alongside the boot receipt sync (double bot fingerprint).
   console.log(`\n[inventory-watch] Scheduling periodic sweep: ${invCronExpr} (every ${INV_WATCH_INTERVAL_MIN}m)`);
-  await runInventoryWatch();
+  console.log(`[inventory-watch] First sweep in ${Math.round(INV_WATCH_STARTUP_DELAY_MS / 60000)}m (avoids startup API burst)`);
+  setTimeout(() => {
+    runInventoryWatch().catch((err) => console.error('[inventory-watch] Startup sweep error:', err.message));
+  }, INV_WATCH_STARTUP_DELAY_MS);
   cron.schedule(invCronExpr, async () => {
     try { await runInventoryWatch(); }
     catch (err) { console.error('[inventory-watch] Unhandled error:', err.message); }

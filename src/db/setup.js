@@ -824,6 +824,38 @@ function initDb(dbPath) {
       UNIQUE(receipt_id, item_key)
     );
     CREATE INDEX IF NOT EXISTS idx_order_subs_receipt ON order_line_substitutions(receipt_id);
+
+    -- ─────────────────────────────────────────────────────────────────
+    -- listing_style_images — operator-supplied CLARIFYING image for a
+    --   product VARIANT, keyed by (listing_id, style).
+    --
+    --   Etsy gives one primary image per listing, so a line bought as
+    --   "Grip 3 Only" still shows the full case+grip hero shot — ambiguous
+    --   for whoever sources or packs it. This override says "for THIS
+    --   variant show THIS photo" and applies to every order (past + future)
+    --   of the same listing+style, everywhere the line is rendered.
+    --
+    --   It changes ONLY the displayed image — never the title, style,
+    --   supplier or purchase state (unlike order_line_substitutions). A
+    --   design switch always wins over it (the switched product is a
+    --   different item with its own image).
+    --
+    --   style_key is the normalized style ('' = the whole listing, when the
+    --   product has no style variation); style_value keeps the human label.
+    -- ─────────────────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS listing_style_images (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      listing_id  INTEGER NOT NULL,
+      style_key   TEXT    NOT NULL DEFAULT '',   -- normalized style value ('' = whole listing)
+      style_value TEXT    NOT NULL DEFAULT '',   -- human-readable style as displayed
+      image_data  BLOB    NOT NULL,              -- uploaded image bytes
+      image_mime  TEXT    NOT NULL DEFAULT 'image/png',
+      note        TEXT    DEFAULT '',
+      created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      updated_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      UNIQUE(listing_id, style_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_listing_style_images_listing ON listing_style_images(listing_id);
   `);
 
   // ── Migrations ────────────────────────────────────────────────────────────
@@ -844,6 +876,12 @@ function initDb(dbPath) {
   }
   if (!orderIssueCols.includes('buyer_message_at')) {
     db.exec(`ALTER TABLE order_issues ADD COLUMN buyer_message_at INTEGER`);
+  }
+  // Provenance of an issue: 'shop' = auto-flagged from Shopping Mode (a shopper
+  // set a component to Discontinued / No-model), else 'manual' (operator). Lets
+  // the auto-flag be safely reverted without ever clobbering operator work.
+  if (!orderIssueCols.includes('source')) {
+    db.exec(`ALTER TABLE order_issues ADD COLUMN source TEXT`);
   }
 
   // Persisted active-listing count per shop (Overview "Active Listings" column).
@@ -1322,6 +1360,22 @@ function initDb(dbPath) {
   // restored to the active views. Idempotent (it only ever looks at still-archived
   // rows, and clears archived_at as it goes).
   migrateArchivedOrdersToIssues(db);
+
+  // Self-heal any line that is BOTH switched to a new design AND still flagged
+  // on-hold, when the switch is the more recent decision. Such a line was being
+  // silently withheld from the purchasing route (a switch is meant to un-hold the
+  // line, but a resolve that never ran / legacy data left the issue open). This
+  // resolves those stale holds so the switched product flows back into shopping.
+  // Idempotent — only touches open issues actually superseded by a substitution.
+  healSupersededSubstitutionIssues(db);
+
+  // Surface every line whose CURRENT purchase status is terminal (Out of
+  // Production / Model Unavailable) as an open fulfilment issue. Heals orders
+  // marked terminal on a surface that historically didn't bridge to issues (the
+  // desktop Route tab, the Orders-tab per-component control, the bulk route-status
+  // import) — they were "on hold" in status yet missing from Issues/on-hold. Runs
+  // AFTER the supersede heal so the two never fight. Idempotent.
+  reconcileTerminalStatusIssues(db);
 
   // Synthetic shop/group that owns every manual order (must exist before any
   // manual receipt is inserted, to satisfy the receipts→shops foreign key).
@@ -2972,6 +3026,66 @@ const STUCK_SQL = `(r.tracking_health = 'critical')`;
 /** SQL fragment for a "delayed" parcel (slow but not critically stuck). */
 const DELAYED_SQL = `(r.tracking_health = 'warning')`;
 
+/** Effective ship date for windowing: Etsy shipment → 4PX label → order date. */
+const SHIP_DATE_SQL = `COALESCE(r.shipment_notified_at, r.fourpx_created_at, r.etsy_created_at)`;
+/** Most recent carrier activity (last scan, else last successful check). */
+const LAST_ACTIVITY_SQL = `COALESCE(r.tracking_last_event_at, r.tracking_checked_at, 0)`;
+
+/**
+ * Build the Shipping-tab date-window predicate — used IDENTICALLY by the parcel
+ * list (getShipments) and the summary cards (getShippingStats) so the two can
+ * never disagree.
+ *
+ * WHY THIS IS NOT A PLAIN SHIP-DATE FILTER
+ * ────────────────────────────────────────
+ * A parcel becomes "stuck" precisely BECAUSE it has been in the system a long
+ * time — a customs loop or a carrier stall drags on for weeks. Filtering the
+ * board purely by ship date therefore hides the very parcels the operator most
+ * needs to act on: the longer a parcel is stuck, the more certain a naive
+ * "Last 30 days" (ship-date) window is to drop it. That was the reported bug —
+ * parcels visibly stuck in customs for over a month never appeared in the tab.
+ *
+ * SEMANTICS
+ * ──────────
+ * A parcel belongs in window [from, to] when EITHER:
+ *   (a) it SHIPPED within the window (historical/volume view — includes delivered
+ *       parcels so the counts remain a faithful record of the period), OR
+ *   (b) it is an OPEN parcel (not delivered) that had carrier ACTIVITY within the
+ *       window. This keeps every still-in-flight parcel on the board regardless of
+ *       how long ago it shipped, while the "activity within window" bound naturally
+ *       excludes long-abandoned parcels that have gone silent (carrier stopped
+ *       scanning ≈ effectively delivered) — so the board never fills with stale noise.
+ *
+ * Mutates `params` with @from / @to as needed. Returns a SQL fragment, or null
+ * when no window is requested ("All").
+ *
+ * @param {{from?:number, to?:number}} opts
+ * @param {object} params  Bound-parameter object to extend.
+ * @returns {string|null}
+ */
+function buildShipWindowClause(opts, params) {
+  const hasFrom = opts.from != null;
+  const hasTo   = opts.to != null;
+  if (!hasFrom && !hasTo) return null; // "All" — no windowing
+
+  // (a) ship-date within the window
+  const shipParts = [];
+  if (hasFrom) { shipParts.push(`${SHIP_DATE_SQL} >= @from`); params.from = opts.from; }
+  if (hasTo)   { shipParts.push(`${SHIP_DATE_SQL} <= @to`);   params.to   = opts.to; }
+  const shipRange = `(${shipParts.join(' AND ')})`;
+
+  // (b) open parcel with carrier activity within the window
+  const actParts = [];
+  if (hasFrom) actParts.push(`${LAST_ACTIVITY_SQL} >= @from`);
+  if (hasTo)   actParts.push(`${LAST_ACTIVITY_SQL} <= @to`);
+  const openActive =
+    `(r.tracking_delivered_at IS NULL ` +
+    `AND COALESCE(r.tracking_status, 'unknown') != 'delivered' ` +
+    `AND ${actParts.join(' AND ')})`;
+
+  return `(${shipRange} OR ${openActive})`;
+}
+
 /**
  * List 4PX shipments for the Shipping tab with their cached tracking snapshot,
  * freight cost, and a computed `is_stuck` flag. Supports filtering by canonical
@@ -2992,10 +3106,11 @@ function getShipments(db, opts = {}) {
   const params = { limit: Math.min(opts.limit ?? 100, 1000), offset: opts.offset ?? 0 };
 
   if (opts.shopId) { where.push('r.shop_id = @shopId'); params.shopId = opts.shopId; }
-  // Ship-date range (COALESCE so parcels without an Etsy shipment timestamp fall
-  // back to the label-creation / order date rather than dropping out of the window).
-  if (opts.from != null) { where.push('COALESCE(r.shipment_notified_at, r.fourpx_created_at, r.etsy_created_at) >= @from'); params.from = opts.from; }
-  if (opts.to != null)   { where.push('COALESCE(r.shipment_notified_at, r.fourpx_created_at, r.etsy_created_at) <= @to');   params.to = opts.to; }
+  // Date window: ship-date OR still-open-and-active (see buildShipWindowClause).
+  // This is what keeps long-stuck parcels (shipped weeks ago, still not delivered)
+  // on the board instead of falling out of a naive ship-date window.
+  const winClause = buildShipWindowClause(opts, params);
+  if (winClause) where.push(winClause);
   if (opts.q) {
     where.push('(r.tracking_code LIKE @q OR r.fourpx_tracking_no LIKE @q OR r.name LIKE @q)');
     params.q = `%${opts.q}%`;
@@ -3056,8 +3171,9 @@ function getShippingStats(db, opts = {}) {
   const where = ["(r.fourpx_consignment_no IS NOT NULL OR r.tracking_code LIKE '4PX%')"];
   const params = {};
   if (opts.shopId) { where.push('r.shop_id = @shopId'); params.shopId = opts.shopId; }
-  if (opts.from != null) { where.push('COALESCE(r.shipment_notified_at, r.fourpx_created_at, r.etsy_created_at) >= @from'); params.from = opts.from; }
-  if (opts.to != null)   { where.push('COALESCE(r.shipment_notified_at, r.fourpx_created_at, r.etsy_created_at) <= @to');   params.to = opts.to; }
+  // Same window logic as the parcel list so the cards and the table always agree.
+  const winClause = buildShipWindowClause(opts, params);
+  if (winClause) where.push(winClause);
   const W = where.join(' AND ');
 
   return db.prepare(`
@@ -4508,32 +4624,56 @@ function getIssueById(db, id) {
   catch { return null; }
 }
 
+/** Fetch the (single) issue for a line-item, or null. */
+function getOrderIssue(db, receiptId, itemKey) {
+  try {
+    return db.prepare('SELECT * FROM order_issues WHERE receipt_id = ? AND item_key = ?')
+      .get(Number(receiptId), String(itemKey)) || null;
+  } catch { return null; }
+}
+
 /**
  * Create or update (re-open) the issue for a line-item. Keyed by
  * (receipt_id, item_key); re-flagging an existing line updates its type/note
  * and re-opens it (clearing any prior resolution) so the workflow restarts.
  *
  * @param {Database.Database} db
- * @param {object} p - { receipt_id, item_key, listing_id?, title?, phone_model?, issue_type, note? }
+ * @param {object} p - { receipt_id, item_key, listing_id?, title?, phone_model?, issue_type, note?, source? }
  * @returns {object} the upserted issue row
  */
 function upsertOrderIssue(db, p) {
   const now = Math.floor(Date.now() / 1000);
   const issueType = ISSUE_TYPES.includes(p.issue_type) ? p.issue_type : 'other';
+  // `source` records who last (re-)raised the issue: whoever calls upsert is
+  // asserting it now, so they take ownership. Callers guard WHEN they upsert
+  // (e.g. Shopping Mode never upserts over an actively-worked operator issue), so
+  // overwriting source here is always the intended, current owner.
   db.prepare(`
     INSERT INTO order_issues
-      (receipt_id, item_key, listing_id, title, phone_model, issue_type, status, note, created_at, updated_at)
+      (receipt_id, item_key, listing_id, title, phone_model, issue_type, status, note, source, created_at, updated_at)
     VALUES
-      (@receipt_id, @item_key, @listing_id, @title, @phone_model, @issue_type, 'open', @note, @now, @now)
+      (@receipt_id, @item_key, @listing_id, @title, @phone_model, @issue_type, 'open', @note, @source, @now, @now)
     ON CONFLICT(receipt_id, item_key) DO UPDATE SET
       listing_id  = COALESCE(excluded.listing_id, listing_id),
       title       = COALESCE(excluded.title, title),
       phone_model = COALESCE(excluded.phone_model, phone_model),
       issue_type  = excluded.issue_type,
       note        = COALESCE(excluded.note, note),
+      source      = excluded.source,
       status      = 'open',
       resolution  = NULL,
       resolved_at = NULL,
+      -- Re-flagging a line whose PREVIOUS issue was already RESOLVED is a brand-new
+      -- problem (classically: the buyer switched design, and the replacement is now
+      -- also unavailable). Reset the buyer-contact workflow so a fresh, correct
+      -- message is drafted for the current design instead of showing the stale
+      -- "buyer already messaged" state and the old copy about the abandoned design.
+      -- Merely retyping an already-OPEN issue keeps the operator's progress intact.
+      buyer_notified_at  = CASE WHEN status <> 'open' THEN NULL ELSE buyer_notified_at END,
+      listing_handled_at = CASE WHEN status <> 'open' THEN NULL ELSE listing_handled_at END,
+      listing_action     = CASE WHEN status <> 'open' THEN NULL ELSE listing_action END,
+      buyer_message      = CASE WHEN status <> 'open' THEN NULL ELSE buyer_message END,
+      buyer_message_at   = CASE WHEN status <> 'open' THEN NULL ELSE buyer_message_at END,
       updated_at  = excluded.updated_at
   `).run({
     receipt_id:  Number(p.receipt_id),
@@ -4543,6 +4683,7 @@ function upsertOrderIssue(db, p) {
     phone_model: p.phone_model != null ? String(p.phone_model) : null,
     issue_type:  issueType,
     note:        p.note != null ? String(p.note) : null,
+    source:      p.source === 'shop' ? 'shop' : 'manual',
     now,
   });
   return db.prepare('SELECT * FROM order_issues WHERE receipt_id = ? AND item_key = ?')
@@ -4565,7 +4706,7 @@ function patchOrderIssue(db, id, patch) {
   if (!existing) return null;
   const allowed = ['buyer_notified_at', 'listing_handled_at', 'listing_action',
     'status', 'resolution', 'resolved_at', 'note',
-    'buyer_message', 'buyer_message_at'];
+    'buyer_message', 'buyer_message_at', 'source'];
   const sets = [];
   const params = { id: Number(id), now: Math.floor(Date.now() / 1000) };
   for (const k of allowed) {
@@ -4663,6 +4804,140 @@ function migrateArchivedOrdersToIssues(db) {
 
   if (migratedOrders) {
     console.log(`[db] Retired Archive → Issues: processed ${migratedOrders} archived order(s), opened ${createdIssues} issue(s).`);
+  }
+}
+
+/**
+ * Self-heal lines that are BOTH switched to a new design AND still flagged
+ * on-hold, where the switch supersedes the hold.
+ *
+ * WHY: a design switch is the operator's explicit "buy this replacement instead"
+ * decision, so the line must flow into purchasing. It was being silently pulled
+ * back out because the line still carried an OPEN fulfilment issue — either a
+ * stale pre-switch flag that never resolved, or (the real culprit) an AUTOMATED
+ * Shopping-Mode re-raise that fired after the switch and reversed it. The route
+ * builder withholds any open-issue line, so the switched product dropped out of
+ * the shopping route entirely and the buyer's item was missed.
+ *
+ * This closes those superseded holds as `resolution='switched'`, using the exact
+ * same precedence rule the route enforces at read time
+ * (route/dashboard.substitutionSupersedesIssue): pure recency — an open issue is
+ * superseded only when the switch is AT LEAST AS RECENT as it (a pre-switch flag
+ * the switch resolved). An issue raised AFTER the switch reflects a NEW problem
+ * with the replacement and is deliberately left open (it belongs in Issues).
+ * Idempotent: after healing there are no superseded open issues left to touch.
+ *
+ * @param {Database.Database} db
+ */
+function healSupersededSubstitutionIssues(db) {
+  let result;
+  try {
+    result = db.prepare(`
+      UPDATE order_issues
+         SET status      = 'resolved',
+             resolution  = 'switched',
+             resolved_at = strftime('%s','now'),
+             updated_at  = strftime('%s','now')
+       WHERE status = 'open'
+         AND EXISTS (
+           SELECT 1 FROM order_line_substitutions s
+            WHERE s.receipt_id = order_issues.receipt_id
+              AND s.item_key   = order_issues.item_key
+              AND s.updated_at >= order_issues.updated_at  -- switch is at least as recent
+         )
+    `).run();
+  } catch { return; } // either table absent on a fresh DB → nothing to heal
+  if (result.changes > 0) {
+    console.log(`[db] Un-held ${result.changes} switched line(s) whose on-hold flag was superseded by a design switch.`);
+  }
+}
+
+/**
+ * Surface every line whose CURRENT purchase status is terminal (Out of Production
+ * / Model Unavailable) as an OPEN fulfilment issue, so it appears in Issues/on-hold
+ * and is held out of purchasing — exactly as if it had been flagged.
+ *
+ * WHY: the purchase-status → issue bridge historically ran only on the mobile
+ * shopping route. Terminal statuses set from the desktop Route tab, the Orders-tab
+ * per-component control, or the bulk route-status import never became issues, so
+ * those orders read "Out of Production" yet were silently absent from Issues/on-
+ * hold. The live bridge now fires from every surface; this reconciles the rows
+ * that pre-date the fix. Idempotent — after healing, matching lines have an open
+ * issue, so re-runs are no-ops.
+ *
+ * Conservative & context-correct, mirroring the live bridge (syncAssignmentIssue):
+ *   • skips lines that already have an OPEN issue (already held),
+ *   • never resurrects a line the operator deliberately CLOSED (resolution
+ *     'refunded' / 'cancelled') — only re-raises otherwise,
+ *   • severity: a discontinued product (out_of_production) outranks an unavailable
+ *     model, and
+ *   • a SWITCHED line's title/model follow the replacement design, never the
+ *     original the buyer left behind.
+ *
+ * @param {Database.Database} db
+ */
+function reconcileTerminalStatusIssues(db) {
+  let lineItemKey, parseVariations;
+  try { ({ lineItemKey, parseVariations } = require('../route/dashboard')); } catch { /* fall back below */ }
+
+  let rows;
+  try {
+    rows = db.prepare(`
+      SELECT receipt_id, item_key, title, status_case, status_grip, status_charm
+        FROM route_assignments
+       WHERE status_case  IN ('Out of Production','Model Unavailable')
+          OR status_grip  IN ('Out of Production','Model Unavailable')
+          OR status_charm IN ('Out of Production','Model Unavailable')
+    `).all();
+  } catch { return; } // table absent on a fresh DB → nothing to reconcile
+  if (!rows.length) return;
+
+  let created = 0;
+  const tx = db.transaction(() => {
+    for (const r of rows) {
+      const existing = db.prepare('SELECT status, resolution FROM order_issues WHERE receipt_id = ? AND item_key = ?')
+        .get(r.receipt_id, r.item_key);
+      if (existing && existing.status === 'open') continue;                                             // already held
+      if (existing && (existing.resolution === 'refunded' || existing.resolution === 'cancelled')) continue; // deliberately closed
+
+      const statuses = [r.status_case, r.status_grip, r.status_charm];
+      const type = statuses.includes('Out of Production') ? 'out_of_production'
+                 : statuses.includes('Model Unavailable') ? 'model_unavailable'
+                 : null;
+      if (!type) continue;
+
+      // Context follows the switched design when present, else the ordered line.
+      const sub = getSubstitutionForLine(db, r.receipt_id, r.item_key);
+      let title = (sub && sub.new_title) || r.title || null;
+      let listingId = null;
+      let phoneModel = (sub && sub.new_phone_model) || null;
+      if (lineItemKey) {
+        try {
+          const txns = db.prepare('SELECT title, listing_id, variations FROM transactions WHERE receipt_id = ?').all(r.receipt_id);
+          const m = txns.find((t) => lineItemKey(t.title, t.listing_id) === r.item_key);
+          if (m) {
+            listingId = m.listing_id != null ? Number(m.listing_id) : null;
+            if (!title) title = m.title;
+            if (!phoneModel && parseVariations) { try { phoneModel = parseVariations(m.variations).phoneModel || null; } catch { /* best effort */ } }
+          }
+        } catch { /* best effort */ }
+      }
+
+      upsertOrderIssue(db, {
+        receipt_id:  r.receipt_id,
+        item_key:    r.item_key,
+        listing_id:  listingId,
+        title,
+        phone_model: phoneModel,
+        issue_type:  type,
+        source:      'shop',
+      });
+      created++;
+    }
+  });
+  tx();
+  if (created) {
+    console.log(`[db] Reconciled ${created} on-hold line(s): terminal purchase status now surfaced as a fulfilment issue.`);
   }
 }
 
@@ -4960,6 +5235,114 @@ function getSubstitutionImage(db, id) {
     }
   } catch { /* table may not exist yet */ }
   return null;
+}
+
+// ─── Per-variant clarifying images (listing_id + style → uploaded photo) ──────
+
+/**
+ * Normalize a style label into a stable lookup key. Must be applied identically
+ * on write and on every read so "Grip 3 Only", "grip 3 only" and "  Grip 3
+ * Only " all map to the same override. An empty style means "the whole listing".
+ *
+ * @param {string} style
+ * @returns {string}
+ */
+function normalizeStyleKey(style) {
+  return String(style == null ? '' : style).trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+/**
+ * Public columns for a style-image row — everything EXCEPT the BLOB, so callers
+ * can list/inspect overrides cheaply without pulling image bytes.
+ */
+const _STYLE_IMG_META_COLS =
+  'id, listing_id, style_key, style_value, image_mime, note, created_at, updated_at';
+
+/**
+ * Create or replace the clarifying image for a (listing_id, style) variant.
+ *
+ * @param {Database.Database} db
+ * @param {object} p - { listing_id, style_value?, image_data(Buffer),
+ *   image_mime?, note? }
+ * @returns {object} the upserted row (metadata only)
+ */
+function upsertListingStyleImage(db, p) {
+  const listingId = Number(p.listing_id);
+  const styleValue = String(p.style_value == null ? '' : p.style_value).trim();
+  const styleKey = normalizeStyleKey(styleValue);
+  db.prepare(`
+    INSERT INTO listing_style_images
+      (listing_id, style_key, style_value, image_data, image_mime, note, created_at, updated_at)
+    VALUES
+      (@listing_id, @style_key, @style_value, @image_data, @image_mime, @note,
+       strftime('%s','now'), strftime('%s','now'))
+    ON CONFLICT(listing_id, style_key) DO UPDATE SET
+      style_value = excluded.style_value,
+      image_data  = excluded.image_data,
+      image_mime  = excluded.image_mime,
+      note        = excluded.note,
+      updated_at  = strftime('%s','now')
+  `).run({
+    listing_id: listingId,
+    style_key: styleKey,
+    style_value: styleValue,
+    image_data: p.image_data,
+    image_mime: p.image_mime != null ? String(p.image_mime) : 'image/png',
+    note: p.note != null ? String(p.note) : '',
+  });
+  return db.prepare(`SELECT ${_STYLE_IMG_META_COLS} FROM listing_style_images WHERE listing_id = ? AND style_key = ?`)
+    .get(listingId, styleKey);
+}
+
+/** Remove the override for a (listing_id, style). Returns true when one existed. */
+function deleteListingStyleImage(db, listingId, styleValue) {
+  try {
+    return db.prepare('DELETE FROM listing_style_images WHERE listing_id = ? AND style_key = ?')
+      .run(Number(listingId), normalizeStyleKey(styleValue)).changes > 0;
+  } catch { return false; }
+}
+
+/** Metadata (no BLOB) for one (listing_id, style) override, or null. */
+function getListingStyleImageMeta(db, listingId, styleValue) {
+  try {
+    return db.prepare(`SELECT ${_STYLE_IMG_META_COLS} FROM listing_style_images WHERE listing_id = ? AND style_key = ?`)
+      .get(Number(listingId), normalizeStyleKey(styleValue)) || null;
+  } catch { return null; }
+}
+
+/** Fetch a style-image's stored bytes + mime by row id, or null. */
+function getListingStyleImage(db, id) {
+  try {
+    const row = db.prepare('SELECT image_data, image_mime FROM listing_style_images WHERE id = ?').get(Number(id));
+    if (row && row.image_data && row.image_data.length) {
+      return { data: row.image_data, mime: row.image_mime || 'image/png' };
+    }
+  } catch { /* table may not exist yet */ }
+  return null;
+}
+
+/**
+ * Batch-load style-image overrides for a set of listings, so a page of orders /
+ * route rows resolves its thumbnails in ONE query. Keyed by
+ * `${listing_id}\x00${style_key}` → { id, image_mime, updated_at }.
+ *
+ * @param {Database.Database} db
+ * @param {Iterable<number>} listingIds
+ * @returns {Object<string, {id:number, image_mime:string, updated_at:number}>}
+ */
+function getListingStyleImageMap(db, listingIds) {
+  const out = {};
+  const ids = [...new Set([...(listingIds || [])].map(Number).filter(Number.isInteger))];
+  if (!ids.length) return out;
+  try {
+    const ph = ids.map(() => '?').join(',');
+    db.prepare(`SELECT id, listing_id, style_key, image_mime, updated_at FROM listing_style_images WHERE listing_id IN (${ph})`)
+      .all(ids)
+      .forEach((r) => {
+        out[`${r.listing_id}\x00${r.style_key}`] = { id: r.id, image_mime: r.image_mime, updated_at: r.updated_at };
+      });
+  } catch { /* table may not exist yet */ }
+  return out;
 }
 
 /**
@@ -5463,6 +5846,7 @@ module.exports = {
   getIssuesForReceipts,
   getIssuesForReceipt,
   getIssueById,
+  getOrderIssue,
   upsertOrderIssue,
   patchOrderIssue,
   deleteOrderIssue,
@@ -5481,6 +5865,12 @@ module.exports = {
   upsertOrderSubstitution,
   deleteOrderSubstitution,
   getSubstitutionImage,
+  normalizeStyleKey,
+  upsertListingStyleImage,
+  deleteListingStyleImage,
+  getListingStyleImageMeta,
+  getListingStyleImage,
+  getListingStyleImageMap,
   insertManualItem,
   getManualItems,
   getManualItemImage,

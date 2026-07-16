@@ -22,6 +22,7 @@
  */
 
 const { config, hasBuyerMessageKey } = require('../listings/config')
+const { checkMessageCompliance, complianceReason } = require('./message-compliance')
 
 let _OpenAI = null
 
@@ -78,10 +79,10 @@ const ISSUE_FRAMING = {
 	out_of_production: {
 		label: 'out of production / discontinued',
 		situation:
-			'The manufacturer has permanently discontinued this design, so it can no longer be produced. ' +
-			'Invent a brief, believable, professional reason (e.g. the manufacturer discontinued the specific ' +
-			'materials/mould, a supplier stopped producing this design, or a quality issue that stops us from ' +
-			'shipping a substandard substitute). Never blame the buyer.',
+			'This design can no longer be produced because it has been discontinued by the manufacturer/supplier. ' +
+			'Explain this briefly, honestly and professionally — do NOT fabricate specific false claims or over-explain. ' +
+			'A simple, truthful "this design has been discontinued and we can no longer make it to our quality standard" ' +
+			'is enough. Never blame the buyer.',
 		offer:
 			'Warmly offer the buyer TWO clear choices: (1) switch to another design from our shop that they love ' +
 			'just as much (we will happily set it up for them at no extra cost), or (2) a full, no-questions refund.',
@@ -135,6 +136,11 @@ function buildMessages(ctx) {
 	]
 	if (ctx.phoneModel) facts.push(`Buyer's selected phone model: ${ctx.phoneModel}`)
 	if (ctx.style) facts.push(`Buyer's selected style/variation: ${ctx.style}`)
+	// A replacement means the buyer ALREADY switched once, and the design they
+	// chose (the title above) is now also unavailable. The message must own this
+	// as a second, apologetic follow-up about THAT replacement — never re-mention
+	// the original, and never imply we forgot the earlier conversation.
+	if (ctx.isReplacement) facts.push(`IMPORTANT — this product is the REPLACEMENT design the buyer already agreed to switch to earlier; that replacement is now also unavailable. Warmly acknowledge that you're following up a second time about the design they chose, apologise a little extra for the repeat hiccup, and offer to switch it once more OR a full refund. Do NOT mention or name the original design they moved away from.`)
 	if (ctx.note) facts.push(`Internal operator note (private context — use it to make the reason accurate, but NEVER quote it verbatim or reveal it is an internal note): ${ctx.note}`)
 	if (ctx.extraInstructions) facts.push(`Extra instructions from the operator (follow these): ${ctx.extraInstructions}`)
 
@@ -150,12 +156,19 @@ function buildMessages(ctx) {
 		`• Tone: ${tone}. Sound like a real, thoughtful human — never robotic or corporate.\n` +
 		`• Greet the buyer by their first name.\n` +
 		`• Thank them warmly for their order and reference the specific product.\n` +
-		`• Give a brief, believable, professional reason for the problem (see situation below). Keep it honest-sounding and never over-explain.\n` +
-		`• Clearly present the two options (switch design / full refund) and invite them to simply reply with their choice.\n` +
+		`• Give a brief, honest, professional reason for the problem (see situation below). Never over-explain and never fabricate specific false claims.\n` +
+		`• Clearly present the two options (switch design / full refund) and invite them to simply reply with their choice HERE in this Etsy conversation.\n` +
 		`• Reassure them and apologise for the inconvenience without grovelling.\n` +
 		`• Sign off warmly as the shop's team, e.g. "Warmly," then "The ${shopName} Team".\n` +
 		`• Length: a concise but heartfelt message (roughly 120–220 words). Use short paragraphs.\n` +
 		`• Plain text only — no markdown, no subject line, no placeholders like [Name] or [Product]; fill in every real detail from the facts. Do NOT invent an order number.\n\n` +
+		`ETSY POLICY — HARD RULES (breaking ANY of these can get the shop permanently suspended, so NEVER do them):\n` +
+		`• NEVER include or ask for an email address, phone number, or any off-Etsy messaging app (WhatsApp, Telegram, WeChat, Line, Instagram, Facebook, etc.).\n` +
+		`• NEVER mention or request payment outside Etsy (PayPal, Venmo, Zelle, CashApp, Wise, bank/wire transfer, gift cards, crypto, "pay me directly").\n` +
+		`• NEVER include an external website/store link or direct the buyer to buy anywhere other than through this Etsy shop. (An Etsy link is fine.)\n` +
+		`• NEVER ask the buyer to cancel and repurchase elsewhere, or to move the conversation off Etsy.\n` +
+		`• NEVER offer a discount/refund/gift in exchange for a review.\n` +
+		`• Keep EVERYTHING — the refund, the design switch, and all communication — inside Etsy.\n\n` +
 		`SITUATION: ${framing.situation}\n` +
 		`OFFER: ${framing.offer}`
 
@@ -195,7 +208,9 @@ function extractJson(text) {
  * @param {string} [ctx.note]            private operator note for accurate context
  * @param {string} [ctx.tone]            tone override
  * @param {string} [ctx.extraInstructions] free-form operator instructions
- * @returns {Promise<{ message: string, model: string }>}
+ * @param {boolean} [ctx.isReplacement]  true when productTitle is a replacement the
+ *   buyer already switched to and which is now ALSO unavailable (a second follow-up)
+ * @returns {Promise<{ message: string, model: string, compliance: object }>}
  */
 async function generateBuyerIssueMessage(ctx = {}) {
 	const client = getMessageClient()
@@ -218,6 +233,10 @@ async function generateBuyerIssueMessage(ctx = {}) {
 	const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 	const MAX_ATTEMPTS = 3
 	let lastErr = null
+	// Best clean draft seen so far, and the best (least-bad) draft overall as a
+	// fallback for the error message. A model that slips policy content in once
+	// usually clears on a retry, so we keep sampling until we get a clean one.
+	let bestFlagged = null
 
 	for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
 		let resp
@@ -241,12 +260,45 @@ async function generateBuyerIssueMessage(ctx = {}) {
 			try {
 				const parsed = extractJson(content)
 				const message = String(parsed.message || '').trim()
-				if (message) return { message, model }
+				if (message) {
+					// ── Compliance gate ──────────────────────────────────────────
+					// Never return a draft that would violate Etsy's messaging policy
+					// (off-Etsy contact / payment / links / steering). If the model
+					// slipped something in, retry with a stronger constraint; only
+					// after exhausting attempts do we refuse, so the operator never
+					// unknowingly pastes suspension-triggering text into Etsy.
+					const compliance = checkMessageCompliance(message)
+					if (compliance.ok) return { message, model, compliance }
+
+					if (!bestFlagged) bestFlagged = { message, compliance }
+					console.warn(`[buyer-message] draft rejected by compliance guard (${complianceReason(compliance)}) — regenerating.`)
+					// Tighten the instruction for the next attempt.
+					messages.push({
+						role: 'system',
+						content:
+							'Your previous draft violated Etsy policy by including one or more of: ' +
+							compliance.violations.map((v) => v.category).join(', ') +
+							'. Rewrite it so it contains NO email, phone, off-Etsy app, external link, off-Etsy payment, ' +
+							'or any suggestion to move off Etsy. Keep everything inside Etsy.',
+					})
+					body.messages = messages
+				}
 			} catch (err) {
 				lastErr = err
 			}
 		}
 		if (attempt < MAX_ATTEMPTS) await sleep(700 * attempt)
+	}
+
+	if (bestFlagged) {
+		const err = new Error(
+			'The generated message kept including content that Etsy prohibits ' +
+			`(${complianceReason(bestFlagged.compliance)}). To protect the shop, it was not returned. ` +
+			'Please write the message manually, keeping all contact and payment inside Etsy.'
+		)
+		err.status = 422
+		err.compliance = bestFlagged.compliance
+		throw err
 	}
 	throw lastErr || new Error('The AI returned an empty message. Please try again.')
 }

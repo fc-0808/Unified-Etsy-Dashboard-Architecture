@@ -55,6 +55,14 @@
 				min-height: 100vh;
 				padding-bottom: calc(24px + var(--safe-bottom));
 			}
+			/* Lock the page behind a modal overlay so the list can't scroll under a
+			   sheet / map / drawer. No position:fixed — that would shift the page
+			   visibly behind the translucent sheet backdrop; overflow:hidden holds
+			   position with no jump. Overlays are position:fixed so they're unaffected. */
+			html.scroll-lock,
+			html.scroll-lock body {
+				overflow: hidden;
+			}
 			button {
 				font-family: inherit;
 				cursor: pointer;
@@ -358,48 +366,7 @@
 				transition: width 0.35s ease;
 			}
 
-			/* ── Filter bar ─────────────────────────────────────── */
-			.filters {
-				display: flex;
-				gap: 8px;
-				padding: 10px 14px 2px;
-				align-items: center;
-			}
-			.search {
-				flex: 1;
-				position: relative;
-			}
-			.search input {
-				width: 100%;
-				font-size: 15px;
-				padding: 10px 12px 10px 34px;
-				border-radius: 10px;
-				border: 1px solid var(--border);
-				background: var(--surface);
-				color: var(--text);
-				outline: none;
-			}
-			.search input:focus {
-				border-color: var(--accent);
-			}
-			.search .mag {
-				position: absolute;
-				left: 11px;
-				top: 50%;
-				transform: translateY(-50%);
-				color: var(--muted);
-				font-size: 14px;
-				display: inline-flex;
-			}
-			.search .mag svg {
-				width: 16px;
-				height: 16px;
-				fill: none;
-				stroke: currentColor;
-				stroke-width: 2;
-				stroke-linecap: round;
-				stroke-linejoin: round;
-			}
+			/* Retry button shown on the error state (see load()'s catch). */
 			.chipbtn {
 				padding: 9px 12px;
 				border-radius: 10px;
@@ -410,48 +377,10 @@
 				color: var(--muted);
 				white-space: nowrap;
 			}
-			.chipbtn.iconchip {
-				display: inline-flex;
-				align-items: center;
-				justify-content: center;
-				padding: 9px 11px;
-			}
-			.chipbtn.iconchip svg {
-				width: 17px;
-				height: 17px;
-				fill: none;
-				stroke: currentColor;
-				stroke-width: 2;
-				stroke-linecap: round;
-				stroke-linejoin: round;
-			}
 			.chipbtn.on {
 				color: var(--text);
 				border-color: var(--accent);
 				background: rgba(245, 100, 0, 0.12);
-			}
-			.chipbtn.iconchip.on svg {
-				fill: rgba(245, 100, 0, 0.18);
-			}
-			.advfilters {
-				padding: 8px 14px 0;
-				display: none;
-				gap: 8px;
-				flex-wrap: wrap;
-			}
-			.advfilters.open {
-				display: flex;
-			}
-			.advfilters select,
-			.advfilters input[type='date'] {
-				flex: 1;
-				min-width: 130px;
-				font-size: 14px;
-				padding: 9px 10px;
-				border-radius: 10px;
-				border: 1px solid var(--border);
-				background: var(--surface);
-				color: var(--text);
 			}
 
 			/* ── Groups + cards ─────────────────────────────────── */
@@ -751,6 +680,19 @@
 				color: var(--amber);
 				background: var(--amber-bg);
 				border: 1px solid rgba(245, 165, 36, 0.35);
+			}
+			.component-total.charm {
+				color: var(--purple);
+				background: var(--purple-bg);
+				border: 1px solid rgba(167, 139, 250, 0.35);
+			}
+			/* Header breakdown of how many cases / grips / charms are still to buy —
+			   the fine-grained companion to the two headline stat cards. */
+			.summary-comps {
+				margin-top: 8px;
+			}
+			.summary-comps:empty {
+				display: none;
 			}
 			.product-prices {
 				display: flex;
@@ -1934,26 +1876,9 @@
 					<button class="iconbtn" id="logoutBtn" title="Sign out" aria-label="Sign out"><svg viewBox="0 0 24 24"><path d="M15 4h3a1.5 1.5 0 0 1 1.5 1.5v13A1.5 1.5 0 0 1 18 20h-3"/><path d="M10 12h9"/><path d="M15.5 8.5 19 12l-3.5 3.5"/></svg></button>
 				</div>
 			</div>
-			<div class="summary">
-				<div class="stat"><div class="n" id="stItems">–</div><div class="l" id="lblItems">Items to buy</div></div>
-				<div class="stat"><div class="n" id="stStalls">–</div><div class="l" id="lblStalls">Stalls to visit</div></div>
-			</div>
+			<div class="component-totals summary-comps" id="summaryComps" aria-live="polite"></div>
 			<div class="progress"><i id="progressBar"></i></div>
 		</header>
-
-		<div class="filters">
-			<div class="search">
-				<span class="mag"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg></span>
-				<input id="searchInput" type="search" placeholder="Search…" autocomplete="off" aria-label="Search" />
-			</div>
-			<button class="chipbtn" id="showDoneBtn" title="Show bought">Show bought</button>
-			<button class="chipbtn iconchip" id="advBtn" title="Filters" aria-label="Filters"><svg viewBox="0 0 24 24"><path d="M4 5h16l-6.2 8v5l-3.6 2v-7z"/></svg></button>
-		</div>
-		<div class="advfilters" id="advFilters">
-			<select id="shopFilter"><option value="">All shops</option></select>
-			<input type="date" id="dateFrom" title="From date" />
-			<input type="date" id="dateTo" title="To date" />
-		</div>
 
 		<div id="list">
 			<div class="state" id="stateBox"><div class="spinner"></div>Loading route…</div>
@@ -2053,8 +1978,7 @@
 				// DIFFERENT statuses. Never sent to the server, never in the picker.
 				mixed: { cls: 'mixed', color: '#94a3b8', en: 'Mixed', zh: '混合' },
 			}
-			const STATUS_ORDER = ['Pending', 'Purchased', 'Out of Stock', 'Out of Production', 'Wrong Stall', 'Model Unavailable']
-			const LS = 'shopRouteFilters'
+			const STATUS_ORDER = ['Pending', 'Purchased', 'Out of Stock', 'Out of Production', 'Model Unavailable', 'Wrong Stall']
 
 			// ── i18n ─ the page shows ONE language at a time (English OR 简体中文) ──
 			let LANG = (() => {
@@ -2066,12 +1990,7 @@
 			})()
 			const T = {
 				brand: { en: 'Shopping Route', zh: '采购路线' },
-				items: { en: 'Items to buy', zh: '待购' },
 				orders: { en: 'Orders', zh: '订单' },
-				stalls: { en: 'Stalls to visit', zh: '待跑摊位' },
-				searchPh: { en: 'Search product, model, charm…', zh: '搜索产品、型号、挂件…' },
-				showBought: { en: 'Show bought', zh: '显示已购' },
-				allShops: { en: 'All shops', zh: '全部店铺' },
 				secCG: { en: 'Cases & Grips', zh: '手机壳 / 支架' },
 				secCharm: { en: 'Charms', zh: '挂件' },
 				secEx: { en: 'Exchanges', zh: '换货' },
@@ -2173,13 +2092,7 @@
 			function applyStaticI18n() {
 				document.title = t('brand')
 				$('brandText').textContent = t('brand')
-				$('lblItems').textContent = t('items')
-				$('lblStalls').textContent = t('stalls')
-				$('searchInput').placeholder = t('searchPh')
-				$('showDoneBtn').textContent = t('showBought')
 				$('langBtn').textContent = LANG === 'en' ? '中文' : 'EN'
-				const opt0 = $('shopFilter').querySelector('option[value=""]')
-				if (opt0) opt0.textContent = t('allShops')
 				document.documentElement.lang = LANG === 'zh' ? 'zh-CN' : 'en'
 			}
 
@@ -2208,6 +2121,15 @@
 			}
 			const esc = (s) =>
 				String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
+
+			// Content-addressed charm-image URL: the per-charm version token (mtime+size
+			// from the route payload) changes whenever the photo is replaced/renamed/
+			// renumbered, so the URL changes too and neither the browser HTTP cache nor
+			// the service-worker image cache can ever serve a stale thumbnail.
+			function charmImageUrl(code, version) {
+				const base = `/api/route/charm-image?code=${encodeURIComponent(code)}`
+				return version ? `${base}&v=${encodeURIComponent(version)}` : base
+			}
 
 			// ── Fully-purchased predicate (mirrors server rowFullyPurchased) ─────
 			function fullyPurchased(r) {
@@ -2339,21 +2261,27 @@
 				const actionable = ROWS.filter((r) => !r.excluded && !r.needs_exchange)
 				const remaining = actionable.filter((r) => !fullyPurchased(r))
 				const done = actionable.length - remaining.length
-				$('stItems').textContent = remaining.length
-				// Stalls still to visit — the actionable metric that replaced the (for a
-				// shopper, meaningless) order count. A line contributes a supplier stop
-				// while its case/grip is unbought and a charm stop while its charm is
-				// unbought (two different stalls → two stops); open exchanges are stops
-				// too. Deduped, so the number equals the stall cards still showing work.
-				const stops = new Set()
-				for (const r of actionable) {
-					if ((r.has_case || r.has_grip) && !cgDone(r)) stops.add('s\x01' + supKeyOf(r))
-					if (r.has_charm && !charmDone(r)) stops.add('c\x01' + charmKeyOf(r))
-				}
-				for (const x of EXCHANGES) stops.add('s\x01' + supKeyOf(x))
-				$('stStalls').textContent = stops.size
 				const pct = actionable.length ? Math.round((done / actionable.length) * 100) : 0
 				$('progressBar').style.width = pct + '%'
+
+				// Component breakdown: how many CASES / GRIPS / CHARMS are still to buy,
+				// quantity-weighted so the totals equal the sum of every card's ×N badge
+				// (a component counts while it exists on a line and isn't yet Purchased —
+				// the exact convention the product cards use). Empty pills are omitted and
+				// the whole strip hides (CSS :empty) when nothing of a kind remains.
+				let caseN = 0
+				let gripN = 0
+				let charmN = 0
+				for (const r of actionable) {
+					const q = r.quantity || 1
+					if (r.has_case && (r.status_case || 'Pending') !== 'Purchased') caseN += q
+					if (r.has_grip && (r.status_grip || 'Pending') !== 'Purchased') gripN += q
+					if (r.has_charm && (r.status_charm || 'Pending') !== 'Purchased') charmN += q
+				}
+				$('summaryComps').innerHTML =
+					(caseN ? `<span class="component-total case">${compLabel(COMP_CASE)} ×${caseN}</span>` : '') +
+					(gripN ? `<span class="component-total grip">${compLabel(COMP_GRIP)} ×${gripN}</span>` : '') +
+					(charmN ? `<span class="component-total charm">${compLabel(COMP_CHARM)} ×${charmN}</span>` : '')
 			}
 
 			// ── Card rendering ───────────────────────────────────────────────────
@@ -2404,12 +2332,15 @@
 			// charm code) so a tap can save it.
 			function priceChip(attrs, label, unitCost, qty) {
 				const lab = `<span class="pl">${label}</span>`
+				// data-qty lets a live cost change patch this chip in place (unit × qty)
+				// without re-rendering the whole list.
+				const q = qty || 1
 				if (unitCost == null || unitCost === '') {
-					return `<button class="price unset" ${attrs}>${lab}<span class="pvwrap"><span class="pv">${t('setPrice')}</span></span></button>`
+					return `<button class="price unset" ${attrs} data-qty="${q}">${lab}<span class="pvwrap"><span class="pv">${t('setPrice')}</span></span></button>`
 				}
-				const total = Number(unitCost) * (qty || 1)
-				const per = qty && qty > 1 ? `<span class="price-per">${money(unitCost)}×${qty}</span>` : ''
-				return `<button class="price" ${attrs}>${lab}<span class="pvwrap"><span class="pv">${money(total)}</span>${per}</span></button>`
+				const total = Number(unitCost) * q
+				const per = q > 1 ? `<span class="price-per">${money(unitCost)}×${q}</span>` : ''
+				return `<button class="price" ${attrs} data-qty="${q}">${lab}<span class="pvwrap"><span class="pv">${money(total)}</span>${per}</span></button>`
 			}
 
 			// Case/Grip card — no product name; the phone model + style ARE the
@@ -2474,8 +2405,17 @@
 					if (!byProduct.has(k)) byProduct.set(k, [])
 					byProduct.get(k).push(r)
 				}
+				// Deterministic walk order within a stall: products with items STILL to
+				// buy first (so the shopper works top-down), then alphabetical/natural by
+				// title. Stable across re-renders, teammates, and reloads.
+				const products = [...byProduct.values()].sort((a, b) => {
+					const ar = a.some((r) => !cgDone(r)) ? 0 : 1
+					const br = b.some((r) => !cgDone(r)) ? 0 : 1
+					if (ar !== br) return ar - br
+					return String(a[0].title || '').localeCompare(String(b[0].title || ''), undefined, { numeric: true, sensitivity: 'base' })
+				})
 				let html = ''
-				for (const lines of byProduct.values()) {
+				for (const lines of products) {
 					if (lines.length < 2) {
 						html += cardHtml(lines[0], g)
 						continue
@@ -2532,7 +2472,7 @@
 				const status = aggStatus(a.rows)
 				const m = STATUS_META[status] || STATUS_META.Pending
 				const img = a.charm_code
-					? `<img class="thumb charm-thumb" loading="lazy" decoding="async" src="/api/route/charm-image?code=${encodeURIComponent(a.charm_code)}" onerror="this.classList.add('ph');this.removeAttribute('src')" />`
+					? `<img class="thumb charm-thumb" loading="lazy" decoding="async" src="${charmImageUrl(a.charm_code, a.charm_image_version)}" onerror="this.classList.add('ph');this.removeAttribute('src')" />`
 					: `<div class="thumb charm-thumb ph"></div>`
 				const orders = a.rows.length
 				const btn = done
@@ -2576,6 +2516,7 @@
 					a.qty = a.rows.reduce((n, r) => n + (r.quantity || 1), 0)
 					a.done = a.rows.every(charmDone)
 					a.charm_cost = a.rows[0] ? a.rows[0].charm_cost : null
+					a.charm_image_version = a.rows[0] ? a.rows[0].charm_image_version || '' : ''
 				}
 				arr.sort((a, b) => String(a.charm_code || '~').localeCompare(String(b.charm_code || '~'), undefined, { numeric: true }))
 				return arr
@@ -2936,24 +2877,102 @@
 				lastFocus = null
 			}
 			// Close whichever overlay is on top (Escape / back-gesture friendly).
-			function closeTopOverlay() {
-				if ($('zoomBg').classList.contains('open')) return closeZoom(), true
-				if ($('priceBg').classList.contains('open')) return closePriceSheet(), true
-				if ($('sheetBg').classList.contains('open')) return closeSheet(), true
-				if (mapOpen()) return closeMap(), true
-				if (drawerOpen()) return closeDrawer(), true
+			// `fromPop` is true when the close originates from a hardware/browser Back
+			// press so the manager knows the history entry is already consumed.
+			function closeTopOverlay(fromPop) {
+				if ($('zoomBg').classList.contains('open')) return closeZoom(fromPop), true
+				if ($('priceBg').classList.contains('open')) return closePriceSheet(fromPop), true
+				if ($('sheetBg').classList.contains('open')) return closeSheet(fromPop), true
+				if (mapOpen()) return closeMap(fromPop), true
+				if (drawerOpen()) return closeDrawer(fromPop), true
 				return false
 			}
+
+			// ── Overlay lifecycle manager ────────────────────────────────────────
+			// One place owns the cross-cutting concerns for every modal overlay
+			// (status sheet, price sheet, map, drawer, image zoom):
+			//   • Hardware/browser BACK closes the top overlay instead of leaving the
+			//     page — via a pushed history entry per open + a single popstate handler.
+			//   • The page behind is scroll-locked so the list can't move under a sheet.
+			//   • Focus is trapped inside the top overlay (Tab wraps) for keyboard/AT.
+			// Design: every OPEN pushes one history entry; a PROGRAMMATIC close consumes
+			// it via history.back() (guarded by `suppress` so it doesn't re-close); a
+			// BACK press is handled by popstate closing the top overlay directly. Depth
+			// stays balanced across any mix of the two paths, including stacked overlays.
+			const Overlay = (() => {
+				const trapStack = [] // dialog containers, innermost last (for focus trap)
+				let depth = 0 // pushed history entries not yet consumed
+				let suppress = 0 // popstate events to swallow (from our own history.back)
+				const root = document.documentElement
+
+				function opened(container) {
+					if (!trapStack.length) root.classList.add('scroll-lock')
+					trapStack.push(container || null)
+					depth++
+					history.pushState({ shopOverlay: depth }, '')
+				}
+				function closed(fromPop) {
+					if (trapStack.length) trapStack.pop()
+					if (!trapStack.length) root.classList.remove('scroll-lock')
+					if (fromPop === true) {
+						// popstate already decremented depth and moved history back.
+						return
+					}
+					if (depth > 0) {
+						depth--
+						suppress++
+						history.back()
+					}
+				}
+				window.addEventListener('popstate', () => {
+					if (suppress > 0) return void suppress--
+					if (depth > 0) {
+						depth--
+						closeTopOverlay(true) // synchronous DOM close; won't touch history
+					}
+				})
+				return {
+					opened,
+					closed,
+					topTrap: () => trapStack[trapStack.length - 1] || null,
+				}
+			})()
+
+			// Keep Tab focus inside the top overlay (light, standard focus trap).
+			document.addEventListener('keydown', (e) => {
+				if (e.key !== 'Tab') return
+				const box = Overlay.topTrap()
+				if (!box) return
+				const nodes = [...box.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(
+					(n) => n.offsetWidth || n.offsetHeight || n === document.activeElement,
+				)
+				if (!nodes.length) return void e.preventDefault()
+				const first = nodes[0]
+				const last = nodes[nodes.length - 1]
+				if (!box.contains(document.activeElement)) {
+					e.preventDefault()
+					first.focus()
+				} else if (e.shiftKey && document.activeElement === first) {
+					e.preventDefault()
+					last.focus()
+				} else if (!e.shiftKey && document.activeElement === last) {
+					e.preventDefault()
+					first.focus()
+				}
+			})
 
 			function openDrawer() {
 				rememberFocus()
 				renderTree()
 				$('drawerBg').classList.add('open')
+				Overlay.opened($('drawer'))
 				$('drawerClose').focus()
 			}
-			function closeDrawer() {
+			function closeDrawer(fromPop) {
+				if (!$('drawerBg').classList.contains('open')) return
 				$('drawerBg').classList.remove('open')
 				restoreFocus()
+				Overlay.closed(fromPop)
 			}
 
 			// Jump from a drawer leaf to its group: expand it, scroll it into view
@@ -3168,6 +3187,7 @@
 
 			function openMap() {
 				if (!FLOOR_LAYOUT || !FLOOR_LAYOUT.length) return
+				const wasOpen = mapOpen()
 				rememberFocus()
 				mapLocateMode = false
 				mapLocateTarget = ''
@@ -3191,17 +3211,20 @@
 				set3d(false) // open flat (readable); user can tap 3D to tilt
 				renderMap()
 				$('mapBg').classList.add('open')
+				if (!wasOpen) Overlay.opened($('mapBg'))
 				// Open framing the ENTIRE floor so no stall is hidden below the fold
 				// (e.g. A201-202 at the far end). Detail is a pinch / double-tap away.
 				requestAnimationFrame(() => requestAnimationFrame(fitMap))
 				$('mapClose').focus()
 			}
-			function closeMap() {
+			function closeMap(fromPop) {
+				if (!mapOpen()) return
 				$('mapBg').classList.remove('open')
 				$('mapBody').classList.remove('locating')
 				mapLocateMode = false
 				mapLocateTarget = ''
 				restoreFocus()
+				Overlay.closed(fromPop)
 			}
 
 			// Which floor index holds a given stall code (or -1).
@@ -3218,6 +3241,7 @@
 			// shopper doesn't know where a shop is.
 			function openMapAt(code) {
 				if (!FLOOR_LAYOUT || !FLOOR_LAYOUT.length) return
+				const wasOpen = mapOpen()
 				const norm = mapNorm(code)
 				mapLocateTarget = norm
 				const fi = floorIdxForStall(norm)
@@ -3227,6 +3251,7 @@
 				set3d(false)
 				renderMap()
 				$('mapBg').classList.add('open')
+				if (!wasOpen) Overlay.opened($('mapBg'))
 				$('mapClose').focus()
 				requestAnimationFrame(() =>
 					requestAnimationFrame(() => {
@@ -3715,13 +3740,16 @@
 				sheetTarget = { rows: relevant.length ? relevant : rowsArr, compKey, field }
 				renderSheet()
 				$('sheetBg').classList.add('open')
+				Overlay.opened($('sheet'))
 				const first = $('sheetOpts').querySelector('.opt')
 				if (first) first.focus()
 			}
-			function closeSheet() {
+			function closeSheet(fromPop) {
+				if (!$('sheetBg').classList.contains('open')) return
 				$('sheetBg').classList.remove('open')
 				sheetTarget = null
 				restoreFocus()
+				Overlay.closed(fromPop)
 			}
 
 			// ── Price editor ─────────────────────────────────────────────────────
@@ -3742,7 +3770,69 @@
 					ROWS.forEach((r) => {
 						if (String(r.charm_code || '').trim() === cd) r.charm_cost = cost
 					})
+					// Charm subtotals read from the (cached) aggregate objects, so keep
+					// them in sync too — otherwise the stall total lags behind the chip.
+					LAST_GROUPS.forEach((g) => (g.aggs || []).forEach((a) => {
+						if (String(a.charm_code || '').trim() === cd) a.charm_cost = cost
+					}))
 				}
+			}
+			// Recompute + patch ONE group's subtotal chip in place (insert / update /
+			// remove as the total crosses zero).
+			function updateGroupSubtotal(groupEl, g) {
+				const head = groupEl.querySelector('.ghead')
+				if (!head) return
+				const st = groupSubtotal(g)
+				let el = head.querySelector('.gtotal')
+				if (st.sum <= 0) {
+					if (el) el.remove()
+					return
+				}
+				const text = money(st.sum) + (st.anyUnpriced ? '+' : '')
+				if (el) {
+					el.textContent = text
+					return
+				}
+				el = document.createElement('span')
+				el.className = 'gtotal'
+				el.textContent = text
+				head.insertBefore(el, head.querySelector('.gcount'))
+			}
+			// Patch every price chip a cost change touches — plus the affected stall
+			// subtotals — WITHOUT rebuilding the list (no flash, keeps scroll + any
+			// open interaction). Costs are shared by normalised title / charm code, so
+			// we match the whole equivalence class, not one exact chip.
+			function patchPricesLocally(kind, key, cost, part) {
+				const cleared = cost == null || cost === ''
+				const setChip = (chip) => {
+					const qty = Number(chip.dataset.qty) || 1
+					const wrap = chip.querySelector('.pvwrap')
+					if (!wrap) return
+					if (cleared) {
+						chip.classList.add('unset')
+						wrap.innerHTML = `<span class="pv">${t('setPrice')}</span>`
+					} else {
+						chip.classList.remove('unset')
+						const per = qty > 1 ? `<span class="price-per">${money(cost)}×${qty}</span>` : ''
+						wrap.innerHTML = `<span class="pv">${money(Number(cost) * qty)}</span>${per}`
+					}
+				}
+				if (kind === 'product') {
+					const tn = normTitle(key)
+					const p = part === 'grip' ? 'grip' : 'case'
+					document.querySelectorAll('.price[data-kind="product"][data-part="' + p + '"]').forEach((chip) => {
+						if (normTitle(chip.dataset.title || '') === tn) setChip(chip)
+					})
+				} else {
+					const cd = String(key || '').trim()
+					document.querySelectorAll('.price[data-kind="charm"]').forEach((chip) => {
+						if (String(chip.dataset.code || '').trim() === cd) setChip(chip)
+					})
+				}
+				document.querySelectorAll('.group[data-gidx]').forEach((groupEl) => {
+					const g = LAST_GROUPS[Number(groupEl.dataset.gidx)]
+					if (g) updateGroupSubtotal(groupEl, g)
+				})
 			}
 			function openPriceSheet(ds) {
 				const kind = ds.kind
@@ -3771,15 +3861,18 @@
 				const inp = $('priceInput')
 				inp.value = unit != null ? unit : ''
 				$('priceBg').classList.add('open')
+				Overlay.opened($('priceSheet'))
 				setTimeout(() => {
 					inp.focus()
 					inp.select()
 				}, 60)
 			}
-			function closePriceSheet() {
+			function closePriceSheet(fromPop) {
+				if (!$('priceBg').classList.contains('open')) return
 				$('priceBg').classList.remove('open')
 				priceTarget = null
 				restoreFocus()
+				Overlay.closed(fromPop)
 			}
 			async function savePrice(clear) {
 				if (!priceTarget) return
@@ -3798,9 +3891,9 @@
 						cost = Math.round(n * 100) / 100
 					}
 				}
-				// Optimistic: reflect immediately, then persist.
+				// Optimistic: reflect immediately (surgical — no list rebuild), then persist.
 				applyCostLocally(kind, key, cost, part)
-				render()
+				patchPricesLocally(kind, key, cost, part)
 				closePriceSheet()
 				try {
 					const body = kind === 'product' ? { kind, title: key, part, cost } : { kind, code: key, cost }
@@ -3825,11 +3918,14 @@
 				rememberFocus()
 				$('zoomImg').src = src.replace('il_300x300.', 'il_570xN.')
 				$('zoomBg').classList.add('open')
+				Overlay.opened($('zoomBg'))
 			}
-			function closeZoom() {
+			function closeZoom(fromPop) {
+				if (!$('zoomBg').classList.contains('open')) return
 				$('zoomBg').classList.remove('open')
 				$('zoomImg').removeAttribute('src')
 				restoreFocus()
+				Overlay.closed(fromPop)
 			}
 
 			// ── Event delegation ─────────────────────────────────────────────────
@@ -3914,19 +4010,15 @@
 				if (e.key === 'Enter') savePrice(false)
 			})
 
-			$('zoomBg').addEventListener('click', closeZoom)
+			$('zoomBg').addEventListener('click', () => closeZoom())
 
 			document.addEventListener('keydown', (e) => {
-				if (e.key === 'Escape') {
-					closeZoom()
-					closeDrawer()
-					closeSheet()
-				}
+				if (e.key === 'Escape') closeTopOverlay(false)
 			})
 
 			// ── Navigation drawer wiring ─────────────────────────────────────────
 			$('menuBtn').addEventListener('click', openDrawer)
-			$('drawerClose').addEventListener('click', closeDrawer)
+			$('drawerClose').addEventListener('click', () => closeDrawer())
 			$('drawerBg').addEventListener('click', (e) => {
 				if (e.target === $('drawerBg')) closeDrawer()
 			})
@@ -3947,7 +4039,7 @@
 
 			// ── Supplier map wiring ──────────────────────────────────────────────
 			$('mapBtn').addEventListener('click', openMap)
-			$('mapClose').addEventListener('click', closeMap)
+			$('mapClose').addEventListener('click', () => closeMap())
 			$('mapFloors').addEventListener('click', (e) => {
 				const b = e.target.closest('.map-floor[data-fi]')
 				if (!b) return
@@ -4074,24 +4166,6 @@
 				if (mapOpen()) fitMap()
 			})
 
-			// ── Filters wiring ───────────────────────────────────────────────────
-			$('showDoneBtn').addEventListener('click', () => {
-				showDone = !showDone
-				$('showDoneBtn').classList.toggle('on', showDone)
-				render()
-			})
-			$('advBtn').addEventListener('click', () => {
-				$('advFilters').classList.toggle('open')
-				$('advBtn').classList.toggle('on')
-			})
-			let searchT = null
-			$('searchInput').addEventListener('input', (e) => {
-				clearTimeout(searchT)
-				searchT = setTimeout(() => {
-					searchQ = e.target.value.trim()
-					render()
-				}, 180)
-			})
 			$('langBtn').addEventListener('click', () => {
 				LANG = LANG === 'en' ? 'zh' : 'en'
 				try {
@@ -4108,55 +4182,7 @@
 				} catch {}
 				location.href = '/login'
 			})
-			for (const id of ['shopFilter', 'dateFrom', 'dateTo']) {
-				$(id).addEventListener('change', () => {
-					saveFilters()
-					load(true)
-				})
-			}
-
-			function saveFilters() {
-				try {
-					localStorage.setItem(
-						LS,
-						JSON.stringify({ shop: $('shopFilter').value, from: $('dateFrom').value, to: $('dateTo').value, showDone }),
-					)
-				} catch {}
-			}
-			function loadFilters() {
-				try {
-					const f = JSON.parse(localStorage.getItem(LS) || '{}')
-					if (f.shop) $('shopFilter').value = f.shop
-					if (f.from) $('dateFrom').value = f.from
-					if (f.to) $('dateTo').value = f.to
-					showDone = !!f.showDone
-					$('showDoneBtn').classList.toggle('on', showDone)
-				} catch {}
-			}
-
 			// ── Data loading ─────────────────────────────────────────────────────
-			async function loadShops() {
-				try {
-					const r = await fetch('/api/shops', { credentials: 'same-origin' })
-					if (!r.ok) return
-					const data = await r.json()
-					const shops = data.shops || data || []
-					const sel = $('shopFilter')
-					const cur = sel.value
-					sel.innerHTML = `<option value="">${t('allShops')}</option>`
-					for (const s of shops) {
-						const id = s.shop_id || s.id
-						const name = s.shop_name || s.name || id
-						if (!id) continue
-						const o = document.createElement('option')
-						o.value = id
-						o.textContent = name
-						sel.appendChild(o)
-					}
-					sel.value = cur
-				} catch {}
-			}
-
 			async function whoAmI() {
 				try {
 					const r = await fetch('/api/auth/me', { credentials: 'same-origin' })
@@ -4175,12 +4201,8 @@
 
 			async function load(showSpinner) {
 				if (showSpinner) $('list').innerHTML = `<div class="state"><div class="spinner"></div>${t('loading')}</div>`
-				const params = new URLSearchParams()
-				if ($('shopFilter').value) params.set('shop_id', $('shopFilter').value)
-				if ($('dateFrom').value) params.set('date_from', $('dateFrom').value)
-				if ($('dateTo').value) params.set('date_to', $('dateTo').value)
 				try {
-					const r = await fetch('/api/shop/route?' + params.toString(), { credentials: 'same-origin' })
+					const r = await fetch('/api/shop/route', { credentials: 'same-origin' })
 					if (r.status === 401) {
 						location.href = '/login'
 						return
@@ -4255,12 +4277,8 @@
 				// Safe-to-refresh guards: foreground only, no unsaved edits to clobber,
 				// and never yank the list out from under an open sheet/map/drawer.
 				if (document.hidden || pending.size || anyOverlayOpen()) return
-				const params = new URLSearchParams()
-				if ($('shopFilter').value) params.set('shop_id', $('shopFilter').value)
-				if ($('dateFrom').value) params.set('date_from', $('dateFrom').value)
-				if ($('dateTo').value) params.set('date_to', $('dateTo').value)
 				try {
-					const r = await fetch('/api/shop/route?' + params.toString(), { credentials: 'same-origin' })
+					const r = await fetch('/api/shop/route', { credentials: 'same-origin' })
 					if (r.status === 401) return (location.href = '/login')
 					if (!r.ok) return
 					const data = await r.json()
@@ -4290,6 +4308,17 @@
 			let sseOpenTimer = null
 			let sseRetryTimer = null
 			let pollTimer = null
+			let routeRefetchTimer = null
+
+			// Debounced full re-sync, used when a pushed event means a line just entered
+			// or left the route (design switched/reverted, issue flagged/resolved/…): the
+			// list membership changed, so a per-line patch can't help — pull fresh. Routes
+			// through reconcile() so it stays guard-aware (won't yank the UI mid-edit or
+			// under an open sheet) and never flashes when nothing actually changed.
+			function scheduleRouteRefetch() {
+				clearTimeout(routeRefetchTimer)
+				routeRefetchTimer = setTimeout(() => reconcile(), 400)
+			}
 
 			function startPolling() {
 				if (pollTimer) return
@@ -4367,12 +4396,20 @@
 						return
 					}
 					// A price was set/changed elsewhere — update matching lines + subtotals.
-					if (msg.type === 'cost') {
-						const key = msg.kind === 'product' ? msg.title : msg.code
-						if (key != null) {
-							applyCostLocally(msg.kind, key, msg.cost, msg.part)
-							render()
-						}
+				if (msg.type === 'cost') {
+					const key = msg.kind === 'product' ? msg.title : msg.code
+					if (key != null) {
+						applyCostLocally(msg.kind, key, msg.cost, msg.part)
+						patchPricesLocally(msg.kind, key, msg.cost, msg.part)
+					}
+					return
+				}
+					// A route-membership/content change we can't express as a per-line
+					// patch (design switched/reverted, issue flagged/resolved/reopened/
+					// deleted). A line may have just ENTERED or LEFT the route, so pull a
+					// fresh list (debounced to coalesce bursts).
+					if (msg.type === 'refresh') {
+						scheduleRouteRefetch()
 						return
 					}
 					if (msg.type !== 'assign') return
@@ -4381,7 +4418,10 @@
 					if (pending.has(k)) return
 					const r = rowIndex.get(k)
 					if (!r) {
-						// A line we don't have yet (new order / different filter) — refresh soon.
+						// A line we don't have yet — it just entered the route (e.g. a newly
+						// switched or un-held order). Deliver on the "refresh soon" promise:
+						// pull a fresh list so it appears, instead of silently dropping it.
+						scheduleRouteRefetch()
 						return
 					}
 					const before = fullyPurchased(r)
@@ -4445,13 +4485,11 @@
 				syncStickTop()
 				if (window.ResizeObserver) new ResizeObserver(syncStickTop).observe(document.querySelector('header'))
 				window.addEventListener('resize', syncStickTop)
-				loadFilters()
 				// Start real-time + identity checks in PARALLEL with loading the list,
 				// instead of waiting for each round-trip in series — faster first paint.
 				whoAmI()
 				connectSSE()
 				loadFloorMap()
-				await loadShops()
 				await load(true)
 				if ('serviceWorker' in navigator) {
 					navigator.serviceWorker.register('/shop-sw.js', { scope: '/shop' }).catch(() => {})

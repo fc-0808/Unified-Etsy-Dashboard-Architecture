@@ -168,11 +168,8 @@
 				display: none !important;
 			}
 			/* Reveal packer surfaces ONLY in packing mode, each with the correct display
-			   type (block banner, flex preset row). These two-class selectors outrank the
-			   base `.packer-only` rule, so visibility is never decided by source order. */
-			body.mode-packer .packer-banner {
-				display: block;
-			}
+			   type (flex preset row). These two-class selectors outrank the base
+			   `.packer-only` rule, so visibility is never decided by source order. */
 			body.mode-packer .packer-presets {
 				display: flex;
 			}
@@ -197,58 +194,6 @@
 				padding: 3px 8px;
 				border-radius: 999px;
 				margin-left: 4px;
-			}
-
-			/* The packer's instructional banner — big, friendly, step-by-step. */
-			.packer-banner {
-				background: linear-gradient(135deg, rgba(245, 100, 0, 0.12), rgba(245, 100, 0, 0.04));
-				border: 1px solid rgba(245, 100, 0, 0.3);
-				border-radius: var(--radius);
-				padding: 18px 20px;
-				margin-bottom: 16px;
-			}
-			.packer-banner h2 {
-				font-size: 19px;
-				margin: 0 0 4px;
-			}
-			.packer-banner .pb-sub {
-				color: var(--muted);
-				font-size: 13px;
-				margin-bottom: 14px;
-			}
-			.packer-steps {
-				display: flex;
-				flex-wrap: wrap;
-				gap: 12px;
-			}
-			.packer-step {
-				display: flex;
-				align-items: center;
-				gap: 10px;
-				background: var(--surface);
-				border: 1px solid var(--border);
-				border-radius: 9px;
-				padding: 10px 14px;
-				flex: 1 1 200px;
-				min-width: 200px;
-			}
-			.packer-step .ps-num {
-				display: inline-flex;
-				align-items: center;
-				justify-content: center;
-				width: 26px;
-				height: 26px;
-				border-radius: 50%;
-				background: var(--accent);
-				color: #fff;
-				font-weight: 800;
-				font-size: 13px;
-				flex-shrink: 0;
-			}
-			.packer-step .ps-text {
-				font-size: 13.5px;
-				font-weight: 600;
-				line-height: 1.35;
 			}
 
 			/* Big segmented queue switcher for the packer (replaces the dense
@@ -316,6 +261,33 @@
 				margin: -2px 0 16px;
 				align-items: center;
 				gap: 7px;
+			}
+			/* "Charms to buy" launcher — only shown in the Need-to-purchase queue.
+			   NOTE: no `display` here on purpose (see .packer-exchange-note note); the
+			   reveal rule below sets the display type in packing mode, and JS toggles
+			   the inline style per active queue. */
+			.packer-charm-bar {
+				margin: -6px 0 16px;
+			}
+			body.mode-packer .packer-charm-bar {
+				display: block;
+			}
+			.packer-charm-btn {
+				display: inline-flex;
+				align-items: center;
+				gap: 8px;
+				padding: 9px 16px;
+				font-size: 14px;
+				font-weight: 700;
+				color: #fff;
+				background: linear-gradient(135deg, #a78bfa, #818cf8);
+				border: 1px solid rgba(167, 139, 250, 0.5);
+				border-radius: 9px;
+				cursor: pointer;
+				transition: filter 0.12s ease;
+			}
+			.packer-charm-btn:hover {
+				filter: brightness(1.08);
 			}
 			/* Reassurance chip: orders set aside because they still owe a wrong-model
 			   supplier swap. Deliberately calm (amber, not red) — it's an FYI, not an
@@ -2980,6 +2952,82 @@
 				background: linear-gradient(135deg, rgba(167, 139, 250, 0.22), rgba(129, 140, 248, 0.18)) !important;
 				color: #ddd6fe !important;
 			}
+			/* ── Per-variant clarifying image ───────────────────────────────────── */
+			.item-fix-image {
+				display: inline-flex;
+				align-items: center;
+				gap: 4px;
+				margin-top: 6px;
+				margin-left: 6px;
+				padding: 2px 8px;
+				border-radius: 20px;
+				font-size: 10px;
+				font-weight: 600;
+				letter-spacing: 0.01em;
+				cursor: pointer;
+				white-space: nowrap;
+				color: var(--muted);
+				border: 1px dashed rgba(255, 255, 255, 0.18);
+				background: transparent;
+			}
+			.item-fix-image:hover {
+				color: #e2e8f0;
+				border-color: rgba(255, 255, 255, 0.4);
+				background: rgba(255, 255, 255, 0.05);
+			}
+			.item-fix-image.active {
+				color: #6ee7b7;
+				border: 1px solid rgba(16, 185, 129, 0.5);
+				background: rgba(16, 185, 129, 0.12);
+			}
+			.product-thumb-custom-img {
+				position: relative;
+				outline: 2px solid rgba(16, 185, 129, 0.55);
+				outline-offset: 1px;
+				border-radius: 8px;
+			}
+			.thumb-custom-mark {
+				position: absolute;
+				bottom: -4px;
+				right: -4px;
+				font-size: 11px;
+				line-height: 1;
+				padding: 2px;
+				border-radius: 6px;
+				background: rgba(6, 78, 59, 0.92);
+				border: 1px solid rgba(16, 185, 129, 0.55);
+			}
+			.style-img-grid {
+				display: grid;
+				grid-template-columns: 1fr 1fr;
+				gap: 14px;
+				margin: 12px 0 6px;
+			}
+			.style-img-cap {
+				font-size: 11px;
+				font-weight: 600;
+				color: var(--muted);
+				margin-bottom: 6px;
+			}
+			.style-img-preview {
+				width: 100%;
+				max-height: 190px;
+				object-fit: contain;
+				border-radius: 8px;
+				background: rgba(255, 255, 255, 0.04);
+				border: 1px solid rgba(255, 255, 255, 0.1);
+			}
+			.style-img-ph {
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				width: 100%;
+				height: 120px;
+				font-size: 32px;
+				border-radius: 8px;
+				background: rgba(255, 255, 255, 0.04);
+				border: 1px dashed rgba(255, 255, 255, 0.14);
+			}
 			/* ── Design-switch picker modal ─────────────────────────────────────── */
 			.switch-tabs {
 				display: flex;
@@ -3027,18 +3075,32 @@
 				overflow: hidden;
 				cursor: pointer;
 				background: rgba(255, 255, 255, 0.03);
-				transition: border-color 0.12s, transform 0.12s;
+				transition:
+					border-color 0.12s,
+					transform 0.12s;
 			}
-			.switch-card:hover { transform: translateY(-2px); border-color: rgba(167, 139, 250, 0.5); }
-			.switch-card.sel { border-color: #a78bfa; box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.4); }
-			.switch-card img, .switch-card .switch-card-ph {
+			.switch-card:hover {
+				transform: translateY(-2px);
+				border-color: rgba(167, 139, 250, 0.5);
+			}
+			.switch-card.sel {
+				border-color: #a78bfa;
+				box-shadow: 0 0 0 2px rgba(167, 139, 250, 0.4);
+			}
+			.switch-card img,
+			.switch-card .switch-card-ph {
 				width: 100%;
 				height: 170px;
 				object-fit: cover;
 				display: block;
 				background: rgba(255, 255, 255, 0.05);
 			}
-			.switch-card .switch-card-ph { display: flex; align-items: center; justify-content: center; font-size: 34px; }
+			.switch-card .switch-card-ph {
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				font-size: 34px;
+			}
 			.switch-card-title {
 				padding: 8px 10px;
 				font-size: 11.5px;
@@ -3049,7 +3111,13 @@
 				-webkit-box-orient: vertical;
 				overflow: hidden;
 			}
-			.switch-grid-empty { grid-column: 1 / -1; padding: 24px; text-align: center; color: var(--muted); font-size: 12.5px; }
+			.switch-grid-empty {
+				grid-column: 1 / -1;
+				padding: 24px;
+				text-align: center;
+				color: var(--muted);
+				font-size: 12.5px;
+			}
 			.switch-config {
 				display: grid;
 				grid-template-columns: 1fr 1fr;
@@ -3058,9 +3126,18 @@
 				padding-top: 14px;
 				border-top: 1px solid rgba(255, 255, 255, 0.08);
 			}
-			.switch-config .full { grid-column: 1 / -1; }
-			.switch-field-label { font-size: 11px; font-weight: 600; color: var(--muted); margin-bottom: 4px; display: block; }
-			.switch-input, .switch-select {
+			.switch-config .full {
+				grid-column: 1 / -1;
+			}
+			.switch-field-label {
+				font-size: 11px;
+				font-weight: 600;
+				color: var(--muted);
+				margin-bottom: 4px;
+				display: block;
+			}
+			.switch-input,
+			.switch-select {
 				width: 100%;
 				padding: 8px 10px;
 				border-radius: 8px;
@@ -3078,8 +3155,15 @@
 				color: var(--muted);
 				font-size: 12px;
 			}
-			.switch-upload:hover { border-color: rgba(167, 139, 250, 0.7); color: #ddd6fe; }
-			.switch-preview { max-height: 120px; border-radius: 8px; margin-top: 8px; }
+			.switch-upload:hover {
+				border-color: rgba(167, 139, 250, 0.7);
+				color: #ddd6fe;
+			}
+			.switch-preview {
+				max-height: 120px;
+				border-radius: 8px;
+				margin-top: 8px;
+			}
 			.switch-selected-hint {
 				margin-top: 10px;
 				font-size: 12px;
@@ -7047,6 +7131,21 @@
 				font-weight: 600;
 				color: #fbbf24;
 				margin-top: 3px;
+			}
+			/* Read-only supplier / assignment cells shown to employees (no owner edits). */
+			.cpm-shop-ro {
+				font-size: 13px;
+				font-weight: 600;
+				color: var(--text);
+			}
+			.cpm-shop-ro.cpm-shop-none {
+				color: var(--muted);
+				font-weight: 500;
+			}
+			.cpm-assign-ro {
+				font-size: 12px;
+				font-weight: 600;
+				color: #fbbf24;
 			}
 			.cpm-detail-btn {
 				background: none;
@@ -13045,6 +13144,7 @@
 					</span>
 					<input type="text" id="shipSearch" placeholder="Search tracking # or buyer…" oninput="debouncedShipSearch()" style="min-width: 220px" />
 					<button class="btn-sm" onclick="loadShipping()" title="Reload the shipment list">↻ Refresh</button>
+					<button class="btn-sm" id="shipDownloadStuck" onclick="downloadStuckTracking()" title="Download the stuck parcels' tracking numbers as a CSV — a ready-to-paste list for 4PX batch queries / complaints (honours the shop, date and search filters).">⬇ Download stuck</button>
 					<span id="shipMeta" class="earn-meta" style="margin-left: auto"></span>
 				</div>
 
@@ -13077,26 +13177,25 @@
 				<div style="text-align: center; margin-top: 14px">
 					<button class="btn-sm" id="shipLoadMore" onclick="loadMoreShipments()" style="display: none">Load more</button>
 				</div>
-				<p class="earn-note">Live 4PX parcel status, refreshed automatically by the tracking sync. A parcel is flagged <span class="ship-chip ship-stuck">stuck</span> when it's in transit with no new carrier scan for ${''}<strong id="shipStuckDaysNote">10</strong> days — typically held at customs. Click any tracking number for the full event timeline and a one-click <em>“copy details for complaint”</em> to escalate to 4PX. The official live page opens from the timeline's “Track on 4PX →” link.</p>
+				<p class="earn-note">Live 4PX parcel status, refreshed automatically by the tracking sync. A parcel is flagged <span class="ship-chip ship-stuck">stuck</span> when its full timeline shows a customs loop, repeated scans, an exception, or no carrier movement for ${''}<strong id="shipStuckDaysNote">10</strong>+ days — typically held at customs. <strong>Open parcels that are still in transit stay on this board no matter how long ago they shipped</strong>, so a parcel stuck in customs for weeks never falls out of the date window. Click any tracking number for the full event timeline and a one-click <em>“copy details for complaint”</em> to escalate to 4PX. The official live page opens from the timeline's “Track on 4PX →” link.</p>
 			</div>
 
 			<!-- ── ORDERS tab ──────────────────────────────────────────── -->
 			<div id="tab-orders">
-				<!-- Packing Mode banner + simplified queue switcher (packer-only) -->
-				<div class="packer-banner packer-only">
-					<h2>📦 Packing Station</h2>
-					<div class="pb-sub">Work the queue from top to bottom. The most urgent orders are listed first.</div>
-					<div class="packer-steps">
-						<div class="packer-step"><span class="ps-num">1</span><span class="ps-text">Pick the order's items and pack the parcel</span></div>
-						<div class="packer-step"><span class="ps-num">2</span><span class="ps-text">Click “📦 Ship with 4PX” to make the label</span></div>
-						<div class="packer-step"><span class="ps-num">3</span><span class="ps-text">Click “📦 Mark packaged” when it's sealed &amp; ready</span></div>
-					</div>
-				</div>
+				<!-- Packing Mode simplified queue switcher (packer-only) -->
 				<div class="packer-presets packer-only" id="packerPresets">
+					<button type="button" class="packer-preset-btn" data-preset="needpurchase" onclick="ROLE.applyPreset('needpurchase')">🛒 Need to purchase<span class="pp-count" style="display: none"></span></button>
 					<button type="button" class="packer-preset-btn active" data-preset="topack" onclick="ROLE.applyPreset('topack')">📦 To pack &amp; ship<span class="pp-count" style="display: none"></span></button>
 					<button type="button" class="packer-preset-btn" data-preset="packaged" onclick="ROLE.applyPreset('packaged')">✅ Recently packaged<span class="pp-count" style="display: none"></span></button>
 				</div>
 				<div class="packer-hint packer-only" id="packerQueueHint"></div>
+				<!-- Charm shopping list — shown only in the Need-to-purchase queue. Opens the
+				     same "Charms to Buy" modal the owner Route tab uses, so an employee can
+				     see every charm still to buy (with supplier/stall + progress) and mark
+				     pieces purchased. Visibility toggled in ROLE.applyPreset(). -->
+				<div class="packer-charm-bar packer-only" id="packerCharmBar" style="display: none">
+					<button type="button" class="packer-charm-btn" onclick="openCharmPurchaseModal()" title="Every charm needed for the orders still to buy — grouped with totals, supplier and purchase status. Mark pieces purchased as you shop.">✨ Charms to buy</button>
+				</div>
 				<!-- Reassurance chip: orders held out of the pack queue because they still
 				     owe a wrong-model supplier swap. Hidden when none (display set in JS). -->
 				<div class="packer-exchange-note packer-only" id="packerExchangeNote" style="display: none"></div>
@@ -14486,13 +14585,12 @@
 				'Signed in as': '登录账号：',
 				'👥 Team': '👥 团队',
 				'📋 Activity': '📋 操作记录',
-				'📦 Packing Station': '📦 打包工作台',
-				'Work the queue from top to bottom. The most urgent orders are listed first.': '从上到下依次处理订单。最紧急的订单排在最前面。',
-				"Pick the order's items and pack the parcel": '拣选订单商品并装箱打包',
-				'Click “📦 Ship with 4PX” to make the label': '点击“📦 用 4PX 发货”生成面单',
-				"Click “📦 Mark packaged” when it's sealed & ready": '封箱完成后点击“📦 标记已打包”',
+				'🛒 Need to purchase': '🛒 待采购',
+				'✨ Charms to buy': '✨ 待购吊饰',
+				'Awaiting charm code': '待分配吊饰编号',
 				'📦 To pack & ship': '📦 待打包发货',
 				'✅ Recently packaged': '✅ 最近已打包',
+				'🛒 These orders still need products bought. Work top to bottom — tap each product’s chip once you’ve purchased it. When everything in an order is purchased it moves to “To pack & ship”.': '🛒 这些订单还有商品需要采购。请从上到下逐个处理 —— 采购好某个商品后，点击该商品的标签。当一个订单的所有商品都已采购，它会自动进入“待打包发货”。',
 				'👉 These are ready to pack. Work top to bottom — pack each parcel, then press “Ship with 4PX”. Most urgent first.': '👉 这些订单可以打包了。请从上到下逐个处理 —— 先打包，再点击“用 4PX 发货”。最紧急的排在最前面。',
 				'Parcels you packed recently, newest first. Review them here — if something looks wrong, open the order and press “Unmark packaged” to fix it.': '你最近打包的包裹，最新的排在最前面。可在此复核 —— 如发现异常，打开订单并点击“取消已打包标记”即可更正。',
 				'🔁 {n} order is awaiting a supplier swap — set aside until it can be exchanged.': '🔁 有 {n} 个订单正在等待到供应商处换货 —— 已暂时搁置，待换货完成后再打包。',
@@ -14693,6 +14791,14 @@
 				// Queue presets — each maps to the existing order-filter selects so we
 				// reuse the battle-tested fetchOrders() pipeline rather than forking it.
 				const PRESETS = {
+					// The buy queue — orders that still have products to SOURCE before they
+					// can be packed. Uses the canonical shipped=needs_purchase scope (the
+					// exact complement of Ready-to-pack): every not-yet-fully-purchased order
+					// that still has to leave the warehouse. Oldest first so the most urgent
+					// (closest to its Etsy ship-by deadline) is worked first. Mark each
+					// product/component purchased with the chips on the row as you source it;
+					// the order then flows automatically into "To pack & ship".
+					needpurchase: { shipped: 'needs_purchase', purchase: '', packaged: '', sort: 'oldest' },
 					// The packing queue MUST match the owner's canonical "Ready to pack"
 					// (shipped=ready_to_pack): fully purchased, not-yet-packaged orders that
 					// still need to leave the warehouse — this INCLUDES pre-transit parcels
@@ -14708,11 +14814,13 @@
 				}
 				// Query strings used to live-count each preset (mirror the PRESETS above).
 				const PRESET_COUNT_QS = {
+					needpurchase: 'shipped=needs_purchase',
 					topack: 'shipped=ready_to_pack',
 					packaged: 'shipped=recently_packaged',
 				}
 				// Plain-language explanation shown under the tabs for the active queue.
 				const PRESET_HINT = {
+					needpurchase: '🛒 These orders still need products bought. Work top to bottom — tap each product’s chip once you’ve purchased it. When everything in an order is purchased it moves to “To pack & ship”.',
 					topack: '👉 These are ready to pack. Work top to bottom — pack each parcel, then press “Ship with 4PX”. Most urgent first.',
 					packaged: 'Parcels you packed recently, newest first. Review them here — if something looks wrong, open the order and press “Unmark packaged” to fix it.',
 				}
@@ -14786,6 +14894,9 @@
 					document.querySelectorAll('#packerPresets .packer-preset-btn').forEach((b) => b.classList.toggle('active', b.dataset.preset === key))
 					const hint = document.getElementById('packerQueueHint')
 					if (hint) hint.textContent = I18N.t(PRESET_HINT[key] || '')
+					// The "Charms to buy" launcher only makes sense in the buy queue.
+					const charmBar = document.getElementById('packerCharmBar')
+					if (charmBar) charmBar.style.display = key === 'needpurchase' ? 'block' : 'none'
 					if (typeof loadOrders === 'function') loadOrders()
 					if (typeof _updateDeadlineSelectBtns === 'function') _updateDeadlineSelectBtns()
 				}
@@ -15086,8 +15197,23 @@
 					{ re: /\/orders\/bulk-needs-purchase$/, t: (d) => [`Updated the purchasing flag on ${val(d, 'receipt_ids') || 'several'} orders (bulk)`, ''] },
 					{ re: /\/orders\/[^/]+\/needs-purchase$/, t: (d) => [`Flagged ${orderRef(d)} as needs-purchase`, ''] },
 					{ re: /\/orders\/[^/]+\/clear-needs-purchase$/, t: (d) => [`Cleared the needs-purchase flag on ${orderRef(d)}`, ''] },
-					{ re: /\/orders\/[^/]+\/items\/component-status$/, t: (d) => [`Updated a component status on ${orderRef(d)}`, ''] },
-					{ re: /\/orders\/[^/]+\/items\/purchase-state$/, t: (d) => [`Updated a purchase state on ${orderRef(d)}`, ''] },
+					{
+						re: /\/orders\/[^/]+\/items\/component-status$/,
+						t: (d) => {
+							const comp = { case: 'Case', grip: 'Grip', charm: 'Charm' }[String(val(d, 'component') || '').toLowerCase()] || 'component'
+							const status = val(d, 'status')
+							const action = status ? `Set the ${comp} to “${status}” on ${orderRef(d)}` : `Updated the ${comp} status on ${orderRef(d)}`
+							return [action, ctx(d, [['Product', 'title']])]
+						},
+					},
+					{
+						re: /\/orders\/[^/]+\/items\/purchase-state$/,
+						t: (d) => {
+							const np = String(val(d, 'needs_purchase') || '')
+							const action = np === 'false' ? `Marked a product purchased on ${orderRef(d)}` : np === 'true' ? `Flagged a product as needs-purchase on ${orderRef(d)}` : `Updated a purchase state on ${orderRef(d)}`
+							return [action, ctx(d, [['Product', 'title']])]
+						},
+					},
 					// ── Orders: fulfilment issues ─────────────────────────────
 					{ re: /\/orders\/[^/]+\/issues$/, t: (d) => [`Flagged a fulfilment issue on ${orderRef(d)}`, ''] },
 					{ re: /\/issues\/[^/]+\/notify$/, t: (d) => [`Marked the buyer notified for issue #${val(d, 'id')}`, ''] },
@@ -15269,7 +15395,14 @@
 						t: (d) => {
 							const cleared = d.cost == null || d.cost === ''
 							const what = d.kind === 'charm' ? 'charm' : d.part === 'grip' ? 'grip' : 'case'
-							return [`${cleared ? 'Cleared' : 'Set'} the ${what} purchase cost`, ctx(d, [['Product', 'title'], ['Charm', 'code'], ['Cost', 'cost']])]
+							return [
+								`${cleared ? 'Cleared' : 'Set'} the ${what} purchase cost`,
+								ctx(d, [
+									['Product', 'title'],
+									['Charm', 'code'],
+									['Cost', 'cost'],
+								]),
+							]
 						},
 					},
 					// ── Team / admin ──────────────────────────────────────────
@@ -15588,9 +15721,48 @@
 					_syncLogLoaded = false
 					loadSyncLog()
 				}
+				_routeTabActive = name === 'route'
 				if (name === 'route') loadRouteTab()
 				if (name === 'earnings') initEarnings()
 				if (name === 'shipping') initShipping()
+			}
+
+			// ── Live Route-tab refresh ────────────────────────────────────────────
+			// The Route tab re-fetches on navigation, but a design switch or issue
+			// change made in the Orders tab (or by a teammate) can add/remove a line
+			// while the Route tab is already open. Subscribe to the shared route event
+			// bus and re-pull the dashboard when membership actually changes, so the
+			// Route tab never shows a stale set. Debounced to coalesce bursts, and only
+			// acts while the Route tab is visible (so it never fights another tab).
+			let _routeTabActive = false
+			let _routeEventSource = null
+			let _routeRefetchTimer = null
+			function _scheduleRouteDashboardRefetch() {
+				clearTimeout(_routeRefetchTimer)
+				_routeRefetchTimer = setTimeout(() => {
+					if (_routeTabActive) loadRouteDashboard()
+				}, 600)
+			}
+			function _ensureRouteEventStream() {
+				if (_routeEventSource) return
+				try {
+					_routeEventSource = new EventSource(`${API}/api/shop/stream`)
+					_routeEventSource.onmessage = (ev) => {
+						let msg
+						try {
+							msg = JSON.parse(ev.data)
+						} catch {
+							return
+						}
+						// 'refresh' = a line entered/left the route (switch / issue change).
+						if (msg && msg.type === 'refresh') _scheduleRouteDashboardRefetch()
+					}
+					_routeEventSource.onerror = () => {
+						/* EventSource auto-reconnects; tab-navigation also re-fetches */
+					}
+				} catch {
+					/* stream optional — navigating to the tab still re-fetches */
+				}
 			}
 
 			// ── Helpers ───────────────────────────────────────────────────
@@ -16823,6 +16995,15 @@
 						// Etsy "Complete order" action is replaced by a local shipped toggle plus
 						// Edit / Delete controls.
 						const isManual = o.source === 'manual'
+						// An employee (packer / owner previewing Packing Mode) may update the
+						// per-component Case/Grip/Charm purchase status and mark products bought,
+						// but NOT the owner-only fulfilment decisions on a line — flagging an
+						// issue (buyer messaging / Etsy listing), starting a design switch or a
+						// wrong-model exchange, or changing the catalog image. Those call
+						// endpoints outside the packer allowlist, so we hide the controls rather
+						// than render buttons that would 403 on submit. (Marking an EXISTING
+						// exchange done stays available — that's granted to packers.)
+						const _employeeView = typeof ROLE !== 'undefined' && ROLE.isPacker()
 						// ── All product items ─────────────────────────────────────
 						const txs = Array.isArray(o.transactions) && o.transactions.length > 0 ? o.transactions : [{ listing_id: o.first_listing_id, title: o.first_product_title, quantity: o.first_quantity, variations: [], image_url: o.product_image_url }]
 
@@ -16853,11 +17034,14 @@
 								const _sub = tx.substitution || null
 								const listingUrl = tx.listing_id ? `https://www.etsy.com/listing/${tx.listing_id}` : null
 								const imgTag = tx.image_url ? `<img src="${tx.image_url}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('🛍️'))">` : `🛍️`
+								// A custom variant image (operator upload for this listing + style)
+								// clarifies exactly what a component-only line is; badge the thumb so
+								// it's obvious the photo isn't the raw Etsy hero shot.
+								const _hasStyleImg = !_sub && !!tx.style_image_id
+								const _styleImgMark = _hasStyleImg ? `<span class="thumb-custom-mark" title="Custom variant image">📷</span>` : ''
 								// Switched lines link the thumb to the switch manager (not the old
 								// Etsy listing); original lines keep the Etsy listing link.
-								const thumb = _sub
-									? `<div class="product-thumb product-thumb-switched" title="Switched design — click to change or revert" onclick="openSwitchModal(${o.receipt_id},'${jsAttr(tx.item_key)}')">${imgTag}</div>`
-									: (listingUrl ? `<a href="${listingUrl}" target="_blank" class="product-thumb" title="View on Etsy">${imgTag}</a>` : `<div class="product-thumb">${imgTag}</div>`)
+								const thumb = _sub ? `<div class="product-thumb product-thumb-switched" title="Switched design — click to change or revert" onclick="openSwitchModal(${o.receipt_id},'${jsAttr(tx.item_key)}')">${imgTag}</div>` : listingUrl ? `<a href="${listingUrl}" target="_blank" class="product-thumb${_hasStyleImg ? ' product-thumb-custom-img' : ''}" title="${_hasStyleImg ? 'Custom variant image set — click to view the Etsy listing' : 'View on Etsy'}">${imgTag}${_styleImgMark}</a>` : `<div class="product-thumb${_hasStyleImg ? ' product-thumb-custom-img' : ''}">${imgTag}${_styleImgMark}</div>`
 
 								const metaRows = []
 								if (tx.quantity)
@@ -16887,10 +17071,15 @@
 								// A line with an OPEN fulfilment issue is on hold (out of production /
 								// model unavailable) — it's withheld from purchasing, so the purchase
 								// chips are replaced by an issue chip that opens the workflow modal.
-								const _issueOpen = tx.issue && tx.issue.status === 'open'
+								// `on_hold` is the server's authoritative "still held" flag: an
+								// open issue that is NOT superseded by a newer design switch. A
+								// switched line therefore shows its purchase chips + Switched
+								// badge (buyable) instead of the on-hold chip — matching the
+								// route, so a switched item can never be silently missed.
+								const _issueOpen = tx.issue && tx.issue.on_hold
 								const _exchangeOpen = tx.exchange && tx.exchange.status === 'open'
 								if (_issueOpen && tx.item_key) {
-									ppCtrl = `<div class="pp-comps">${issueChipHtml(o.receipt_id, tx)}</div>`
+									ppCtrl = `<div class="pp-comps">${issueChipHtml(o.receipt_id, tx, _employeeView)}</div>`
 								} else if (_exchangeOpen && tx.item_key) {
 									ppCtrl = `<div class="pp-comps">${exchangeChipHtml(o.receipt_id, tx)}</div>`
 								} else if (showPurchaseChips && tx.item_key) {
@@ -16913,18 +17102,27 @@
 								// "Flag issue" affordance — available on any purchasable product that
 								// isn't already on hold, so the operator can mark it out of production
 								// or model-unavailable straight from the order.
+								// Owner-only fulfilment decisions — hidden from employees (packing
+								// mode) because they call endpoints outside the packer allowlist.
 								let flagIssueCtrl = ''
 								let flagExchangeCtrl = ''
-								if (!_issueOpen && !_exchangeOpen && showPurchaseChips && tx.item_key) {
+								if (!_employeeView && !_issueOpen && !_exchangeOpen && showPurchaseChips && tx.item_key) {
 									flagIssueCtrl = `<button class="item-flag-issue" onclick="openIssueModal(${o.receipt_id},'${jsAttr(tx.item_key)}')" title="Product discontinued, or the buyer's phone model is no longer offered? Flag it to hold it out of purchasing and start the buyer-contact workflow.">⚑ Flag issue</button>`
 									flagExchangeCtrl = `<button class="item-flag-exchange" onclick="openExchangeModalForOrder(${o.receipt_id},'${jsAttr(tx.item_key)}')" title="Need a different model than ordered — a wrong model in hand to swap, or a buyer model-change to buy? Flag it so the correct model is tracked and the line is held out of the normal buy list until it's sorted.">🔁 Fix model</button>`
 								}
 
 								// "Change design" control on an already-switched line so the operator
-								// can pick a different replacement or revert to the original.
-								const switchCtrl = _sub && tx.item_key
-									? `<button class="item-switch-edit" onclick="openSwitchModal(${o.receipt_id},'${jsAttr(tx.item_key)}')" title="Buyer switched design — click to change the replacement or revert to the original. Never affects Etsy.">🔄 Change design</button>`
-									: ''
+								// can pick a different replacement or revert to the original. Owner-only.
+								const switchCtrl = !_employeeView && _sub && tx.item_key ? `<button class="item-switch-edit" onclick="openSwitchModal(${o.receipt_id},'${jsAttr(tx.item_key)}')" title="Buyer switched design — click to change the replacement or revert to the original. Never affects Etsy.">🔄 Change design</button>` : ''
+
+								// "Fix image" affordance — upload a photo that clarifies exactly what
+								// this listing+style variant is (e.g. a grip-only line). Available on
+								// any real (non-switched) line with an Etsy listing, regardless of
+								// shipping state, since catalog clarity is always useful.
+								let fixImageCtrl = ''
+								if (!_employeeView && !_sub && tx.item_key && tx.listing_id) {
+									fixImageCtrl = _hasStyleImg ? `<button class="item-fix-image active" onclick="openStyleImageModal(${o.receipt_id},'${jsAttr(tx.item_key)}')" title="A custom image is set for this variant — click to change it or revert to the Etsy photo.">📷 Image set</button>` : `<button class="item-fix-image" onclick="openStyleImageModal(${o.receipt_id},'${jsAttr(tx.item_key)}')" title="Etsy shows one photo per listing, so a single-component variant (e.g. grip only) can be unclear. Upload a photo of exactly what this variant is — it shows on every order of this product + style, everywhere.">📷 Fix image</button>`
+								}
 
 								// Title cell: switched lines show the new design + a badge and the
 								// original ("was: …") for reference; normal lines show the title.
@@ -16940,7 +17138,7 @@
           ${metaRows.length ? `<div class="product-meta">${metaRows.join('')}</div>` : ''}
           ${ppCtrl}
           ${switchCtrl}
-          ${flagIssueCtrl}${flagExchangeCtrl}
+          ${flagIssueCtrl}${flagExchangeCtrl}${fixImageCtrl}
         </div>
       </div>`
 							})
@@ -17008,7 +17206,8 @@
 						const _outstandingItems = txs.filter((t) => t.line_outstanding).length
 						// A product on hold (open fulfilment issue) is neither outstanding nor
 						// "purchased" — so an order with any held line is not "Fully purchased".
-						const _hasOpenIssue = txs.some((t) => t.issue && t.issue.status === 'open')
+						// A switched line is NOT held (on_hold is false), so it doesn't count.
+						const _hasOpenIssue = txs.some((t) => t.issue && t.issue.on_hold)
 						// A product awaiting a wrong-model exchange is in hand but NOT yet the
 						// correct model — the swap is still owed, so the order is NOT "Fully
 						// purchased" (this is the exact false-"done" state we're fixing).
@@ -17071,7 +17270,9 @@
 						// opens the first open issue's workflow modal. Held products are kept
 						// out of the purchasing Route automatically.
 						let issueBadgeHtml = ''
-						const _openIssueTxs = txs.filter((t) => t.issue && t.issue.status === 'open')
+						// Only lines STILL held (open issue, not superseded by a switch) count
+						// toward the order's on-hold badge — a switched line is buyable again.
+						const _openIssueTxs = txs.filter((t) => t.issue && t.issue.on_hold)
 						if (_openIssueTxs.length) {
 							const first = _openIssueTxs[0]
 							const _messaged = _openIssueTxs.filter((t) => t.issue.buyer_notified_at).length
@@ -17099,16 +17300,8 @@
 							const first = _openExchangeTxs[0]
 							const corr = _txModelCorrection(first)
 							const need = escHtml((corr && corr.need) || _txPhoneModel(first) || '?')
-							const label =
-								_openExchangeTxs.length > 1
-									? `🔁 Model fix needed · ${_openExchangeTxs.length}`
-									: corr && corr.isPurchase
-										? `🛒 Buy correct model: ${need}`
-										: `🔁 Swap to: ${need}`
-							const tip =
-								corr && corr.isPurchase
-									? `The buyer changed model — the correct model isn't in stock, so it must be purchased. Held out of packing until bought. Click to manage / mark done.`
-									: `Wrong model in hand — swap it at the supplier for the model the order needs. Held out of packing until swapped. Click to manage / mark done.`
+							const label = _openExchangeTxs.length > 1 ? `🔁 Model fix needed · ${_openExchangeTxs.length}` : corr && corr.isPurchase ? `🛒 Buy correct model: ${need}` : `🔁 Swap to: ${need}`
+							const tip = corr && corr.isPurchase ? `The buyer changed model — the correct model isn't in stock, so it must be purchased. Held out of packing until bought. Click to manage / mark done.` : `Wrong model in hand — swap it at the supplier for the model the order needs. Held out of packing until swapped. Click to manage / mark done.`
 							exchangeBadgeHtml = `<div class="exchange-badge" style="cursor:pointer" onclick="openExchangeModalForOrder(${o.receipt_id},'${jsAttr(first.item_key)}')" title="${tip.replace(/"/g, '&quot;')}">${label}</div>`
 						}
 
@@ -17700,13 +17893,15 @@
 			// Per-product chip for a line that is currently on hold. Once the buyer has
 			// been marked messaged, a green "Buyer messaged" pill is appended so the
 			// held line reads at a glance as "already reached out, awaiting reply".
-			function issueChipHtml(receiptId, tx) {
+			function issueChipHtml(receiptId, tx, employeeView) {
 				const t = tx.issue ? tx.issue.issue_type : 'other'
-				const chip = `<button class="item-issue" onclick="openIssueModal(${receiptId},'${jsAttr(tx.item_key)}')" title="On hold — ${jsAttr(issueTypeLabel(t))}. Click to manage the buyer message + Etsy listing workflow.">⚑ ${issueTypeLabel(t)} · on hold</button>`
+				// The on-hold workflow (buyer message + Etsy listing handling) is owner-only,
+				// so for an employee the chip is a read-only status pill (no click → no 403).
+				const chip = employeeView ? `<span class="item-issue" style="cursor:default" title="On hold — ${jsAttr(issueTypeLabel(t))}. The owner is handling this; nothing to buy for it right now.">⚑ ${issueTypeLabel(t)} · on hold</span>` : `<button class="item-issue" onclick="openIssueModal(${receiptId},'${jsAttr(tx.item_key)}')" title="On hold — ${jsAttr(issueTypeLabel(t))}. Click to manage the buyer message + Etsy listing workflow.">⚑ ${issueTypeLabel(t)} · on hold</button>`
 				const notifiedAt = tx.issue && tx.issue.buyer_notified_at
 				if (!notifiedAt) return chip
 				const when = new Date(notifiedAt * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-				return chip + `<span class="item-issue-sent" title="Buyer messaged on ${when} — awaiting their reply. Click the on-hold chip to manage.">✓ Buyer messaged</span>`
+				return chip + `<span class="item-issue-sent" title="Buyer messaged on ${when} — awaiting their reply.${employeeView ? '' : ' Click the on-hold chip to manage.'}">✓ Buyer messaged</span>`
 			}
 
 			// Per-product chip for a line awaiting a wrong-model exchange (item in hand,
@@ -17717,9 +17912,7 @@
 				const need = ex.need_model || _txPhoneModel(tx) || '?'
 				const isBuy = !have
 				const label = isBuy ? `🛒 Buy: ${escHtml(need)}` : `🔁 Swap: ${escHtml(have)} → ${escHtml(need)}`
-				const title = isBuy
-					? 'Buyer changed model and it is not in stock — buy the correct model, then mark it done. Click to manage.'
-					: 'Wrong model in hand — carry it to the supplier and swap it for the model this order needs. Click to manage / mark done.'
+				const title = isBuy ? 'Buyer changed model and it is not in stock — buy the correct model, then mark it done. Click to manage.' : 'Wrong model in hand — carry it to the supplier and swap it for the model this order needs. Click to manage / mark done.'
 				return `<button class="item-exchange" onclick="openExchangeModalForOrder(${receiptId},'${jsAttr(tx.item_key)}')" title="${title}">${label}</button>`
 			}
 
@@ -17729,6 +17922,18 @@
 					if (/model|iphone|phone|device|fits|compatib/i.test(v.formatted_name || '')) return v.formatted_value || ''
 				}
 				return ''
+			}
+
+			// The CURRENT design on a line. When the buyer agreed to switch, the line
+			// is being fulfilled as the replacement, so every buyer-facing workflow
+			// (issue title, on-hold message, model handling) must speak about the
+			// SWITCHED design — never the original the buyer already moved away from.
+			// Falls back to the originally-ordered product when there's no switch.
+			function _txEffectiveTitle(tx) {
+				return (tx && tx.substitution && tx.substitution.new_title) || (tx && tx.title) || ''
+			}
+			function _txEffectivePhoneModel(tx) {
+				return (tx && tx.substitution && tx.substitution.new_phone_model) || _txPhoneModel(tx) || ''
 			}
 
 			// Is this variation the phone-model one? (Same heuristic as _txPhoneModel.)
@@ -17751,17 +17956,34 @@
 			//   buyerChanged — true when the model to pack differs from what was ordered.
 			//   open / done  — exchange lifecycle state.
 			function _txModelCorrection(tx) {
-				const ex = tx && tx.exchange
-				if (!ex) return null
 				const ordered = (_txPhoneModel(tx) || '').trim()
-				const need = (ex.need_model || ordered || '').trim()
-				const have = (ex.have_model || '').trim()
 				const differs = (a, b) => !!(a && b && a.toLowerCase() !== b.toLowerCase())
-				const buyerChanged = differs(need, ordered)
-				// Strike the wrong in-hand model if we have one; otherwise (a pure buy)
-				// strike the originally-ordered model the buyer moved away from.
-				const from = have || (buyerChanged ? ordered : '')
-				return { ex, ordered, need, have, from, isPurchase: !have, buyerChanged, open: ex.status === 'open', done: ex.status === 'done' }
+
+				// A wrong-model exchange owns a real swap/buy lifecycle, so it wins and
+				// drives the state tag (to swap / to buy / done).
+				const ex = tx && tx.exchange
+				if (ex) {
+					const need = (ex.need_model || ordered || '').trim()
+					const have = (ex.have_model || '').trim()
+					const buyerChanged = differs(need, ordered)
+					// Strike the wrong in-hand model if we have one; otherwise (a pure buy)
+					// strike the originally-ordered model the buyer moved away from.
+					const from = have || (buyerChanged ? ordered : '')
+					return { kind: 'exchange', ex, ordered, need, have, from, isPurchase: !have, buyerChanged, open: ex.status === 'open', done: ex.status === 'done' }
+				}
+
+				// A design switch can also change the phone model (the buyer agreed to a
+				// different design/model). It has no swap/buy lifecycle of its own — the
+				// switched line just re-enters the purchasing queue — so it renders as a
+				// plain "ordered → now" correction with no state tag, matching the model
+				// the Route and shopping views already buy and pack.
+				const sub = tx && tx.substitution
+				const newModel = sub && sub.new_phone_model ? String(sub.new_phone_model).trim() : ''
+				if (differs(newModel, ordered)) {
+					return { kind: 'switch', ordered, need: newModel, have: '', from: ordered, isPurchase: false, buyerChanged: true, open: false, done: false }
+				}
+
+				return null
 			}
 
 			// Short state tag for a model correction (buy vs swap × pending vs done).
@@ -17773,8 +17995,11 @@
 			// the wrong/old model struck through, the model to pack emphasised, plus a tag.
 			function _modelCorrectionValueHtml(corr) {
 				const now = `<span class="model-now">${escHtml(corr.need || '?')}</span>`
-				const was = corr.from ? `<span class="model-was" title="Old / wrong model — do NOT pack this">${escHtml(corr.from)}</span> ` : ''
-				return `${was}${now} <span class="model-corr-tag ${corr.done ? 'done' : 'pending'}">${_correctionTag(corr)}</span>`
+				const was = corr.from ? `<span class="model-was" title="Old / originally-ordered model — do NOT pack this">${escHtml(corr.from)}</span> ` : ''
+				// A design switch has no swap/buy state, so it shows no lifecycle tag —
+				// the "🔄 Switched" badge on the title already explains the change.
+				const tag = corr.kind === 'switch' ? '' : ` <span class="model-corr-tag ${corr.done ? 'done' : 'pending'}">${_correctionTag(corr)}</span>`
+				return `${was}${now}${tag}`
 			}
 
 			// Which components the buyer actually purchased for this line (case / grip
@@ -17831,9 +18056,16 @@
 
 			function _composeIssueMessage(ctx) {
 				const buyer = (ctx.order.buyer_name || '').trim() || 'there'
-				const fullTitle = (ctx.tx.title || 'your item').trim()
+				// Speak about the CURRENT design: if the buyer already switched, this
+				// message is about the replacement they chose, not the original.
+				const fullTitle = (_txEffectiveTitle(ctx.tx) || 'your item').trim()
 				const type = ctx.issue ? ctx.issue.issue_type : ctx.draftType
-				const model = (ctx.issue && ctx.issue.phone_model) || _txPhoneModel(ctx.tx)
+				const model = (ctx.issue && ctx.issue.phone_model) || _txEffectivePhoneModel(ctx.tx)
+				// True when this line was already switched once — the buyer picked this
+				// replacement, so an issue on it means the REPLACEMENT is now also
+				// unavailable. The copy gently acknowledges that so the buyer isn't
+				// confused ("didn't I already sort this?") and feels well looked-after.
+				const isReswitch = !!(ctx.tx && ctx.tx.substitution)
 				// The exact combo the buyer purchased (case / grip / charm).
 				const combo = _txComponentsPhrase(ctx.tx)
 				// Multi-item awareness: when the order has several products, the message
@@ -17848,41 +18080,24 @@
 				const itemName = multi ? `your "${_shortTitle(fullTitle)}"` : `"${fullTitle}"`
 				const oneOf = multi ? ` (one of the ${allTx.length} items you ordered)` : ''
 				// Reassurance sentence — multi-item only.
-				const restNote = multi
-					? ` Please don't worry — the ${others > 1 ? `other ${others} items` : 'other item'} in your order ${others > 1 ? 'are' : 'is'} all completely fine and will be made and shipped to you as normal; this only affects ${itemName}.`
-					: ''
+				const restNote = multi ? ` Please don't worry — the ${others > 1 ? `other ${others} items` : 'other item'} in your order ${others > 1 ? 'are' : 'is'} all completely fine and will be made and shipped to you as normal; this only affects ${itemName}.` : ''
 				// Switch/refund phrasing, scoped to the one item on a multi-item order.
 				const switchWhat = multi ? 'just this item' : `your ${combo || 'order'}`
 				const refundBullet = multi ? '  • or a refund for just this item — no worries at all.' : '  • or a full refund — no worries at all.'
+				// Opening sentence. When the buyer already switched once, warmly own
+				// that we're coming back a second time about the design THEY chose, so
+				// the follow-up never reads as if we forgot the first conversation.
+				const aboutIntro = isReswitch ? `I'm so sorry to reach out again about ${itemName}${oneOf} — the replacement design you kindly chose.` : `I'm reaching out about ${itemName}${oneOf}.`
+				// A second switch offer nudges toward a fresh alternative or a refund.
+				const switchAgain = isReswitch ? 'switch it once more' : `switch ${switchWhat}`
 
 				if (type === 'model_unavailable') {
-					return (
-						`Hi ${buyer}, 🌸\n\n` +
-						`Thank you so much for your order — it really means a lot to us!\n\n` +
-						`I'm reaching out about ${itemName}${oneOf}. Sadly, the "${model || 'selected'}" case base we use to handcraft this design has sold out and we're no longer able to restock it, so we can't make it for that phone anymore.${restNote}\n\n` +
-						`To make it right, you're very welcome to either:\n` +
-						`  • switch ${switchWhat} to a different design that fits your phone (at no extra cost),\n` +
-						refundBullet + `\n\n` +
-						`Just let us know which you'd prefer and we'll take care of it right away. Thank you so much for your patience and understanding 💕`
-					)
+					return `Hi ${buyer}, 🌸\n\n` + `Thank you so much for your order — it really means a lot to us!\n\n` + `${aboutIntro} Sadly, the "${model || 'selected'}" case base we use to handcraft this design has sold out and we're no longer able to restock it, so we can't make it for that phone anymore.${restNote}\n\n` + `To make it right, you're very welcome to either:\n` + `  • ${switchAgain} to a different design that fits your phone (at no extra cost),\n` + refundBullet + `\n\n` + `Just let us know which you'd prefer and we'll take care of it right away. Thank you so much for your patience and understanding 💕`
 				}
 				if (type === 'out_of_production') {
-					return (
-						`Hi ${buyer}, 🌸\n\n` +
-						`Thank you so much for your order — we were so happy to see it come through!\n\n` +
-						`I'm reaching out about ${itemName}${oneOf}. Sadly, one of the special materials we use to handcraft this design is no longer available to us, so we're no longer able to make it.${restNote}\n\n` +
-						`To make it up to you, you're very welcome to either:\n` +
-						`  • switch ${switchWhat} to another design you'll adore just as much (we'll set it up at no extra cost),\n` +
-						refundBullet + `\n\n` +
-						`Just reply with your preference and we'll sort it out straight away. Thank you for being so lovely and understanding 💕`
-					)
+					return `Hi ${buyer}, 🌸\n\n` + `Thank you so much for your order — we were so happy to see it come through!\n\n` + `${aboutIntro} Sadly, one of the special materials we use to handcraft this design is no longer available to us, so we're no longer able to make it.${restNote}\n\n` + `To make it up to you, you're very welcome to either:\n` + `  • ${switchAgain} to another design you'll adore just as much (we'll set it up at no extra cost),\n` + refundBullet + `\n\n` + `Just reply with your preference and we'll sort it out straight away. Thank you for being so lovely and understanding 💕`
 				}
-				return (
-					`Hi ${buyer}, 🌸\n\n` +
-					`Thank you so much for your order — we really appreciate you!\n\n` +
-					`I'm reaching out about ${itemName}${oneOf} — we've run into a little hiccup fulfilling it as ordered.${restNote}\n\n` +
-					`We'd be so happy to either switch ${switchWhat} to a lovely alternative or offer ${multi ? 'a refund for just this item' : 'a full refund'} — whatever feels best for you. Just let us know and we'll take care of it right away. Thank you for your patience 💕`
-				)
+				return `Hi ${buyer}, 🌸\n\n` + `Thank you so much for your order — we really appreciate you!\n\n` + `${aboutIntro} We've run into a little hiccup fulfilling it as ordered.${restNote}\n\n` + `We'd be so happy to either ${switchAgain} to a lovely alternative or offer ${multi ? 'a refund for just this item' : 'a full refund'} — whatever feels best for you. Just let us know and we'll take care of it right away. Thank you for your patience 💕`
 			}
 
 			let _issueCtx = null // { receiptId, itemKey, order, tx, issue, draftType }
@@ -17906,7 +18121,7 @@
 					issue: tx.issue || null,
 					draftType: (tx.issue && tx.issue.issue_type) || 'out_of_production',
 				}
-				document.getElementById('issueModalSubtitle').textContent = `${order.shop_name || ''} · ${(tx.title || 'Product').slice(0, 70)}`
+				document.getElementById('issueModalSubtitle').textContent = `${order.shop_name || ''} · ${(_txEffectiveTitle(tx) || 'Product').slice(0, 70)}`
 				document.getElementById('issueError').classList.remove('show')
 				renderIssueModal()
 				document.getElementById('issueModal').classList.add('open')
@@ -17932,7 +18147,13 @@
 				const msg = _composeIssueMessage(ctx)
 				const orderLink = `https://www.etsy.com/your/orders/sold?order_id=${ctx.receiptId}`
 
-				if (!issue) {
+				// Phase 1 (flag a fresh issue) whenever there is no OPEN issue — this
+				// covers a brand-new line AND a switched line whose earlier issue was
+				// already resolved (resolution 'switched'). That's exactly how the
+				// buyer's REPLACEMENT gets flagged when it, too, goes out of production
+				// or loses the model: a clean new flag on the current design, rather
+				// than re-opening the stale, original-design issue.
+				if (!issue || issue.status !== 'open') {
 					// ── Phase 1: flag a new issue ──────────────────────────────────
 					const opts = Object.entries(ISSUE_TYPE_META)
 						.map(([k, m]) => {
@@ -17943,9 +18164,13 @@
 							</label>`
 						})
 						.join('')
-					const modelHint = ctx.draftType === 'model_unavailable' ? `<div class="modal-note" style="margin-top:10px">Buyer's chosen model: <strong>${_txPhoneModel(ctx.tx) || '—'}</strong> — this is the model that will be removed from the listing.</div>` : ''
+					const modelHint = ctx.draftType === 'model_unavailable' ? `<div class="modal-note" style="margin-top:10px">Buyer's chosen model: <strong>${_txEffectivePhoneModel(ctx.tx) || '—'}</strong> — this is the model that will be removed from the listing.</div>` : ''
+					// On a switched line, make it unmistakable that we're flagging the
+					// REPLACEMENT the buyer chose, not the original they left behind.
+					const switchedNote = ctx.tx && ctx.tx.substitution ? `<div class="modal-note" style="margin-top:10px">🔄 This line was already switched to <strong>${escHtml(_txEffectiveTitle(ctx.tx))}</strong>. Flagging now holds that <strong>replacement</strong> and drafts a buyer message about it — perfect when the switched design is <em>also</em> out of production or missing the model.</div>` : ''
 					body.innerHTML = `
 						<div class="modal-note">Flagging this product holds it out of the purchasing Route so you never buy it while the buyer decides. The other products on this order keep flowing normally.</div>
+						${switchedNote}
 						<div class="modal-field"><label class="modal-label">What's the issue?</label><div class="issue-type-grid">${opts}</div></div>
 						${modelHint}
 						<div class="modal-field"><label class="modal-label">Note (optional)</label><textarea class="modal-input" id="issueNote" rows="2" maxlength="1000" placeholder="e.g. confirmed discontinued by supplier on WeChat"></textarea></div>
@@ -18135,8 +18360,11 @@
 							item_key: _issueCtx.itemKey,
 							issue_type: type,
 							listing_id: _issueCtx.tx.listing_id || null,
-							title: _issueCtx.tx.title || null,
-							phone_model: type === 'model_unavailable' ? _txPhoneModel(_issueCtx.tx) || null : null,
+							// Flag the CURRENT design: on a switched line this is the
+							// replacement the buyer chose, so the held product, buyer
+							// message and listing workflow all speak about the right item.
+							title: _txEffectiveTitle(_issueCtx.tx) || null,
+							phone_model: type === 'model_unavailable' ? _txEffectivePhoneModel(_issueCtx.tx) || null : null,
 							note: note || null,
 						}),
 					})
@@ -18332,13 +18560,14 @@
 				const defModel = _switchDefaultModel()
 				const defStyle = _switchDefaultStyle()
 				const styleOpts = SWITCH_STYLES.map((s) => {
-					const norm = (x) => String(x).toLowerCase().replace(/[^a-z+]/g, '')
+					const norm = (x) =>
+						String(x)
+							.toLowerCase()
+							.replace(/[^a-z+]/g, '')
 					const sel = norm(s) === norm(defStyle) ? ' selected' : ''
 					return `<option value="${escAttr(s)}"${sel}>${escHtml(s)}</option>`
 				}).join('')
-				const removeBtn = ctx.sub
-					? `<button class="modal-cancel" onclick="removeSwitch()" title="Revert this line to the originally ordered design.">↩ Revert to original</button>`
-					: `<button class="modal-cancel" onclick="closeSwitchModal()">Cancel</button>`
+				const removeBtn = ctx.sub ? `<button class="modal-cancel" onclick="removeSwitch()" title="Revert this line to the originally ordered design.">↩ Revert to original</button>` : `<button class="modal-cancel" onclick="closeSwitchModal()">Cancel</button>`
 
 				document.getElementById('switchModalBody').innerHTML = `
 					<div class="modal-note">Pick the replacement design the buyer agreed to. It's tracked <strong>only in this dashboard</strong> and flows back into your purchasing queue to be bought — your Etsy shop is never changed.</div>
@@ -18385,7 +18614,10 @@
 
 			async function _loadSwitchProducts() {
 				const grid = document.getElementById('switchGrid')
-				if (_switchLoaded) { renderSwitchGrid(); return }
+				if (_switchLoaded) {
+					renderSwitchGrid()
+					return
+				}
 				try {
 					const res = await fetch(`${API}/api/route/products`)
 					const data = await res.json()
@@ -18426,7 +18658,10 @@
 				// If the chosen product has exactly one known style, prefill it.
 				if (p.styles && p.styles.length === 1) {
 					const sel = document.getElementById('switchStyle')
-					const norm = (x) => String(x).toLowerCase().replace(/[^a-z+]/g, '')
+					const norm = (x) =>
+						String(x)
+							.toLowerCase()
+							.replace(/[^a-z+]/g, '')
 					const hit = SWITCH_STYLES.find((s) => norm(s) === norm(p.styles[0]))
 					if (sel && hit) sel.value = hit
 				}
@@ -18437,14 +18672,15 @@
 			function _renderSwitchSelHint() {
 				const el = document.getElementById('switchSelHint')
 				if (!el) return
-				el.innerHTML = _switchSel && _switchMode === 'catalog'
-					? `<div class="switch-selected-hint">Selected: <strong>${escHtml(_switchSel.title)}</strong></div>`
-					: ''
+				el.innerHTML = _switchSel && _switchMode === 'catalog' ? `<div class="switch-selected-hint">Selected: <strong>${escHtml(_switchSel.title)}</strong></div>` : ''
 			}
 
 			/** Custom mode: typing a title clears any catalog selection. */
 			function _syncSwitchCustom() {
-				if (_switchMode === 'custom') { _switchSel = null; _renderSwitchSelHint() }
+				if (_switchMode === 'custom') {
+					_switchSel = null
+					_renderSwitchSelHint()
+				}
 			}
 
 			function onSwitchImageFile(input) {
@@ -18485,10 +18721,16 @@
 					if (!title) return _switchError('Enter a product title for the custom design.')
 					payload.new_title = title
 					payload.source = 'custom'
-					if (_switchImageB64) { payload.image_b64 = _switchImageB64; payload.image_mime = _switchImageMime }
+					if (_switchImageB64) {
+						payload.image_b64 = _switchImageB64
+						payload.image_mime = _switchImageMime
+					}
 				}
 
-				if (btn) { btn.disabled = true; btn.textContent = 'Switching…' }
+				if (btn) {
+					btn.disabled = true
+					btn.textContent = 'Switching…'
+				}
 				try {
 					const res = await fetch(`${API}/api/orders/${_switchCtx.receiptId}/substitution`, {
 						method: 'POST',
@@ -18502,7 +18744,10 @@
 					await fetchOrders()
 				} catch (e) {
 					_switchError('Could not switch: ' + e.message)
-					if (btn) { btn.disabled = false; btn.textContent = '🔄 Switch this order' }
+					if (btn) {
+						btn.disabled = false
+						btn.textContent = '🔄 Switch this order'
+					}
 				}
 			}
 
@@ -18522,6 +18767,160 @@
 					await fetchOrders()
 				} catch (e) {
 					_switchError('Could not revert: ' + e.message)
+				}
+			}
+
+			// ── Per-variant clarifying image ───────────────────────────────────────
+			// Etsy serves ONE hero photo per listing, so a line bought as a single
+			// component (e.g. "Grip 3 Only") still shows the whole case+grip shot —
+			// ambiguous for whoever sources or packs it. The operator uploads a photo
+			// of exactly what THIS variant is; it overrides the thumbnail for the same
+			// listing + style on every order (past + future), across the Orders tab,
+			// the purchasing Route and mobile picking. It changes ONLY the image —
+			// never Etsy, the title, the supplier or the purchase state.
+			let _styleImgCtx = null // { receiptId, itemKey, listingId, style, title, currentUrl, hasOverride }
+			let _styleImgB64 = ''
+			let _styleImgMime = ''
+
+			/** The line's Style variation value (empty when the product has no style). */
+			function _txStyle(tx) {
+				for (const v of tx.variations || []) {
+					if (/style/i.test(v.formatted_name || '')) return v.formatted_value || ''
+				}
+				return ''
+			}
+
+			function openStyleImageModal(receiptId, itemKey) {
+				const order = _ordersMap.get(Number(receiptId)) || _ordersMap.get(receiptId)
+				if (!order) {
+					alert('Could not load this order — please reload the page.')
+					return
+				}
+				const tx = (order.transactions || []).find((t) => t.item_key === itemKey)
+				if (!tx) {
+					alert('Could not find this product on the order — please reload the page.')
+					return
+				}
+				if (!tx.listing_id) {
+					alert('This line has no Etsy listing to attach a variant image to.')
+					return
+				}
+				_styleImgCtx = {
+					receiptId: Number(receiptId),
+					itemKey,
+					listingId: tx.listing_id,
+					style: _txStyle(tx),
+					title: tx.title || '',
+					currentUrl: tx.image_url || '',
+					hasOverride: !!tx.style_image_id,
+				}
+				_styleImgB64 = ''
+				_styleImgMime = ''
+				document.getElementById('styleImageSubtitle').textContent = `${order.shop_name || ''} · ${(tx.title || 'Product').slice(0, 70)}`
+				document.getElementById('styleImageError').classList.remove('show')
+				_renderStyleImageModal()
+				document.getElementById('styleImageModal').classList.add('open')
+			}
+
+			function _renderStyleImageModal() {
+				const ctx = _styleImgCtx
+				if (!ctx) return
+				const styleLabel = ctx.style ? escHtml(ctx.style) : 'this product'
+				const curImg = ctx.currentUrl ? `<img class="style-img-preview" src="${escAttr(ctx.currentUrl)}" alt="current" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'style-img-ph',textContent:'🛍️'}))">` : `<div class="style-img-ph">🛍️</div>`
+				const removeBtn = ctx.hasOverride ? `<button class="modal-cancel" onclick="removeStyleImage()" title="Remove the custom image and go back to the Etsy listing photo.">↩ Revert to Etsy image</button>` : `<button class="modal-cancel" onclick="closeStyleImageModal()">Cancel</button>`
+				document.getElementById('styleImageBody').innerHTML = `
+					<div class="modal-note">Upload a photo of exactly what <strong>${styleLabel}</strong> is. This replaces the thumbnail for <strong>this product + style</strong> on <strong>every order</strong> — the Orders tab, the purchasing Route and mobile picking. Your Etsy shop is never changed.</div>
+					<div class="style-img-grid">
+						<div>
+							<div class="style-img-cap">${ctx.hasOverride ? 'Current (custom)' : 'Current (Etsy)'}</div>
+							${curImg}
+						</div>
+						<div>
+							<div class="style-img-cap">New image</div>
+							<label class="switch-upload" for="styleImgFile">Click to upload a photo</label>
+							<input type="file" id="styleImgFile" accept="image/*" style="display:none" onchange="onStyleImageFile(this)" />
+							<div id="styleImgPreviewWrap"></div>
+						</div>
+					</div>
+					<div class="modal-field"><label class="modal-label">Note (optional)</label><input class="modal-input" id="styleImgNote" placeholder="e.g. shows the grip only" /></div>
+					<div class="modal-actions">
+						${removeBtn}
+						<button class="modal-submit" id="styleImgSubmitBtn" onclick="submitStyleImage()">Save image</button>
+					</div>`
+			}
+
+			function onStyleImageFile(input) {
+				const file = input.files && input.files[0]
+				if (!file) return
+				const reader = new FileReader()
+				reader.onload = () => {
+					_styleImgB64 = String(reader.result || '')
+					_styleImgMime = file.type || 'image/png'
+					const wrap = document.getElementById('styleImgPreviewWrap')
+					if (wrap) wrap.innerHTML = `<img class="style-img-preview" src="${_styleImgB64}" alt="preview" />`
+				}
+				reader.readAsDataURL(file)
+			}
+
+			function _styleImgError(msg) {
+				const el = document.getElementById('styleImageError')
+				el.textContent = msg
+				el.classList.add('show')
+			}
+
+			function closeStyleImageModal() {
+				document.getElementById('styleImageModal').classList.remove('open')
+				_styleImgCtx = null
+				_styleImgB64 = ''
+				_styleImgMime = ''
+			}
+
+			async function submitStyleImage() {
+				if (!_styleImgCtx) return
+				if (!_styleImgB64) return _styleImgError('Choose an image to upload first.')
+				const btn = document.getElementById('styleImgSubmitBtn')
+				document.getElementById('styleImageError').classList.remove('show')
+				const note = (document.getElementById('styleImgNote')?.value || '').trim()
+				if (btn) {
+					btn.disabled = true
+					btn.textContent = 'Saving…'
+				}
+				try {
+					const res = await fetch(`${API}/api/listings/${_styleImgCtx.listingId}/style-image`, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ style: _styleImgCtx.style, image_b64: _styleImgB64, image_mime: _styleImgMime, note }),
+					})
+					const data = await res.json()
+					if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`)
+					showRouteToast('📷 Variant image updated — showing everywhere')
+					closeStyleImageModal()
+					await fetchOrders()
+				} catch (e) {
+					_styleImgError('Could not save: ' + e.message)
+					if (btn) {
+						btn.disabled = false
+						btn.textContent = 'Save image'
+					}
+				}
+			}
+
+			async function removeStyleImage() {
+				if (!_styleImgCtx) return
+				document.getElementById('styleImageError').classList.remove('show')
+				try {
+					const res = await fetch(`${API}/api/listings/${_styleImgCtx.listingId}/style-image`, {
+						method: 'DELETE',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ style: _styleImgCtx.style }),
+					})
+					const data = await res.json()
+					if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`)
+					showRouteToast('↩ Reverted to the Etsy image')
+					closeStyleImageModal()
+					await fetchOrders()
+				} catch (e) {
+					_styleImgError('Could not revert: ' + e.message)
 				}
 			}
 
@@ -18721,16 +19120,8 @@
 					.join(', ')
 				const supplier = [ex.supplier_shop, ex.supplier_stall].filter(Boolean).join(' · ')
 				const needHtml = escHtml(ex.need_model || ctx.needModel || '?')
-				const noteHtml = done
-					? isBuy
-						? 'This is <strong>done</strong> — the correct model was bought and the components marked purchased.'
-						: 'This is <strong>done</strong> — the correct model was swapped in and the components marked purchased.'
-					: isBuy
-						? 'The buyer needs a model we do NOT have in stock. <strong>Buy the correct model</strong> on the next trip, then mark it done.'
-						: 'This item is in hand but in the <strong>wrong model</strong>. Carry it to the supplier and swap it for the model the order needs, then mark it done.'
-				const swapPreview = isBuy
-					? `<div class="exchange-swap-preview"><span class="arrow">🛒</span><span class="to">${needHtml}</span></div>`
-					: `<div class="exchange-swap-preview"><span class="from">${escHtml(ex.have_model || '?')}</span><span class="arrow">→</span><span class="to">${needHtml}</span></div>`
+				const noteHtml = done ? (isBuy ? 'This is <strong>done</strong> — the correct model was bought and the components marked purchased.' : 'This is <strong>done</strong> — the correct model was swapped in and the components marked purchased.') : isBuy ? 'The buyer needs a model we do NOT have in stock. <strong>Buy the correct model</strong> on the next trip, then mark it done.' : 'This item is in hand but in the <strong>wrong model</strong>. Carry it to the supplier and swap it for the model the order needs, then mark it done.'
+				const swapPreview = isBuy ? `<div class="exchange-swap-preview"><span class="arrow">🛒</span><span class="to">${needHtml}</span></div>` : `<div class="exchange-swap-preview"><span class="from">${escHtml(ex.have_model || '?')}</span><span class="arrow">→</span><span class="to">${needHtml}</span></div>`
 				body.innerHTML = `
 					<div class="modal-note">${noteHtml}</div>
 					<div class="modal-field">
@@ -18755,9 +19146,7 @@
 				const hint = document.getElementById('exchangeModeHint')
 				const btn = document.getElementById('exchangeCreateBtn')
 				if (hint) {
-					hint.innerHTML = have
-						? '🔁 Swap the wrong model at the supplier for the correct one.'
-						: '🛒 Nothing to swap → the correct model will be <strong>purchased</strong> on the next shopping trip.'
+					hint.innerHTML = have ? '🔁 Swap the wrong model at the supplier for the correct one.' : '🛒 Nothing to swap → the correct model will be <strong>purchased</strong> on the next shopping trip.'
 				}
 				if (btn && !btn.disabled) btn.textContent = 'Flag model fix'
 			}
@@ -19880,6 +20269,60 @@
 				if (from != null) p.set('from', from)
 				if (to != null) p.set('to', to)
 				return p
+			}
+
+			// Download the STUCK parcels' tracking numbers as a CSV. Reuses the current
+			// shop / date-range / search filters (but forces status=stuck) so the export
+			// always matches the "Stuck" card. Streams the file straight from the server
+			// so even a large export never blocks the UI.
+			async function downloadStuckTracking() {
+				const btn = document.getElementById('shipDownloadStuck')
+				const p = _shipQuery()
+				p.set('status', 'stuck') // always the stuck bucket, regardless of the status dropdown
+				const url = API + '/api/4px/shipments/export.csv?' + p.toString()
+				const orig = btn ? btn.textContent : ''
+				try {
+					if (btn) {
+						btn.disabled = true
+						btn.textContent = '⬇ Preparing…'
+					}
+					const r = await fetch(url)
+					if (!r.ok) {
+						let msg = 'Export failed (' + r.status + ')'
+						try {
+							const j = await r.json()
+							if (j && j.error) msg = j.error
+						} catch {}
+						throw new Error(msg)
+					}
+					// Derive the filename from the server's Content-Disposition, fall back to a stamp.
+					const cd = r.headers.get('Content-Disposition') || ''
+					const m = /filename\*?=(?:UTF-8'')?"?([^"';]+)"?/i.exec(cd)
+					const fname = m ? decodeURIComponent(m[1]) : '4PX-stuck-tracking-' + new Date().toISOString().slice(0, 10) + '.csv'
+					const text = await r.text()
+					// The CSV always carries a header row; treat "header only" as empty.
+					const dataRows = text.split('\n').filter((l) => l.trim().length).length - 1
+					if (dataRows < 1) {
+						alert('No stuck parcels to export for the current filters.')
+						return
+					}
+					const blob = new Blob([text], { type: 'text/csv;charset=utf-8' })
+					const a = document.createElement('a')
+					const objUrl = URL.createObjectURL(blob)
+					a.href = objUrl
+					a.download = fname
+					document.body.appendChild(a)
+					a.click()
+					a.remove()
+					URL.revokeObjectURL(objUrl)
+				} catch (e) {
+					alert('Could not download stuck tracking numbers: ' + (e && e.message ? e.message : e))
+				} finally {
+					if (btn) {
+						btn.disabled = false
+						btn.textContent = orig
+					}
+				}
 			}
 
 			async function loadShipping() {
@@ -21984,7 +22427,12 @@
 				// Collect shop names to sync. When "All shops" is selected we must skip
 				// the placeholder <option value=""> — otherwise its label ("All shops")
 				// is sent as a shop name and the server 404s ("No config for shop All shops").
-				const shopNames = shopId ? [shopSel.options[shopSel.selectedIndex]?.textContent.trim()] : [...shopSel.querySelectorAll('option')].filter((o) => o.value).map((o) => o.textContent.trim()).filter(Boolean)
+				const shopNames = shopId
+					? [shopSel.options[shopSel.selectedIndex]?.textContent.trim()]
+					: [...shopSel.querySelectorAll('option')]
+							.filter((o) => o.value)
+							.map((o) => o.textContent.trim())
+							.filter(Boolean)
 
 				for (const name of shopNames) {
 					btn.textContent = `Syncing ${name}…`
@@ -22825,37 +23273,48 @@
 				btn.disabled = true
 				errEl.classList.remove('show')
 
-				let done = 0,
-					failed = []
-				for (const o of orders) {
-					progEl.textContent = `Processing ${done + 1} of ${orders.length}…`
-					try {
-						const resp = await fetch(`${API}/api/orders/${o.receipt_id}/ship`, {
-							method: 'POST',
-							headers: { 'Content-Type': 'application/json' },
-							body: JSON.stringify({ tracking_code: o.tracking_code, carrier_name: carrier }),
-						})
-						const json = await resp.json()
-						if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`)
-					} catch (err) {
-						failed.push(`${o.buyer || '#' + o.receipt_id}: ${err.message}`)
-					}
-					done++
-				}
+				// Complete via the server's paced, auto-chunked bulk endpoint. Doing the
+				// whole batch in ONE request lets the server spread the Etsy writes over
+				// time (chunk size + inter-request/-chunk sleeps) instead of the browser
+				// firing them back-to-back — which is what keeps large completions off
+				// Etsy's bot/abuse radar. It also unifies behaviour with the 4PX wizard.
+				const buyerById = new Map(orders.map((o) => [String(o.receipt_id), o.buyer]))
+				const etaSec = orders.length > 1 ? Math.round((orders.length - 1) * 2 + (Math.ceil(orders.length / 50) - 1) * 15) : 0
+				progEl.textContent = orders.length > 1 ? `Completing ${orders.length} orders on Etsy (paced${etaSec ? `, ~${Math.max(1, Math.round(etaSec / 60))} min` : ''})… keep this open.` : 'Completing 1 order on Etsy…'
 
-				if (failed.length) {
-					errEl.textContent = `${done - failed.length} succeeded. Failed:\n${failed.join('\n')}`
+				try {
+					const resp = await fetch(`${API}/api/4px/bulk-complete`, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({
+							carrier_name: carrier,
+							orders: orders.map((o) => ({ receipt_id: o.receipt_id, tracking_code: o.tracking_code })),
+						}),
+					})
+					const json = await resp.json()
+					if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`)
+
+					const failed = (json.results || []).filter((r) => !r.success).map((r) => `${buyerById.get(String(r.receipt_id)) || '#' + r.receipt_id}: ${r.error}`)
+
+					if (failed.length) {
+						errEl.textContent = `${json.completed} succeeded. Failed:\n${failed.join('\n')}`
+						errEl.classList.add('show')
+						btn.disabled = false
+						btn.textContent = 'Retry failed'
+						progEl.textContent = ''
+					} else {
+						progEl.textContent = `✓ All ${json.completed} orders marked as shipped.`
+						setTimeout(async () => {
+							closeBulkModal()
+							clearSelection()
+							await fetchOrders()
+						}, 900)
+					}
+				} catch (err) {
+					errEl.textContent = `Completion failed: ${err.message}`
 					errEl.classList.add('show')
 					btn.disabled = false
-					btn.textContent = 'Retry failed'
 					progEl.textContent = ''
-				} else {
-					progEl.textContent = `✓ All ${done} orders marked as shipped.`
-					setTimeout(async () => {
-						closeBulkModal()
-						clearSelection()
-						await fetchOrders()
-					}, 900)
 				}
 			}
 
@@ -23771,7 +24230,10 @@
 				if (!orders.length) return
 
 				primary.disabled = true
-				progEl.textContent = `Completing ${orders.length} order${orders.length > 1 ? 's' : ''} on Etsy…`
+				// The server paces large batches (chunk + sleeps), so set expectations:
+				// ~2s/order + a 15s cooldown per 50-order chunk. Keep the modal open.
+				const _etaSec = orders.length > 1 ? Math.round((orders.length - 1) * 2 + (Math.ceil(orders.length / 50) - 1) * 15) : 0
+				progEl.textContent = orders.length > 1 ? `Completing ${orders.length} orders on Etsy (paced${_etaSec ? `, ~${Math.max(1, Math.round(_etaSec / 60))} min` : ''})… keep this window open.` : 'Completing 1 order on Etsy…'
 
 				try {
 					const resp = await fetch(`${API}/api/4px/bulk-complete`, {
@@ -27074,6 +27536,7 @@
 
 			/** Entry point called by showTab('route'). */
 			async function loadRouteTab() {
+				_ensureRouteEventStream()
 				_populateRouteShopFilter()
 				await loadRouteConfig()
 				await _syncRouteStatus()
@@ -27836,7 +28299,7 @@
 
 			// ── Orders Sorting Dashboard ────────────────────────────────────────────────
 
-			const ROUTE_STATUS_OPTIONS = ['Pending', 'Purchased', 'Out of Stock', 'Out of Production', 'Wrong Stall', 'Model Unavailable']
+			const ROUTE_STATUS_OPTIONS = ['Pending', 'Purchased', 'Out of Stock', 'Out of Production', 'Model Unavailable', 'Wrong Stall']
 			let _routeRows = [] // last-loaded dashboard rows
 			let _charmList = [] // charm catalog from OSP
 			let _charmByCode = {} // code → charm
@@ -28677,7 +29140,7 @@
 					const c = _charmByCode[row.charm_code] || {}
 					const shop = row.charm_shop || c.default_charm_shop || ''
 					const stall = _charmShopStall(shop)
-					const imgSrc0 = `${API}/api/route/charm-image?code=${encodeURIComponent(row.charm_code)}`
+					const imgSrc0 = charmImageUrl(row.charm_code, c.image_version)
 					const img = c.has_image
 						? `<img class="charm-cell-thumb" src="${imgSrc0}"
              onmouseenter="showCharmPreview(this,'${imgSrc0}')" onmouseleave="hideCharmPreview()"
@@ -28688,7 +29151,7 @@
 				if (row.suggested_charm_code) {
 					const c = _charmByCode[row.suggested_charm_code] || {}
 					const shop = row.suggested_charm_shop || c.default_charm_shop || ''
-					const imgSrc1 = `${API}/api/route/charm-image?code=${encodeURIComponent(row.suggested_charm_code)}`
+					const imgSrc1 = charmImageUrl(row.suggested_charm_code, c.image_version)
 					const img = c.has_image
 						? `<img class="charm-cell-thumb" style="opacity:.7" src="${imgSrc1}"
              onmouseenter="showCharmPreview(this,'${imgSrc1}')" onmouseleave="hideCharmPreview()"
@@ -28759,11 +29222,7 @@
 				const _exNeed = escHtml(row.exchange_need_model || row.phone_model || '?')
 				const _exNote = row.exchange_note ? ` <span style="color:var(--muted);font-weight:400">· ${escHtml(row.exchange_note)}</span>` : ''
 				const exchangeBadge = needsExchange ? `<span class="route-exchange-badge" title="${_exBuy ? 'Buyer changed model — buy the correct one at the supplier.' : 'Wrong model in hand — swap at the supplier. Never re-bought.'}">${_exBuy ? '🛒 Buy' : '🔁 Exchange'}</span>` : ''
-				const exchangeSwap = needsExchange
-					? _exBuy
-						? `<div class="route-exchange-swap">🛒 <span class="swap-need">${_exNeed}</span>${_exNote}</div>`
-						: `<div class="route-exchange-swap">🔁 <span class="swap-have">${escHtml(row.exchange_have_model || '?')}</span> → <span class="swap-need">${_exNeed}</span>${_exNote}</div>`
-					: ''
+				const exchangeSwap = needsExchange ? (_exBuy ? `<div class="route-exchange-swap">🛒 <span class="swap-need">${_exNeed}</span>${_exNote}</div>` : `<div class="route-exchange-swap">🔁 <span class="swap-have">${escHtml(row.exchange_have_model || '?')}</span> → <span class="swap-need">${_exNeed}</span>${_exNote}</div>`) : ''
 
 				// Action cell. In the normal list it carries the Exclude toggle + a
 				// permanent "Remove from dashboard" button (with Undo). In the "Show
@@ -29003,6 +29462,13 @@
 			async function _saveRouteAssign(receiptId, itemKey, patch) {
 				const row = _routeRows.find((r) => r.receipt_id === receiptId && r.item_key === itemKey)
 				if (row) Object.assign(row, patch) // optimistic local update
+				// Employees (Packing Mode) may only touch per-component purchase status,
+				// and route/assign is owner-only — so route their status writes through the
+				// packer-allowed per-item component-status endpoint (same route_assignments
+				// record, same rollup). Non-status patches (charm_code, charm_shop,
+				// excluded…) are owner-only catalog edits and their controls are hidden for
+				// employees, so they never reach here in that mode.
+				if (_employeeCharmMode()) return _saveComponentStatusForEmployee(receiptId, itemKey, patch, row)
 				try {
 					const res = await fetch(`${API}/api/route/assign`, {
 						method: 'POST',
@@ -29015,6 +29481,31 @@
 					}
 				} catch (err) {
 					alert('Network error saving assignment: ' + err.message)
+				}
+			}
+
+			// Persist a Charms-to-Buy status change for an employee via the packer-allowed
+			// per-item endpoint. Maps each status_* field in the patch to its component and
+			// writes route_assignments.status_<comp> (server re-rolls the needs-purchase
+			// flag), so the Orders tab and the owner Route tab stay perfectly in sync.
+			async function _saveComponentStatusForEmployee(receiptId, itemKey, patch, row) {
+				const COMPS = { status_case: 'case', status_grip: 'grip', status_charm: 'charm' }
+				for (const [field, comp] of Object.entries(COMPS)) {
+					if (patch[field] == null) continue
+					try {
+						const res = await fetch(`${API}/api/orders/${receiptId}/items/component-status`, {
+							method: 'POST',
+							headers: { 'Content-Type': 'application/json' },
+							credentials: 'same-origin',
+							body: JSON.stringify({ item_key: itemKey, title: row?.title, component: comp, status: patch[field] }),
+						})
+						if (!res.ok) {
+							const d = await res.json().catch(() => ({}))
+							alert('Save failed: ' + (d.error || res.status))
+						}
+					} catch (err) {
+						alert('Network error saving status: ' + err.message)
+					}
 				}
 			}
 
@@ -29586,7 +30077,7 @@
 				tbody.innerHTML = list
 					.map((c) => {
 						const isSelected = selCharm?.code === c.code
-						const img = c.has_image ? `<img src="${API}/api/route/charm-image?code=${encodeURIComponent(c.code)}&t=${_charmImgVer}" loading="lazy">` : `<div class="ao-charm-thumb-placeholder">🔗</div>`
+						const img = c.has_image ? `<img src="${charmImageUrl(c.code, c.image_version)}" loading="lazy">` : `<div class="ao-charm-thumb-placeholder">🔗</div>`
 						const stall = c.default_charm_shop_stall || _charmShopStall(c.default_charm_shop)
 						const shopCell = c.default_charm_shop ? escHtml(c.default_charm_shop) + (stall ? ` · 📍${escHtml(stall)}` : '') : '—'
 						return `<tr class="ao-charm-table-row${isSelected ? ' ao-charm-row-selected' : ''}"
@@ -29610,7 +30101,7 @@
 				const clearId = context === 'config' ? 'aoConfigCharmClearBtn' : 'aoCustomCharmClearBtn'
 				const c = _charmByCode[code] || { code, default_charm_shop: shop }
 
-				const img = c.has_image ? `<img src="${API}/api/route/charm-image?code=${encodeURIComponent(code)}&t=${_charmImgVer}" loading="lazy">` : ''
+				const img = c.has_image ? `<img src="${charmImageUrl(code, c.image_version)}" loading="lazy">` : ''
 				const selEl = document.getElementById(selId)
 				if (selEl) {
 					selEl.style.display = ''
@@ -30224,7 +30715,7 @@
 					addCard +
 					list
 						.map((c) => {
-							const img = c.has_image ? `<img src="${API}/api/route/charm-image?code=${encodeURIComponent(c.code)}&t=${_charmImgVer}" loading="lazy" draggable="false">` : `<div style="aspect-ratio:1;display:flex;align-items:center;justify-content:center;background:#0d1017;border-radius:6px;margin-bottom:6px;font-size:22px;color:var(--muted)">🔗</div>`
+							const img = c.has_image ? `<img src="${charmImageUrl(c.code, c.image_version)}" loading="lazy" draggable="false">` : `<div style="aspect-ratio:1;display:flex;align-items:center;justify-content:center;background:#0d1017;border-radius:6px;margin-bottom:6px;font-size:22px;color:var(--muted)">🔗</div>`
 							// Exact charm-shop stall from the imported directory.
 							const stall = c.default_charm_shop_stall || _charmShopStall(c.default_charm_shop)
 							const shopLine = c.default_charm_shop ? `<div class="charm-card-shop">${escHtml(c.default_charm_shop)}${stall ? ` · 📍${escHtml(stall)}` : ''}</div>` : ''
@@ -30240,8 +30731,21 @@
 						.join('')
 			}
 
-			// Bumped after image edits to bust the charm-image cache.
+			// Session fallback cache-buster: used only for freshly uploaded/renamed
+			// images whose server-side version token hasn't been reloaded yet.
 			let _charmImgVer = Date.now()
+
+			/**
+			 * Build a content-addressed charm-image URL. The per-charm `version`
+			 * (mtime+size token from the charm payload) makes the URL change whenever
+			 * the underlying photo changes, so browsers/service-worker caches can
+			 * never serve a stale thumbnail. Falls back to the session bust token
+			 * when no server version is known yet (e.g. right after an upload).
+			 */
+			function charmImageUrl(code, version) {
+				const v = version || _charmImgVer
+				return `${API}/api/route/charm-image?code=${encodeURIComponent(code)}&v=${encodeURIComponent(v)}`
+			}
 
 			/** Look up a charm shop's exact stall from the imported directory. */
 			function _charmShopStall(shopName) {
@@ -30369,8 +30873,46 @@
 				}
 			}
 
+			// True when the Charms-to-Buy list is being used by an employee (server-locked
+			// packer, or an owner previewing Packing Mode). Employees reach it from the
+			// Need-to-purchase tab — NOT the Route tab — so it must load its own data and
+			// persist through the packer-allowed per-item endpoint.
+			function _employeeCharmMode() {
+				return typeof ROLE !== 'undefined' && ROLE.isPacker()
+			}
+
+			// Load the charm shopping list bundle for the buy queue in one round-trip
+			// (rows + catalog + shops + progress) — the packer-safe equivalent of the
+			// Route tab's dashboard + charms + charm-progress loads. Populates the same
+			// globals the CPM renders from; the packer never opens the Route tab, so
+			// reusing _routeRows/_charmByCode here has no cross-view side effects.
+			async function _loadPackerCharmData() {
+				try {
+					const r = await fetch(`${API}/api/route/charms-to-buy`, { credentials: 'same-origin' })
+					const d = await r.json()
+					if (!d || !d.ok) return
+					_routeRows = d.rows || []
+					_charmByCode = {}
+					;(d.charms || []).forEach((c) => {
+						_charmByCode[c.code] = c
+					})
+					_charmShopDirectory = d.charm_shops || []
+					_charmProgress = d.progress || {}
+				} catch {
+					/* non-fatal — modal shows an empty state */
+				}
+			}
+
 			async function openCharmPurchaseModal() {
 				document.getElementById('charmPurchaseModal').style.display = 'flex'
+				// Employee path: self-contained load from the packer-safe endpoint.
+				if (_employeeCharmMode()) {
+					const body = document.getElementById('cpmBody')
+					if (body) body.innerHTML = '<div class="cpm-empty">Loading…</div>'
+					await _loadPackerCharmData()
+					renderCharmPurchaseModal()
+					return
+				}
 				renderCharmPurchaseModal()
 				try {
 					const r = await fetch(`${API}/api/route/charm-progress`)
@@ -30386,6 +30928,9 @@
 
 			function closeCharmPurchaseModal() {
 				document.getElementById('charmPurchaseModal').style.display = 'none'
+				// The list may have changed charm purchase status; refresh the underlying
+				// Need-to-purchase order list so it reflects the new state immediately.
+				if (_employeeCharmMode() && typeof loadOrders === 'function') loadOrders()
 			}
 
 			function toggleCpmDetail(key) {
@@ -30513,7 +31058,7 @@
 				}
 
 				if (changed.length) {
-					renderRouteDashboard()
+					if (!_employeeCharmMode()) renderRouteDashboard()
 					for (const r of changed) await _saveRouteAssign(r.receipt_id, r.item_key, { status_charm: r.status_charm })
 				}
 			}
@@ -30525,6 +31070,9 @@
 			 * as group rows so they scroll naturally and never overlap the header.
 			 */
 			function _cpmBuildTable(assigned, unassigned) {
+				// Employees get a read-only supplier column and no charm-assignment controls
+				// (those are owner catalog decisions); they keep the stepper + status picker.
+				const emp = _employeeCharmMode()
 				const colgroup = `<colgroup>` + `<col class="col-thumb"><col class="col-code"><col class="col-supplier">` + `<col class="col-fulfill"><col class="col-status"><col class="col-actions">` + `</colgroup>`
 				const thead = `<thead><tr>` + `<th></th>` + `<th>Charm</th>` + `<th>Supplier · Location</th>` + `<th>Purchased · To buy</th>` + `<th>Status</th>` + `<th></th>` + `</tr></thead>`
 
@@ -30537,7 +31085,7 @@
 					for (const g of assigned) {
 						const code = g.code
 						const c = _charmByCode[code] || {}
-						const imgSrc = `${API}/api/route/charm-image?code=${encodeURIComponent(code)}&t=${_charmImgVer}`
+						const imgSrc = charmImageUrl(code, c.image_version)
 						const img = c.has_image ? `<img class="cpm-thumb" src="${imgSrc}" onmouseenter="showCharmPreview(this,'${imgSrc}')" onmouseleave="hideCharmPreview()">` : `<div class="cpm-thumb-ph">🔗</div>`
 						const sku = c.sku ? `<div class="cpm-code-sku">${escHtml(c.sku)}</div>` : ''
 
@@ -30545,7 +31093,10 @@
 						const shopVal = shopMixed ? '' : [...g.shops][0] || ''
 						const stall = shopVal ? _charmShopStall(shopVal) : ''
 						const shopHint = shopMixed ? `<div class="cpm-mixed-tag">Mixed — choose to set all</div>` : stall ? `<div class="cpm-shop-stall">📍 ${escHtml(stall)}</div>` : ''
-						const shopSel = `<select class="cpm-shop-select" onchange="setCharmGroupShop('${jsAttr(code)}',this.value)">${_cpmShopOptions(shopVal)}</select>${shopHint}`
+						// Owner: editable shop picker. Employee: read-only "shop · stall".
+						const shopSel = emp
+							? `<div class="cpm-shop-ro">${shopMixed ? 'Mixed' : shopVal ? escHtml(shopVal) : '— none —'}</div>` + (shopMixed || !stall ? '' : `<div class="cpm-shop-stall">📍 ${escHtml(stall)}</div>`)
+							: `<select class="cpm-shop-select" onchange="setCharmGroupShop('${jsAttr(code)}',this.value)">${_cpmShopOptions(shopVal)}</select>${shopHint}`
 
 						const statusMixed = g.statuses.size > 1
 						const statusVal = statusMixed ? '' : [...g.statuses][0] || 'Pending'
@@ -30578,7 +31129,11 @@
 						// so the user can confirm directly from this modal without going back to
 						// the main table.
 						let charmCol
-						if (g.suggested) {
+						if (emp) {
+							// Assigning a charm code is an owner catalog decision. The employee
+							// still sees the product + can mark its charm status below.
+							charmCol = `<div class="cpm-assign-ro" title="No charm code assigned yet — the owner sets this up. You can still mark it purchased below.">Awaiting charm code</div>`
+						} else if (g.suggested) {
 							const sugShop = _charmByCode[g.suggested]?.default_charm_shop || ''
 							charmCol = `<div class="cpm-suggested-wrap">` + `<span class="cpm-sug-code">${escHtml(g.suggested)}</span>` + `<span class="charm-suggest-tag">suggested</span>` + `<button class="charm-assign-btn cpm-sug-accept" ` + `onclick="acceptSuggestedCharmForGroup('${jsAttr(g.item_key)}','${jsAttr(g.suggested)}','${jsAttr(sugShop)}')" ` + `title="Confirm this suggested charm for all ${g.orders.size} order${g.orders.size !== 1 ? 's' : ''} of this product">` + `✓ Accept</button>` + `<button class="cpm-assign-btn" onclick="openCharmPickerForProduct('${first.receipt_id}','${jsAttr(g.item_key)}')" title="Choose a different charm">✎ Change</button>` + `</div>`
 						} else {
@@ -30648,7 +31203,7 @@
 				// count is derived from it (see _cpmPurchased), so there is nothing
 				// else to keep in sync here.
 				renderCharmPurchaseModal()
-				renderRouteDashboard()
+				if (!_employeeCharmMode()) renderRouteDashboard()
 				for (const r of rows) await _saveRouteAssign(r.receipt_id, r.item_key, { status_charm: status })
 			}
 
@@ -30660,7 +31215,7 @@
 					r.status_charm = status
 				})
 				renderCharmPurchaseModal()
-				renderRouteDashboard()
+				if (!_employeeCharmMode()) renderRouteDashboard()
 				for (const r of rows) await _saveRouteAssign(r.receipt_id, r.item_key, { status_charm: status })
 			}
 
@@ -30954,7 +31509,7 @@
 				const prev = document.getElementById('charmEditPreview')
 				const ph = document.getElementById('charmEditPreviewPh')
 				if (mode === 'edit' && c?.has_image) {
-					prev.src = `${API}/api/route/charm-image?code=${encodeURIComponent(code)}&t=${_charmImgVer}`
+					prev.src = charmImageUrl(code, c.image_version)
 					prev.style.display = 'block'
 					ph.style.display = 'none'
 				} else {
@@ -31878,6 +32433,16 @@
 				<div class="modal-subtitle" id="switchModalSubtitle">—</div>
 				<div id="switchModalBody"></div>
 				<div class="modal-error" id="switchError"></div>
+			</div>
+		</div>
+
+		<!-- ── Variant Image Modal (upload a clarifying photo for listing + style) ── -->
+		<div class="modal-overlay" id="styleImageModal" onclick="if (event.target === this) closeStyleImageModal()">
+			<div class="modal-box" style="max-width: 540px">
+				<div class="modal-title">📷 Variant image</div>
+				<div class="modal-subtitle" id="styleImageSubtitle">—</div>
+				<div id="styleImageBody"></div>
+				<div class="modal-error" id="styleImageError"></div>
 			</div>
 		</div>
 

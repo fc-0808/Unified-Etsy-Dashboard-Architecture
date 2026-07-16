@@ -56,7 +56,12 @@ function getPdfium() {
  *
  * @param {Buffer} pdfBuffer
  * @param {LabelBitmapOptions} [opts]
- * @returns {Promise<{ png: Buffer, width: number, height: number }>}
+ * @returns {Promise<{ png: Buffer, width: number, height: number, coveragePct: number }>}
+ *   coveragePct is the % of the media area the label content fills after the
+ *   aspect-preserving fit. A low value means the configured media size does not
+ *   match the label's real shape (e.g. a square label on tall/wide stock) — the
+ *   caller can surface this so a media-size misconfiguration never prints
+ *   silently shrunk/off-centre.
  */
 async function renderLabelBitmap(pdfBuffer, opts = {}) {
   const widthMm     = opts.widthMm     ?? 80;
@@ -78,10 +83,12 @@ async function renderLabelBitmap(pdfBuffer, opts = {}) {
     // target dot grid so the single downscale-then-threshold step produces clean
     // edges. scale is derived from the page's own width so the result is
     // independent of the label's point size.
-    let pageWidthPt = 266.45; // 4PX labels are ~3.7in square; safe fallback
+    let pageWidthPt  = 266.45; // 4PX labels are ~3.7in square; safe fallback
+    let pageHeightPt = 266.45;
     try {
       const sz = page.getOriginalSize();
-      if (sz && sz.originalWidth > 0) pageWidthPt = sz.originalWidth;
+      if (sz && sz.originalWidth  > 0) pageWidthPt  = sz.originalWidth;
+      if (sz && sz.originalHeight > 0) pageHeightPt = sz.originalHeight;
     } catch (_) { /* use fallback */ }
     const renderPx = targetW * supersample;
     const scale = renderPx / pageWidthPt;
@@ -100,7 +107,17 @@ async function renderLabelBitmap(pdfBuffer, opts = {}) {
       .png({ compressionLevel: 9 })
       .toBuffer();
 
-    return { png: buffer, width: targetW, height: targetH };
+    // How much of the media the label actually covers after the aspect-
+    // preserving `fit: contain`. With contain the content fills one axis fully
+    // and is letterboxed on the other, so coverage = min(aspect ratio) — 100%
+    // means the label shape matches the media, lower means growing white margins.
+    const srcAspect   = pageWidthPt / pageHeightPt;
+    const mediaAspect = targetW / targetH;
+    const coveragePct = Math.round(
+      (Math.min(srcAspect, mediaAspect) / Math.max(srcAspect, mediaAspect)) * 100
+    );
+
+    return { png: buffer, width: targetW, height: targetH, coveragePct };
   } finally {
     try { doc.destroy(); } catch (_) { /* ignore */ }
   }

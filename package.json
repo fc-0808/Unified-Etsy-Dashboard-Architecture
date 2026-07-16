@@ -5,6 +5,9 @@
   "description": "Unified local dashboard for 20 Etsy shops across 4 proxy-isolated groups",
   "scripts": {
     "oauth:setup": "node scripts/oauth-setup.js",
+    "shop:remove": "node scripts/remove-shop.js",
+    "complete:4px": "node scripts/complete-4px-pending.js",
+    "compliance:check": "node -e \"const {loadConfig}=require('./src/config/schema');const g=require('./src/compliance/suspension-guard');const c=loadConfig();const r=g.analyzeSuspensionRisks(c);console.log(g.formatRiskReport(r));const s=g.summarizeRisks(r);if(s.status!=='ok')process.exit(1);\"",
     "proxy:test": "node test_proxy.js",
     "proxy:verify": "node scripts/verify-proxies.js",
     "db:setup": "node scripts/setup-db.js",
