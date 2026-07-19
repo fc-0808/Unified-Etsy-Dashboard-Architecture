@@ -1250,7 +1250,7 @@ async function getActiveListings(shopClient, shopId, options = {}) {
 
 /**
  * Fetch the primary thumbnail URL for up to 100 listing IDs in one API call.
- * Uses GET /application/listings/batch?listing_ids[]=…&includes[]=Images
+ * Uses GET /application/listings/batch?listing_ids=…,…&includes=Images
  *
  * Returns a Map<number, string> of listing_id → image URL.
  * Missing/inactive listings are silently omitted from the result.
@@ -1273,11 +1273,15 @@ async function getListingImagesBatch(shopClient, listingIds) {
     gateClient(shopClient);
     try {
       await withRetry(async () => {
-        // Build URLSearchParams manually so repeated keys are serialised correctly:
-        // listing_ids[]=1&listing_ids[]=2&includes[]=Images
+        // Etsy's batch endpoint declares its array query params as explode:false,
+        // i.e. a single COMMA-SEPARATED value (listing_ids=1,2,3). Repeated or
+        // bracketed keys (listing_ids[]=1) are NOT recognised — Etsy then treats
+        // listing_ids as missing (400) or silently returns just one row. See
+        // etsy/open-api discussion #1479 and the reference SDK, which both join on
+        // ",". This matches getPaymentReceiptMap's payment_ids serialisation below.
         const params = new URLSearchParams();
-        chunk.forEach((id) => params.append('listing_ids[]', id));
-        params.append('includes[]', 'Images');
+        params.append('listing_ids', chunk.join(','));
+        params.append('includes', 'Images');
 
         const { data } = await shopClient.get('/application/listings/batch', { params });
         for (const listing of (data.results ?? [])) {
