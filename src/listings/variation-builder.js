@@ -101,6 +101,10 @@ const STYLE_ORDER = ['Case+Grip+Charm', 'Case+Grip', 'Case+Charm', 'Case Only', 
 function normaliseEnabledStyles(input = {}) {
   const out = {};
   for (const key of STYLE_ORDER) out[key] = Boolean(input[key]);
+  // "Case Only" is always available (a listing must offer the bare case). Force it
+  // on here so the generated copy ("What's Included") can never disagree with the
+  // inventory buildInventory() actually publishes, which already re-enables it.
+  out['Case Only'] = true;
   return out;
 }
 

@@ -125,23 +125,32 @@ async function streamUnmatchedImagesZip(res, items) {
     (async () => {
       const usedNames = new Set();
 
-      for (const item of items) {
-        let entryName = item.name;
-        if (usedNames.has(entryName)) {
-          const dot = entryName.lastIndexOf('.');
-          const stem = dot > 0 ? entryName.slice(0, dot) : entryName;
-          const ext = dot > 0 ? entryName.slice(dot + 1) : 'jpg';
+      // Return a ZIP-unique version of `name`, reserving it in usedNames.
+      const reserveUniqueName = (name) => {
+        let candidate = name;
+        if (usedNames.has(candidate)) {
+          const dot = candidate.lastIndexOf('.');
+          const stem = dot > 0 ? candidate.slice(0, dot) : candidate;
+          const ext = dot > 0 ? candidate.slice(dot + 1) : 'jpg';
           let n = 2;
           while (usedNames.has(`${stem}_${n}.${ext}`)) n++;
-          entryName = `${stem}_${n}.${ext}`;
+          candidate = `${stem}_${n}.${ext}`;
         }
-        usedNames.add(entryName);
+        usedNames.add(candidate);
+        return candidate;
+      };
+
+      for (const item of items) {
+        let entryName = reserveUniqueName(item.name);
 
         try {
           const { buffer, ext } = await fetchImage(item.url);
           if (!entryName.endsWith(`.${ext}`)) {
             const dot = entryName.lastIndexOf('.');
-            entryName = (dot > 0 ? entryName.slice(0, dot) : entryName) + `.${ext}`;
+            const corrected = (dot > 0 ? entryName.slice(0, dot) : entryName) + `.${ext}`;
+            // Correcting the extension can collide with an already-reserved name,
+            // so re-run the uniqueness check on the corrected name.
+            entryName = reserveUniqueName(corrected);
           }
           archive.append(buffer, { name: entryName });
           added++;

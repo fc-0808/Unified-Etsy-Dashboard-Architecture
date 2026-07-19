@@ -1074,8 +1074,11 @@ async function getOrderFreight(appKey, appSecret, requestNo, opts = {}) {
 async function getEstimatedCost(appKey, appSecret, input, opts = {}) {
   const { countryCode, weightG, productCode, currency = 'CNY' } = input || {};
   if (!countryCode) throw new Error('countryCode is required for an estimated cost lookup');
-  const w = Math.max(1, Math.round(Number(weightG) || 0));
-  if (!w) throw new Error('a positive weightG is required for an estimated cost lookup');
+  // Validate the raw weight BEFORE clamping — clamping to a 1g floor first would
+  // make this guard dead code and silently price an invalid weight at 1 gram.
+  const roundedW = Math.round(Number(weightG) || 0);
+  if (!(roundedW > 0)) throw new Error('a positive weightG is required for an estimated cost lookup');
+  const w = roundedW;
 
   // Query ALL lanes for the country+weight (omit the product filter) and SELECT the
   // requested product from the result below. This guarantees a price even when the

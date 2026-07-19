@@ -140,12 +140,12 @@ function queryOfficialApi(appKey, appSecret, trackingCode, options = {}) {
         'Accept':        'application/json',
       },
     }, (res) => {
-      let raw = '';
-      res.on('data', (c) => (raw += c));
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
       res.on('end', () => {
         clearTimeout(timer);
         try {
-          const json = JSON.parse(raw);
+          const json = JSON.parse(Buffer.concat(chunks).toString('utf8'));
           if (json.result !== '1' || !json.data) {
             resolve({ status: 'unknown', firstScanAt: null, eventCount: 0, lastEventCode: null, lastEventDesc: json.msg ?? json.errors?.[0]?.error_msg ?? 'api_error' });
             return;
@@ -203,12 +203,12 @@ function queryPublicApi(trackingCode, options = {}) {
         'User-Agent':    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       },
     }, (res) => {
-      let raw = '';
-      res.on('data', (c) => (raw += c));
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
       res.on('end', () => {
         clearTimeout(timer);
         try {
-          const json = JSON.parse(raw);
+          const json = JSON.parse(Buffer.concat(chunks).toString('utf8'));
           if (json.result !== 1 || !Array.isArray(json.data) || !json.data.length) {
             resolve({ status: 'unknown', firstScanAt: null, eventCount: 0, lastEventCode: null, lastEventDesc: 'not_found' });
             return;
@@ -449,12 +449,12 @@ function _officialTrackFull(appKey, appSecret, trackingCode) {
         },
       },
       (res) => {
-        let raw = '';
-        res.on('data', (c) => (raw += c));
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
         res.on('end', () => {
           clearTimeout(timer);
           try {
-            const json = JSON.parse(raw);
+            const json = JSON.parse(Buffer.concat(chunks).toString('utf8'));
             if (json.result !== '1' || !json.data) {
               return resolve({ events: [], status: 'error', source: 'official', error: json.msg ?? json.errors?.[0]?.error_msg ?? 'api_error' });
             }
@@ -514,12 +514,12 @@ function _publicTrackFull(trackingCode) {
         },
       },
       (res) => {
-        let raw = '';
-        res.on('data', (c) => (raw += c));
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
         res.on('end', () => {
           clearTimeout(timer);
           try {
-            const json = JSON.parse(raw);
+            const json = JSON.parse(Buffer.concat(chunks).toString('utf8'));
             if (json.result !== 1 || !Array.isArray(json.data) || !json.data.length) {
               return resolve({ events: [], status: 'not_found', source: 'public' });
             }

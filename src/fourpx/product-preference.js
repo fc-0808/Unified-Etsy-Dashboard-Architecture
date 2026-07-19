@@ -16,7 +16,7 @@
  * The same preference must be applied in three places, so it lives here once:
  *   1. The server exposes the preferred code + country map via GET /api/4px/config
  *      so the browser drawer pre-selects the right product per order.
- *   2. The curated FOURPX_PRODUCT_CATALOG (server fallback for direct-customer API
+ *   2. The curated FOURPX_RECOMMENDED_PRODUCTS shortlist (server fallback for API
  *      keys that can't call ds.xms.logistics_product.getlist) sources S5058's
  *      country coverage from FOURPX_POSTLINK_S5058_COUNTRIES here.
  *   3. create4pxShipmentForReceipt() uses resolveLogisticsProduct() as a

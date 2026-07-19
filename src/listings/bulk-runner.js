@@ -14,13 +14,15 @@
  */
 
 const crypto = require('crypto');
+const fs = require('fs');
 const path = require('path');
+const sharp = require('sharp');
 
-const { scanInputRoot, scanProductFolder } = require('./scanner');
+const { scanInputRoot, scanProductFolder, MAX_IMAGES, IMAGE_EXTS } = require('./scanner');
 const { getPricesForCurrency, STYLE_KEYS } = require('./pricing');
 const { resolveDefaultPrices } = require('./shop-prices');
 const { generateListingCopy, generateCopyFromAnalysis, filterModelsInDescription, retitleForModels } = require('./ai-generator');
-const { getShopListingSettings } = require('./shop-settings');
+const { getShopListingSettings, reconcileShopSection } = require('./shop-settings');
 const { createListingForProduct, repriceListing } = require('./etsy-create');
 const { getTaxonomyAttributes } = require('./attributes');
 const { computeEnabledStyles, normaliseEnabledStyles, normaliseCustomStyles, normaliseEnabledModels, STYLE_ORDER } = require('./variation-builder');
@@ -57,7 +59,20 @@ function jobProductType(job) {
 function applyImagePlan(product, preview) {
   const order = preview && Array.isArray(preview.imageOrder) ? preview.imageOrder : null;
   if (!order || !order.length) return product;
-  const byName = new Map((product.images || []).map((im) => [im.filename, im]));
+  // Resolve plan filenames against the FULL on-disk image set, not just the
+  // natural-sort top-MAX_IMAGES that scanInputRoot returned: a kept photo can
+  // sort past the cap (an operator-uploaded `upload-<ts>` file, or a listing
+  // that still holds orphan files from a pre-archiving removal). Missing that
+  // file would silently drop it from the upload. The plan is itself bounded to
+  // ≤MAX_IMAGES, so the result never exceeds Etsy's cap.
+  let byName;
+  try {
+    const all = scanProductFolder(product.folder, { maxImages: Infinity }).images || [];
+    byName = new Map(all.map((im) => [im.filename, im]));
+  } catch {
+    byName = new Map();
+  }
+  for (const im of product.images || []) if (!byName.has(im.filename)) byName.set(im.filename, im);
   const picked = [];
   const seen = new Set();
   for (const fn of order) {
@@ -283,7 +298,9 @@ class BulkJobManager {
     if (!job) { const e = new Error('Job not found'); e.status = 404; throw e; }
     const item = this.getItemBySeq(jobId, seq);
     if (!item) { const e = new Error('Item not found'); e.status = 404; throw e; }
-    const scanned = scanProductFolder(item.product_folder);
+    // Scan UNCAPPED: a planned/uploaded photo may natural-sort past MAX_IMAGES
+    // when the folder still holds orphan files, and it must still stream.
+    const scanned = scanProductFolder(item.product_folder, { maxImages: Infinity });
     // Prefer the persisted preview order (rank → filename) so an operator's
     // reordering/removal in the Inspector is honoured when streaming thumbnails.
     // The folder's own natural-sort rank is only a fallback for legacy items.
@@ -418,10 +435,21 @@ class BulkJobManager {
     let ai = {};
     try { ai = item.ai_json ? JSON.parse(item.ai_json) : {}; } catch { ai = {}; }
 
-    // Authoritative filenames = what's actually on disk right now.
+    // Natural-sort scan (capped at MAX_IMAGES) — only used as the rank fallback
+    // for legacy items whose preview lacks an image list.
     let scanned = [];
     try { scanned = scanProductFolder(item.product_folder).images || []; } catch { scanned = []; }
-    const validNames = new Set(scanned.map((im) => im.filename));
+    // Every image file physically on disk right now, UNCAPPED. The scanner only
+    // surfaces the first MAX_IMAGES, but we must see them all to (a) accept a
+    // freshly uploaded photo that natural-sorts past the cap and (b) reconcile
+    // the folder against the plan below.
+    let diskNames = [];
+    try {
+      diskNames = fs.readdirSync(item.product_folder).filter((f) => IMAGE_EXTS.has(path.extname(f).toLowerCase()));
+    } catch {
+      diskNames = scanned.map((im) => im.filename);
+    }
+    const validNames = new Set(diskNames);
 
     const requested = Array.isArray(filenames) ? filenames : [];
     const order = [];
@@ -431,6 +459,15 @@ class BulkJobManager {
       seen.add(fn); order.push(fn);
     }
     if (!order.length) { const e = new Error('Keep at least one image.'); e.status = 400; throw e; }
+
+    // Reconcile the folder with the plan: any image on disk the operator did NOT
+    // keep is soft-deleted into a `_removed/` subfolder. This keeps the folder
+    // mirroring the plan so we (a) stay under Etsy's photo cap, (b) never let
+    // natural-sort truncation hide a newly added photo, and (c) upload exactly
+    // the kept set on the real create. Files are MOVED, never destroyed, so a
+    // mistaken removal is fully recoverable.
+    const keep = new Set(order);
+    this._archiveImages(item.product_folder, diskNames.filter((n) => !keep.has(n)));
 
     // Map the CURRENT ranks → filenames so we can carry variation-photo links
     // across the reorder. Prefer the saved preview order; fall back to the scan.
@@ -464,6 +501,170 @@ class BulkJobManager {
     });
     this._emit(jobId, { type: 'images', folder: item.product_folder, seq: item.seq, images: newImages });
     return { ok: true, images: newImages, styleImageMapping: preview.styleImageMapping };
+  }
+
+  /**
+   * Soft-delete images out of a product folder by MOVING each named file into a
+   * `_removed/` subfolder (created on demand). Non-destructive and recoverable;
+   * scanProductFolder ignores subdirectories, so archived files disappear from
+   * the plan/scan without being lost. Best-effort per file — a move that fails
+   * leaves the file in place (harmless) and never breaks the surrounding save.
+   *
+   * @param {string} folder   product folder
+   * @param {string[]} names  filenames (relative to folder) to archive
+   */
+  _archiveImages(folder, names) {
+    if (!Array.isArray(names) || !names.length) return;
+    const trash = path.join(folder, '_removed');
+    for (const name of names) {
+      const src = path.join(folder, name);
+      try {
+        if (!fs.existsSync(src)) continue;
+        if (!fs.existsSync(trash)) fs.mkdirSync(trash, { recursive: true });
+        let dest = path.join(trash, name);
+        if (fs.existsSync(dest)) {
+          const ext = path.extname(name);
+          dest = path.join(trash, `${path.basename(name, ext)}-${Date.now()}${ext}`);
+        }
+        fs.renameSync(src, dest);
+      } catch { /* best effort — leaving the original in place is harmless */ }
+    }
+  }
+
+  /**
+   * Import operator-uploaded photos into an item's product folder and append
+   * them to the curated image plan. Same gate as updateItemImages: only valid on
+   * a dry-run preview, before the Etsy draft is created — once a real listing
+   * exists its photos live on Etsy and are managed there.
+   *
+   * Each upload is validated + decoded through sharp (rejects anything that is
+   * not a real jpg/png/gif/webp — we never trust the client-declared type),
+   * written to disk under a collision-free name, and appended AFTER the existing
+   * kept photos. The re-rank + variation-photo remap + persistence + SSE emit are
+   * delegated to updateItemImages so there is a single code path that mutates the
+   * plan. Writing to disk (not just the DB) is essential: the real create re-scans
+   * the folder, so an uploaded photo must physically exist there to be uploaded.
+   *
+   * @param {string} jobId
+   * @param {number} seq
+   * @param {Array<{data:Buffer, filename?:string}>} files
+   * @returns {Promise<object>} updateItemImages result + { added:string[] }
+   */
+  async addItemImages(jobId, seq, files) {
+    const job = this.getJob(jobId);
+    if (!job) { const e = new Error('Job not found'); e.status = 404; throw e; }
+    const item = this.getItemBySeq(jobId, seq);
+    if (!item) { const e = new Error('Item not found'); e.status = 404; throw e; }
+    if (job.dry_run !== 1 || item.listing_id) {
+      const e = new Error('Photos can only be added on a dry-run preview, before the Etsy draft is created.');
+      e.status = 400; throw e;
+    }
+
+    const incoming = Array.isArray(files)
+      ? files.filter((f) => f && Buffer.isBuffer(f.data) && f.data.length)
+      : [];
+    if (!incoming.length) { const e = new Error('No image files supplied.'); e.status = 400; throw e; }
+
+    const folder = item.product_folder;
+    try {
+      if (!fs.statSync(folder).isDirectory()) throw new Error('not a directory');
+    } catch {
+      const e = new Error('Product folder no longer exists on disk.'); e.status = 409; throw e;
+    }
+
+    // Every image file currently on disk — used only to pick a collision-free
+    // name for the new files (it may include orphans left by a removal made
+    // before the reconcile logic existed).
+    let onDiskNames = [];
+    try {
+      onDiskNames = fs.readdirSync(folder).filter((f) => IMAGE_EXTS.has(path.extname(f).toLowerCase()));
+    } catch {
+      try { onDiskNames = (scanProductFolder(folder).images || []).map((im) => im.filename); } catch { onDiskNames = []; }
+    }
+
+    // The 20-photo cap applies to the PLAN — the photos that actually upload to
+    // Etsy — NOT to stray files on disk. Removed photos are archived out of the
+    // folder by updateItemImages, but a listing edited before that logic existed
+    // may still hold orphans, so we must count the plan (imageOrder), never the
+    // raw directory. This is what lets "delete 2, then add 1" work as expected.
+    let preview = {};
+    try { preview = item.preview_json ? JSON.parse(item.preview_json) : {}; } catch { preview = {}; }
+    const planNames = Array.isArray(preview.imageOrder) && preview.imageOrder.length
+      ? preview.imageOrder
+      : (Array.isArray(preview.images) && preview.images.length
+          ? preview.images.slice().sort((a, b) => Number(a.rank) - Number(b.rank)).map((im) => im.filename)
+          : onDiskNames);
+    const room = MAX_IMAGES - planNames.length;
+    if (room <= 0) {
+      const e = new Error(`This product already has the maximum of ${MAX_IMAGES} photos. Remove one before adding more.`);
+      e.status = 400; throw e;
+    }
+    if (incoming.length > room) {
+      const e = new Error(`Only ${room} more photo${room === 1 ? '' : 's'} can be added (max ${MAX_IMAGES} per listing).`);
+      e.status = 400; throw e;
+    }
+
+    // sharp's detected format → the on-disk extension we persist. Only raster
+    // formats Etsy (and our scanner) accept are allowed through.
+    const FORMAT_EXT = { jpeg: 'jpg', png: 'png', gif: 'gif', webp: 'webp' };
+    const used = new Set(onDiskNames.map((n) => n.toLowerCase()));
+    const written = [];
+    let stamp = Date.now();
+    try {
+      for (const file of incoming) {
+        // Confirm it is a real, decodable raster image and learn its TRUE format.
+        // sharp is authoritative; the magic-byte sniff is a fallback if sharp is
+        // unavailable for a given build/format.
+        let fmt = '';
+        try { fmt = String((await sharp(file.data).metadata()).format || '').toLowerCase(); } catch { fmt = ''; }
+        let ext = FORMAT_EXT[fmt] || this._sniffImageExt(file.data);
+        if (!ext) { const e = new Error('Unsupported image — upload a JPG, PNG, GIF or WebP.'); e.status = 400; throw e; }
+
+        // Collision-free name. `upload-<timestamp>` keeps the first integer large
+        // so natural-sort places new photos AFTER numbered originals (1.png, 2.png…)
+        // — i.e. appended, matching the "add to the end" intent.
+        let name;
+        do { name = `upload-${stamp++}.${ext}`; }
+        while (used.has(name.toLowerCase()) || fs.existsSync(path.join(folder, name)));
+        used.add(name.toLowerCase());
+        fs.writeFileSync(path.join(folder, name), file.data);
+        written.push(name);
+      }
+    } catch (err) {
+      // Roll back any files already written so a mid-batch failure leaves no
+      // orphaned photos on disk.
+      for (const n of written) { try { fs.unlinkSync(path.join(folder, n)); } catch { /* best effort */ } }
+      throw err;
+    }
+
+    // Preserve the operator's current display order, then append the new photos.
+    // (`preview` was already parsed above for the plan-count cap check.)
+    const currentOrder = Array.isArray(preview.imageOrder) && preview.imageOrder.length
+      ? preview.imageOrder.slice()
+      : (Array.isArray(preview.images) && preview.images.length
+          ? preview.images.slice().sort((a, b) => Number(a.rank) - Number(b.rank)).map((im) => im.filename)
+          : onDiskNames.slice());
+    const seen = new Set();
+    const order = [];
+    for (const fn of [...currentOrder, ...written]) {
+      if (typeof fn === 'string' && !seen.has(fn)) { seen.add(fn); order.push(fn); }
+    }
+
+    const result = this.updateItemImages(jobId, seq, order);
+    return { ...result, added: written };
+  }
+
+  /**
+   * Fallback image sniffer by magic bytes, used only when sharp can't identify
+   * the format. Returns a scanner-accepted extension or ''.
+   */
+  _sniffImageExt(buf) {
+    if (!Buffer.isBuffer(buf) || buf.length < 12) return '';
+    if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'png';
+    if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'gif';
+    if (buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'webp';
+    return '';
   }
 
   // ── Publishing ─────────────────────────────────────────────────────────────
@@ -1174,9 +1375,15 @@ class BulkJobManager {
       if (preview.character) ai.characterName = preview.character;
       if (preview.enabledStyles && Object.keys(preview.enabledStyles).length) ai.enabledStyles = preview.enabledStyles;
       if (preview.enabledModels && Object.keys(preview.enabledModels).length) ai.enabledModels = preview.enabledModels;
+      // Per-style price edits made on the preview MUST carry into the real draft —
+      // the run loop layers ai.stylePrices over the job-level defaults so the Etsy
+      // inventory is created with exactly the prices the operator approved.
+      if (preview.stylePrices && Object.keys(preview.stylePrices).length) ai.stylePrices = this._sanitizePrices(preview.stylePrices);
       if (preview.styleImageMapping) ai.styleImageMapping = preview.styleImageMapping;
-      if (preview.customStyles) ai.customStyles = preview.customStyles; // operator-defined variation values
-      if (preview.variationOrder) ai.variationOrder = preview.variationOrder; // operator's variation display order
+      // Honour the operator's EXACT custom-variation state — including an explicit
+      // clear (null) — so promoting never resurrects custom values they removed.
+      if (preview.customStyles !== undefined) ai.customStyles = preview.customStyles; // operator-defined variation values
+      if (preview.variationOrder !== undefined) ai.variationOrder = preview.variationOrder; // operator's variation display order
       if (Array.isArray(preview.imageAnalysis) && preview.imageAnalysis.length) ai.imageAnalysis = preview.imageAnalysis;
       if (preview.aiAttributes) ai.aiAttributes = preview.aiAttributes;
 
@@ -1286,8 +1493,13 @@ class BulkJobManager {
         e.status = 403;
         throw e;
       }
+      // A real (non-dry) run WRITES to Etsy, so resolve settings fresh from the
+      // shop first: this picks up sections/profiles created AFTER the dry run
+      // was saved (e.g. an "AirPods Cases" section added just before publish).
+      // Dry runs may use the 6h cache — they only preview, never write.
       const settings = await getShopListingSettings({
-        db: this.db, shopClient, shopId: numericShopId, shopKey: job.shop_key, productType: jobProductType(job), force: false,
+        db: this.db, shopClient, shopId: numericShopId, shopKey: job.shop_key, productType: jobProductType(job),
+        force: job.dry_run !== 1,
       });
 
       // Merge UI overrides onto the auto-selected defaults — but NEVER let an
@@ -1305,6 +1517,27 @@ class BulkJobManager {
       // Layer: resolved shop defaults < the run's stored overrides < non-empty live overrides.
       const defaults = { ...settings.defaults, ...storedOverrides, ...cleanOverrides };
       const mergedSettings = { ...settings, defaults };
+
+      // Reconcile the storefront section against the shop's CURRENT sections.
+      // The section is chosen once (often at dry-run time) and then baked into
+      // the run's stored overrides — but the shop's sections can change before
+      // publish. This honours a deliberate choice while self-correcting a stale
+      // id or one that belongs to another product type (e.g. an AirPods run
+      // whose section defaulted to "iPhone Cases"), and adopts a matching
+      // section created after the dry run. Only matters for real writes.
+      if (job.dry_run !== 1) {
+        try {
+          const priorSection = defaults.shop_section_id ?? null;
+          const resolvedSection = reconcileShopSection(priorSection, settings.shop_sections, getProductType(jobProductType(job)));
+          if ((resolvedSection ?? null) !== priorSection) {
+            defaults.shop_section_id = resolvedSection;
+            const titleOf = (id) => (settings.shop_sections || []).find((s) => Number(s.shop_section_id) === Number(id));
+            const to = resolvedSection ? `"${(titleOf(resolvedSection) || {}).title || resolvedSection}"` : 'none';
+            const from = priorSection ? `"${(titleOf(priorSection) || {}).title || priorSection}"` : 'none';
+            this._emit(jobId, { type: 'info', message: `Shop section auto-corrected for this ${jobProductType(job)} run: ${from} → ${to}.` });
+          }
+        } catch { /* keep the merged default if section resolution fails */ }
+      }
 
       // Taxonomy attribute menu (Theme/Occasion/Celebration/Pattern allowed values)
       // so Phase 2 can pick valid Etsy "feature section" values. One cached call.
@@ -1378,14 +1611,26 @@ class BulkJobManager {
             this._emit(jobId, { type: 'item', folder: item.product_folder, status: 'ai_done', title: copy.title });
           }
 
-          // 2) Create / resume on Etsy.
-          const checkpoint = item.checkpoint_json ? JSON.parse(item.checkpoint_json) : {};
+          // 2) Create / resume on Etsy. Parse defensively (like every other
+          // JSON.parse in this file): a corrupt checkpoint should start the item
+          // from a clean slate, not throw and fail an otherwise-resumable item.
+          let checkpoint = {};
+          try { checkpoint = item.checkpoint_json ? JSON.parse(item.checkpoint_json) : {}; } catch { checkpoint = {}; }
+          // Per-item price overrides captured in the Inspector during the dry-run
+          // preview take precedence over the job-level defaults; any style the
+          // operator didn't touch falls back to the job price. Without this, price
+          // edits made on the preview were silently dropped when the run created
+          // the real Etsy draft (the create used only the job-level prices).
+          const priceOverrides = this._sanitizePrices(copy.stylePrices || {});
+          const itemPrices = Object.keys(priceOverrides).length
+            ? { ...priceInfo.prices, ...priceOverrides }
+            : priceInfo.prices;
           const result = await createListingForProduct({
             shopClient,
             shopId: numericShopId,
             product,
             copy,
-            prices: priceInfo.prices,
+            prices: itemPrices,
             settings: mergedSettings,
             productType,
             options: { state: targetState, restockQuantity, dryRun, currency: priceInfo.currency },

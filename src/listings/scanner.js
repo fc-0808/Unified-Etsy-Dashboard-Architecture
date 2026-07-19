@@ -56,6 +56,12 @@ function mimeForVideo(ext) {
 /**
  * Scan a single product folder.
  * @param {string} folderPath absolute path to the product folder
+ * @param {object} [opts]
+ * @param {number} [opts.maxImages=MAX_IMAGES]  Upper bound on images returned.
+ *        Pass `Infinity` to get EVERY image on disk — required when resolving a
+ *        curated image plan whose kept photos may natural-sort past the default
+ *        cap (e.g. an operator-uploaded `upload-<ts>` file, or a listing that
+ *        still holds orphan files from a removal made before archiving existed).
  * @returns {{
  *   folder: string, name: string,
  *   images: Array<{path:string,filename:string,mime:string,rank:number}>,
@@ -63,7 +69,8 @@ function mimeForVideo(ext) {
  *   imageCount: number, hasVideo: boolean, warnings: string[]
  * }}
  */
-function scanProductFolder(folderPath) {
+function scanProductFolder(folderPath, opts = {}) {
+  const maxImages = opts.maxImages != null ? opts.maxImages : MAX_IMAGES;
   const name = path.basename(folderPath);
   const warnings = [];
   let entries = [];
@@ -85,11 +92,11 @@ function scanProductFolder(folderPath) {
     .filter((f) => VIDEO_EXTS.has(path.extname(f).toLowerCase()))
     .sort(naturalCompare);
 
-  if (imageFiles.length > MAX_IMAGES) {
-    warnings.push(`${imageFiles.length} images found — only the first ${MAX_IMAGES} will be uploaded.`);
+  if (Number.isFinite(maxImages) && imageFiles.length > maxImages) {
+    warnings.push(`${imageFiles.length} images found — only the first ${maxImages} will be uploaded.`);
   }
 
-  const images = imageFiles.slice(0, MAX_IMAGES).map((f, i) => ({
+  const images = imageFiles.slice(0, maxImages).map((f, i) => ({
     path: path.join(folderPath, f),
     filename: f,
     mime: mimeForImage(path.extname(f)),

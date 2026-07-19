@@ -334,6 +334,27 @@ function initDb(dbPath) {
       computed_at INTEGER DEFAULT (strftime('%s', 'now'))
     );
 
+    -- ─────────────────────────────────────────────
+    -- Operator-declared "same product" merges (human-in-the-loop override).
+    -- Perceptual-hash unification only links listings whose images look alike.
+    -- When two listings are physically the SAME supplier product but their Etsy
+    -- photos differ (different angle, model, or promo shot), the hash can't see
+    -- it. An operator records the equivalence here and the canonical reconciler
+    -- honours it as a FORCED union edge — so their orders merge into one product
+    -- card on the shopping route. Edges are stored undirected + de-duplicated
+    -- (listing_a < listing_b); a connected component = one product.
+    -- ─────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS product_merges (
+      listing_a  INTEGER NOT NULL,
+      listing_b  INTEGER NOT NULL,
+      note       TEXT    DEFAULT '',
+      created_by TEXT    DEFAULT '',
+      created_at INTEGER DEFAULT (strftime('%s', 'now')),
+      PRIMARY KEY (listing_a, listing_b),
+      CHECK (listing_a < listing_b)
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_merges_b ON product_merges(listing_b);
+
     -- Durable audit trail for supplier purchase prices. Catalog/Excel imports
     -- must never make a manually recorded price unrecoverable again.
     CREATE TABLE IF NOT EXISTS product_price_history (
@@ -1799,8 +1820,14 @@ function upsertReceipt(db, shopId, groupId, receipt) {
       first_variations     = COALESCE(excluded.first_variations,     first_variations),
       all_transactions     = COALESCE(excluded.all_transactions,     all_transactions),
       formatted_address    = COALESCE(excluded.formatted_address,    formatted_address),
-      tracking_code        = excluded.tracking_code,
-      carrier_name         = excluded.carrier_name,
+      -- Protect tracking against transient NULLs, same rationale as the fields
+      -- above: a Pass B / non-shipped re-sync often returns a receipt with an
+      -- empty shipments[] array (firstShip == null → tracking_code param NULL).
+      -- Writing that NULL raw would wipe a tracking number set by a prior sync or
+      -- by external 4PX tracking (updateTrackingDetail). COALESCE keeps the
+      -- existing value while still accepting a genuinely-changed non-NULL code.
+      tracking_code        = COALESCE(excluded.tracking_code, tracking_code),
+      carrier_name         = COALESCE(excluded.carrier_name,  carrier_name),
       shipment_was_shipped = excluded.shipment_was_shipped,
       -- Only update shipment_notified_at when it is newly set; never overwrite a real
       -- timestamp with NULL (re-sync may omit the shipments array for non-shipped orders).
@@ -3919,6 +3946,24 @@ function updateCharmLibraryRow(db, r) {
       INSERT INTO charm_library (code, sku, default_charm_shop, notes, image_file, sort_order, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, strftime('%s','now'))
     `).run(next.code, next.sku, next.default_charm_shop, next.notes, next.image_file, keepSort);
+    // A deliberate code rename is the ONLY legitimate way a (normally stable)
+    // charm code changes. Carry every existing reference over to the new code so
+    // orders keep pointing at the same physical charm instead of being orphaned.
+    if (nCode !== oCode) {
+      const rn = { [oCode]: nCode };
+      _remapCharmCodeColumn(db, 'route_assignments',   rn);
+      _remapCharmCodeColumn(db, 'product_assignments', rn);
+      try { _remapCharmCodeColumn(db, 'product_map',   rn); } catch { /* optional table */ }
+      // charm_purchase_progress is keyed by charm_code (PK) and tracks how many
+      // physical pieces of this charm have been bought — a stock count that must
+      // follow the charm across a rename, exactly like the assignment references
+      // above. Clear any stale orphan row for the new code first so the two-phase
+      // swap in _remapCharmCodeColumn can't hit a PK collision.
+      try {
+        db.prepare('DELETE FROM charm_purchase_progress WHERE charm_code = ?').run(nCode);
+        _remapCharmCodeColumn(db, 'charm_purchase_progress', rn);
+      } catch { /* table may not exist before first migration */ }
+    }
   });
   tx();
   renumberCharmLibrary(db);
@@ -3946,73 +3991,49 @@ function _remapCharmCodeColumn(db, table, renameMap) {
 }
 
 /**
- * Reorder the charm library to match `newOrder` (an array of current codes in
- * the desired visual order) and renumber codes sequentially by position
- * (CH-00001, CH-00002, …) — mirroring OSP's reorder_charm_library_rows.
+ * Reorder the charm library to match `newOrder` (an array of the CURRENT codes
+ * in the desired visual order) by updating ONLY each charm's `sort_order`.
  *
- * The physical charm (sku, shop, notes, image) travels with its position; the
- * code is positional. Every charm_code reference in route_assignments,
- * product_assignments and product_map is remapped so existing assignments keep
- * pointing at the same physical charm.
+ * Charm CODES are STABLE, permanent identities. A charm keeps its code — and
+ * therefore its image file and every `route_assignments` / `product_assignments`
+ * / `product_map` reference — no matter where it is dragged. Reordering is a
+ * pure DISPLAY concern, so it can NEVER change which physical charm an order is
+ * assigned to, and never renames a file on disk.
  *
- * @returns {{ renameMap: Object<string,string>, renames: Array<{oldCode,newCode,ext}> }}
- *          renames lists the image files that must be renamed on disk.
+ * (Historically this renumbered codes by position — CH-00001, CH-00002, … — and
+ * then had to remap every reference across three tables AND rename every image
+ * on disk to keep the physical charm's identity intact. That multi-step rename
+ * was fragile: any inconsistency between the code remap and the image rename
+ * repointed an order at the WRONG physical charm and/or orphaned its image. A
+ * charm code the operator assigned (e.g. CH-00065) must not silently mutate just
+ * because the list was sorted. Decoupling identity from position deletes that
+ * whole class of bugs.)
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {string[]} newOrder current codes in the desired order (full permutation)
+ * @returns {{ reordered: number }}
  * @throws {Error} code 'REQUIRED' when newOrder isn't a full permutation.
  */
 function reorderCharmLibrary(db, newOrder) {
-  const rows   = getCharmLibrary(db);
-  const byCode = new Map(rows.map(r => [r.code, r]));
+  const rows  = getCharmLibrary(db);
+  const known = new Set(rows.map(r => r.code));
 
   const seen = new Set();
   const finalOrder = [];
   for (const raw of (newOrder || [])) {
     const c = String(raw || '').trim();
-    if (byCode.has(c) && !seen.has(c)) { finalOrder.push(c); seen.add(c); }
+    if (known.has(c) && !seen.has(c)) { finalOrder.push(c); seen.add(c); }
   }
   if (finalOrder.length !== rows.length) {
     throw Object.assign(new Error('Reorder list must include every charm exactly once.'), { code: 'REQUIRED' });
   }
 
-  // Detect code prefix + numeric width from the existing codes.
-  let pfx = 'CH-', maxW = 0;
-  for (const r of rows) {
-    const m = /^([A-Za-z]+-+)(\d+)$/.exec(r.code);
-    if (m) { if (pfx === 'CH-') pfx = m[1].toUpperCase(); maxW = Math.max(maxW, m[2].length); }
-  }
-  const width = Math.max(maxW, String(finalOrder.length).length, 5);
+  const upd = db.prepare('UPDATE charm_library SET sort_order = @so WHERE code = @code');
+  db.transaction(() => {
+    finalOrder.forEach((code, i) => upd.run({ so: i, code }));
+  })();
 
-  const renameMap = {};
-  const renames   = [];
-  const newRows = finalOrder.map((code, i) => {
-    const newCode = `${pfx}${String(i + 1).padStart(width, '0')}`;
-    const cur = byCode.get(code);
-    let imageFile = cur.image_file || '';
-    if (newCode !== code) {
-      renameMap[code] = newCode;
-      if (cur.image_file) {
-        const dot = cur.image_file.lastIndexOf('.');
-        const ext = dot >= 0 ? cur.image_file.slice(dot + 1) : 'png';
-        imageFile = `${newCode}.${ext}`;
-        renames.push({ oldCode: code, newCode, ext });
-      }
-    }
-    return {
-      code: newCode, sku: cur.sku, default_charm_shop: cur.default_charm_shop,
-      notes: cur.notes, image_file: imageFile, sort_order: i,
-    };
-  });
-
-  const tx = db.transaction(() => {
-    replaceCharmLibrary(db, newRows);
-    if (Object.keys(renameMap).length) {
-      _remapCharmCodeColumn(db, 'route_assignments',   renameMap);
-      _remapCharmCodeColumn(db, 'product_assignments', renameMap);
-      try { _remapCharmCodeColumn(db, 'product_map',    renameMap); } catch {}
-    }
-  });
-  tx();
-
-  return { renameMap, renames };
+  return { reordered: finalOrder.length };
 }
 
 // ─── Charm purchase progress (purchased / in-stock quantity per charm) ────────

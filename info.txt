@@ -40,7 +40,6 @@ The first one registeredwith waltercheung1388@gmail.com will be used to connect 
 "20.	Email: waltercheung1388@gmail.com (Y2KASEofficial) 
 21.	Email: walterfung19950808@gmail.com (LUVKASEofficial) 
 22.	Email: barefootproject01@gmail.com (Y2KASEshop) 
-23.	Email: waltercheung38@gmail.com (Y2KASEstore) 
 24.	Email: canadadigital01@gmail.com (Y2KiPhoneCases)" 
 and the second one registered with walterfung19950808@gmail.com will be used to connect with 
 "26.	Email: cheapcconline@gmail.com (KawaiiiPhoneCases)" 
@@ -55,7 +54,6 @@ Lets say the 7 accounts of
 "20.	Email: waltercheung1388@gmail.com (Y2KASEofficial) 
 21.	Email: walterfung19950808@gmail.com (LUVKASEofficial) 
 22.	Email: barefootproject01@gmail.com (Y2KASEshop) 
-23.	Email: waltercheung38@gmail.com (Y2KASEstore) 
 24.	Email: canadadigital01@gmail.com (Y2KiPhoneCases) 
 26.	Email: cheapcconline@gmail.com (KawaiiiPhoneCases)" 
 will be using one proxy and another of 

@@ -112,6 +112,41 @@ function lineItemKey(title, listingId) {
 }
 
 /**
+ * Key under which a line's PER-PRODUCT saved defaults live in
+ * `product_assignments` (the user-set supplier + charm that every order of the
+ * same product should inherit).
+ *
+ * For a normal line this is just the line's own key. For a line the operator has
+ * SWITCHED to a new design it MUST be the REPLACEMENT design's identity — the
+ * product we will actually buy — NOT the original order line. The original
+ * line's key still carries the ORIGINAL product's saved supplier/charm, so
+ * reading (or writing) defaults under it on a switched line leaks stale data:
+ * the switch would update the title + image yet keep the OLD supplier name /
+ * stall. This mirrors how the image, canonical key and title-based supplier
+ * matching already re-key onto the replacement on a switch.
+ *
+ *   • catalog switch → replacement listing identity (new title + source listing)
+ *   • custom switch  → null: a custom upload is NOT a catalog product, so it has
+ *                      no per-product default to inherit or persist; only the
+ *                      per-order override (route_assignments) applies to it.
+ *   • no switch      → the line's own key.
+ *
+ * Used on BOTH sides so reads and writes always agree:
+ *   • read  — buildRouteRows/emitRow, resolving the supplier/charm to display,
+ *   • write — POST /api/route/assign, persisting an operator's manual supplier
+ *             /charm edit as the correct product's default.
+ *
+ * @param {string} lineKey  the line's own key (lineItemKey of the ORIGINAL title)
+ * @param {object|null} sub the substitution record for the line, if any
+ * @returns {string|null}   product-defaults key, or null when none applies
+ */
+function productDefaultsKey(lineKey, sub) {
+  if (!sub) return lineKey;
+  if (sub.source === 'custom') return null;
+  return lineItemKey(sub.new_title || '', sub.source_listing_id);
+}
+
+/**
  * A line is "fully purchased" — and therefore needs NO further shopping — once
  * every component it actually carries (case / grip / charm) is marked Purchased.
  *
@@ -440,6 +475,18 @@ function buildRouteRows(db, config, filters = {}) {
   // Authoritative product map from Excel "Product Map" sheet, keyed by title_norm.
   // Priority: route_assignments > product_assignments > excel_product_map > OSP catalog.
   const excelProductMap = getProductMapByNorm(db);
+
+  // Charm code → supplier shop, from the charm library (Manage charms). This is
+  // the SINGLE SOURCE OF TRUTH for a charm's supplier: the shop is a pure function
+  // of the charm CODE. route_assignments / product_assignments only CACHE the shop
+  // that was current when the charm was first assigned, so once the operator edits
+  // a charm's supplier here, that cache is stale — resolving the shop from the
+  // library (below) is what keeps the Route tab + Shopping page in sync with the
+  // edit instead of showing the old shop/stall.
+  const charmShopByCode = new Map();
+  try {
+    getCharmLibrary(db).forEach((c) => charmShopByCode.set(c.code, c.default_charm_shop || ''));
+  } catch { /* charm_library may not exist before first seed */ }
   // Durable physical-product identity across Etsy shops/listing IDs. Generated
   // from near-identical primary product images and persisted in listing_phash.
   // Product Map carries the same key so Excel/catalog aliases remain linked.
@@ -504,7 +551,17 @@ function buildRouteRows(db, config, filters = {}) {
       };
     }
     const saved    = assignMap[`${meta.receipt_id}\x00${key}`] || {};
-    const product  = productMap[key] || {};
+    // Per-product saved defaults (supplier / charm). On a SWITCHED line these
+    // must describe the REPLACEMENT design we will actually buy — never the
+    // original line, whose key still holds the ORIGINAL product's saved
+    // supplier/charm. Reading them under the original key here was the SOLE
+    // reason a design switch updated the title + image yet left the OLD supplier
+    // name / stall in place: product_assignments outranks the (correctly
+    // re-keyed) Excel map + catalog match in the priority chain below.
+    // productDefaultsKey re-keys catalog switches onto the replacement and
+    // returns null for custom uploads (which have no catalog default).
+    const productDefKey = productDefaultsKey(key, sub);
+    const product  = (productDefKey && productMap[productDefKey]) || {};
     const excelPM  = excelProductMap.get(titleNorm) || {};
     // Canonical physical-product identity — the key the shopping view uses to MERGE
     // order lines into a single product card. It MUST describe the product we will
@@ -613,7 +670,17 @@ function buildRouteRows(db, config, filters = {}) {
     // Keeping catalog data out of charm_code ensures "Needs charm" always surfaces
     // every item that still requires a conscious operator decision.
     const effectiveCharmCode = saved.charm_code || (isCustomSub ? '' : product.charm_code) || '';
-    const effectiveCharmShop = saved.charm_shop || (isCustomSub ? '' : product.charm_shop) || '';
+    // The charm's supplier SHOP follows its CODE via the charm library — the single
+    // source of truth — NOT the per-order/per-product snapshot. Trusting the stored
+    // snapshot was the bug: after editing a charm's supplier in Manage charms, the
+    // already-assigned order lines (Route tab) and the Shopping page kept showing the
+    // OLD shop (and therefore the old stall, which is derived from the shop name).
+    // When the confirmed code is known to the library we take the library's shop
+    // (even when intentionally blank); only a code the library doesn't recognise
+    // (legacy / hand-typed) falls back to the stored snapshot.
+    const effectiveCharmShop = (effectiveCharmCode && charmShopByCode.has(effectiveCharmCode))
+      ? charmShopByCode.get(effectiveCharmCode)
+      : (saved.charm_shop || (isCustomSub ? '' : product.charm_shop) || '');
 
     // ── Derived shopping-completion state ─────────────────────────────────────
     // A line is "fully purchased" once EVERY component it actually has (case /
@@ -1663,6 +1730,7 @@ module.exports = {
   normalizeTitle,
   itemKey,
   lineItemKey,
+  productDefaultsKey,
   LINE_KEY_MARKER,
   rowFullyPurchased,
   substitutionSupersedesIssue,

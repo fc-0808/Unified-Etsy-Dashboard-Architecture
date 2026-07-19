@@ -66,7 +66,12 @@ function fetchImageBuffer(imageUrl, hopsLeft = 1) {
         res.resume(); // drain so the socket is freed
         const loc = res.headers.location;
         if (!loc || hopsLeft <= 0) return reject(new Error('Too many redirects'));
-        return fetchImageBuffer(loc, hopsLeft - 1).then(resolve).catch(reject);
+        // Resolve relative Location headers against the current URL — a bare
+        // "/path" redirect would otherwise throw "Invalid URL" and drop the image.
+        let nextUrl;
+        try { nextUrl = new URL(loc, imageUrl).toString(); }
+        catch { return reject(new Error(`Invalid redirect URL: ${loc}`)); }
+        return fetchImageBuffer(nextUrl, hopsLeft - 1).then(resolve).catch(reject);
       }
 
       if (statusCode !== 200) {

@@ -69,6 +69,12 @@ const PACKER_ALLOW = [
 	{ m: 'POST', re: /^\/api\/orders\/bulk-mark-packaged$/ },
 	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/ship$/ },
 	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/update-tracking$/ },
+	// Manual (off-Etsy) orders can land in the packing queue too. A packer may pack
+	// and ship them (local shipped toggle + tracking) exactly as they ship Etsy
+	// orders — but NOT create/edit/delete them (owner catalog actions, kept off the
+	// list; those controls are hidden in the packer UI).
+	{ m: 'POST', re: /^\/api\/orders\/manual\/[^/]+\/shipped$/ },
+	{ m: 'POST', re: /^\/api\/orders\/manual\/[^/]+\/tracking$/ },
 	{ m: 'GET', re: /^\/api\/4px\/config$/ },
 	{ m: 'GET', re: /^\/api\/4px\/products$/ },
 	{ m: 'GET', re: /^\/api\/4px\/order\/[^/]+$/ },
@@ -282,7 +288,14 @@ function createAuth(opts = {}) {
 		const h = req.headers || {}
 		if (h['x-forwarded-for'] || h['x-forwarded-host']) return false
 		if (String(h['x-forwarded-proto'] || '').toLowerCase() === 'https') return false
-		const host = String(h.host || '').split(':')[0].toLowerCase()
+		// Strip the optional :port. IPv6 hosts arrive bracketed (e.g. "[::1]:3000"),
+		// so unwrap the brackets before comparing rather than naively split(':').
+		let host = String(h.host || '').toLowerCase().trim()
+		if (host.startsWith('[')) {
+			host = host.slice(1, host.indexOf(']') === -1 ? host.length : host.indexOf(']'))
+		} else {
+			host = host.split(':')[0]
+		}
 		if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true
 		if (/^10\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true
 		if (/^169\.254\./.test(host)) return true // link-local

@@ -804,14 +804,6 @@
 				align-items: center;
 				gap: 6px 8px;
 			}
-			/* Case/Grip cards stack model → style so the style pill is ALWAYS on its
-			   own line beneath the model, regardless of how long the model name is
-			   (fixes the "sometimes beside, sometimes below" inconsistency). */
-			.cident.stack {
-				flex-direction: column;
-				align-items: flex-start;
-				gap: 6px;
-			}
 			.cmodel {
 				font-size: 19px;
 				font-weight: 800;
@@ -1135,10 +1127,15 @@
 			.markall:active {
 				filter: brightness(0.92);
 			}
-			.markall.done {
-				background: var(--green-bg);
-				color: var(--green);
-				border: 1px solid var(--green);
+			/* A finished card needs no action button: the green component chip already
+			   shows it's bought (and is tappable to reopen the picker). A full-width
+			   "已购" button in the done state was styled like a green chip, so it read
+			   as a PHANTOM second row — e.g. a single purchased case looked like "two
+			   cases, one icon". Hiding it collapses every completed case / grip / charm
+			   to a single clean line. Render and live patches both toggle .done on the
+			   card, so this covers both without any JS. */
+			.card.done .markall {
+				display: none;
 			}
 			.saving {
 				font-size: 10px;
@@ -1303,7 +1300,7 @@
 			.opt.sel {
 				border-color: var(--accent);
 			}
-			/* ── Multi-order status sheet (set-all + per-order) ─────────────────── */
+			/* ── Multi-unit status sheet (set-all + quantity split) ─────────────── */
 			.sheet-lab {
 				font-size: 12px;
 				color: var(--muted);
@@ -1329,27 +1326,63 @@
 				background: var(--surface);
 				box-shadow: inset 0 0 0 1px var(--accent);
 			}
-			.order-row {
-				border-top: 1px solid var(--border);
-				padding-top: 12px;
-				margin-bottom: 14px;
+			/* Quantity split: how many of N identical units are bought / out of stock;
+			   the rest stay "to buy". Tap ± to move ONE unit — no per-order grids. */
+			.qalloc {
+				display: flex;
+				flex-direction: column;
+				gap: 4px;
 			}
-			.order-lab {
-				font-size: 14px;
-				font-weight: 800;
-				color: var(--text);
-				margin-bottom: 9px;
+			.qrow {
 				display: flex;
 				align-items: center;
-				gap: 8px;
+				justify-content: space-between;
+				padding: 8px 4px;
+				border-top: 1px solid var(--border);
 			}
-			.order-lab .oq {
-				font-size: 12px;
-				font-weight: 700;
+			.qrow:first-child {
+				border-top: 0;
+			}
+			.qrow.muted .qlab {
 				color: var(--muted);
-				background: var(--surface2);
-				border-radius: 999px;
-				padding: 1px 9px;
+			}
+			.qlab {
+				display: inline-flex;
+				align-items: center;
+				gap: 10px;
+				font-size: 15px;
+				font-weight: 800;
+			}
+			.qstep {
+				display: inline-flex;
+				align-items: center;
+				gap: 14px;
+			}
+			.qbtn {
+				width: 44px;
+				height: 44px;
+				border-radius: 12px;
+				border: 1px solid var(--border);
+				background: var(--surface);
+				color: var(--text);
+				font-size: 24px;
+				font-weight: 800;
+				line-height: 1;
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+			}
+			.qbtn:active {
+				transform: scale(0.94);
+			}
+			.qbtn:disabled {
+				opacity: 0.3;
+			}
+			.qval {
+				min-width: 22px;
+				text-align: center;
+				font-size: 19px;
+				font-weight: 800;
 			}
 
 			/* ── Toast ──────────────────────────────────────────── */
@@ -1478,17 +1511,26 @@
 				gap: 6px;
 				flex-shrink: 0;
 			}
-			.map-floor {
-				min-width: 38px;
-				padding: 6px 11px;
+			/* Scoped to the header so it never collides with the floor-plate rule
+			   (`.map-floor`, further down) — that clash was inflating the tab
+			   buttons with the plate's padding/shadow and eating map height. Compact
+			   pills keep the header short so more of the map is visible. */
+			.map-floors .map-floor {
+				min-width: 34px;
+				padding: 4px 10px;
 				border-radius: 9px;
 				border: 1px solid var(--border);
 				background: var(--surface2);
+				box-shadow: none;
 				font-weight: 800;
 				font-size: 12.5px;
+				line-height: 1.15;
 				color: var(--muted);
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
 			}
-			.map-floor.on {
+			.map-floors .map-floor.on {
 				color: var(--text);
 				border-color: var(--accent);
 				background: rgba(245, 100, 0, 0.12);
@@ -1799,48 +1841,6 @@
 				box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
 			}
 			/* Zoom / 3-D controls overlaid on the stage. */
-			.map-ctrls {
-				position: absolute;
-				right: 12px;
-				bottom: calc(14px + var(--safe-bottom));
-				display: flex;
-				flex-direction: column;
-				gap: 8px;
-				z-index: 2;
-			}
-			.map-ctrl {
-				width: 44px;
-				height: 44px;
-				border-radius: 12px;
-				border: 1px solid var(--border);
-				background: rgba(29, 33, 48, 0.92);
-				backdrop-filter: blur(8px);
-				color: var(--text);
-				font-weight: 800;
-				font-size: 13px;
-				display: flex;
-				align-items: center;
-				justify-content: center;
-				box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
-			}
-			.map-ctrl svg {
-				width: 20px;
-				height: 20px;
-				fill: none;
-				stroke: currentColor;
-				stroke-width: 2;
-				stroke-linecap: round;
-				stroke-linejoin: round;
-			}
-			.map-ctrl:active {
-				background: var(--surface2);
-			}
-			.map-ctrl.on {
-				border-color: var(--accent);
-				color: var(--accent);
-				background: rgba(245, 100, 0, 0.16);
-			}
-
 			/* Respect users who ask for less motion: drop non-essential animation and
 			   press-scale effects (the undo window still works, just without the
 			   animated line). */
@@ -1909,12 +1909,6 @@
 			<div class="map-body" id="mapBody">
 				<div class="map-scene" id="mapScene"><div class="map-floor" id="mapFloor"></div></div>
 				<div class="map-legend" id="mapLegend"></div>
-				<div class="map-ctrls">
-					<button class="map-ctrl" id="map3dBtn" title="Toggle 3D view" aria-label="Toggle 3D view">3D</button>
-					<button class="map-ctrl" id="mapFit" title="Fit to screen" aria-label="Fit to screen"><svg viewBox="0 0 24 24"><path d="M4 9V5a1 1 0 0 1 1-1h4"/><path d="M20 9V5a1 1 0 0 0-1-1h-4"/><path d="M4 15v4a1 1 0 0 0 1 1h4"/><path d="M20 15v4a1 1 0 0 1-1 1h-4"/></svg></button>
-					<button class="map-ctrl" id="mapZoomOut" title="Zoom out" aria-label="Zoom out"><svg viewBox="0 0 24 24"><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
-					<button class="map-ctrl" id="mapZoomIn" title="Zoom in" aria-label="Zoom in"><svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
-				</div>
 			</div>
 		</div>
 
@@ -2035,9 +2029,8 @@
 				otherFloor: { en: 'Other', zh: '其他' },
 				leftSummary: { en: 'left to buy', zh: '待购' },
 				mixed: { en: 'Mixed', zh: '混合' },
-				setAll: { en: 'Set all orders', zh: '全部订单设为' },
-				perOrder: { en: 'Set each order', zh: '逐单设置' },
-				order: { en: 'Order', zh: '订单' },
+				setAll: { en: 'Set all', zh: '全部设为' },
+				splitQty: { en: 'Or split by quantity', zh: '或按数量分配' },
 			}
 			const t = (k) => (T[k] ? T[k][LANG] : k)
 			const compLabel = (c) => (LANG === 'zh' ? c.labelZh : c.label)
@@ -2285,21 +2278,6 @@
 			}
 
 			// ── Card rendering ───────────────────────────────────────────────────
-			// Status buttons for ONLY the components in this section.
-			function compHtml(r, comps) {
-				return comps
-					.filter((c) => r[c.flag])
-					.map((c) => {
-						const st = r[c.status] || 'Pending'
-						const m = STATUS_META[st] || STATUS_META.Pending
-						return `<button class="comp type-${c.key} ${m.cls}" data-rid="${r.receipt_id}" data-ik="${esc(r.item_key)}" data-c="${c.key}">
-							<span class="cicon">${ICONS[c.key] || ''}</span>
-							<div class="ctext"><span class="cl">${compLabel(c)}</span><span class="cs">${stLabel(st)}</span></div>
-						</button>`
-					})
-					.join('')
-			}
-
 			function aggregateComponentStatus(rows, component) {
 				const relevant = rows.filter((r) => r[component.flag])
 				const statuses = relevant.map((r) => r[component.status] || 'Pending')
@@ -2343,54 +2321,36 @@
 				return `<button class="price" ${attrs} data-qty="${q}">${lab}<span class="pvwrap"><span class="pv">${money(total)}</span>${per}</span></button>`
 			}
 
-			// Case/Grip card — no product name; the phone model + style ARE the
-			// identity, shown large. Product photo is enlarged.
+			// Product photo thumbnail for a Case/Grip product header.
 			function imgHtml(r) {
 				return r.image_url
 					? `<img class="thumb" loading="lazy" decoding="async" src="${esc(r.image_url)}" onerror="this.classList.add('ph');this.removeAttribute('src')" />`
 					: `<div class="thumb ph"></div>`
 			}
-			// A standalone Case/Grip card (single order for this product).
-			function cardHtml(r, g) {
-				const done = g.doneFn(r)
-				const tags = []
-				if (r.quantity > 1) tags.push(`<span class="tag qty">×${r.quantity}</span>`)
-				const btn = done
-					? `<button class="markall done" data-rid="${r.receipt_id}" data-ik="${esc(r.item_key)}" data-sec="${g.section}">${t('bought')}</button>`
-					: `<button class="markall" data-rid="${r.receipt_id}" data-ik="${esc(r.item_key)}" data-sec="${g.section}">${t('markBought')}</button>`
-				// One price chip per component present — case & grip priced separately.
-				const chips = []
-				if (r.has_case) chips.push(priceChip(`data-kind="product" data-part="case" data-title="${esc(r.title)}"`, compLabel(COMP_CASE), r.cost_case, r.quantity))
-				if (r.has_grip) chips.push(priceChip(`data-kind="product" data-part="grip" data-title="${esc(r.title)}"`, compLabel(COMP_GRIP), r.cost_grip, r.quantity))
-				const info = `<div class="cinfo">
-							<div class="cident stack">
-								<span class="cmodel">${esc(r.phone_model || '—')}</span>
-							</div>
-							${tags.length ? `<div class="cmeta">${tags.join('')}</div>` : ''}
-						</div>`
-				return `<div class="card ${done ? 'done' : ''}" data-rid="${r.receipt_id}" data-ik="${esc(r.item_key)}">
-					<div class="ctop">${imgHtml(r)}${info}</div>
-					<div class="comps">${compHtml(r, g.comps)}</div>
-					${chips.length ? `<div class="cprice">${chips.join('')}</div>` : ''}
-					${btn}
-				</div>`
-			}
 
-			function modelGroupHtml(rows, g, aggId) {
-				const r0 = rows[0]
-				const done = rows.every(g.doneFn)
-				const qty = rows.reduce((n, r) => n + (r.quantity || 1), 0)
-				const tags = []
-				if (qty > 1) tags.push(`<span class="tag qty">×${qty}</span>`)
+			// One card scoped to a SINGLE component of a product:
+			//   • COMP_CASE → a model-specific row (one per phone model; a case must fit).
+			//   • COMP_GRIP → the single model-agnostic grip BATCH (all grips for the
+			//     product — from Case+Grip combos AND Grip-Only orders — since a grip
+			//     fits any phone). The chip opens the per-order sheet for PARTIAL marking
+			//     (e.g. 2 bought / 1 out of stock), and the button marks the whole
+			//     component bought in one tap. Only this component's status is touched,
+			//     so a combo order's case (in its own model row) stays independent.
+			function cgComponentCardHtml(rows, comp, aggId) {
+				const done = rows.every((r) => (r[comp.status] || 'Pending') === 'Purchased')
+				const qty = rows.filter((r) => r[comp.flag]).reduce((n, r) => n + (r.quantity || 1), 0)
+				const identity = comp.key === 'case'
+					? `<span class="cmodel">${esc(rows[0].phone_model || '—')}</span>`
+					: `<span class="cmodel">${esc(compLabel(COMP_GRIP))}</span>`
 				const button = done
-					? `<button class="markall done compact" data-agg="${aggId}" data-sec="${g.section}">${t('bought')}</button>`
-					: `<button class="markall compact" data-agg="${aggId}" data-sec="${g.section}">${t('markBought')}</button>`
-				return `<div class="card in-product model-group ${done ? 'done' : ''}" data-agg="${aggId}">
+					? `<button class="markall done compact" data-agg="${aggId}" data-comp="${comp.key}">${t('bought')}</button>`
+					: `<button class="markall compact" data-agg="${aggId}" data-comp="${comp.key}">${t('markBought')}</button>`
+				return `<div class="card in-product model-group ${done ? 'done' : ''}" data-agg="${aggId}" data-comp="${comp.key}">
 					<div class="model-line-head">
-						<span class="cmodel">${esc(r0.phone_model || '—')}</span>
-						${tags.length ? `<span class="cmeta">${tags.join('')}</span>` : ''}
+						${identity}
+						${qty > 1 ? `<span class="cmeta"><span class="tag qty">×${qty}</span></span>` : ''}
 					</div>
-					<div class="comps">${aggregateCompHtml(rows, g.comps, aggId)}</div>
+					<div class="comps">${aggregateCompHtml(rows, [comp], aggId)}</div>
 					${button}
 				</div>`
 			}
@@ -2416,50 +2376,67 @@
 				})
 				let html = ''
 				for (const lines of products) {
-					if (lines.length < 2) {
-						html += cardHtml(lines[0], g)
-						continue
-					}
+					// EVERY product — whether it's one order or many — renders with the
+					// SAME anatomy: an image + still-to-buy header, then one card per
+					// component (a case row per phone model, and a single model-agnostic
+					// grip batch). A one-order product simply has one row. This keeps the
+					// list visually consistent so a shopper never has to relearn a layout.
 					const r0 = lines[0]
-					const totalQty = lines.reduce((n, r) => n + (r.quantity || 1), 0)
-					const caseNeed = lines.filter((r) => r.has_case && (r.status_case || 'Pending') !== 'Purchased').reduce((n, r) => n + (r.quantity || 1), 0)
-					const gripNeed = lines.filter((r) => r.has_grip && (r.status_grip || 'Pending') !== 'Purchased').reduce((n, r) => n + (r.quantity || 1), 0)
+					// Split the product's lines by COMPONENT, because the two shop very
+					// differently: a CASE is model-specific (must fit the phone) so it's
+					// listed per phone model; a GRIP is universal (fits any phone) so every
+					// grip — from Case+Grip combos AND Grip-Only orders — is ONE batch count.
+					const caseLines = lines.filter((r) => r.has_case)
+					const gripLines = lines.filter((r) => r.has_grip)
+					const caseNeed = caseLines.filter((r) => (r.status_case || 'Pending') !== 'Purchased').reduce((n, r) => n + (r.quantity || 1), 0)
+					const gripNeed = gripLines.filter((r) => (r.status_grip || 'Pending') !== 'Purchased').reduce((n, r) => n + (r.quantity || 1), 0)
 					const caseCost = lines.find((r) => r.cost_case != null)?.cost_case ?? null
 					const gripCost = lines.find((r) => r.cost_grip != null)?.cost_grip ?? null
 					const sharedPrices = []
-					if (lines.some((r) => r.has_case)) sharedPrices.push(priceChip(`data-kind="product" data-part="case" data-title="${esc(r0.title)}"`, compLabel(COMP_CASE), caseCost, 1))
-					if (lines.some((r) => r.has_grip)) sharedPrices.push(priceChip(`data-kind="product" data-part="grip" data-title="${esc(r0.title)}"`, compLabel(COMP_GRIP), gripCost, 1))
+					if (caseLines.length) sharedPrices.push(priceChip(`data-kind="product" data-part="case" data-title="${esc(r0.title)}"`, compLabel(COMP_CASE), caseCost, 1))
+					if (gripLines.length) sharedPrices.push(priceChip(`data-kind="product" data-part="grip" data-title="${esc(r0.title)}"`, compLabel(COMP_GRIP), gripCost, 1))
+					// CASES → one row per phone model (newest → oldest).
 					const byModel = new Map()
-					for (const line of lines) {
-						const model = String(line.phone_model || '—').trim()
-						if (!byModel.has(model)) byModel.set(model, [])
-						byModel.get(model).push(line)
+					for (const line of caseLines) {
+						const key = String(line.phone_model || '—').trim()
+						if (!byModel.has(key)) byModel.set(key, [])
+						byModel.get(key).push(line)
 					}
-					const modelGroups = [...byModel.entries()].sort((a, b) =>
+					const caseModelGroups = [...byModel.entries()].sort((a, b) =>
 						b[0].localeCompare(a[0], undefined, { numeric: true, sensitivity: 'base' }),
 					)
+					// Rows: every case model (model shown), then ONE model-agnostic grip
+					// batch (no model — a grip fits any phone). A combo order's case sits
+					// in its model row and its grip in the batch; the two are marked
+					// independently (per-component status).
+					const rowsHtml = []
+					for (const [, modelRows] of caseModelGroups) {
+						const aggId = 'm' + MODEL_AGG_SEQ++
+						AGG.set(aggId, modelRows)
+						rowsHtml.push(cgComponentCardHtml(modelRows, COMP_CASE, aggId))
+					}
+					if (gripLines.length) {
+						const aggId = 'm' + MODEL_AGG_SEQ++
+						AGG.set(aggId, gripLines)
+						rowsHtml.push(cgComponentCardHtml(gripLines, COMP_GRIP, aggId))
+					}
+					// Header summary = ONLY the still-to-buy per-component counts
+					// (壳 ×N · 支架 ×M). The old "N models ×total" line conflated cases
+					// and grips (e.g. "1 model ×2" for a product that is 1 case + 2 grips),
+					// which read as if a case count was wrong — so it's gone. The case
+					// rows below list the models; the totals give the honest quantities.
 					html += `<div class="product">
 						<div class="product-head">
 							${imgHtml(r0)}
 							<div class="product-meta">
-								<div class="product-summary">
-									<span class="product-count">${modelGroups.length} ${LANG === 'zh' ? '个型号' : modelGroups.length > 1 ? 'models' : 'model'}</span>
-									<span class="tag qty">×${totalQty}</span>
-								</div>
 								<div class="component-totals">
-									${caseNeed ? `<span class="component-total case">${compLabel(COMP_CASE)} ×${caseNeed}</span>` : ''}
-									${gripNeed ? `<span class="component-total grip">${compLabel(COMP_GRIP)} ×${gripNeed}</span>` : ''}
+									${caseNeed ? `<span class="component-total case">${compLabel(COMP_CASE)}${caseNeed > 1 ? ` ×${caseNeed}` : ''}</span>` : ''}
+									${gripNeed ? `<span class="component-total grip">${compLabel(COMP_GRIP)}${gripNeed > 1 ? ` ×${gripNeed}` : ''}</span>` : ''}
 								</div>
 								${sharedPrices.length ? `<div class="product-prices">${sharedPrices.join('')}</div>` : ''}
 							</div>
 						</div>
-						<div class="plines">${modelGroups
-							.map(([, modelRows]) => {
-								const aggId = 'm' + MODEL_AGG_SEQ++
-								AGG.set(aggId, modelRows)
-								return modelGroupHtml(modelRows, g, aggId)
-							})
-							.join('')}</div>
+						<div class="plines">${rowsHtml.join('')}</div>
 					</div>`
 				}
 				return html
@@ -3007,16 +2984,21 @@
 					.toUpperCase()
 					.replace(/\s+/g, '')
 					.replace(/[–—]/g, '-')
+			// Mirror of server stallCodeAliases: expand merged stalls (A279-280,
+			// 5B31-32, 5C03-07) to their unit codes so a catalog stall recorded as a
+			// single unit still matches the combined map cell. Numbers must share the
+			// same width, so single-unit codes like A2-21 / A2-16 are left untouched.
 			const mapCodeAliases = (code) => {
 				const normalized = mapNorm(code)
 				if (!normalized) return []
 				const out = new Set([normalized])
-				const match = /^([A-Z]+)(\d{3,})-(\d{3,})$/.exec(normalized)
+				const match = /^([0-9]*[A-Z]+)(\d+)-(\d+)$/.exec(normalized)
 				if (match) {
-					const start = Number(match[2])
-					const end = Number(match[3])
-					if (end >= start && end - start <= 20) {
-						for (let value = start; value <= end; value++) out.add(`${match[1]}${value}`)
+					const [, prefix, startStr, endStr] = match
+					const start = Number(startStr)
+					const end = Number(endStr)
+					if (startStr.length === endStr.length && end >= start && end - start <= 20) {
+						for (let value = start; value <= end; value++) out.add(`${prefix}${String(value).padStart(startStr.length, '0')}`)
 					}
 				}
 				return [...out]
@@ -3208,7 +3190,7 @@
 					}
 				})
 				mapFloorIdx = best
-				set3d(false) // open flat (readable); user can tap 3D to tilt
+				set3d(false) // always open flat (readable) rather than tilted
 				renderMap()
 				$('mapBg').classList.add('open')
 				if (!wasOpen) Overlay.opened($('mapBg'))
@@ -3323,27 +3305,33 @@
 			function set3d(on) {
 				mTilt = on
 				$('mapScene').classList.toggle('tilt', on)
-				$('map3dBtn').classList.toggle('on', on)
-			}
-			const mapCenter = () => {
-				const r = $('mapBody').getBoundingClientRect()
-				return { x: r.width / 2, y: r.height / 2 }
 			}
 
 			// ── In-place DOM updates ─────────────────────────────────────────────
 			// Status changes patch the affected card(s) directly instead of rebuilding
 			// the whole list. This removes the flash/refresh AND stops every image
 			// from reloading on each tap.
-			function findCgCard(r) {
-				// Direct attribute lookup (O(1)-ish) instead of scanning every card;
-				// CSS.escape guards item_keys containing quotes / special characters.
-				const direct = document.querySelector('.card[data-rid="' + CSS.escape(String(r.receipt_id)) + '"][data-ik="' + CSS.escape(r.item_key) + '"]')
-				if (direct) return direct
+			// Every Case/Grip card a row appears in. Each card is a component-scoped
+			// aggregate (a case model row or the grip batch), so a combo order lives in
+			// TWO cards — its case in a model row, its grip in the batch — and a status
+			// change must patch both; a case-only / grip-only order returns one.
+			function findCgCards(r) {
+				const out = []
 				for (const el of document.querySelectorAll('.model-group[data-agg]')) {
 					const rows = AGG.get(el.dataset.agg)
-					if (rows && rows.includes(r)) return el
+					if (rows && rows.includes(r)) out.push(el)
 				}
-				return null
+				return out
+			}
+			// A card is "done" (removable when hiding bought) once its scoped component
+			// (case row / grip batch) is fully Purchased. The cgDone fallback is
+			// defensive — every Case/Grip card is component-scoped.
+			function cgCardDone(el, rows) {
+				if (el.dataset.comp) {
+					const field = 'status_' + el.dataset.comp
+					return rows.every((row) => (row[field] || 'Pending') === 'Purchased')
+				}
+				return rows.every(cgDone)
 			}
 			// Locate the merged-charm card covering a row via the live AGG map.
 			function findCharmCard(r) {
@@ -3355,12 +3343,18 @@
 			}
 			function updateCgCardEl(el, r) {
 				const rows = el.dataset.agg ? AGG.get(el.dataset.agg) || [r] : [r]
-				const done = rows.every(cgDone)
+				// A component-scoped card (case model row / grip batch) tracks exactly ONE
+				// component; the CASE_GRIP fallback is defensive (all cards are scoped).
+				const scopeComp = el.dataset.comp ? COMPONENTS.find((c) => c.key === el.dataset.comp) : null
+				const scoped = scopeComp ? [scopeComp] : CASE_GRIP
+				const done = scopeComp
+					? rows.every((row) => (row[scopeComp.status] || 'Pending') === 'Purchased')
+					: rows.every(cgDone)
 				el.classList.toggle('done', done)
 				// Patch ONLY the affected component button(s) in place. Rebuilding the
 				// whole .comps innerHTML tore down / recreated both buttons every tap,
 				// which caused the visible twitch — so we surgically update instead.
-				for (const c of CASE_GRIP) {
+				for (const c of scoped) {
 					if (!rows.some((row) => row[c.flag])) continue
 					const cb = el.querySelector('.comp[data-c="' + c.key + '"]')
 					if (!cb) continue
@@ -3384,9 +3378,17 @@
 
 			function updateProductSummary(productEl) {
 				if (!productEl) return
+				// Dedupe: a combo order appears in BOTH its case row and the grip batch,
+				// so collect each line-item once (else case/grip totals double-count).
+				const seen = new Set()
 				const rows = []
 				for (const el of productEl.querySelectorAll('.model-group[data-agg]')) {
-					for (const row of AGG.get(el.dataset.agg) || []) rows.push(row)
+					for (const row of AGG.get(el.dataset.agg) || []) {
+						const k = row.receipt_id + '\x00' + row.item_key
+						if (seen.has(k)) continue
+						seen.add(k)
+						rows.push(row)
+					}
 				}
 				const values = {
 					case: rows.filter((r) => r.has_case && (r.status_case || 'Pending') !== 'Purchased').reduce((n, r) => n + (r.quantity || 1), 0),
@@ -3396,7 +3398,9 @@
 					const el = productEl.querySelector('.component-total.' + key)
 					if (!el) continue
 					const comp = key === 'case' ? COMP_CASE : COMP_GRIP
-					el.textContent = `${compLabel(comp)} ×${qty}`
+					// Hide the "×1" — a lone unit reads cleaner as just "壳" / "支架"
+					// (matches the initial render so live patches never diverge).
+					el.textContent = compLabel(comp) + (qty > 1 ? ` ×${qty}` : '')
 					el.hidden = qty === 0
 				}
 			}
@@ -3477,10 +3481,9 @@
 							else updateCharmCardEl(found.el, found.rows)
 						}
 					} else {
-						const el = findCgCard(r)
-						if (el) {
+						for (const el of findCgCards(r)) {
 							const rows = el.dataset.agg ? AGG.get(el.dataset.agg) || [r] : [r]
-							if (!showDone && rows.every(cgDone)) removeCardEl(el)
+							if (!showDone && cgCardDone(el, rows)) removeCardEl(el)
 							else updateCgCardEl(el, r)
 						}
 					}
@@ -3488,12 +3491,12 @@
 				refreshBadges()
 			}
 			// Patch a row wherever it appears (a line can be in both the Case/Grip and
-			// Charm sections). Used for real-time updates from other devices.
+			// Charm sections, and a combo order in both its case row and grip batch).
+			// Used for real-time updates from other devices.
 			function patchRowEverywhere(r) {
-				const cg = findCgCard(r)
-				if (cg) {
+				for (const cg of findCgCards(r)) {
 					const rows = cg.dataset.agg ? AGG.get(cg.dataset.agg) || [r] : [r]
-					if (!showDone && rows.every(cgDone)) removeCardEl(cg)
+					if (!showDone && cgCardDone(cg, rows)) removeCardEl(cg)
 					else updateCgCardEl(cg, r)
 				}
 				const ch = findCharmCard(r)
@@ -3704,32 +3707,50 @@
 				const comp = COMPONENTS.find((c) => c.key === compKey)
 				const r0 = rows[0]
 				const totalQty = rows.reduce((n, r) => n + (r.quantity || 1), 0)
-				let subtitle
-				if (compKey === 'charm') {
-					subtitle = `${esc(r0.charm_code || 'charm')}${totalQty > 1 ? ` ×${totalQty}` : ''}`
-				} else {
-					subtitle = esc(r0.phone_model || 'item') + (totalQty > 1 ? ` ×${totalQty}` : '')
-				}
-				$('sheetTitle').innerHTML = `${compLabel(comp)} · <b>${subtitle}</b>`
+				const qtyTag = totalQty > 1 ? ` ×${totalQty}` : ''
+				// Title: a case keeps its phone model (a case must fit); a grip has NO
+				// model (it fits any phone); a charm shows its code.
+				let title
+				if (compKey === 'charm') title = `${compLabel(comp)} · <b>${esc(r0.charm_code || 'charm')}</b>${qtyTag}`
+				else if (compKey === 'grip') title = `<b>${esc(compLabel(comp))}</b>${qtyTag}`
+				else title = `${compLabel(comp)} · <b>${esc(r0.phone_model || 'item')}</b>${qtyTag}`
+				$('sheetTitle').innerHTML = title
+
 				if (rows.length <= 1) {
 					const cur = r0[field] || 'Pending'
 					$('sheetOpts').innerHTML = STATUS_ORDER.map((s) => optHtml(s, s === cur, '')).join('')
 					return
 				}
-				// Multi-order: set-all list, then a row per constituent order.
+				// Multiple IDENTICAL units. They're fungible (a grip fits any phone; two
+				// cases of the same model+design are interchangeable), so WHICH order gets
+				// which unit is irrelevant — the shopper only cares HOW MANY are bought vs
+				// unavailable. So: one-tap "set all", then a compact quantity split — far
+				// cleaner than repeating the full status grid once per order.
 				const allSame = rows.every((r) => (r[field] || 'Pending') === (r0[field] || 'Pending'))
 				const cur = allSame ? r0[field] || 'Pending' : null
+				const countOf = (s) => rows.filter((r) => (r[field] || 'Pending') === s).length
+				const boughtN = countOf('Purchased')
+				const noStockN = countOf('Out of Stock')
+				const restN = rows.length - boughtN - noStockN
+				const step = (statusKey, val) => {
+					const canInc = rows.length - countOf(statusKey) > 0
+					return `<div class="qrow">
+						<span class="qlab"><span class="swatch" style="background:${STATUS_META[statusKey].color}"></span>${stLabel(statusKey)}</span>
+						<span class="qstep">
+							<button class="qbtn" data-qadj="dec" data-qs="${esc(statusKey)}"${val > 0 ? '' : ' disabled'} aria-label="minus">−</button>
+							<span class="qval">${val}</span>
+							<button class="qbtn" data-qadj="inc" data-qs="${esc(statusKey)}"${canInc ? '' : ' disabled'} aria-label="plus">+</button>
+						</span>
+					</div>`
+				}
 				let h = `<div class="sheet-lab">${t('setAll')}</div>`
 				h += `<div class="opt-grid">${STATUS_ORDER.map((s) => optHtml(s, s === cur, '', true)).join('')}</div>`
-				h += `<div class="sheet-lab">${t('perOrder')}</div>`
-				rows.forEach((r, i) => {
-					const st = r[field] || 'Pending'
-					const q = (r.quantity || 1) > 1 ? `<span class="oq">×${r.quantity}</span>` : ''
-					h += `<div class="order-row">
-						<div class="order-lab">${t('order')} ${i + 1}${q}</div>
-						<div class="opt-grid">${STATUS_ORDER.map((s) => optHtml(s, s === st, ` data-oi="${i}"`, true)).join('')}</div>
-					</div>`
-				})
+				h += `<div class="sheet-lab">${t('splitQty')}</div>`
+				h += `<div class="qalloc">`
+				h += step('Purchased', boughtN)
+				h += step('Out of Stock', noStockN)
+				h += `<div class="qrow muted"><span class="qlab"><span class="swatch" style="background:${STATUS_META.Pending.color}"></span>${stLabel('Pending')}</span><span class="qval">${restN}</span></div>`
+				h += `</div>`
 				$('sheetOpts').innerHTML = h
 			}
 			function openSheet(rowsArr, compKey) {
@@ -3937,6 +3958,19 @@
 				const r = rowFromEl(el)
 				return r ? [r] : []
 			}
+			// Brief "settle" window after a completion that mutates the list. Marking
+			// an item bought removes/shrinks its card (showDone is off) and everything
+			// below slides UP under the finger, so a touchscreen's stray/echoed follow-up
+			// tap lands on whatever chip reflowed into that spot. Without this guard that
+			// tap fell through and popped open a NEIGHBOUR's status picker — the reported
+			// "need to click twice / it opens after I complete an order" glitch. During
+			// the window we ignore only picker-opening (.comp) taps; mark-bought taps are
+			// still honoured so rapid multi-item shopping is never slowed.
+			let listSettleUntil = 0
+			const LIST_SETTLE_MS = 350
+			const armListSettle = () => {
+				listSettleUntil = performance.now() + LIST_SETTLE_MS
+			}
 			$('list').addEventListener('click', (e) => {
 				// Tap a photo → open it full-screen so the design is easy to read.
 				const thumb = e.target.closest('img.thumb')
@@ -3951,6 +3985,11 @@
 				}
 				const comp = e.target.closest('.comp')
 				if (comp) {
+					// Reflow guard (see armListSettle): swallow a picker-opening tap that
+					// arrives in the settle window right after a completion — it's almost
+					// certainly a stray/echoed tap on a neighbour that slid under the
+					// finger, not a deliberate request to open this chip's status picker.
+					if (performance.now() < listSettleUntil) return
 					const meta = COMPONENTS.find((c) => c.key === comp.dataset.c)
 					const rows = rowsFromEl(comp).filter((r) => !meta || r[meta.flag])
 					if (rows.length) openSheet(rows, comp.dataset.c)
@@ -3960,10 +3999,23 @@
 				if (all) {
 					if (all.dataset.exid) {
 						markExchanged(Number(all.dataset.exid))
+						armListSettle()
 						return
 					}
 					const rows = rowsFromEl(all)
-					if (rows.length) markSection(rows, all.dataset.sec)
+					if (rows.length) {
+						if (all.dataset.comp) {
+							// Component-scoped card (case row / grip batch): mark ONLY that
+							// component bought, leaving the order's other component untouched.
+							const comp = COMPONENTS.find((c) => c.key === all.dataset.comp)
+							if (comp) setStatusRows(rows.filter((r) => r[comp.flag]), all.dataset.comp, 'Purchased')
+						} else {
+							markSection(rows, all.dataset.sec)
+						}
+						// Card just completed → the list reflows; block a stray follow-up
+						// tap from falling through onto a neighbour's picker.
+						armListSettle()
+					}
 					return
 				}
 				// "Locate on map" pin → open the map focused on this stall (must run
@@ -3986,19 +4038,34 @@
 			})
 			$('sheetBg').addEventListener('click', (e) => {
 				if (e.target === $('sheetBg')) return closeSheet()
+				// Quantity split: move ONE unit into / out of a status. Fungible units,
+				// so we just pick any suitable line (prefer a still-"to buy" one on inc).
+				const qbtn = e.target.closest('.qbtn')
+				if (qbtn && sheetTarget && !qbtn.disabled) {
+					const { rows, field, compKey } = sheetTarget
+					const status = qbtn.dataset.qs
+					if (qbtn.dataset.qadj === 'inc') {
+						let line = rows.find((r) => (r[field] || 'Pending') === 'Pending' && (r[field] || 'Pending') !== status)
+						if (!line) line = rows.find((r) => (r[field] || 'Pending') !== status)
+						if (line) setStatusRows([line], compKey, status, { noAdvance: true })
+					} else {
+						const line = rows.find((r) => (r[field] || 'Pending') === status)
+						if (line) setStatusRows([line], compKey, 'Pending', { noAdvance: true })
+					}
+					renderSheet()
+					return
+				}
 				const opt = e.target.closest('.opt')
 				if (!opt || !sheetTarget) return
 				const s = opt.dataset.s
-				if (opt.dataset.oi != null) {
-					// Per-order: apply to just that line, keep the sheet open so the
-					// shopper can set the sibling order(s), and refresh the highlights.
-					const row = sheetTarget.rows[Number(opt.dataset.oi)]
-					if (row) setStatusRows([row], sheetTarget.compKey, s, { noAdvance: true })
-					renderSheet()
-				} else {
-					// Set-all: one decision for every order of this model, then close.
+				{
+					// Set-all: one decision for every unit, then close. (Partial edits use
+					// the quantity split above; there are no per-order buttons any more.)
 					setStatusRows(sheetTarget.rows, sheetTarget.compKey, s)
 					closeSheet()
+					// Closing the sheet re-exposes the (reflowed) list; arm the same guard
+					// so an echoed tap can't immediately re-open a picker underneath.
+					armListSettle()
 				}
 			})
 			$('priceBg').addEventListener('click', (e) => {
@@ -4059,32 +4126,18 @@
 					return
 				}
 				// A supplier-pin lookup is a quick locate-and-dismiss flow: tapping
-				// any empty part of the map closes it. Drag/pinch and controls remain
-				// unaffected.
-				if (mapLocateMode && !e.target.closest('.map-ctrl')) closeMap()
+				// any empty part of the map closes it. Drag/pinch remain unaffected.
+				if (mapLocateMode) closeMap()
 			})
 			$('mapBg').addEventListener('click', (e) => {
 				if (!mapLocateMode) return
-				if (e.target.closest('#mapClose, .map-ctrl, .map-floor, .mstall')) return
+				if (e.target.closest('#mapClose, .map-floor, .mstall')) return
 				if (!e.target.closest('#mapBody')) closeMap()
 			})
-
-			// Zoom / 3-D controls.
-			$('mapZoomIn').addEventListener('click', () => {
-				const c = mapCenter()
-				mapZoomAt(1.3, c.x, c.y)
-			})
-			$('mapZoomOut').addEventListener('click', () => {
-				const c = mapCenter()
-				mapZoomAt(0.77, c.x, c.y)
-			})
-			$('mapFit').addEventListener('click', fitMap)
-			$('map3dBtn').addEventListener('click', () => set3d(!mTilt))
 
 			// Pan (1 pointer) + pinch-zoom (2 pointers).
 			const stage = $('mapBody')
 			stage.addEventListener('pointerdown', (e) => {
-				if (e.target.closest('.map-ctrl')) return
 				try {
 					stage.setPointerCapture(e.pointerId)
 				} catch {}
@@ -4156,7 +4209,6 @@
 			)
 			// Double-tap / double-click: zoom in, or fit if already zoomed in.
 			stage.addEventListener('dblclick', (e) => {
-				if (e.target.closest('.map-ctrl')) return
 				const p = stagePt(e.clientX, e.clientY)
 				if (mScale > 1.3) fitMap()
 				else mapZoomAt(1.9, p.x, p.y)

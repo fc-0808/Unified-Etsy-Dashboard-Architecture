@@ -1336,13 +1336,9 @@ function postProcessTitle(rawTitle, hasMagsafe) {
 			.replace(/^[\s,]+/, '')
 			.trim()
 	}
-	if (title.length > 140) {
-		title = title
-			.slice(0, 140)
-			.replace(/\s+\S*$/, '')
-			.replace(/,+$/, '')
-			.trim()
-	}
+	// Apply the special-character substitutions FIRST — they can lengthen the
+	// string (e.g. "&" → " and "), so truncating before this ran could let the
+	// final title exceed Etsy's 140-char cap and get rejected by createDraftListing.
 	const subs = { '&': 'and', '+': 'and', '%': 'percent', ':': ',' }
 	for (const [ch, repl] of Object.entries(subs)) {
 		if (title.split(ch).length - 1 > 1) {
@@ -1350,6 +1346,13 @@ function postProcessTitle(rawTitle, hasMagsafe) {
 			title = parts[0] + ch + parts.slice(1).join(` ${repl} `)
 			title = title.replace(/\s+/g, ' ').trim()
 		}
+	}
+	if (title.length > 140) {
+		title = title
+			.slice(0, 140)
+			.replace(/\s+\S*$/, '')
+			.replace(/,+$/, '')
+			.trim()
 	}
 	return title
 }

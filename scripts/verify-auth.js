@@ -55,6 +55,12 @@ function buildApp(store) {
 	app.get('/api/route/charms-to-buy', (_req, res) => res.json({ ok: true, rows: [], charms: [], charm_shops: [], progress: {} }))
 	app.get('/api/route/dashboard', (_req, res) => res.json({ rows: [] }))
 	app.post('/api/route/assign', (_req, res) => res.json({ ok: true }))
+	// Manual (off-Etsy) orders: pack/ship + tracking are employee-safe; create/edit/delete are not.
+	app.post('/api/orders/manual', (_req, res) => res.json({ created: true }))
+	app.put('/api/orders/manual/:id', (_req, res) => res.json({ ok: true }))
+	app.delete('/api/orders/manual/:id', (_req, res) => res.json({ ok: true }))
+	app.post('/api/orders/manual/:id/shipped', (_req, res) => res.json({ ok: true }))
+	app.post('/api/orders/manual/:id/tracking', (_req, res) => res.json({ ok: true }))
 	app.post('/api/listings', (_req, res) => res.json({ created: true }))
 	app.use('/api', (_req, res) => res.status(404).json({ error: 'unknown' }))
 	return app
@@ -107,6 +113,16 @@ async function suiteA() {
 	check('Employee BLOCKED from the owner route planner (403)', r.status === 403, `got ${r.status}`)
 	r = await post('/api/route/assign')
 	check('Employee BLOCKED from route/assign (403)', r.status === 403, `got ${r.status}`)
+
+	// Manual orders in the packing queue: pack/ship + tracking allowed; edit/delete/create not.
+	r = await post('/api/orders/manual/-5/shipped')
+	check('Employee CAN mark a manual order shipped (200)', r.status === 200, `got ${r.status}`)
+	r = await post('/api/orders/manual/-5/tracking')
+	check('Employee CAN add manual-order tracking (200)', r.status === 200, `got ${r.status}`)
+	r = await post('/api/orders/manual')
+	check('Employee BLOCKED from creating a manual order (403)', r.status === 403, `got ${r.status}`)
+	r = await fetch(base + '/api/orders/manual/-5', { method: 'DELETE', headers: { cookie: packer } })
+	check('Employee BLOCKED from deleting a manual order (403)', r.status === 403, `got ${r.status}`)
 
 	r = await login(base, { password: process.env.DASHBOARD_OWNER_PASSWORD })
 	const owner = cookieHeader(r)

@@ -149,6 +149,7 @@ const {
 	getListingStyleImageMap,
 } = require('../db/setup')
 const routeDashboard = require('../route/dashboard')
+const productMerges = require('../route/product-merges')
 const { FLOOR_MAPS, normalizeStallCode, stallCodeAliases } = require('../route/floor-map')
 const { generateBuyerIssueMessage } = require('../support/buyer-message')
 const { checkMessageCompliance } = require('../support/message-compliance')
@@ -244,194 +245,91 @@ const _syncingShops = new Set()
 // Keyed by "appKey:countryCode" so different country filters get separate caches.
 const _fpxProductsCache = new Map() // key → { products, expiresAt }
 
+// Second cache: the *authoritative* set of logistics-product codes 4PX actually
+// accepts for a destination, used to validate a chosen product BEFORE calling
+// ds.xms.order.create (so an invalid code is rejected with clear guidance instead
+// of the opaque 4PX "product code does not exist" / DS000110 round-trip).
+// Keyed by "appKey:countryCode" → { codes:Set<string>, priceable:Set<string>, expiresAt }.
+const _fpxValidCodesCache = new Map()
+
 /**
- * Comprehensive 4PX XMS logistics product catalogue — fallback for direct-customer
- * API keys that cannot access ds.xms.logistics_product.getlist (returns error 000024).
+ * Curated 4PX logistics products — the RECOMMENDED, human-friendly shortlist we
+ * float to the top of the picker and use as the last-resort fallback list.
  *
- * When the live API IS available (ISV / software-provider accounts), this list is
- * never used — the API's country-filtered response takes precedence.
+ * CRITICAL INVARIANT — every code here is a REAL, order-able 4PX product code.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * The previous version of this catalogue carried ~20 *fabricated* codes (PXUS,
+ * PXCA, SFCECO, YUNTU, FDBM, BDS, …). None of them exist on the 4PX account: the
+ * live ds.xms.logistics_product.getlist returns 600+ products and NOT ONE of the
+ * fabricated codes is among them. They were nonetheless injected into the picker
+ * as "curated" options and every attempt to ship with one failed at order-create
+ * with 4PX error DS000110 ("product code does not exist") — the exact bug this
+ * file now fixes. The correct 4PX priority-postal code is "PX" (not "PXUS"): 4PX
+ * resolves the destination carrier internally, so there are NO per-country
+ * suffix codes (same lesson already learned for QC → there is no "QCUS").
+ *
+ * Every code below was verified against BOTH the live product list and the live
+ * ds.xms.estimated_cost.get rate card for this account. The live API remains the
+ * single source of truth at runtime; this list only supplies friendly English
+ * names, tiering, and a sensible default ordering on top of the live data.
  *
  * Structure per entry:
  *   code      — logistics_product_code passed verbatim to ds.xms.order.create
- *   name      — short display label
- *   desc      — one-line description with transit time estimate
- *   tier      — 'economy' | 'standard' | 'express' | 'premium' | 'custom'
- *   countries — ISO-2 destination codes where this product is offered.
- *               Empty array [] means the product ships to ALL countries.
- *
- * Sources: b.4px.com portal, 4PX open-platform docs, partner reseller catalogs.
- * Country arrays are best-effort; the live API is authoritative for your account.
+ *   name      — short English display label
+ *   desc      — one-line description (live price / ETA is appended when known)
+ *   tier      — 'economy' | 'standard' | 'express' | 'custom'
+ *   countries — ISO-2 destinations where this product is offered; [] = worldwide.
  */
 
 // Helper — ISO-2 codes for common destination regions
 const _EU27 = ['DE', 'FR', 'NL', 'IT', 'ES', 'PL', 'SE', 'BE', 'AT', 'PT', 'CZ', 'HU', 'RO', 'SK', 'FI', 'DK', 'IE', 'HR', 'SI', 'LT', 'LV', 'EE', 'BG', 'GR', 'LU', 'MT', 'CY']
-const _EU_CORE = ['DE', 'FR', 'NL', 'IT', 'ES', 'PL', 'SE', 'BE', 'AT', 'PT']
-const _ANGLOSPHERE = ['US', 'CA', 'AU', 'GB']
-const _ASIA_EAST = ['JP', 'KR', 'SG', 'MY', 'TH', 'PH', 'VN', 'TW', 'HK']
-const _LATAM = ['MX', 'BR', 'CL', 'AR', 'CO', 'PE']
 
 // Destinations where 4PX requires an IOSS number for parcels with a declared
 // value ≤ €150 (EU27 — the IOSS scheme covers the whole EU customs union). The
 // server attaches config.fourpx_ioss_no to orders bound for these countries.
 const FOURPX_IOSS_COUNTRIES = new Set(_EU27)
 
-const FOURPX_PRODUCT_CATALOG = [
-	// ── POSTLINK — Postal direct (邮政直连) ──────────────────────────────────────
+const FOURPX_RECOMMENDED_PRODUCTS = [
+	// ── POSTLINK-LW (S5058) — the default workhorse for light parcels ────────────
+	// Docs-verified POSTLINK-LW coverage lives in src/fourpx/product-preference.js
+	// so the picker default, /api/4px/config, and the server-side resolver agree.
 	{
 		code: 'S5058',
 		name: 'POSTLINK-LW (S5058)',
-		desc: 'Postal Light Weight · ≤2 kg · no battery · 10–25 days',
+		desc: 'Postal Light Weight · ≤2 kg · tracked · economy',
 		tier: 'economy',
-		// Docs-verified POSTLINK-LW coverage — single source of truth in
-		// src/fourpx/product-preference.js so the curated fallback, the /api/4px/config
-		// preference, and the server-side default resolver never diverge.
 		countries: [...FOURPX_POSTLINK_S5058_COUNTRIES],
 	},
-	{
-		code: 'S5118',
-		name: 'US-ISLAND-PH (S5118)',
-		desc: 'Postal · US island territories (HI/AK/GU/PR/VI) + Philippines · 12–25 days',
-		tier: 'economy',
-		countries: ['US', 'PH'],
-	},
-	{
-		code: 'S5062',
-		name: 'POSTLINK-S (S5062)',
-		desc: 'Postal Small Package · ≤2 kg · economy · 12–30 days',
-		tier: 'economy',
-		countries: [..._ANGLOSPHERE, ..._EU27, ..._ASIA_EAST, ..._LATAM, 'NO', 'CH', 'NZ'],
-	},
-	{
-		code: 'S5013',
-		name: 'POSTLINK-R (S5013)',
-		desc: 'Postal Registered Airmail · global · 15–40 days',
-		tier: 'economy',
-		countries: [], // worldwide
-	},
 
-	// ── 4PX Direct Lines / Special Lines (特线产品) ───────────────────────────────
-	{
-		code: 'FDYE',
-		name: 'Yellow Express Direct',
-		desc: '4PX Yellow Express · ePacket-grade · tracked · 8–18 days',
-		tier: 'standard',
-		countries: [..._ANGLOSPHERE, ..._EU_CORE, 'JP', 'KR', 'SG', 'MY', 'RU', 'BR', 'MX'],
-	},
-	{
-		code: 'FXEC',
-		name: 'Express via China Post',
-		desc: 'China Post Express Registered · tracked · 10–20 days',
-		tier: 'standard',
-		countries: [], // worldwide
-	},
-	{
-		code: 'FXRM',
-		name: 'Registered Airmail',
-		desc: 'China Post Registered Air · economy untracked · 15–30 days',
-		tier: 'economy',
-		countries: [], // worldwide
-	},
-	{
-		code: 'FLPS',
-		name: 'Light Priority Small',
-		desc: '4PX Light Priority · ≤500 g · tracked · 8–16 days',
-		tier: 'standard',
-		countries: [..._ANGLOSPHERE, ..._EU_CORE],
-	},
-	{
-		code: 'FDBM',
-		name: 'Blue Multi Direct',
-		desc: '4PX Blue Direct Multi-Piece · USPS last-mile · 8–15 days',
-		tier: 'standard',
-		countries: ['US'],
-	},
-	{
-		code: 'FDTM',
-		name: 'Direct Tracked Mail',
-		desc: '4PX Direct Tracked Mail · USPS/Canada Post · 8–18 days',
-		tier: 'standard',
-		countries: ['US', 'CA'],
-	},
+	// ── QC — POSTLINK Standard Registered (联邮通标准挂号) ─────────────────────────
+	// A single global code; 4PX resolves the destination carrier internally.
+	{ code: 'QC', name: 'POSTLINK Standard (QC)', desc: 'Standard registered · guaranteed scans · low loss', tier: 'standard', countries: [] },
 
-	// ── 4PX Business Direct (商业小包) ───────────────────────────────────────────
-	{
-		code: 'BDS',
-		name: 'Business Direct Small',
-		desc: '4PX Business Direct · tracked · global · 8–20 days',
-		tier: 'standard',
-		countries: [], // worldwide
-	},
-	{
-		code: 'BDSE',
-		name: 'Business Direct Economy',
-		desc: '4PX Business Direct Economy · low-cost tracked · 10–25 days',
-		tier: 'economy',
-		countries: [..._ANGLOSPHERE, ..._EU_CORE, 'PL', 'SE', 'BE'],
-	},
+	// ── PX — POSTLINK Priority Registered (联邮通优先挂号) ─────────────────────────
+	// The REAL 4PX priority-postal code. This is the correct product for a faster
+	// service to the US and elsewhere — it replaces the old fabricated "PXUS".
+	{ code: 'PX', name: 'POSTLINK Priority (PX)', desc: 'Priority registered · faster transit · signature scans', tier: 'express', countries: [] },
 
-	// ── QC — Quality Controlled (质量保障专线) ────────────────────────────────────
-	// 4PX exposes this as a SINGLE product code ("QC") that resolves the correct
-	// carrier by destination internally — there are no per-country QC codes on the
-	// portal. Sending fabricated codes like "QCBE"/"QCUS" is rejected by 4PX with
-	// "所选产品暂时未在<CC>开通服务" (product not opened for that country), so we
-	// ship one global QC entry that is valid for every destination.
-	{ code: 'QC', name: 'QC — Quality Controlled', desc: 'QC · quality-controlled line · guaranteed scans · low loss · 8–20 days', tier: 'standard', countries: [] },
+	// ── S5063 — POSTLINK China–US Fast Track (联邮通中美快线) ──────────────────────
+	// US-only expedited postal line (no battery). Real, priced ~5–9 days.
+	{ code: 'S5063', name: 'POSTLINK US Fast Track (S5063)', desc: 'China–US expedited postal line · no battery', tier: 'express', countries: ['US'] },
 
-	// ── PX Series — Priority Express (优先快递) ───────────────────────────────────
-	// Faster transit, signature tracking, priority sort.
-	{ code: 'PXUS', name: 'PX Priority — United States', desc: 'Priority Express · USPS Priority last-mile · 5–10 days', tier: 'express', countries: ['US'] },
-	{ code: 'PXCA', name: 'PX Priority — Canada', desc: 'Priority Express · Canada Post Xpresspost · 6–12 days', tier: 'express', countries: ['CA'] },
-	{ code: 'PXAU', name: 'PX Priority — Australia', desc: 'Priority Express · AusPost Express · 6–12 days', tier: 'express', countries: ['AU'] },
-	{ code: 'PXGB', name: 'PX Priority — United Kingdom', desc: 'Priority Express · Royal Mail Tracked 48 · 5–10 days', tier: 'express', countries: ['GB'] },
-	{ code: 'PXDE', name: 'PX Priority — Germany', desc: 'Priority Express · DHL DE · 6–12 days', tier: 'express', countries: ['DE'] },
-	{ code: 'PXFR', name: 'PX Priority — France', desc: 'Priority Express · Colissimo Priority · 6–12 days', tier: 'express', countries: ['FR'] },
-	{ code: 'PXJP', name: 'PX Priority — Japan', desc: 'Priority Express · Japan Post EMS · 5–10 days', tier: 'express', countries: ['JP'] },
-	{ code: 'PXSG', name: 'PX Priority — Singapore', desc: 'Priority Express · SingPost Priority · 5–10 days', tier: 'express', countries: ['SG'] },
-
-	// ── SFC (SF Express International / 顺丰国际) ─────────────────────────────────
-	{
-		code: 'SFCECO',
-		name: 'SFC Economy',
-		desc: 'SF Express Economy · tracked · 8–18 days',
-		tier: 'standard',
-		countries: ['US', 'CA', 'AU', 'GB', 'DE', 'FR', 'NL', 'IT', 'ES', 'JP', 'KR', 'SG'],
-	},
-	{
-		code: 'SFCPRI',
-		name: 'SFC Priority',
-		desc: 'SF Express Priority · 6–12 days',
-		tier: 'express',
-		countries: ['US', 'CA', 'AU', 'GB', 'DE', 'FR', 'NL', 'IT', 'ES', 'JP', 'KR', 'SG'],
-	},
-
-	// ── YunExpress (云途物流) ────────────────────────────────────────────────────
-	{
-		code: 'YUNTU',
-		name: 'YunExpress Standard',
-		desc: 'Yun Express Standard · tracked · 8–20 days',
-		tier: 'standard',
-		countries: ['US', 'CA', 'AU', 'GB', 'DE', 'FR', 'NL', 'IT', 'ES', 'PL', 'SE', 'BE', 'AT', 'PT', 'CZ', 'HU'],
-	},
-	{
-		code: 'YUNTUP',
-		name: 'YunExpress Priority',
-		desc: 'Yun Express Priority · 7–15 days',
-		tier: 'express',
-		countries: ['US', 'CA', 'AU', 'GB', 'DE', 'FR', 'NL', 'IT', 'ES', 'PL', 'SE', 'BE'],
-	},
+	// ── S5118 — US-ISLAND-PH — the ONLY lane for US island ZIPs ──────────────────
+	// Hawaii / Alaska / Guam / Puerto Rico / US Virgin Islands (+ Philippines).
+	{ code: 'S5118', name: 'US-ISLAND-PH (S5118)', desc: 'US island territories (HI/AK/GU/PR/VI) + Philippines', tier: 'economy', countries: ['US', 'PH'] },
 
 	// ── Manual / fallback ────────────────────────────────────────────────────────
-	{
-		code: 'OTHER',
-		name: 'Other / Custom…',
-		desc: 'Enter a product code manually',
-		tier: 'custom',
-		countries: [],
-	},
+	{ code: 'OTHER', name: 'Other / Custom…', desc: 'Enter a 4PX product code manually', tier: 'custom', countries: [] },
 ]
 
-// Backwards-compat alias — some internal helpers reference FOURPX_KNOWN_PRODUCTS
-const FOURPX_KNOWN_PRODUCTS = FOURPX_PRODUCT_CATALOG
+/**
+ * True when a curated product entry is offered for `country` ([] = worldwide).
+ * @param {{countries:string[]}} p
+ * @param {string} country  ISO-2 (already upper-cased) or '' for "any".
+ */
+function _fpxProductServesCountry(p, country) {
+	return !country || !Array.isArray(p.countries) || p.countries.length === 0 || p.countries.includes(country)
+}
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -1597,6 +1495,7 @@ app.get('/api/orders', (req, res) => {
 	// never disagree with the Route. Best-effort: any failure leaves charms with a
 	// plain status chip and never breaks the orders list.
 	const productCharmByKey = {} // item_key → { charm_code, charm_shop }  (per-product default)
+	const charmShopByCode = new Map() // charm code → supplier shop  (charm library = source of truth)
 	const charmStallByShop = new Map() // lower(shop_name) → stall  (where to buy)
 	let charmImgVerMap = new Map() // charm_code → image version token (cache-bust)
 	if (rows.length > 0) {
@@ -1619,6 +1518,13 @@ app.get('/api/orders', (req, res) => {
 			db.prepare('SELECT item_key, charm_code, charm_shop FROM product_assignments').all().forEach((a) => {
 				productCharmByKey[a.item_key] = { charm_code: a.charm_code || '', charm_shop: a.charm_shop || '' }
 			})
+		} catch {}
+		// Charm library = single source of truth for a charm code → its supplier shop.
+		// Assignments only cache the shop from when the charm was assigned, so we
+		// resolve the shop from the library by code (below) to stay in lockstep with
+		// Manage-charms edits, exactly like buildRouteRows / the Route tab.
+		try {
+			getCharmLibrary(db).forEach((c) => charmShopByCode.set(c.code, c.default_charm_shop || ''))
 		} catch {}
 		try {
 			getCharmShopDirectory(db).forEach((c) => {
@@ -1687,10 +1593,20 @@ app.get('/api/orders', (req, res) => {
 			if (sc.hasCharm) {
 				// Attach the CONFIRMED charm assignment (never suggestions) so the buy
 				// queue can show exactly which charm to source, and where. Same chain
-				// the Route tab uses: per-order save → per-product default.
-				const pd = productCharmByKey[itemKey] || {}
+				// the Route tab uses: per-order save → per-product default. On a
+				// SWITCHED line the per-product default must come from the REPLACEMENT
+				// design — not the original line's key, which still holds the original
+				// product's charm — so it stays in lockstep with the Route tab and
+				// buildRouteRows (see routeDashboard.productDefaultsKey).
+				const pdKey = routeDashboard.productDefaultsKey(itemKey, sub)
+				const pd = (pdKey && productCharmByKey[pdKey]) || {}
 				const charmCode = (a.charm_code || pd.charm_code || '').trim()
-				const charmShop = (a.charm_shop || pd.charm_shop || '').trim()
+				// Supplier shop follows the CODE via the charm library (source of truth);
+				// the per-order/per-product snapshot is only a fallback for a code the
+				// library doesn't know, so a Manage-charms supplier edit shows up here too.
+				const charmShop = (charmCode && charmShopByCode.has(charmCode)
+					? charmShopByCode.get(charmCode)
+					: (a.charm_shop || pd.charm_shop || '')).trim()
 				const charmStall = charmShop ? charmStallByShop.get(charmShop.toLowerCase()) || '' : ''
 				components.push({
 					comp: 'charm',
@@ -4079,7 +3995,32 @@ app.post('/api/orders/bulk-needs-purchase', (req, res) => {
  * @returns {Promise<object>}  The Etsy createReceiptShipment result.
  * @throws  {Error}  err.status carries an HTTP-friendly status when known.
  */
-async function shipEtsyReceipt(receiptId, opts = {}) {
+// Tracks 'ship' calls currently talking to Etsy, keyed by receipt id, so two
+// concurrent requests for the same receipt (e.g. a resumed bulk-complete that
+// overlaps a still-running original after a connection blip) share ONE Etsy call
+// and the buyer is never notified twice. 'update' (edit-tracking) is an explicit
+// operator re-submit and is intentionally not de-duplicated.
+const _shipInFlight = new Map() // receiptId(string) -> Promise<object>
+
+function shipEtsyReceipt(receiptId, opts = {}) {
+	const mode = opts.mode === 'update' ? 'update' : 'ship'
+	if (mode === 'update') return _shipEtsyReceiptImpl(receiptId, opts)
+
+	const key = String(receiptId)
+	const existing = _shipInFlight.get(key)
+	if (existing) return existing
+
+	const p = _shipEtsyReceiptImpl(receiptId, opts)
+	_shipInFlight.set(key, p)
+	// Free the slot once settled (success OR failure) so a later, legitimate retry
+	// of a genuinely-failed order can proceed.
+	p.finally(() => {
+		if (_shipInFlight.get(key) === p) _shipInFlight.delete(key)
+	})
+	return p
+}
+
+async function _shipEtsyReceiptImpl(receiptId, opts = {}) {
 	const tracking = (opts.tracking_code || '').trim()
 	const carrier = (opts.carrier_name || '4PX').trim()
 	const mode = opts.mode === 'update' ? 'update' : 'ship'
@@ -4090,7 +4031,7 @@ async function shipEtsyReceipt(receiptId, opts = {}) {
 	}
 
 	// 1. Resolve which shop this receipt belongs to (receipts store shop_id).
-	const order = db.prepare('SELECT shop_id, source, tracking_code, carrier_confirmed_at FROM receipts WHERE receipt_id = ?').get(receiptId)
+	const order = db.prepare('SELECT shop_id, source, tracking_code, carrier_confirmed_at, is_shipped FROM receipts WHERE receipt_id = ?').get(receiptId)
 	if (!order) {
 		const e = new Error('Order not found')
 		e.status = 404
@@ -4102,6 +4043,19 @@ async function shipEtsyReceipt(receiptId, opts = {}) {
 		const e = new Error('Manual orders are not on Etsy and cannot be shipped or tracked through Etsy. Mark them shipped locally or ship them with 4PX.')
 		e.status = 400
 		throw e
+	}
+
+	// Idempotency: if this receipt is ALREADY shipped on Etsy with this EXACT
+	// tracking number, do not call Etsy again. Etsy sends a buyer notification on
+	// every successful tracking submit and allows multiple shipment records per
+	// receipt, so a blind re-submit would double-notify the buyer. Skipping here
+	// makes bulk-complete safe to re-run after an interruption (dropped connection,
+	// server restart): already-completed orders are skipped instantly and only the
+	// remaining ones are shipped. A DIFFERENT tracking number is treated as a
+	// genuine (re)ship and proceeds normally.
+	if (mode !== 'update' && order.is_shipped === 1 && (order.tracking_code || '').trim() === tracking) {
+		console.log(`[ship] ${order.shop_id} receipt ${receiptId} already shipped with ${tracking} — skipped (idempotent)`)
+		return { receipt_id: receiptId, tracking_code: tracking, carrier_name: carrier, skipped: true, alreadyShipped: true }
 	}
 
 	// 2. Find shop + group config by shop_id.
@@ -4347,15 +4301,119 @@ app.get('/api/4px/config', (_req, res) => {
 })
 
 /**
+ * Fetch, from 4PX, the ground-truth of what can actually be shipped to a
+ * destination — and cache it for 30 minutes. Two independent live signals are
+ * combined so a single API quirk can never hide a valid product nor surface an
+ * invalid one:
+ *
+ *   • ds.xms.logistics_product.getlist  → every product code enabled on the
+ *     account (the broad "does this code exist at all?" oracle). Country-agnostic.
+ *   • ds.xms.estimated_cost.get         → every lane 4PX will actually PRICE for
+ *     this country+weight, with fee + ETA (the "is it orderable right now, and
+ *     what does it cost/how fast?" oracle). Country-specific but not exhaustive
+ *     (some enabled lanes — e.g. S5058→AU — are order-able yet omitted here).
+ *
+ * @returns {Promise<{codes:Set<string>, priceable:Set<string>,
+ *                    nameByCode:Map<string,string>, priceByCode:Map<string,object>,
+ *                    live:Array, priced:Array, ok:boolean}>}
+ */
+async function get4pxValidCodes(appKey, appSecret, country) {
+	const cc = (country || '').toUpperCase()
+	const cacheKey = `${appKey}:${cc}`
+	const hit = _fpxValidCodesCache.get(cacheKey)
+	if (hit && hit.expiresAt > Date.now()) return hit
+
+	const hasCjk = (s) => /[\u4e00-\u9fff]/.test(s || '')
+
+	// (1) Account-wide product catalogue (names + existence).
+	let live = []
+	try {
+		live = await getLogisticsProducts(appKey, appSecret, { countryCode: cc || undefined })
+	} catch (err) {
+		console.warn(`[4px/products] getlist failed for ${cc || 'ALL'}: ${err.message}`)
+	}
+	const codes = new Set()
+	const nameByCode = new Map()
+	for (const p of live) {
+		const code = (p.logistics_product_code ?? p.logisticsProductCode ?? p.code ?? '').toString().trim()
+		if (!code) continue
+		codes.add(code.toUpperCase())
+		const nameEn = p.logistics_product_name_en || p.logistics_product_name || ''
+		if (nameEn && !hasCjk(nameEn)) nameByCode.set(code.toUpperCase(), nameEn)
+	}
+
+	// (2) Live rate card for this country+weight (order-ability + price + ETA).
+	const priceable = new Set()
+	const priceByCode = new Map()
+	let priced = []
+	if (cc) {
+		try {
+			const weightG = Number(config.fourpx_default_weight_g) > 0 ? Number(config.fourpx_default_weight_g) : 100
+			const est = await getEstimatedCost(appKey, appSecret, { countryCode: cc, weightG, currency: config.fourpx_settlement_currency || 'CNY' })
+			priced = Array.isArray(est.all) ? est.all : []
+			for (const p of priced) {
+				const code = (p.logistics_product_code ?? p.logisticsProductCode ?? '').toString().trim()
+				if (!code) continue
+				const fee = Number(p.lump_sum_fee ?? p.lumpSumFee ?? p.total_fee)
+				priceable.add(code.toUpperCase())
+				priceByCode.set(code.toUpperCase(), {
+					fee: Number.isFinite(fee) ? fee : null,
+					currency: config.fourpx_settlement_currency || 'CNY',
+					estimatedTime: p.estimated_time ?? p.estimatedTime ?? null,
+				})
+			}
+		} catch (err) {
+			console.warn(`[4px/products] estimated_cost failed for ${cc}: ${err.message}`)
+		}
+	}
+
+	const result = {
+		codes,
+		priceable,
+		nameByCode,
+		priceByCode,
+		live,
+		priced,
+		ok: codes.size > 0 || priceable.size > 0,
+		expiresAt: Date.now() + 30 * 60 * 1000,
+	}
+	_fpxValidCodesCache.set(cacheKey, result)
+	return result
+}
+
+/** Render a "5–8 days · ~39.90 CNY" style suffix from a rate-card entry. */
+function _fpxPriceSuffix(price) {
+	if (!price) return ''
+	const parts = []
+	if (price.estimatedTime) parts.push(`${String(price.estimatedTime).replace(/-/g, '–')} days`)
+	if (Number.isFinite(price.fee)) parts.push(`~${price.fee.toFixed(2)} ${price.currency || 'CNY'}`)
+	return parts.join(' · ')
+}
+
+/** Derive a display tier for a live lane from its ETA (fewest days = faster). */
+function _fpxTierFromEta(estimatedTime) {
+	const m = String(estimatedTime || '').match(/\d+/)
+	if (!m) return 'standard'
+	const minDays = Number(m[0])
+	if (minDays <= 8) return 'express'
+	if (minDays <= 14) return 'standard'
+	return 'economy'
+}
+
+/**
  * GET /api/4px/products
- * List available logistics products for this 4PX account.
+ * List the logistics products a shipment can ACTUALLY be created with for a
+ * destination. Every returned code is real and order-able — the picker can no
+ * longer offer a fabricated code that fails at order-create with DS000110.
  *
- * Tries ds.xms.logistics_product.getlist first (available to ISV accounts).
- * Falls back to FOURPX_KNOWN_PRODUCTS for direct-customer API keys, where the
- * product-list API returns 404 (method not available for that account type).
+ * Ordering:
+ *   1. Recommended — our curated, verified-real shortlist for the destination,
+ *      enriched with live price/ETA. Pre-selected default lives here (S5058).
+ *   2. All priced lanes returned by 4PX's live rate card (real prices + ETAs),
+ *      grouped by speed, cheapest first.
+ *   3. "Other / custom" for power users who know a specific code.
  *
- * Results are cached for 30 minutes.
- * Query param: country (optional ISO-2 code, e.g. "US")
+ * Results are cached for 30 minutes. Query param: country (ISO-2, e.g. "US").
  */
 app.get('/api/4px/products', async (req, res) => {
 	try {
@@ -4367,104 +4425,68 @@ app.get('/api/4px/products', async (req, res) => {
 			return res.json({ products: cached.products, source: cached.source, country: cached.country, cached: true })
 		}
 
-		let products = []
-		let source = 'api'
+		const { priceByCode, priced, nameByCode, live } = await get4pxValidCodes(appKey, appSecret, country)
 
-		try {
-			products = await getLogisticsProducts(appKey, appSecret, { countryCode: country || undefined })
-		} catch {
-			products = []
-		}
+		const products = []
+		const seen = new Set() // upper-cased codes already added (dedupe)
 
-		// Direct-customer API keys cannot access ds.xms.logistics_product.getlist
-		// (error 000024). Fall back to the curated catalogue with country filtering.
-		if (!products.length) {
-			source = 'fallback'
-
-			// Filter catalogue entries relevant to this destination country.
-			// products with countries:[] are global (available everywhere).
-			const filtered = FOURPX_PRODUCT_CATALOG.filter((p) => !country || p.countries.length === 0 || p.countries.includes(country))
-
-			// Sort: (1) country-specific first, (2) then global, (3) custom last
-			const tierOrder = { economy: 0, standard: 1, express: 2, premium: 3, custom: 99 }
-			filtered.sort((a, b) => {
-				const aSpec = a.countries.length > 0 ? 0 : 1
-				const bSpec = b.countries.length > 0 ? 0 : 1
-				if (aSpec !== bSpec) return aSpec - bSpec
-				return (tierOrder[a.tier] ?? 99) - (tierOrder[b.tier] ?? 99)
-			})
-
-			products = filtered.map((p) => ({
+		// ── 1. Recommended (curated, verified-real) ──────────────────────────────
+		for (const p of FOURPX_RECOMMENDED_PRODUCTS) {
+			if (p.code === 'OTHER') continue
+			if (!_fpxProductServesCountry(p, country)) continue
+			const price = priceByCode.get(p.code.toUpperCase())
+			const suffix = _fpxPriceSuffix(price)
+			products.push({
 				logistics_product_code: p.code,
 				logistics_product_name: p.name,
-				description: p.desc,
-				tier: p.tier,
-				// Expose country scope so the frontend can show contextual info
-				country_specific: p.countries.length > 0,
-			}))
-		} else {
-			// Live API response — normalise to the shape the frontend expects.
-			// The getlist API returns logistics_product_name_en / _cn (not _name),
-			// plus transport_mode_label which we map to a display tier for grouping.
-			const MODE_TIER = { express: 'express', priority: 'standard', postal: 'economy', cod: 'custom' }
-			const hasCjk = (s) => /[\u4e00-\u9fff]/.test(s || '')
-			products = products.map((p) => {
-				const nameEn = p.logistics_product_name_en || p.logistics_product_name || ''
-				const nameCn = p.logistics_product_name_cn || ''
-				// Prefer a genuine English name. When 4PX only has a Chinese name (very
-				// common for internal product lines), show the product code instead so
-				// the English-language UI stays readable; keep the Chinese as a subtitle.
-				const displayName = !nameEn || hasCjk(nameEn) ? p.logistics_product_code : nameEn
-				return {
-					logistics_product_code: p.logistics_product_code,
-					logistics_product_name: displayName,
-					name_cn: nameCn || undefined,
-					description: hasCjk(nameCn) && nameCn !== displayName ? nameCn : undefined,
-					tier: MODE_TIER[p.transport_mode_label] ?? 'standard',
-					transport_mode: p.transport_mode,
-					trackable: p.order_track === 'Y',
-					country_specific: !!country,
-				}
+				description: suffix ? `${p.desc} · ${suffix}` : p.desc,
+				tier: 'recommended',
+				service_tier: p.tier,
+				recommended: true,
+				fee: price?.fee ?? null,
+				currency: price?.currency ?? null,
+				estimated_time: price?.estimatedTime ?? null,
+				country_specific: Array.isArray(p.countries) && p.countries.length > 0,
 			})
-			// Stable, useful ordering: trackable first, then by code.
-			products.sort((a, b) => Number(b.trackable) - Number(a.trackable) || String(a.logistics_product_code).localeCompare(String(b.logistics_product_code)))
-
-			// ── Curated supplements ──────────────────────────────────────────────────
-			// The live API's product list is account-scoped: products not enabled on
-			// the merchant's 4PX account are simply omitted, even if they are valid
-			// shipping options.  US-ISLAND-PH (S5118) is a prime example — it handles
-			// deliveries to HI/AK/GU/PR/VI and is supported on all direct accounts,
-			// but many API keys never see it in the getlist response.
-			//
-			// Strategy: after normalising live results, scan the curated static catalog
-			// for destination-relevant products that are absent from the API response
-			// and append them as "supplemented" entries.  Live API items are never
-			// modified or removed; supplements are always placed after live results so
-			// the operator's account-configured products remain the primary choices.
-			if (country) {
-				const liveCodeSet = new Set(products.map((p) => p.logistics_product_code))
-				const tierOrder = { economy: 0, standard: 1, express: 2, premium: 3, custom: 99 }
-				const supplements = FOURPX_PRODUCT_CATALOG.filter((p) => p.tier !== 'custom' && (p.countries.length === 0 || p.countries.includes(country)) && !liveCodeSet.has(p.code))
-					.sort((a, b) => {
-						const aSpec = a.countries.length > 0 ? 0 : 1
-						const bSpec = b.countries.length > 0 ? 0 : 1
-						if (aSpec !== bSpec) return aSpec - bSpec
-						return (tierOrder[a.tier] ?? 99) - (tierOrder[b.tier] ?? 99)
-					})
-					.map((p) => ({
-						logistics_product_code: p.code,
-						logistics_product_name: p.name,
-						description: p.desc,
-						tier: p.tier,
-						country_specific: p.countries.length > 0,
-						supplemented: true, // not from live API; curated catalog entry
-					}))
-				if (supplements.length) {
-					products = [...products, ...supplements]
-					console.log(`[4px/products] Live API (${country}): ${liveCodeSet.size} live + ${supplements.length} curated supplement(s) [${supplements.map((s) => s.logistics_product_code).join(', ')}]`)
-				}
-			}
+			seen.add(p.code.toUpperCase())
 		}
+
+		// ── 2. All other live-priced lanes (real prices + ETAs, cheapest first) ──
+		const moreLanes = priced
+			.map((p) => {
+				const code = (p.logistics_product_code ?? p.logisticsProductCode ?? '').toString().trim()
+				const fee = Number(p.lump_sum_fee ?? p.lumpSumFee ?? p.total_fee)
+				return { code, fee: Number.isFinite(fee) ? fee : Infinity, eta: p.estimated_time ?? p.estimatedTime ?? null }
+			})
+			.filter((l) => l.code && !seen.has(l.code.toUpperCase()))
+			.sort((a, b) => a.fee - b.fee)
+		for (const l of moreLanes) {
+			seen.add(l.code.toUpperCase())
+			const price = { fee: Number.isFinite(l.fee) ? l.fee : null, currency: config.fourpx_settlement_currency || 'CNY', estimatedTime: l.eta }
+			const suffix = _fpxPriceSuffix(price)
+			products.push({
+				logistics_product_code: l.code,
+				logistics_product_name: nameByCode.get(l.code.toUpperCase()) || l.code,
+				description: suffix || undefined,
+				tier: _fpxTierFromEta(l.eta),
+				fee: price.fee,
+				currency: price.currency,
+				estimated_time: price.estimatedTime,
+				country_specific: !!country,
+			})
+		}
+
+		// ── Source classification ────────────────────────────────────────────────
+		// 'api'      — at least one live signal (rate card and/or product list) drove the list.
+		// 'fallback' — no live data; only the curated verified-real shortlist is shown.
+		const usedLive = priced.length > 0 || live.length > 0
+		const source = usedLive ? 'api' : 'fallback'
+
+		// The custom escape hatch is always last, in its own group.
+		products.push({ logistics_product_code: 'OTHER', logistics_product_name: 'Other / Custom…', description: 'Enter a 4PX product code manually', tier: 'custom', country_specific: false })
+
+		const recommendedCount = products.filter((p) => p.recommended).length
+		console.log(`[4px/products] ${country || 'ALL'}: ${recommendedCount} recommended + ${moreLanes.length} priced lane(s) (source=${source})`)
 
 		_fpxProductsCache.set(cacheKey, { products, source, country, expiresAt: Date.now() + 30 * 60 * 1000 })
 		res.json({ products, source, country, cached: false })
@@ -4816,6 +4838,39 @@ async function create4pxShipmentForReceipt({ appKey, appSecret, receipt_id, reci
 		// Mirror the tax id into recipient_info too (harmless; used by 4PX for label
 		// printing). The binding validation is satisfied by the order-level vat_no.
 		...(recipientVatNo && { vat_no: recipientVatNo }),
+	}
+
+	// ── Validate the product against 4PX's live catalogue (defense in depth) ─────
+	// Prevents the opaque DS000110 ("product code does not exist") round-trip: if
+	// the account cannot actually ship to this destination with the chosen code,
+	// reject NOW with clear, actionable guidance and real alternatives — instead of
+	// letting 4PX fail the create call. A code is accepted when it appears in EITHER
+	// the account product list (getlist) OR the live rate card (estimated_cost) OR
+	// our curated verified-real shortlist for the country; this union avoids false
+	// rejections for lanes one signal omits (e.g. S5058→AU is order-able yet absent
+	// from the AU rate card). If both live signals are unavailable, validation is
+	// skipped and 4PX stays the final authority.
+	try {
+		const { codes, priceable, ok } = await get4pxValidCodes(appKey, appSecret, destCountry)
+		if (ok) {
+			const want = String(logistics_product_code).toUpperCase()
+			const recommendedForCountry = FOURPX_RECOMMENDED_PRODUCTS.filter((p) => p.code !== 'OTHER' && _fpxProductServesCountry(p, destCountry)).map((p) => p.code)
+			const isValid = codes.has(want) || priceable.has(want) || recommendedForCountry.some((c) => c.toUpperCase() === want)
+			if (!isValid) {
+				const suggestions = recommendedForCountry.filter((c) => codes.has(c.toUpperCase()) || priceable.has(c.toUpperCase()))
+				// NB: keep this message free of ':' — the browser's humanize4pxError()
+				// strips everything before a colon when cleaning raw 4PX errors.
+				const altText = suggestions.length ? ` Recommended services for ${destCountry || 'this destination'} — ${suggestions.join(', ')}.` : ''
+				const e = new Error(`4PX shipping service "${logistics_product_code}" is not available for ${destCountry || 'this destination'} on your account. Pick another service from the dropdown.${altText}`)
+				e.status = 422
+				e.code = 'DS000110'
+				throw e
+			}
+		}
+	} catch (err) {
+		if (err.status === 422) throw err
+		// A failure of the validation lookup itself must never block a shipment.
+		console.warn(`[4px] product validation skipped for receipt ${receipt_id}: ${err.message}`)
 	}
 
 	// Customer reference 4PX echoes back. Manual orders use a MANUAL- prefix with
@@ -5487,12 +5542,14 @@ app.post('/api/4px/bulk-complete', async (req, res) => {
 			const isFirstOverall = chunkIdx === 0 && i === 0
 			if (!isFirstOverall) await complianceSleep(BULK_SHIP_INTER_REQUEST_MS)
 			try {
-				await shipEtsyReceipt(o.receipt_id, {
+				const r = await shipEtsyReceipt(o.receipt_id, {
 					tracking_code: o.tracking_code,
 					carrier_name: o.carrier_name || batchCarrier,
 					pacedBulk: true,
 				})
-				results.push({ receipt_id: o.receipt_id, success: true, tracking_code: (o.tracking_code || '').trim() })
+				// `skipped` = already shipped with this tracking (idempotent re-run);
+				// surfaced so a resumed batch can report "already done" honestly.
+				results.push({ receipt_id: o.receipt_id, success: true, tracking_code: (o.tracking_code || '').trim(), skipped: !!r?.skipped })
 			} catch (err) {
 				const etsyBody = err.response?.data
 				const errMsg = (typeof etsyBody === 'object' ? etsyBody?.error_description || etsyBody?.error : null) || err.message
@@ -5503,12 +5560,14 @@ app.post('/api/4px/bulk-complete', async (req, res) => {
 	}
 
 	const ok = results.filter((r) => r.success).length
+	const skipped = results.filter((r) => r.success && r.skipped).length
 	const failed = results.length - ok
-	console.log(`[4px/bulk] complete batch: ${ok} completed, ${failed} failed (of ${results.length})`)
+	console.log(`[4px/bulk] complete batch: ${ok} completed${skipped ? ` (${skipped} already shipped, skipped)` : ''}, ${failed} failed (of ${results.length})`)
 	res.json({
 		success: failed === 0,
 		total: results.length,
 		completed: ok,
+		skipped,
 		failed,
 		chunks: chunks.length,
 		chunk_size: BULK_SHIP_CHUNK_SIZE,
@@ -6720,6 +6779,30 @@ app.post('/api/bulk/jobs/:job_id/items/:seq/images', (req, res) => {
 })
 
 /**
+ * POST /api/bulk/jobs/:job_id/items/:seq/images/upload
+ * Body: { images: [{ data_b64, filename?, mime? }] } — base64 (data-URL ok).
+ * Import operator-uploaded photos into the product folder and append them to the
+ * curated image plan. Dry-run preview only, before the Etsy draft exists. The
+ * client uploads one photo per request (progress + stays well under the body
+ * limit); the server appends idempotently so a sequence accumulates correctly.
+ */
+app.post('/api/bulk/jobs/:job_id/items/:seq/images/upload', express.json({ limit: '60mb' }), async (req, res) => {
+	try {
+		const raw = Array.isArray(req.body?.images) ? req.body.images : []
+		const files = []
+		for (const it of raw) {
+			const { data } = _decodeBase64Image(it?.data_b64 ?? it?.image_b64, it?.mime)
+			if (data) files.push({ data, filename: typeof it?.filename === 'string' ? it.filename : '' })
+		}
+		if (!files.length) return res.status(400).json({ error: 'A valid image is required.' })
+		const result = await bulkManager.addItemImages(req.params.job_id, req.params.seq, files)
+		res.json({ success: true, ...result })
+	} catch (err) {
+		res.status(err.status || 500).json({ error: err.message })
+	}
+})
+
+/**
  * POST /api/bulk/jobs/:job_id/items/:seq/prices  { style_prices: {styleKey: price} }
  * Update one product's per-style prices; re-pushes inventory if it's a live draft.
  */
@@ -7358,36 +7441,54 @@ app.post('/api/route/assign', express.json(), (req, res) => {
 		const hasSupplierChange = b.supplier_shop_override != null || b.supplier_stall_override != null
 		const hasCharmChange = b.charm_code != null
 		if ((hasSupplierChange || hasCharmChange) && b.item_key) {
-			const productPatch = { item_key: String(b.item_key), title: b.title }
-			if (hasSupplierChange) {
-				productPatch.supplier_shop = b.supplier_shop_override ?? ''
-				productPatch.supplier_stall = b.supplier_stall_override ?? ''
-			}
-			if (hasCharmChange) {
-				productPatch.charm_code = b.charm_code ?? ''
-				productPatch.charm_shop = b.charm_shop ?? ''
-			}
-			upsertProductAssignment(db, productPatch)
-
-			// Write-through to the Product Catalog (product_map) so a supplier/charm
-			// edited HERE in the Orders Sorting Dashboard is immediately reflected in
-			// the Product Catalog modal — the two views stay consistent. Only the
-			// field(s) that changed are written; the rest of the catalog row is
-			// preserved. The row is created if the product wasn't catalogued yet, so
-			// products no longer show "Not set" after being assigned in the Route tab.
-			try {
-				const mapPatch = { title: b.title }
+			// Route the per-product default to the product we will actually BUY. On a
+			// SWITCHED line that is the REPLACEMENT design — not the original order
+			// line — so both the key and the title come from the substitution. This
+			// keeps the WRITE symmetric with how buildRouteRows READS the default
+			// (routeDashboard.productDefaultsKey): a supplier/charm the operator sets
+			// on a switched line becomes the REPLACEMENT product's default, and never
+			// pollutes (or is misattributed to) the original product.
+			//
+			// A CUSTOM upload has no catalog product (productKey === null): we skip the
+			// product-level + catalog write entirely so we neither corrupt the original
+			// product's default nor invent a bogus catalog entry from a one-off title.
+			// The per-order override saved just above still stands, so the operator's
+			// choice is honoured for that specific line.
+			const sub = getSubstitutionForLine(db, Number(b.receipt_id), String(b.item_key))
+			const productKey = routeDashboard.productDefaultsKey(String(b.item_key), sub)
+			const effectiveTitle = sub && sub.new_title ? sub.new_title : b.title
+			if (productKey) {
+				const productPatch = { item_key: productKey, title: effectiveTitle }
 				if (hasSupplierChange) {
-					mapPatch.supplier_shop = b.supplier_shop_override ?? ''
-					mapPatch.supplier_stall = b.supplier_stall_override ?? ''
+					productPatch.supplier_shop = b.supplier_shop_override ?? ''
+					productPatch.supplier_stall = b.supplier_stall_override ?? ''
 				}
 				if (hasCharmChange) {
-					mapPatch.charm_code = b.charm_code ?? ''
-					mapPatch.charm_shop = b.charm_shop ?? ''
+					productPatch.charm_code = b.charm_code ?? ''
+					productPatch.charm_shop = b.charm_shop ?? ''
 				}
-				mergeProductMapSupplierCharm(db, mapPatch)
-			} catch (e) {
-				console.warn('[route] product-map write-through failed:', e.message)
+				upsertProductAssignment(db, productPatch)
+
+				// Write-through to the Product Catalog (product_map) so a supplier/charm
+				// edited HERE in the Orders Sorting Dashboard is immediately reflected in
+				// the Product Catalog modal — the two views stay consistent. Only the
+				// field(s) that changed are written; the rest of the catalog row is
+				// preserved. The row is created if the product wasn't catalogued yet, so
+				// products no longer show "Not set" after being assigned in the Route tab.
+				try {
+					const mapPatch = { title: effectiveTitle }
+					if (hasSupplierChange) {
+						mapPatch.supplier_shop = b.supplier_shop_override ?? ''
+						mapPatch.supplier_stall = b.supplier_stall_override ?? ''
+					}
+					if (hasCharmChange) {
+						mapPatch.charm_code = b.charm_code ?? ''
+						mapPatch.charm_shop = b.charm_shop ?? ''
+					}
+					mergeProductMapSupplierCharm(db, mapPatch)
+				} catch (e) {
+					console.warn('[route] product-map write-through failed:', e.message)
+				}
 			}
 		}
 
@@ -7622,13 +7723,15 @@ function reconcileCanonicalProductKeys() {
 			}
 			return i
 		}
-		const join = (a, b) => {
+		// `force` skips the supplier-overlap guard: an operator-declared merge is a
+		// deliberate human decision that outranks the automatic safety heuristic.
+		const join = (a, b, force = false) => {
 			a = root(a)
 			b = root(b)
 			if (a === b) return
 			const as = groupStalls[a]
 			const bs = groupStalls[b]
-			if (as.size && bs.size) {
+			if (!force && as.size && bs.size) {
 				let overlap = false
 				for (const stall of as) {
 					if (bs.has(stall)) {
@@ -7645,6 +7748,16 @@ function reconcileCanonicalProductKeys() {
 			for (let j = i + 1; j < rows.length; j++) {
 				if (supplierCompatible(rows[i], rows[j]) && phashDistance(rows[i].phash, rows[j].phash) <= 6) join(i, j)
 			}
+		}
+
+		// Operator-declared "same product" merges: forced union edges that link
+		// listings the perceptual hash can't (differing photos of one physical
+		// product). These override the visual + supplier heuristics entirely.
+		const idxByListing = new Map(rows.map((row, i) => [Number(row.listing_id), i]))
+		for (const { listing_a, listing_b } of productMerges.getMergeEdges(db)) {
+			const ia = idxByListing.get(Number(listing_a))
+			const ib = idxByListing.get(Number(listing_b))
+			if (ia != null && ib != null) join(ia, ib, true)
 		}
 
 		const groups = new Map()
@@ -8784,6 +8897,51 @@ app.delete('/api/route/product-map', express.json(), (req, res) => {
 })
 
 /**
+ * POST /api/route/product-merges
+ * Declare that two or more listings are the SAME physical product, so their
+ * orders merge into one product card on the shopping route even when their
+ * images differ and the perceptual hash can't link them automatically.
+ * Body: { listing_ids: number[], note?: string }
+ * The canonical reconciler re-runs immediately, so the effect is instant.
+ */
+app.post('/api/route/product-merges', express.json(), (req, res) => {
+	const b = req.body ?? {}
+	try {
+		const inserted = productMerges.linkProducts(db, b.listing_ids, {
+			note: b.note,
+			createdBy: (req.auth && req.auth.user) || '',
+		})
+		reconcileCanonicalProductKeys()
+		res.status(201).json({ ok: true, inserted })
+	} catch (err) {
+		res.status(err.status || 500).json({ error: err.message })
+	}
+})
+
+/**
+ * DELETE /api/route/product-merges
+ * Undo a manual merge. Pass { listing_id } to fully unlink one listing, or
+ * { listing_a, listing_b } to drop a single equivalence edge.
+ */
+app.delete('/api/route/product-merges', express.json(), (req, res) => {
+	const b = req.body ?? {}
+	try {
+		let removed = 0
+		if (b.listing_a != null && b.listing_b != null) {
+			removed = productMerges.removeMergePair(db, b.listing_a, b.listing_b) ? 1 : 0
+		} else if (b.listing_id != null) {
+			removed = productMerges.unlinkProduct(db, b.listing_id)
+		} else {
+			return res.status(400).json({ error: 'Provide listing_id, or listing_a and listing_b.' })
+		}
+		reconcileCanonicalProductKeys()
+		res.json({ ok: true, removed })
+	} catch (err) {
+		res.status(err.status || 500).json({ error: err.message })
+	}
+})
+
+/**
  * GET /api/route/product-map/export.csv
  * Download the entire product catalog as a UTF-8 CSV file.
  * Suitable for backup, spreadsheet editing, or re-import via the Excel import flow.
@@ -8841,7 +8999,12 @@ function _charmsPayload() {
 		default_charm_shop_stall: stallByShop[c.default_charm_shop] || '',
 		notes: c.notes || '',
 		image_file: c.image_file || '',
-		has_image: !!c.image_file,
+		// has_image reflects a REAL file on disk, not just a non-empty DB column.
+		// charmImageVersionMap only records a version when a <code>.<ext> file
+		// actually exists, so `imgVer.has(code)` is the authoritative disk check.
+		// This is what prevents a charm whose image was lost/orphaned (e.g. by a
+		// past renumber) from rendering as a broken <img> in the Manage-charm menu.
+		has_image: imgVer.has(c.code),
 		image_version: imgVer.get(c.code) || '',
 		sort_order: c.sort_order,
 	}))
@@ -8922,6 +9085,13 @@ app.put('/api/route/charms', express.json({ limit: '20mb' }), (req, res) => {
 			notes: b.notes,
 			image_file: imageFile,
 		})
+		// The charm library is the source of truth for a code → its supplier shop,
+		// so a supplier (or code) change here changes what every already-assigned
+		// order line resolves to. Tell all live Route/Shopping clients to refetch so
+		// the new supplier + stall show up immediately instead of the stale snapshot.
+		const shopChanged = b.default_charm_shop != null &&
+			String(b.default_charm_shop).trim() !== (cur.default_charm_shop || '')
+		if (shopChanged || newCode !== origCode) broadcastRouteRefresh(null, 'charm-updated')
 		res.json({ ok: true, code: newCode, ..._charmsPayload() })
 	} catch (err) {
 		res.status(_supplierErrStatus(err)).json({ error: err.message })
@@ -8940,6 +9110,9 @@ app.delete('/api/route/charms', express.json(), (req, res) => {
 		try {
 			charmLibrary.deleteCharmImage(config, code)
 		} catch {}
+		// Order lines still referencing this code now fall back to their stored
+		// snapshot — refetch live views so that resolution change is reflected.
+		broadcastRouteRefresh(null, 'charm-deleted')
 		res.json({ ok: true, ..._charmsPayload() })
 	} catch (err) {
 		res.status(_supplierErrStatus(err)).json({ error: err.message })
@@ -8954,6 +9127,9 @@ app.post('/api/route/charms/resync', (req, res) => {
 	try {
 		const r = charmLibrary.resyncCharmLibrary(db, config)
 		if (!r.ok) return res.status(400).json(r)
+		// The whole library was replaced from the manifest — code → supplier
+		// mappings may have changed, so refetch all live Route/Shopping views.
+		broadcastRouteRefresh(null, 'charm-resynced')
 		res.json({ ok: true, ..._charmsPayload() })
 	} catch (err) {
 		res.status(500).json({ error: err.message })
@@ -8961,10 +9137,11 @@ app.post('/api/route/charms/resync', (req, res) => {
 })
 
 /**
- * POST /api/route/charms/reorder — drag-to-reorder + renumber.
+ * POST /api/route/charms/reorder — drag-to-reorder (display order only).
  * Body: { order: [code, ...] } — current codes in the desired visual order.
- * Codes are renumbered sequentially by position; image files + charm_code
- * references follow so each physical charm keeps its image and assignments.
+ * Only each charm's sort_order changes; codes stay put (stable identities), so
+ * every image file and charm_code reference — and thus every order's assigned
+ * charm — is untouched.
  */
 app.post('/api/route/charms/reorder', express.json(), (req, res) => {
 	const order = (req.body ?? {}).order
@@ -8972,12 +9149,11 @@ app.post('/api/route/charms/reorder', express.json(), (req, res) => {
 		return res.status(400).json({ error: 'order must be a non-empty array of charm codes.' })
 	}
 	try {
-		const { renames } = reorderCharmLibrary(db, order)
-		try {
-			charmLibrary.reorderCharmImages(config, renames)
-		} catch (e) {
-			console.warn('[charms] image reorder warning:', e.message)
-		}
+		// Codes are stable identities: a reorder only re-sorts (sort_order), so it
+		// touches no assignment, no supplier resolution and no image file. Nothing
+		// on the route rows changes, hence no image rename and no route refresh —
+		// only the charm library's display order, returned below for the modal.
+		reorderCharmLibrary(db, order)
 		res.json({ ok: true, ..._charmsPayload() })
 	} catch (err) {
 		res.status(_supplierErrStatus(err)).json({ error: err.message })
@@ -10450,4 +10626,31 @@ process.on('SIGINT', () => {
 process.on('SIGTERM', () => {
 	releaseOwnedLocks()
 	process.exit(0)
+})
+
+// ── Last-resort crash guards — keep operator-initiated work alive ─────────────
+// A single stray async rejection anywhere in the process (background sync worker,
+// tracking poller, inventory watch, a webhook, etc.) would otherwise take down
+// Node's default and kill the WHOLE server — severing any long-running request in
+// flight. That is exactly what turned a paced /api/4px/bulk-complete run into a
+// browser "Failed to fetch": a background task rejected, the process died, PM2
+// (autorestart) revived it, and the operator's completion was cut off mid-batch.
+//
+// These handlers log with full context and DELIBERATELY keep the process running.
+// Rationale for this app specifically:
+//   • Every HTTP handler is self-contained and persists to synchronous SQLite as
+//     it goes, so there is no shared in-memory state to corrupt across requests.
+//   • Fulfilment (shipping/completing real, already-labelled orders) must never be
+//     aborted by an unrelated background hiccup — that ships orders late, a worse
+//     Etsy signal than the original error.
+//   • Genuinely fatal, unrecoverable conditions (e.g. port already in use) still
+//     exit through their own explicit paths (see httpServer 'error' above).
+// The bulk-complete flow is additionally idempotent + resumable, so even in the
+// rare case a crash IS unavoidable, no work is lost or duplicated on retry.
+process.on('unhandledRejection', (reason) => {
+	const detail = reason instanceof Error ? reason.stack || reason.message : JSON.stringify(reason)
+	console.error(`[fatal-guard] Unhandled promise rejection — logged; server kept alive:\n${detail}`)
+})
+process.on('uncaughtException', (err) => {
+	console.error(`[fatal-guard] Uncaught exception — logged; server kept alive:\n${err?.stack || err}`)
 })

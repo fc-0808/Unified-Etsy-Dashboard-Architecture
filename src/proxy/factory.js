@@ -91,7 +91,13 @@ class TwoHopSocksAgent extends https.Agent {
         });
 
         tlsSocket.once('secureConnect', () => callback(null, tlsSocket));
-        tlsSocket.once('error', (err) => callback(err));
+        tlsSocket.once('error', (err) => {
+          // The two-hop chain connected but the TLS handshake failed. Destroy the
+          // underlying SOCKS socket so we don't leak file descriptors on the
+          // transient chain failures this agent is specifically built to weather.
+          rawSocket.destroy();
+          callback(err);
+        });
       })
       .catch((err) => callback(err));
   }
@@ -163,6 +169,12 @@ function createGroupClient(groupConfig, vpnPort, forceNew = false) {
   if (!forceNew && _instanceCache.has(groupConfig.group_id)) {
     return _instanceCache.get(groupConfig.group_id);
   }
+
+  // forceNew (e.g. verifyGroupProxy) replaces any cached instance — destroy the
+  // previous agent first so its keep-alive sockets aren't orphaned on every
+  // re-verify / config reload.
+  const prev = _instanceCache.get(groupConfig.group_id);
+  if (prev && prev._agent) prev._agent.destroy();
 
   const agent = new TwoHopSocksAgent(vpnPort, groupConfig.proxy);
 

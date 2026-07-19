@@ -91,11 +91,11 @@ const OFF_ETSY_REDIRECT = [
 /** Patterns that detect review-for-incentive exchanges (policy violation). */
 const REVIEW_MANIPULATION = [
 	{
-		re: /\b(discount|refund|gift|coupon|credit|cashback|store\s+credit|compensation|reward)\b.*\b(review|feedback|star|rating)\b/i,
+		re: /\b(discount|refund|gift|coupon|credit|cashback|store\s+credit|compensation|reward)\b.*\b(review|feedback|star|rating)\b/is,
 		description: 'discount/gift offered in exchange for a review',
 	},
 	{
-		re: /\b(review|feedback|star|rating)\b.*\b(discount|refund|gift|coupon|credit|cashback|reward)\b/i,
+		re: /\b(review|feedback|star|rating)\b.*\b(discount|refund|gift|coupon|credit|cashback|reward)\b/is,
 		description: 'review solicited with an incentive',
 	},
 	{

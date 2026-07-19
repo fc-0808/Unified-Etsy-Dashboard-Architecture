@@ -55,7 +55,16 @@ class TokenManager {
     if (fs.existsSync(this._path)) {
       try {
         this._store = JSON.parse(fs.readFileSync(this._path, 'utf8'));
-      } catch {
+      } catch (err) {
+        // A corrupt/half-written tokens.json must NOT be silently reset — the next
+        // _save() would overwrite it and permanently clobber every shop's refresh
+        // token. Back it up first so it can be recovered, and surface the error.
+        const backup = `${this._path}.corrupt-${Date.now()}`;
+        try { fs.copyFileSync(this._path, backup); } catch { /* best effort */ }
+        console.error(
+          `[token-manager] ${this._path} is not valid JSON (${err.message}). ` +
+          `Backed up to ${backup} before continuing so no tokens are silently lost.`
+        );
         this._store = {};
       }
     }

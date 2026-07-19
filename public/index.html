@@ -1283,6 +1283,225 @@
 				}
 			}
 
+			/* ── Orders → mobile card layout ─────────────────────────────
+			   The Orders view is a 4-column data table (check | Product |
+			   Ship To | Status). Its fixed columns alone are ~520px, so on a
+			   phone the table can't fit — and because .table-wrap is
+			   overflow:hidden it doesn't scroll, it *clips*: Ship To and
+			   Status fall off the right edge and become unreachable.
+
+			   Below this breakpoint we reflow each order into a single,
+			   self-contained card (the responsive-table → cards pattern used
+			   by Stripe / Shopify / Linear). Everything a packer or owner
+			   needs stacks vertically and stays on-screen. The long SEO
+			   product *name* is intentionally dropped — on a phone the
+			   thumbnail + phone model + style + purchase state identify the
+			   line far more usefully than a 60-character title.
+
+			   Scoped to #tab-orders so every other tab's table is untouched,
+			   and driven entirely by CSS so the render pipeline is unchanged. */
+			@media (max-width: 768px) {
+				/* Break out of the clipped, bordered table shell so cards can
+				   breathe as their own surfaces. */
+				#tab-orders .table-wrap {
+					background: transparent;
+					border: none;
+					border-radius: 0;
+					overflow: visible;
+				}
+				#tab-orders table,
+				#tab-orders tbody,
+				#tab-orders .order-row,
+				#tab-orders .order-row td {
+					display: block;
+					width: 100%;
+					min-width: 0; /* opt out of the intrinsic-width scroll rule below */
+				}
+				/* Column headers are meaningless once each row is stacked. */
+				#tab-orders thead {
+					display: none;
+				}
+
+				/* Each order becomes a card. */
+				#tab-orders .order-row {
+					position: relative;
+					background: var(--surface);
+					border: 1px solid var(--border);
+					border-radius: var(--radius);
+					margin-bottom: 12px;
+					padding: 14px;
+				}
+				#tab-orders .order-row td {
+					padding: 0;
+					border: none;
+				}
+				/* No hover/flash background inside cards on touch devices. */
+				#tab-orders .order-row:hover td {
+					background: transparent;
+				}
+				/* Drop the desktop row separator that sat between rows. */
+				#tab-orders .order-row + .order-row td {
+					border-top: none;
+				}
+				/* Separate the stacked sections inside a card (Ship To =
+				   3rd cell, Status = 4th) with a hairline + spacing. The
+				   product cell (2nd) stays flush at the top with no divider. */
+				#tab-orders .order-row td:nth-child(n + 3) {
+					margin-top: 12px;
+					padding-top: 12px;
+					border-top: 1px solid rgba(255, 255, 255, 0.06);
+				}
+
+				/* THE ASK: hide the long product name on mobile. The image,
+				   model, style and purchase chips carry the real signal. The
+				   "was: …" original-title line is dropped for the same reason. */
+				#tab-orders .product-title,
+				#tab-orders .switched-from {
+					display: none;
+				}
+
+				/* Let long meta values wrap instead of forcing overflow. */
+				#tab-orders .product-meta-row {
+					flex-wrap: wrap;
+				}
+				#tab-orders .product-meta-value {
+					white-space: normal;
+				}
+
+				/* The per-order select checkbox: pin it to the card's
+				   top-right as an obvious "select this order" affordance
+				   instead of a dead 40px column. Hidden views keep it gone. */
+				#tab-orders .order-row .col-check:not(.cb-hidden) {
+					position: absolute;
+					top: 12px;
+					right: 12px;
+					width: auto;
+					min-width: 0;
+					padding: 0 !important;
+					z-index: 1;
+				}
+				#tab-orders .order-row .order-cb {
+					width: 20px;
+					height: 20px;
+				}
+				/* Keep product content clear of the pinned checkbox. */
+				#tab-orders .order-row:has(.col-check:not(.cb-hidden)) td:nth-child(2) {
+					padding-right: 30px;
+				}
+
+				/* Filter bar: make controls tappable and let the action
+				   cluster drop to its own full-width row. */
+				#tab-orders #ordersFilters select {
+					flex: 1 1 auto;
+					min-width: 0;
+				}
+				#tab-orders .orders-filter-actions {
+					margin-left: 0;
+					width: 100%;
+				}
+			}
+
+			/* ── All other tabs → mobile hardening ───────────────────────
+			   The remaining tabs are data-dense: several carry 5–9 column
+			   tables (Earnings ledger, Listings, Shipping, Events, Overview,
+			   Route sorting board) plus wide toolbars. On a phone the shared
+			   .table-wrap clips (overflow:hidden), so the right-hand columns
+			   — Status, Cost, Actions — silently disappear off-screen. That's
+			   the same "I can't see everything" problem the Orders tab had.
+
+			   Design call: unlike the Orders queue (a scannable list that
+			   reads best as cards), these are comparison-oriented analytical
+			   tables where columns must stay aligned to be useful. Forcing
+			   them into stacked cards would hurt scannability and require
+			   per-cell relabelling. So we do what mature admin products —
+			   Stripe, AWS, Shopify — do for dense tables: keep the table
+			   intact and let it scroll horizontally *inside its card*, with a
+			   visible affordance, so nothing is ever clipped. Alongside that
+			   we reflow the one genuinely broken wide non-table block (the
+			   Shops activity feed's fixed 5-column grid) and let every
+			   toolbar / filter cluster wrap instead of overflowing.
+
+			   Scoped by breakpoint; the Orders card overrides win via #id. */
+			@media (max-width: 768px) {
+				/* No table ever clips again: swap the clipping shell for
+				   contained horizontal scroll, and let the table keep its
+				   intrinsic width so columns stay legible and swipe into view
+				   instead of being crushed. (#tab-orders opts out above.) */
+				.table-wrap {
+					overflow-x: auto;
+					overflow-y: hidden;
+					-webkit-overflow-scrolling: touch;
+				}
+				.table-wrap > table {
+					min-width: max-content;
+				}
+				/* A slim, discoverable scrollbar so the swipe affordance reads
+				   on desktops-in-mobile-width and Android; iOS overlays it. */
+				.table-wrap::-webkit-scrollbar {
+					height: 6px;
+				}
+				.table-wrap::-webkit-scrollbar-thumb {
+					background: rgba(255, 255, 255, 0.18);
+					border-radius: 3px;
+				}
+
+				/* Section headers & filter controls: wrap, never overflow. */
+				.section-head {
+					flex-wrap: wrap;
+					gap: 10px;
+				}
+				.filters input,
+				.filters select {
+					max-width: 100%;
+				}
+
+				/* Shops · activity feed — a fixed 5-column grid (~465px) that
+				   can't fit a phone. Reflow to a fluid entry: badge + shop on
+				   the first line, time · receipts · duration wrapping beneath;
+				   the error message spans full width. */
+				#tab-shops .sl-topbar {
+					flex-wrap: wrap;
+					gap: 12px;
+				}
+				#tab-shops .sl-topbar-actions {
+					flex-wrap: wrap;
+				}
+				#tab-shops .log-entry {
+					display: flex;
+					flex-wrap: wrap;
+					align-items: center;
+					gap: 4px 10px;
+				}
+				#tab-shops .log-shop {
+					flex: 1 1 auto;
+					min-width: 0;
+				}
+				#tab-shops .log-dur {
+					text-align: left;
+				}
+				#tab-shops .log-err {
+					flex: 1 1 100%;
+				}
+
+				/* Earnings · currency activity panels: force a single column so
+				   the 340px-min track can't push a horizontal page scroll. */
+				#tab-earnings .earn-activity-grid {
+					grid-template-columns: 1fr;
+				}
+				#tab-earnings .earn-actions {
+					flex-wrap: wrap;
+				}
+
+				/* Bulk · selection action bar wraps to its own row instead of
+				   overflowing to the right edge. */
+				#tab-bulk .bulk-selbar {
+					flex-wrap: wrap;
+				}
+				#tab-bulk .bulk-selbar-actions {
+					margin-left: 0;
+				}
+			}
+
 			/* ── Loading / error states ─────────────────────────────── */
 			.loading {
 				color: var(--muted);
@@ -3146,6 +3365,19 @@
 				color: var(--text);
 				font-size: 12.5px;
 			}
+			/* Render the native <select> popup (options list, arrow, scrollbar) in
+			   dark mode so its text stays legible. Without this, Windows Chromium
+			   paints the popup on a default white surface while the light option
+			   text is inherited — producing unreadable light-on-white text. */
+			.switch-select {
+				color-scheme: dark;
+			}
+			/* Explicit opaque option colors as a fallback for engines that don't
+			   honor color-scheme inside the native popup. */
+			.switch-select option {
+				background-color: var(--surface);
+				color: var(--text);
+			}
 			.switch-upload {
 				border: 1.5px dashed rgba(167, 139, 250, 0.4);
 				border-radius: 10px;
@@ -4563,6 +4795,11 @@
 				background: rgba(180, 100, 240, 0.13);
 				color: #c080f0;
 				border: 1px solid rgba(180, 100, 240, 0.22);
+			}
+			.fpx-tier-badge.recommended {
+				background: rgba(70, 200, 160, 0.14);
+				color: #45d0a5;
+				border: 1px solid rgba(70, 200, 160, 0.28);
 			}
 			/* Product-code chip — surfaces the logistics code (e.g. S5118) next to a
 			   name-only label so products stay identifiable and code-searchable. */
@@ -11595,6 +11832,32 @@
 				justify-content: space-between;
 				gap: 8px;
 			}
+			.bins-img-actions {
+				display: flex;
+				align-items: center;
+				gap: 10px;
+				margin: 0 0 10px;
+			}
+			.bins-addimg-btn {
+				display: inline-flex;
+				align-items: center;
+				gap: 4px;
+			}
+			.bins-addimg-btn:hover {
+				border-color: var(--accent);
+				color: var(--text);
+			}
+			.bins-img-count {
+				font-size: 11px;
+			}
+			.bins-gallery.droppable {
+				border-radius: 10px;
+				transition: box-shadow 0.12s ease, background 0.12s ease;
+			}
+			.bins-gallery.file-hover {
+				box-shadow: inset 0 0 0 2px var(--accent);
+				background: rgba(245, 100, 0, 0.08);
+			}
 			.bins-vid {
 				margin-top: 8px;
 				font-size: 12px;
@@ -14786,7 +15049,6 @@
 				const LS_PREVIEW = 'dashboardPackPreview' // owner-only UI preview of Packing Mode
 				const LS_ROLE = 'dashboardRole' // legacy local role (only used when server auth is OFF)
 				const LS_PIN = 'dashboardPackerPin' // legacy PIN (only used when server auth is OFF)
-				let activePreset = 'topack'
 
 				// Queue presets — each maps to the existing order-filter selects so we
 				// reuse the battle-tested fetchOrders() pipeline rather than forking it.
@@ -14882,7 +15144,6 @@
 				function applyPreset(key) {
 					const p = PRESETS[key]
 					if (!p) return
-					activePreset = key
 					const set = (id, val) => {
 						const el = document.getElementById(id)
 						if (el != null && val != null) el.value = val
@@ -16845,7 +17106,12 @@
 				// (mark/clear needs-purchase + send to route).
 				// Use cb-hidden class (width:0 + padding:0) instead of display:none —
 				// display:none on <th>/<td> is unreliable for table column layout.
-				const showCb = shipped === 'false' || shipped === 'pre_transit' || shipped === 'needs_purchase' || shipped === 'ready_to_pack'
+				let showCb = shipped === 'false' || shipped === 'pre_transit' || shipped === 'needs_purchase' || shipped === 'ready_to_pack'
+				// Employees have no bulk action in the buy queue (bulk needs-purchase is
+				// owner-only, and "Send to Route" is owner-only too), so the checkbox column
+				// there would only ever produce an empty selection bar. Hide it for them —
+				// their per-row chips + the Charms-to-buy list are the buy-queue tools.
+				if (typeof ROLE !== 'undefined' && ROLE.isPacker() && shipped === 'needs_purchase') showCb = false
 				document.querySelectorAll('.col-check').forEach((el) => {
 					el.classList.toggle('cb-hidden', !showCb)
 				})
@@ -17053,13 +17319,31 @@
 								// this", so the packer reads the RIGHT model straight from the model
 								// field instead of a separate note. Applies to the model variation only.
 								const _corr = _txModelCorrection(tx)
+								// A design switch can also change the Style; the purchase chips below
+								// are derived from the switched style, so the STYLE row must follow it
+								// too or the line contradicts itself (see _txStyleSwitch).
+								const _styleSw = _txStyleSwitch(tx)
+								let _styleRowRendered = false
 								for (const v of tx.variations || []) {
 									if (!v.formatted_name || !v.formatted_value) continue
-									const _showCorr = _corr && _isModelVariation(v.formatted_name) && (_corr.from || (_corr.need && _corr.need.toLowerCase() !== String(v.formatted_value).toLowerCase()))
-									const valueHtml = _showCorr ? _modelCorrectionValueHtml(_corr) : escHtml(v.formatted_value)
+									let valueHtml
+									if (_styleSw && _isStyleVariation(v.formatted_name)) {
+										valueHtml = _styleSwitchValueHtml(_styleSw)
+										_styleRowRendered = true
+									} else {
+										const _showCorr = _corr && _isModelVariation(v.formatted_name) && (_corr.from || (_corr.need && _corr.need.toLowerCase() !== String(v.formatted_value).toLowerCase()))
+										valueHtml = _showCorr ? _modelCorrectionValueHtml(_corr) : escHtml(v.formatted_value)
+									}
 									metaRows.push(`<div class="product-meta-row">
             <span class="product-meta-label">${escHtml(v.formatted_name)}</span>
             <span class="product-meta-value">${valueHtml}</span></div>`)
+								}
+								// The switch always sets a style; if the original line carried none,
+								// synthesize the STYLE row so it still agrees with the purchase chips.
+								if (_styleSw && !_styleRowRendered) {
+									metaRows.push(`<div class="product-meta-row">
+            <span class="product-meta-label">Style</span>
+            <span class="product-meta-value">${_styleSwitchValueHtml(_styleSw)}</span></div>`)
 								}
 
 								// ── Purchase status controls ──────────────────────────
@@ -17337,7 +17621,12 @@
 							// tracking number obtained outside the dashboard so the parcel can be
 							// tracked live and the order moves to shipped.
 							const manualTrackBtn = !o.fourpx_consignment_no ? `<button class="btn-manual-track" onclick="openManualTrackingModal(${o.receipt_id})" title="${o.tracking_code ? 'Edit the tracking number for this manual order' : 'Enter a 4PX tracking number so this manual order can be tracked'}">🔖 ${o.tracking_code ? 'Edit tracking' : 'Add tracking'}</button>` : ''
-							manualActionsHtml = `<button class="btn-manual-edit" onclick="editManualOrder(${o.receipt_id})" title="Edit this manual order's buyer, address and items">✎ Edit</button>
+							// Edit / Delete restructure the manual order itself — owner-only. A packer
+							// still packs, tracks and ships it (the tracking + Mark shipped buttons),
+							// exactly as they handle an Etsy order.
+							manualActionsHtml = _employeeView
+								? manualTrackBtn
+								: `<button class="btn-manual-edit" onclick="editManualOrder(${o.receipt_id})" title="Edit this manual order's buyer, address and items">✎ Edit</button>
         ${manualTrackBtn}
         <button class="btn-manual-delete" onclick="deleteManualOrderConfirm(${o.receipt_id})" title="Permanently delete this manual order">🗑 Delete</button>`
 							manualShipBtn = o.is_shipped ? `<button class="btn-manual-edit" onclick="setManualShipped(${o.receipt_id}, false)" title="Move this manual order back to Needs shipping">↩ Mark unshipped</button>` : `<button class="btn-local-ship" onclick="setManualShipped(${o.receipt_id}, true)" title="Mark this manual order shipped (local only — manual orders are never pushed to Etsy)">✓ Mark shipped</button>`
@@ -18000,6 +18289,52 @@
 				// the "🔄 Switched" badge on the title already explains the change.
 				const tag = corr.kind === 'switch' ? '' : ` <span class="model-corr-tag ${corr.done ? 'done' : 'pending'}">${_correctionTag(corr)}</span>`
 				return `${was}${now}${tag}`
+			}
+
+			// Is this variation the Style one (the Case / Grip / Charm combo)? Same
+			// heuristic the server and the switch modal use to locate the style value.
+			function _isStyleVariation(name) {
+				return /style/i.test(name || '')
+			}
+
+			// The originally-ordered Style value (e.g. "Case Only", "Case+Grip") for a
+			// line, or '' when the product carries no style variation.
+			function _txOrigStyle(tx) {
+				for (const v of (tx && tx.variations) || []) {
+					if (_isStyleVariation(v.formatted_name)) return String(v.formatted_value || '').trim()
+				}
+				return ''
+			}
+
+			// Describe a design switch that changes the Style, so the STYLE row shows the
+			// design we now BUY and PACK — never the one the buyer moved away from. This
+			// is the style analogue of _txModelCorrection: the purchase chips below are
+			// already derived (server-side) from the switched style, so without this the
+			// STYLE row and the chips disagree (row says "Case Only", chips show Case +
+			// Grip). Returns null when the line isn't switched to a different style.
+			//   now  — the replacement style to display (authoritative; emphasised).
+			//   from — the original style struck through, or '' when it didn't change.
+			function _txStyleSwitch(tx) {
+				const sub = tx && tx.substitution
+				const now = sub && sub.new_style ? String(sub.new_style).trim() : ''
+				if (!now) return null
+				const from = _txOrigStyle(tx)
+				// Product switched but the style combo is unchanged → nothing to correct;
+				// render the STYLE row plainly (mirrors _txModelCorrection returning null).
+				if (from && from.toLowerCase() === now.toLowerCase()) return null
+				// from stays '' when the original line had no style variation, so the row
+				// simply shows the replacement style (emphasised, no strike-through).
+				return { from, now }
+			}
+
+			// Inner HTML for the STYLE row's value on a switched line: original style
+			// struck through (when it changed) and the replacement emphasised — the same
+			// visual language as the model correction, so the line reads as one coherent
+			// "was → now" story that matches the purchase chips below.
+			function _styleSwitchValueHtml(sw) {
+				const now = `<span class="model-now">${escHtml(sw.now)}</span>`
+				const was = sw.from ? `<span class="model-was" title="Originally-ordered style — the buyer switched away from this">${escHtml(sw.from)}</span> ` : ''
+				return `${was}${now}`
 			}
 
 			// Which components the buyer actually purchased for this line (case / grip
@@ -20685,10 +21020,15 @@
 				document.getElementById('fpxWidth').value = ''
 				document.getElementById('fpxHeight').value = ''
 
-				// Extract the style string from the order's transaction variations
+				// Extract the style string from the order's transaction variations. A
+				// design switch changes what's actually shipped (and thus the parcel
+				// weight), so the switched style wins over the originally-ordered one —
+				// keeping the auto-weight consistent with the Orders tab and the chips.
 				const _fpxStyleRaw = (() => {
 					const txs = Array.isArray(o.transactions) && o.transactions.length > 0 ? o.transactions : []
 					for (const tx of txs) {
+						const _switched = tx.substitution && tx.substitution.new_style ? String(tx.substitution.new_style).trim() : ''
+						if (_switched) return _switched
 						for (const v of tx.variations || []) {
 							if (/style/i.test(v.formatted_name || v.property_name || '')) {
 								return (v.formatted_value || v.value || '').toString().trim()
@@ -20982,6 +21322,7 @@
 
 					// ── Group products by service tier ──────────────────────────────
 					const TIER_META = {
+						recommended: { label: 'Recommended', order: -1 },
 						economy: { label: 'Economy', order: 0 },
 						standard: { label: 'Standard', order: 1 },
 						express: { label: 'Express', order: 2 },
@@ -21034,9 +21375,9 @@
 					// ── Source indicator bar ────────────────────────────────────────
 					const isLive = data.source === 'api'
 					const countryTag = (data.country || countryCode || '').toUpperCase()
-					const suppCount = _fpxProducts.filter((p) => p.supplemented).length
+					const recCount = _fpxProducts.filter((p) => p.recommended).length
 					const sourceDot = `<span class="fpx-csel-source-dot ${isLive ? 'live' : 'fallback'}"></span>`
-					const sourceText = isLive ? `Live API${countryTag ? ` · ${countryTag}` : ''}${suppCount ? ` · +${suppCount} curated` : ''}` : `Curated catalog${countryTag ? ` · filtered for ${countryTag}` : ' · all destinations'} · ${_fpxProducts.length} products`
+					const sourceText = isLive ? `Live rates${countryTag ? ` · ${countryTag}` : ''}${recCount ? ` · ${recCount} recommended` : ''}` : `Curated catalog${countryTag ? ` · filtered for ${countryTag}` : ' · all destinations'} · ${_fpxProducts.length} products`
 					const sourceBar = document.createElement('div')
 					sourceBar.className = 'fpx-csel-source-bar'
 					sourceBar.innerHTML = `<span class="fpx-csel-source-row">${sourceDot}<span>${escHtml(sourceText)}</span></span>`
@@ -23283,16 +23624,7 @@
 				progEl.textContent = orders.length > 1 ? `Completing ${orders.length} orders on Etsy (paced${etaSec ? `, ~${Math.max(1, Math.round(etaSec / 60))} min` : ''})… keep this open.` : 'Completing 1 order on Etsy…'
 
 				try {
-					const resp = await fetch(`${API}/api/4px/bulk-complete`, {
-						method: 'POST',
-						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({
-							carrier_name: carrier,
-							orders: orders.map((o) => ({ receipt_id: o.receipt_id, tracking_code: o.tracking_code })),
-						}),
-					})
-					const json = await resp.json()
-					if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`)
+					const json = await _fpxPostBulkCompleteResilient({ carrier_name: carrier, orders: orders.map((o) => ({ receipt_id: o.receipt_id, tracking_code: o.tracking_code })) }, { onStatus: (m) => (progEl.textContent = m) })
 
 					const failed = (json.results || []).filter((r) => !r.success).map((r) => `${buyerById.get(String(r.receipt_id)) || '#' + r.receipt_id}: ${r.error}`)
 
@@ -23303,7 +23635,8 @@
 						btn.textContent = 'Retry failed'
 						progEl.textContent = ''
 					} else {
-						progEl.textContent = `✓ All ${json.completed} orders marked as shipped.`
+						const _skipNote = json.skipped ? ` (${json.skipped} already shipped)` : ''
+						progEl.textContent = `✓ All ${json.completed} orders marked as shipped${_skipNote}.`
 						setTimeout(async () => {
 							closeBulkModal()
 							clearSelection()
@@ -23371,16 +23704,31 @@
 			}
 
 			// Normalise one transaction's variations into display chips + the raw
-			// Style value (used for the suggested parcel weight).
+			// Style value (used for the suggested parcel weight). A design switch
+			// changes what's actually shipped, so the switched style overrides the
+			// originally-ordered one for both the chip and the weight — keeping this
+			// wizard consistent with the Orders tab and the single-order 4PX drawer.
 			function _fbxParseTxVariations(tx) {
+				const switchedStyle = tx && tx.substitution && tx.substitution.new_style ? String(tx.substitution.new_style).trim() : ''
 				let styleRaw = ''
+				let styleSeen = false
 				const variations = []
 				for (const v of tx?.variations || []) {
 					const name = (v.formatted_name || v.property_name || '').toString().trim()
-					const value = (v.formatted_value || v.value || '').toString().trim()
+					let value = (v.formatted_value || v.value || '').toString().trim()
 					if (!name || !value) continue
-					if (/style/i.test(name)) styleRaw = value
+					if (/style/i.test(name)) {
+						styleSeen = true
+						if (switchedStyle) value = switchedStyle
+						styleRaw = value
+					}
 					variations.push({ name, value })
+				}
+				// Switched line whose original carried no Style variation: surface the
+				// replacement style so the chips and suggested weight still reflect it.
+				if (switchedStyle && !styleSeen) {
+					styleRaw = switchedStyle
+					variations.push({ name: 'Style', value: switchedStyle })
 				}
 				return { variations, styleRaw }
 			}
@@ -24219,6 +24567,50 @@
 				}
 			}
 
+			// Resilient POST to the paced bulk-complete endpoint. A paced completion can
+			// run for minutes; if the connection drops mid-flight (e.g. the dashboard
+			// server is restarted by its supervisor), fetch() rejects with a TypeError
+			// ("Failed to fetch"). Because the server persists progress and completion is
+			// idempotent, re-sending the SAME batch safely skips already-completed orders
+			// and finishes the rest — so we transparently resume with capped backoff.
+			// HTTP-level errors (4xx/5xx with a JSON body) are real and surface at once.
+			async function _fpxPostBulkCompleteResilient(payload, { onStatus } = {}) {
+				const MAX_ATTEMPTS = 6
+				let lastNetErr = null
+				for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+					try {
+						const resp = await fetch(`${API}/api/4px/bulk-complete`, {
+							method: 'POST',
+							headers: { 'Content-Type': 'application/json' },
+							body: JSON.stringify(payload),
+						})
+						let json = {}
+						try {
+							json = await resp.json()
+						} catch {
+							json = {}
+						}
+						if (!resp.ok) {
+							const e = new Error(json.error || `HTTP ${resp.status}`)
+							e.httpError = true // real server-side failure — do not resume
+							throw e
+						}
+						return json
+					} catch (err) {
+						if (err.httpError) throw err
+						// Network-level drop (server restarting / connection reset). Resume.
+						lastNetErr = err
+						if (attempt >= MAX_ATTEMPTS) break
+						const waitMs = Math.min(4000 * attempt, 20000)
+						if (onStatus) onStatus(`Connection dropped — the server may be restarting. Resuming in ${Math.round(waitMs / 1000)}s… already-completed orders are skipped. [retry ${attempt}/${MAX_ATTEMPTS - 1}]`)
+						await new Promise((r) => setTimeout(r, waitMs))
+					}
+				}
+				const e = new Error('Lost connection to the dashboard and could not resume automatically. Wait a few seconds for it to come back, then click Retry — orders already completed are skipped, so retrying is safe.')
+				e.cause = lastNetErr
+				throw e
+			}
+
 			async function fpxBulkComplete() {
 				const errEl = document.getElementById('fbxError')
 				const progEl = document.getElementById('fbxProgress')
@@ -24236,13 +24628,7 @@
 				progEl.textContent = orders.length > 1 ? `Completing ${orders.length} orders on Etsy (paced${_etaSec ? `, ~${Math.max(1, Math.round(_etaSec / 60))} min` : ''})… keep this window open.` : 'Completing 1 order on Etsy…'
 
 				try {
-					const resp = await fetch(`${API}/api/4px/bulk-complete`, {
-						method: 'POST',
-						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({ carrier_name: carrier, orders }),
-					})
-					const json = await _fbxParseJson(resp)
-					if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`)
+					const json = await _fpxPostBulkCompleteResilient({ carrier_name: carrier, orders }, { onStatus: (m) => (progEl.textContent = m) })
 
 					const failed = (json.results || []).filter((r) => !r.success)
 					if (failed.length) {
@@ -24252,7 +24638,8 @@
 						primary.disabled = false
 						primary.textContent = 'Retry completion'
 					} else {
-						progEl.textContent = `✓ All ${json.completed} orders completed on Etsy.`
+						const _skipNote = json.skipped ? ` (${json.skipped} already shipped)` : ''
+						progEl.textContent = `✓ All ${json.completed} orders completed on Etsy${_skipNote}.`
 						setTimeout(async () => {
 							closeFpxBulkModal()
 							clearSelection()
@@ -24596,14 +24983,27 @@
 				}
 			}
 
-			function fillSelect(sel, items, valueKey, labelFn, selected) {
+			function fillSelect(sel, items, valueKey, labelFn, selected, opts) {
+				const autoLabel = opts && opts.autoOption
 				sel.innerHTML = ''
 				if (!items.length) {
 					const o = document.createElement('option')
 					o.value = ''
-					o.textContent = '(none found)'
+					o.textContent = autoLabel || '(none found)'
 					sel.appendChild(o)
 					return
+				}
+				// An explicit "auto-detect" sentinel (empty value) so the operator's
+				// intent is honest: leaving it on Auto lets the server pick the
+				// section that matches the product type instead of a <select>
+				// silently defaulting to the first option (which put AirPods runs
+				// into the iPhone section). Selected when there is no resolved value.
+				if (autoLabel) {
+					const a = document.createElement('option')
+					a.value = ''
+					a.textContent = autoLabel
+					if (selected == null || selected === '') a.selected = true
+					sel.appendChild(a)
 				}
 				items.forEach((it) => {
 					const o = document.createElement('option')
@@ -24696,7 +25096,7 @@
 					fillSelect(document.getElementById('bulkShipping'), s.shipping_profiles || [], 'shipping_profile_id', (p) => p.title || p.shipping_profile_id, d.shipping_profile_id)
 					fillSelect(document.getElementById('bulkReturn'), s.return_policies || [], 'return_policy_id', (p) => `#${p.return_policy_id}${p.return_deadline ? ' · ' + p.return_deadline + 'd' : ''}`, d.return_policy_id)
 					fillSelect(document.getElementById('bulkPartner'), s.production_partners || [], 'production_partner_id', (p) => p.partner_name || `#${p.production_partner_id}`, (d.production_partner_ids || [])[0])
-					fillSelect(document.getElementById('bulkSection'), s.shop_sections || [], 'shop_section_id', (p) => p.title || `#${p.shop_section_id}`, d.shop_section_id)
+					fillSelect(document.getElementById('bulkSection'), s.shop_sections || [], 'shop_section_id', (p) => p.title || `#${p.shop_section_id}`, d.shop_section_id, { autoOption: 'Auto-detect (match product type)' })
 					document.getElementById('bulkWhoMade').value = d.who_made || 'someone_else'
 					document.getElementById('bulkWhenMade').value = d.when_made || 'made_to_order'
 
@@ -26447,8 +26847,13 @@
 				const bodyHtml = `
 					<div>
 						<p class="bins-sec-h bins-img-hint">Images · upload order (${imgs.length})<span class="bins-autosave" id="binsImgStatus"></span></p>
-						${canEditImgs ? '<div class="bulk-muted" style="margin:-2px 0 8px">Drag to reorder · the first photo is the <strong>thumbnail</strong> · hover a photo and click ✕ to drop it. Changes are saved automatically and used when drafts are created.</div>' : ''}
-						<div class="bins-gallery" id="binsGallery">${galleryHtml}</div>
+						${canEditImgs ? `<div class="bulk-muted" style="margin:-2px 0 8px">Drag to reorder · the first photo is the <strong>thumbnail</strong> · hover a photo and click ✕ to drop it · <strong>add your own</strong> with the button below or by dropping files onto the gallery. Changes are saved automatically and used when drafts are created.</div>
+						<div class="bins-img-actions">
+							<button type="button" class="bins-mini-btn bins-addimg-btn" onclick="document.getElementById('binsImgUpload').click()">＋ Add photos</button>
+							<input type="file" id="binsImgUpload" accept="image/png,image/jpeg,image/gif,image/webp" multiple style="display:none" onchange="bulkImgUpload(this)">
+							<span class="bulk-muted bins-img-count">${imgs.length}/${BULK_MAX_IMAGES}</span>
+						</div>` : ''}
+						<div class="bins-gallery${canEditImgs ? ' droppable' : ''}" id="binsGallery"${canEditImgs ? ' ondragover="bulkImgFileDragOver(event)" ondragleave="bulkImgFileDragLeave(event)" ondrop="bulkImgFileDrop(event)"' : ''}>${galleryHtml}</div>
 						${vidHtml}
 						<p class="bins-sec-h" style="margin-top:18px">Variation matrix · prices (${escHtml(cur || 'currency')})</p>
 						${bulkAccessoryHtml(p.accessory)}
@@ -26606,6 +27011,122 @@
 					alert(err.message)
 					if (_bulkInspectSeq === seq) bulkInspectorOpen(seq, { preserveScroll: true })
 				}
+			}
+
+			// ── Upload new photos (dry-run preview only) ──────────────────
+			// Mirrors scanner.MAX_IMAGES. The 18 MB/photo cap keeps a single base64
+			// request (≈1.37× the raw bytes) safely under the server's 25 MB JSON
+			// body limit; product photos are far smaller in practice. The server
+			// re-validates authoritatively — these are just fast UX guards.
+			const BULK_MAX_IMAGES = 20
+			const BULK_MAX_UPLOAD_BYTES = 18 * 1024 * 1024
+
+			// File-picker change handler → hand off to the shared uploader.
+			function bulkImgUpload(input) {
+				const files = input && input.files ? Array.from(input.files) : []
+				if (input) input.value = '' // let the operator re-pick the same file later
+				bulkImgUploadFiles(files)
+			}
+
+			function bulkReadFileAsDataURL(file) {
+				return new Promise((resolve, reject) => {
+					const reader = new FileReader()
+					reader.onload = () => resolve(String(reader.result || ''))
+					reader.onerror = () => reject(new Error('Could not read file'))
+					reader.readAsDataURL(file)
+				})
+			}
+
+			// Validate, then upload photos one-per-request (reliable progress + keeps
+			// each payload small). Persists as it goes; refreshes the Inspector once
+			// at the end so ranks + variation-photo links reflect the appended photos.
+			async function bulkImgUploadFiles(files) {
+				if (!_bulkJobId || !_binsDetail || !_binsDetail.item) return
+				if (!files || !files.length) return
+				const seq = _binsDetail.item.seq
+				const status = document.getElementById('binsImgStatus')
+
+				const imgFiles = files.filter((f) => /^image\//.test(f.type || ''))
+				if (!imgFiles.length) {
+					showToast('Choose image files (JPG, PNG, GIF or WebP).', 'error')
+					return
+				}
+				const current = bulkImgGatherOrder().length
+				const room = BULK_MAX_IMAGES - current
+				if (room <= 0) {
+					showToast(`This listing already has the maximum of ${BULK_MAX_IMAGES} photos.`, 'error')
+					return
+				}
+				const tooBig = imgFiles.find((f) => f.size > BULK_MAX_UPLOAD_BYTES)
+				if (tooBig) {
+					showToast(`"${tooBig.name}" is larger than 18 MB — use a smaller image.`, 'error')
+					return
+				}
+				let queue = imgFiles
+				if (queue.length > room) {
+					showToast(`Only ${room} more photo${room === 1 ? '' : 's'} fit — adding the first ${room}.`, 'error')
+					queue = queue.slice(0, room)
+				}
+
+				let done = 0
+				for (const file of queue) {
+					if (status) {
+						status.textContent = `Uploading ${done + 1}/${queue.length}…`
+						status.className = 'bins-autosave saving'
+					}
+					try {
+						const dataUrl = await bulkReadFileAsDataURL(file)
+						const res = await fetch(API + '/api/bulk/jobs/' + _bulkJobId + '/items/' + seq + '/images/upload', {
+							method: 'POST',
+							headers: { 'Content-Type': 'application/json' },
+							body: JSON.stringify({ images: [{ data_b64: dataUrl, filename: file.name, mime: file.type }] }),
+						})
+						const json = await res.json()
+						if (!res.ok) throw new Error(json.error || 'Upload failed')
+						done++
+					} catch (err) {
+						// Stop on the first failure — anything already uploaded is safely
+						// persisted server-side and will show after the refresh below.
+						if (status) status.textContent = ''
+						showToast(`Couldn't add "${file.name}": ${err.message}`, 'error')
+						break
+					}
+				}
+
+				if (done) {
+					_binsImgVer = Date.now() // bust the thumbnail cache so new photos load
+					if (status) {
+						status.textContent = `Added ${done} photo${done === 1 ? '' : 's'}`
+						status.className = 'bins-autosave ok'
+					}
+					if (_bulkInspectSeq === seq) await bulkInspectorOpen(seq, { preserveScroll: true })
+				}
+			}
+
+			// External-file drag-and-drop onto the gallery. Distinguished from the
+			// internal thumbnail reorder drag by the presence of dataTransfer files.
+			function bulkImgIsFileDrag(e) {
+				const t = e.dataTransfer && e.dataTransfer.types
+				return !!t && Array.prototype.indexOf.call(t, 'Files') !== -1
+			}
+			function bulkImgFileDragOver(e) {
+				if (!bulkImgIsFileDrag(e)) return
+				e.preventDefault()
+				const g = document.getElementById('binsGallery')
+				if (g) g.classList.add('file-hover')
+			}
+			function bulkImgFileDragLeave(e) {
+				if (!bulkImgIsFileDrag(e)) return
+				const g = document.getElementById('binsGallery')
+				if (g && !g.contains(e.relatedTarget)) g.classList.remove('file-hover')
+			}
+			function bulkImgFileDrop(e) {
+				if (!bulkImgIsFileDrag(e)) return
+				e.preventDefault()
+				const g = document.getElementById('binsGallery')
+				if (g) g.classList.remove('file-hover')
+				const files = e.dataTransfer && e.dataTransfer.files ? Array.from(e.dataTransfer.files) : []
+				if (files.length) bulkImgUploadFiles(files)
 			}
 
 			// Gather the edited per-style prices from the Inspector inputs.
@@ -30698,7 +31219,7 @@
 				if (q) list = list.filter((c) => (c.code || '').toLowerCase().includes(q) || (c.sku || '').toLowerCase().includes(q) || (c.default_charm_shop || '').toLowerCase().includes(q))
 
 				// In manage mode, lead with a drag hint + an "Add charm" card.
-				const hint = _charmManageMode ? `<div class="charm-manage-hint">↕ <span>Drag a charm onto a slot to <b>reassign its code</b> — codes renumber by position (the image &amp; shop travel with the charm).</span></div>` : ''
+				const hint = _charmManageMode ? `<div class="charm-manage-hint">↕ <span>Drag to <b>reorder</b> the list. Each charm keeps its code, image, shop and existing order assignments — only the display order changes.</span></div>` : ''
 				const addCard = _charmManageMode
 					? `<div class="charm-add-card" onclick="openCharmEditor('add')">
          <span class="plus">＋</span><span>Add charm</span>
@@ -30715,7 +31236,10 @@
 					addCard +
 					list
 						.map((c) => {
-							const img = c.has_image ? `<img src="${charmImageUrl(c.code, c.image_version)}" loading="lazy" draggable="false">` : `<div style="aspect-ratio:1;display:flex;align-items:center;justify-content:center;background:#0d1017;border-radius:6px;margin-bottom:6px;font-size:22px;color:var(--muted)">🔗</div>`
+							// has_image is now a real on-disk check (server-side), so a missing
+							// file shows the placeholder rather than a broken <img>. onerror is a
+							// belt-and-suspenders guard for a file removed after the payload built.
+							const img = c.has_image ? `<img src="${charmImageUrl(c.code, c.image_version)}" loading="lazy" draggable="false" onerror="_charmCardImgError(this)">` : _charmCardImgPlaceholder()
 							// Exact charm-shop stall from the imported directory.
 							const stall = c.default_charm_shop_stall || _charmShopStall(c.default_charm_shop)
 							const shopLine = c.default_charm_shop ? `<div class="charm-card-shop">${escHtml(c.default_charm_shop)}${stall ? ` · 📍${escHtml(stall)}` : ''}</div>` : ''
@@ -30745,6 +31269,19 @@
 			function charmImageUrl(code, version) {
 				const v = version || _charmImgVer
 				return `${API}/api/route/charm-image?code=${encodeURIComponent(code)}&v=${encodeURIComponent(v)}`
+			}
+
+			/** Placeholder markup for a charm card with no (loadable) image. */
+			function _charmCardImgPlaceholder() {
+				return `<div class="charm-card-img-ph" style="aspect-ratio:1;display:flex;align-items:center;justify-content:center;background:#0d1017;border-radius:6px;margin-bottom:6px;font-size:22px;color:var(--muted)">🔗</div>`
+			}
+
+			/** Swap a charm card <img> that failed to load for the neutral placeholder. */
+			function _charmCardImgError(img) {
+				img.onerror = null
+				const tpl = document.createElement('template')
+				tpl.innerHTML = _charmCardImgPlaceholder().trim()
+				if (tpl.content.firstChild) img.replaceWith(tpl.content.firstChild)
 			}
 
 			/** Look up a charm shop's exact stall from the imported directory. */
@@ -31714,7 +32251,10 @@
 				reorderCharms(codes)
 			}
 
-			/** Send the new code order to the server (renumbers + remaps), then re-render. */
+			/**
+			 * Persist the new DISPLAY order (server updates sort_order only — codes,
+			 * images and assignments are untouched), then re-render the grid.
+			 */
 			async function reorderCharms(newOrder) {
 				try {
 					const res = await fetch(`${API}/api/route/charms/reorder`, {
@@ -31728,7 +32268,6 @@
 						return
 					}
 					_adoptCharmPayload(data)
-					_charmImgVer = Date.now() // images were renamed — bust the cache
 					renderCharmGrid()
 				} catch (err) {
 					alert('Network error — could not reorder.')
@@ -32096,7 +32635,7 @@
 		<div class="bulk-bar" id="bulkBar">
 			<span class="bulk-bar-count" id="bulkCount">0 selected</span>
 			<button class="bulk-bar-deselect" onclick="clearSelection()">✕ Deselect all</button>
-			<button class="bulk-bar-route" onclick="sendSelectionToRoute()" title="Add these orders to the Route tab’s shopping list (kept on top of the orders already there)">📍 Send to Route</button>
+			<button class="bulk-bar-route owner-only" onclick="sendSelectionToRoute()" title="Add these orders to the Route tab’s shopping list (kept on top of the orders already there)">📍 Send to Route</button>
 			<button class="bulk-bar-needs-purchase owner-only" id="bulkBarNeedsPurchaseBtn" style="display: none" onclick="bulkSetNeedsPurchase(true)" title="Flag the selected pre-transit orders as still out of stock — keeps them in the purchasing queue and pulls them into the Route until bought">🛒 Mark needs purchase</button>
 			<button class="bulk-bar-purchased owner-only" id="bulkBarClearPurchaseBtn" style="display: none" onclick="bulkSetNeedsPurchase(false)" title="Clear the needs-purchase flag on the selected orders (they have been bought)">Mark purchased</button>
 			<button class="bulk-bar-mark-packaged" id="bulkBarMarkPackagedBtn" style="display: none" onclick="bulkMarkPackaged(true)" title="Mark all selected orders as physically packaged and ready for carrier pickup">📦 Mark packaged</button>

@@ -35,6 +35,62 @@ function pickSection(sections, pt) {
   return pt.id === 'iphone_case' ? sections[0].shop_section_id : null;
 }
 
+// Escape a string for safe interpolation into a RegExp.
+function reEscape(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Does a section title clearly belong to a DIFFERENT product type than `pt`?
+// We key off each type's distinctive device word ("iPhone" / "AirPods"), NOT
+// the generic "case" keyword every section shares — so we only flag genuine
+// cross-type contamination (an AirPods run pointed at the "iPhone Cases"
+// section) and never a legitimate custom section such as "Best Sellers".
+function sectionBelongsToOtherType(title, pt) {
+  const t = String(title || '');
+  const matchesWord = (word) => Boolean(word) && new RegExp(`\\b${reEscape(word)}\\b`, 'i').test(t);
+  if (matchesWord(pt.deviceWord)) return false; // owns THIS type's device word → not foreign
+  return Object.values(productTypes.PRODUCT_TYPES).some(
+    (other) => other.id !== pt.id && matchesWord(other.deviceWord),
+  );
+}
+
+/**
+ * Resolve the shop_section_id to use for a run against the shop's CURRENT
+ * sections. Honours a deliberate operator choice, but self-corrects the two
+ * ways a stored section id goes wrong between selection and publish:
+ *   1. it no longer exists on the shop (deleted, or copied from another shop), or
+ *   2. it belongs to a different product type — e.g. an AirPods run whose UI
+ *      defaulted to the only existing "iPhone Cases" section — while a section
+ *      matching THIS product type now exists (created after the dry run).
+ * Falls back to pickSection's auto-selection when there is no valid choice.
+ *
+ * @param {number|null} desiredId  stored/override section id (may be stale)
+ * @param {Array<{shop_section_id:number,title:string}>} sections  live sections
+ * @param {object} pt  product-type descriptor
+ * @returns {number|null}
+ */
+function reconcileShopSection(desiredId, sections, pt) {
+  const list = Array.isArray(sections) ? sections : [];
+  if (!list.length) return null;
+  const byId = new Map(list.map((s) => [Number(s.shop_section_id), s]));
+  const desired = desiredId != null ? byId.get(Number(desiredId)) : null;
+  const autoId = pickSection(list, pt);
+
+  // A stored id that no longer exists on this shop → auto-detect.
+  if (desiredId != null && !desired) return autoId;
+  // A section owned by another product type → never keep it. Correct it to the
+  // matching section when one exists, else fall back to auto-selection (which,
+  // for AirPods, is "no section" rather than silently using the iPhone one).
+  if (desired && sectionBelongsToOtherType(desired.title, pt)) {
+    const preferred = list.find((s) => pt.sectionKeywords.test(s.title || ''));
+    return preferred ? preferred.shop_section_id : autoId;
+  }
+  // Honour a valid, non-conflicting explicit choice.
+  if (desired) return desired.shop_section_id;
+  // No stored choice → auto-detect (matching section, iPhone fallback, or none).
+  return autoId;
+}
+
 // Prefer a "ready to ship" / non-calculated profile, else the first.
 function pickShippingProfile(profiles) {
   if (!profiles.length) return null;
@@ -215,4 +271,4 @@ async function getShopListingSettings({ db, shopClient, shopId, shopKey, product
   return settings;
 }
 
-module.exports = { fetchShopListingSettings, getShopListingSettings };
+module.exports = { fetchShopListingSettings, getShopListingSettings, pickSection, reconcileShopSection };

@@ -227,9 +227,12 @@ class ShopRepricer {
         if (offering.price && typeof offering.price === 'object') {
           prodCurrency = offering.price.currency_code || prodCurrency;
         }
-        if (!(Number.isFinite(cur) && Math.abs(cur - newPrice) < PRICE_EPSILON)) offeringsChanged++;
-        offering.price = newPrice; // PUT accepts a float
-        changed = true;
+        const differs = !(Number.isFinite(cur) && Math.abs(cur - newPrice) < PRICE_EPSILON);
+        if (differs) {
+          offeringsChanged++;
+          changed = true; // only a real price delta warrants a live Etsy PUT
+        }
+        offering.price = newPrice; // PUT accepts a float (harmless no-op when equal)
       }
       currency = prodCurrency || currency;
       productUpdates.push({ product_id: product.product_id, price: newPrice, currency: prodCurrency });
