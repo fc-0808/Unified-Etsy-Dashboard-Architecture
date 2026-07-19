@@ -4103,6 +4103,10 @@ async function _shipEtsyReceiptImpl(receiptId, opts = {}) {
 		carrier_name: carrier,
 		note_to_buyer: (opts.note_to_buyer || '').trim() || undefined,
 		send_bcc: opts.send_bcc ?? false,
+		// 'ship' is idempotent on tracking_code (never double-notify the buyer on a
+		// lost-response retry). 'update' is a deliberate operator re-notify, so it
+		// must always reach Etsy — disable the idempotency probe for it.
+		idempotent: mode !== 'update',
 	})
 
 	// 6. Mirror the change locally so the UI updates without waiting for the next sync.

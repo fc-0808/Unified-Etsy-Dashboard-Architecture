@@ -19,6 +19,7 @@
     "test:dedup": "node scripts/test-dedup.js",
     "verify:dedup": "node scripts/verify-dedup-fix.js",
     "test:route-shop-filter": "node scripts/test-route-shop-filter.js",
+    "test:retry-idempotency": "node scripts/test-retry-idempotency.js",
     "test:switch-supplier": "node scripts/test-switch-supplier.js",
     "test:charm-supplier": "node scripts/test-charm-supplier.js",
     "test:charm-reorder": "node scripts/test-charm-reorder.js",

@@ -546,7 +546,25 @@ function isRetryableNetworkError(err) {
   return RETRYABLE_NETWORK_MESSAGES.some((m) => msg.includes(m));
 }
 
-async function withRetry(fn, maxRetries = 3) {
+/**
+ * Retry wrapper for Etsy calls.
+ *
+ * @param {Function} fn                 The request to (re)run.
+ * @param {number}   [maxRetries=3]
+ * @param {object}   [opts]
+ * @param {Function} [opts.reconcile]   Idempotency probe for NON-idempotent calls
+ *   (POST creates). Between a retryable failure and the re-send, this is invoked to
+ *   ask Etsy whether the operation already landed — because on the VPN→proxy chain
+ *   the request can SUCCEED while only its RESPONSE is lost, and a blind re-send
+ *   would then create a duplicate (for a shipment, a second buyer email). Contract:
+ *     • resolves a truthy value → already applied; adopt it, do NOT re-send.
+ *     • resolves null/false     → confirmed not applied; safe to re-send.
+ *     • rejects                 → state unknown; fail closed (do NOT re-send a
+ *                                 non-idempotent op) and surface the original error.
+ *   Omit it for idempotent calls (GETs, quantity PUTs) to keep the current behavior.
+ */
+async function withRetry(fn, maxRetries = 3, opts = {}) {
+  const reconcile = typeof opts.reconcile === 'function' ? opts.reconcile : null;
   const RETRYABLE = new Set([429, 500, 502, 503, 504]);
   let lastError;
 
@@ -580,6 +598,29 @@ async function withRetry(fn, maxRetries = 3) {
           `Waiting ${Math.round(waitMs / 1000)}s before retry...`
       );
       await new Promise((res) => setTimeout(res, waitMs));
+
+      // Idempotency guard: before re-sending a non-idempotent create, confirm the
+      // previous attempt didn't already succeed with its response lost in transit.
+      if (reconcile) {
+        let already;
+        try {
+          already = await reconcile();
+        } catch (probeErr) {
+          console.warn(
+            `[etsy/client] idempotency probe failed (${probeErr.message}) — ` +
+              `not re-sending to avoid a duplicate side effect. Surfacing original error.`
+          );
+          throw lastError;
+        }
+        if (already != null && already !== false) {
+          console.warn(
+            '[etsy/client] operation already applied on Etsy (response was lost in ' +
+              'transit) — adopting the existing record instead of re-sending.'
+          );
+          return already;
+        }
+        // Probe confirmed nothing was created → the re-send below is safe.
+      }
     }
   }
 
@@ -998,6 +1039,24 @@ async function deleteListing(shopClient, listingId) {
  */
 async function createReceiptShipment(shopClient, shopId, receiptId, opts = {}) {
   gateClient(shopClient);
+
+  // This POST fires a buyer shipping-notification email and Etsy allows MANY
+  // shipment records per receipt, so it is NOT idempotent. On a retry (e.g. the
+  // request landed but its response was lost on the proxy chain), probe the
+  // receipt's existing shipments and adopt the one carrying this exact
+  // tracking_code instead of sending a second notification. Disabled when the
+  // caller passes idempotent:false — the edit-tracking flow is a deliberate
+  // operator re-notify that must always reach Etsy.
+  const idempotent = opts.idempotent !== false && !!opts.tracking_code;
+  const wantTracking = String(opts.tracking_code ?? '').trim();
+  const reconcile = idempotent
+    ? async () => {
+        const receipt = await getReceipt(shopClient, shopId, receiptId);
+        const shipments = Array.isArray(receipt?.shipments) ? receipt.shipments : [];
+        return shipments.find((s) => String(s?.tracking_code ?? '').trim() === wantTracking) || null;
+      }
+    : null;
+
   return withRetry(async () => {
     const body = {
       tracking_code:  opts.tracking_code,
@@ -1011,7 +1070,7 @@ async function createReceiptShipment(shopClient, shopId, receiptId, opts = {}) {
       body
     );
     return data;
-  });
+  }, 3, { reconcile });
 }
 
 /**
@@ -1586,6 +1645,20 @@ async function getShopSection(shopClient, shopId, sectionId) {
 async function createShopSection(shopClient, shopId, { title } = {}) {
   const numericId = await resolveShopId(shopClient, shopId);
   gateClient(shopClient);
+
+  // Creating a section is not idempotent (Etsy allows same-titled sections). On a
+  // retry, probe existing sections and adopt the one with this title rather than
+  // leaving a duplicate section on the public shop if the first POST landed but
+  // its response was lost in transit.
+  const wantTitle = String(title ?? '').trim();
+  const reconcile = wantTitle
+    ? async () => {
+        const data = await getShopSections(shopClient, numericId);
+        const results = Array.isArray(data?.results) ? data.results : [];
+        return results.find((s) => String(s?.title ?? '').trim() === wantTitle) || null;
+      }
+    : null;
+
   return withRetry(async () => {
     const params = new URLSearchParams();
     params.append('title', String(title ?? ''));
@@ -1595,7 +1668,7 @@ async function createShopSection(shopClient, shopId, { title } = {}) {
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
     );
     return data;
-  });
+  }, 3, { reconcile });
 }
 
 /**
@@ -1802,4 +1875,5 @@ module.exports = {
   QpdExhaustedError,
   isQpdExhaustedError,
   PERSONAL_ACCESS_QPD,
+  withRetry,
 };
