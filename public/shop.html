@@ -2333,6 +2333,19 @@
 			// reboot; rehydrated on boot and drained by flush() + Background Sync.
 			const pending = new Map()
 			let flushing = false
+			// Every deliberate in-app navigation goes through leaveTo(), which marks the
+			// departure as ours so the beforeunload guard stays silent. That guard exists to
+			// catch a shopper CLOSING the tab with unsynced work; firing it on our own
+			// redirects stacked a native "Leave site?" dialog on top of our own confirm,
+			// and worse, let a shopper cancel the /login redirect that was trying to get
+			// them re-authenticated so the queue could drain at all. One helper rather than
+			// a flag set at each call site, because there are several and missing one
+			// silently reintroduces the prompt.
+			let leavingIntentionally = false
+			function leaveTo(url) {
+				leavingIntentionally = true
+				location.href = url
+			}
 			const collapseOverride = new Map() // groupKey → bool (user's explicit expand/collapse)
 			let LAST_GROUPS = [] // groups as last rendered (for collapse + auto-scroll)
 			const AGG = new Map() // aggId → [rows] for aggregated charm cards (rebuilt each render)
@@ -2907,7 +2920,7 @@
 				showUndoBar((x.have_model || '').trim() ? t('markedExchanged') : t('markedBought'), action)
 				fetch('/api/exchanges/' + encodeURIComponent(exid) + '/done', { method: 'POST', credentials: 'same-origin' })
 					.then((r) => {
-						if (r.status === 401) location.href = '/login'
+						if (r.status === 401) leaveTo('/login')
 						else if (!r.ok) throw new Error('HTTP ' + r.status)
 					})
 					.catch(() => {
@@ -4059,9 +4072,28 @@
 				}
 			}
 
-			async function flush() {
-				if (flushing || !pending.size) return
+			// Resolves when the CURRENT drain pass finishes. When a pass is already in
+			// flight we hand back THAT pass's promise rather than resolving instantly:
+			// `flush()` is called on every tap, so a caller awaiting it (logout) would
+			// otherwise sail straight through the `flushing` guard and conclude the work
+			// is unsaved while the request was mid-flight and about to succeed.
+			let flushPromise = null
+			function flush() {
+				if (!pending.size) return Promise.resolve()
+				if (flushing) return flushPromise || Promise.resolve()
 				flushing = true
+				// Never reject (most callers fire-and-forget, and the logout path awaits
+				// without a catch), and always release the `flushing` latch — an escaping
+				// throw would otherwise wedge the queue shut for the rest of the session.
+				flushPromise = _flushPass()
+					.catch(() => {})
+					.finally(() => {
+						flushing = false
+					})
+				return flushPromise
+			}
+
+			async function _flushPass() {
 				let failed = false
 				for (const id of [...pending.keys()]) {
 					// Always send the LATEST coalesced state for this line: a tap may have
@@ -4078,9 +4110,19 @@
 						if (resp.status === 401) {
 							// Session lost — stop draining and re-auth. The entry stays in
 							// IndexedDB, so nothing is lost; it replays after sign-in.
-							flushing = false
-							location.href = '/login'
+							leaveTo('/login')
 							return
+						}
+						if (resp.status === 403) {
+							// AUTHORIZATION, not a bad op: this role isn't allowed to make this
+							// write (a role change mid-shift, or an allowlist edit). The op is
+							// perfectly valid, so it MUST stay queued — dropping it would
+							// silently destroy the shopper's purchases. Matches ShopSync
+							// .replayAll, which the service worker uses on the same store; the
+							// two diverging here is exactly the drift this shared module exists
+							// to prevent.
+							failed = true
+							continue
 						}
 						// 2xx = applied. A non-auth 4xx means the op is permanently
 						// rejected (e.g. the order was deleted) — drop it so one bad op can
@@ -4104,7 +4146,8 @@
 						failed = true // network/5xx — keep queued, retry
 					}
 				}
-				flushing = false
+				// `flushing` is released by flush()'s finally (the single owner), which runs
+				// before either timer below can fire, so the re-flush is never blocked.
 				if (pending.size) {
 					if (failed) {
 						// A genuine failure — back off so we don't hammer a flaky network.
@@ -4573,7 +4616,7 @@
 						headers: { 'Content-Type': 'application/json' },
 						body: JSON.stringify(body),
 					})
-					if (r.status === 401) return void (location.href = '/login')
+					if (r.status === 401) return void leaveTo('/login')
 					if (!r.ok) throw new Error('HTTP ' + r.status)
 					haptic(12)
 					toast(okMsg)
@@ -4895,7 +4938,7 @@
 				applyStaticI18n()
 				render()
 			})
-			$('dashBtn').addEventListener('click', () => (location.href = '/'))
+			$('dashBtn').addEventListener('click', () => leaveTo('/'))
 			$('refreshBtn').addEventListener('click', () => load(true))
 			$('logoutBtn').addEventListener('click', async () => {
 				// Don't strand unsynced work: try one last drain, and if writes remain
@@ -4908,7 +4951,7 @@
 				try {
 					await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' })
 				} catch {}
-				location.href = '/login'
+				leaveTo('/login')
 			})
 
 			// Last-line safety net: warn before leaving/closing the tab with writes that
@@ -4916,7 +4959,7 @@
 			// next open, but a visible prompt prevents a shopper walking away thinking
 			// everything saved. Native browser confirm — no custom text is shown.
 			window.addEventListener('beforeunload', (e) => {
-				if (pending.size) {
+				if (pending.size && !leavingIntentionally) {
 					e.preventDefault()
 					e.returnValue = ''
 				}
@@ -4928,7 +4971,7 @@
 					if (r.ok) {
 						const d = await r.json()
 						ME = d.user || null
-						if (d.authEnabled && !d.role) location.href = '/login'
+						if (d.authEnabled && !d.role) leaveTo('/login')
 						// Show "back to dashboard" for the owner, and for a packer ONLY
 						// when on the office LAN (so they can return to Packing Mode). Over
 						// the public tunnel a packer stays shopping-only, so it's hidden.
@@ -4938,12 +4981,41 @@
 				} catch {}
 			}
 
+			// Re-assert every QUEUED-but-unacknowledged status write over freshly-fetched
+			// server rows. A queued op is state the shopper has already been shown and the
+			// server has not confirmed yet, so it outranks the server's copy until it
+			// drains — the standard optimistic-UI rule.
+			//
+			// This is what makes a restart safe. On boot with a queue, the route GET
+			// resolves long before the replay POSTs do, so without this the list renders
+			// the server's PRE-replay state and shows already-bought items as still to
+			// buy — the double-buy the durable queue exists to prevent. reconcile() can't
+			// cover it either: it deliberately bails while `pending` is non-empty, so the
+			// stale list would stand until the queue drained AND the next 45 s tick came
+			// round. Applying the patches locally fixes the render immediately, whether or
+			// not the network is even up.
+			//
+			// Only assign (status) entries are replayed here: they are what drives the
+			// buy/don't-buy decision. Cost entries carry their own absolute price and are
+			// re-sent by the queue, but a stale price never causes a duplicate purchase.
+			function reapplyPending() {
+				if (!pending.size) return
+				for (const entry of pending.values()) {
+					if (!entry || entry.url !== ShopSync.ASSIGN_URL || !entry.body) continue
+					const row = rowIndex.get(entry.body.receipt_id + '\x00' + entry.body.item_key)
+					if (!row) continue
+					for (const f of ['status_case', 'status_grip', 'status_charm']) {
+						if (entry.body[f] != null) row[f] = entry.body[f]
+					}
+				}
+			}
+
 			async function load(showSpinner) {
 				if (showSpinner) $('list').innerHTML = `<div class="state"><div class="spinner"></div>${t('loading')}</div>`
 				try {
 					const r = await fetch('/api/shop/route', { credentials: 'same-origin' })
 					if (r.status === 401) {
-						location.href = '/login'
+						leaveTo('/login')
 						return
 					}
 					if (r.status === 403) {
@@ -4957,6 +5029,7 @@
 					MANUAL_MERGE = new Set((data.manual_merge_listings || []).map(Number))
 					rowIndex.clear()
 					for (const row of ROWS) rowIndex.set(keyOf(row), row)
+					reapplyPending()
 					render()
 					// A successful load means we CAN reach the server — that's the honest
 					// "connected" signal (SSE is only for instant push on top of this).
@@ -5025,7 +5098,7 @@
 				if (document.hidden || pending.size || anyOverlayOpen()) return
 				try {
 					const r = await fetch('/api/shop/route', { credentials: 'same-origin' })
-					if (r.status === 401) return (location.href = '/login')
+					if (r.status === 401) return leaveTo('/login')
 					if (!r.ok) return
 					const data = await r.json()
 					const rows = data.rows || []
@@ -5250,7 +5323,11 @@
 			async function boot() {
 				applyStaticI18n()
 				syncStickTop()
-				hydrateQueue()
+				// AWAITED, and before load(): this only reads IndexedDB (fast — the drain it
+				// kicks off is not awaited), and `pending` has to be populated before the
+				// first load so reapplyPending() can keep unacknowledged taps on screen
+				// instead of letting the server's pre-replay state overwrite them.
+				await hydrateQueue()
 				if (window.ResizeObserver) new ResizeObserver(syncStickTop).observe(document.querySelector('header'))
 				window.addEventListener('resize', syncStickTop)
 				// Start real-time + identity checks in PARALLEL with loading the list,

@@ -193,11 +193,16 @@ async function main() {
 		const created = await api('/api/sourcing/suppliers', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ name: 'Huaqiangbei Cases', location: 'HQB', wechat: 'wx-hqb' }),
+			body: JSON.stringify({ name: 'Huaqiangbei Cases', location: 'HQB', wechat: 'wx-hqb', qq: '812345678' }),
 		})
 		assert(created.status === 200 && created.body.supplier.id > 0, 'POST /suppliers creates a supplier')
 		const supId = created.body.supplier.id
 		assert(Array.isArray(created.body.suppliers), 'the create response returns the refreshed supplier list')
+		// The chat handles are the point of this registry (these suppliers publish on
+		// WeChat/QQ), so assert they round-trip rather than being quietly dropped.
+		assert(created.body.supplier.wechat === 'wx-hqb' && created.body.supplier.qq === '812345678', `the WeChat/QQ handles persist (got "${created.body.supplier.wechat}"/"${created.body.supplier.qq}")`)
+		const listedHandles = (created.body.suppliers || []).find((s) => s.id === supId)
+		assert(listedHandles && listedHandles.wechat === 'wx-hqb', 'and are returned by the supplier list the UI renders from')
 
 		const dup = await api('/api/sourcing/suppliers', {
 			method: 'POST',
@@ -215,6 +220,7 @@ async function main() {
 			body: JSON.stringify({ location: 'Futian' }),
 		})
 		assert(renamed.status === 200 && renamed.body.supplier.location === 'Futian' && renamed.body.supplier.name === 'Huaqiangbei Cases', 'PUT /suppliers/:id patches one field, keeps the rest')
+		assert(renamed.body.supplier.wechat === 'wx-hqb' && renamed.body.supplier.qq === '812345678', 'a partial update preserves the untouched chat handles')
 		const missing = await api('/api/sourcing/suppliers/99999', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'x' }) })
 		assert(missing.status === 404, `PUT on a missing supplier is 404 (got ${missing.status})`)
 

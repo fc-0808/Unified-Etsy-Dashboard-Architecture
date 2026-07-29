@@ -751,6 +751,17 @@
 					<label data-i18n="fLocation">Shop Location</label>
 					<input type="text" id="smLocation" placeholder="e.g. Huaqiangbei, Shenzhen" />
 				</div>
+				<!-- The chat handles are the whole point of this registry: these suppliers
+				     publish their design folders on WeChat/QQ, so the handle is how the
+				     employee actually reaches them for a new drop. -->
+				<div class="field">
+					<label data-i18n="fWechat">WeChat ID</label>
+					<input type="text" id="smWechat" placeholder="e.g. case_studio_88" />
+				</div>
+				<div class="field">
+					<label data-i18n="fQq">QQ</label>
+					<input type="text" id="smQq" placeholder="e.g. 812345678" />
+				</div>
 				<div class="field">
 					<label data-i18n="fNotes">Notes</label>
 					<textarea id="smNotes" placeholder="What they specialise in, terms, etc."></textarea>
@@ -821,6 +832,8 @@
 				editSupplier: { en: 'Edit supplier', zh: '编辑供应商' },
 				fName: { en: 'Supplier name *', zh: '供应商名称 *' },
 				fLocation: { en: 'Shop Location', zh: '店铺位置' },
+				fWechat: { en: 'WeChat ID', zh: '微信号' },
+				fQq: { en: 'QQ', zh: 'QQ 号' },
 				fNotes: { en: 'Notes', zh: '备注' },
 				fTitle: { en: 'Title', zh: '标题' },
 				fCategory: { en: 'Category', zh: '类别' },
@@ -930,7 +943,11 @@
 					/* handled by api() redirect */
 				}
 				try {
-					META = await api('/api/sourcing/meta')
+					// Merge over the defaults rather than replacing: a 200 that isn't the
+					// expected shape (a proxy interstitial, say) would otherwise leave
+					// META.categories undefined and kill boot() in fillCategorySelects,
+					// before the supplier list ever loads.
+					META = Object.assign({ categories: [], statuses: [] }, await api('/api/sourcing/meta'))
 				} catch (e) {
 					toast(e.message, 'err')
 				}
@@ -939,18 +956,29 @@
 				await loadSuppliers()
 			}
 
+			// Rewriting a <select>'s innerHTML resets its value, and these run again on
+			// every language switch — which silently changed the visible package list (the
+			// status filter fell back to "all") and reset the upload category and any open
+			// edit modal. Preserve each selection across the relabel.
+			function keepSelection(el, fill) {
+				if (!el) return
+				const prev = el.value
+				fill()
+				if (prev && [...el.options].some((o) => o.value === prev)) el.value = prev
+			}
 			function fillCategorySelects() {
-				const uploadSel = document.getElementById('uploadCategory')
-				const pmSel = document.getElementById('pmCategory')
-				const opts = META.categories.map((c) => `<option value="${c.id}">${esc(LANG === 'zh' ? c.label_zh : c.label)}</option>`).join('')
-				uploadSel.innerHTML = opts
-				pmSel.innerHTML = opts
+				const opts = () => META.categories.map((c) => `<option value="${c.id}">${esc(LANG === 'zh' ? c.label_zh : c.label)}</option>`).join('')
+				for (const id of ['uploadCategory', 'pmCategory']) {
+					const el = document.getElementById(id)
+					keepSelection(el, () => (el.innerHTML = opts()))
+				}
 			}
 			function fillStatusSelects() {
+				const statusOpts = () => META.statuses.map((s) => `<option value="${s.id}">${esc(LANG === 'zh' ? s.label_zh : s.label)}</option>`).join('')
 				const sf = document.getElementById('statusFilter')
-				sf.innerHTML = `<option value="">${esc(t('allStatuses'))}</option>` + META.statuses.map((s) => `<option value="${s.id}">${esc(LANG === 'zh' ? s.label_zh : s.label)}</option>`).join('')
+				keepSelection(sf, () => (sf.innerHTML = `<option value="">${esc(t('allStatuses'))}</option>` + statusOpts()))
 				const pm = document.getElementById('pmStatus')
-				pm.innerHTML = META.statuses.map((s) => `<option value="${s.id}">${esc(LANG === 'zh' ? s.label_zh : s.label)}</option>`).join('')
+				keepSelection(pm, () => (pm.innerHTML = statusOpts()))
 			}
 
 			async function loadSuppliers() {
@@ -1009,6 +1037,10 @@
 				document.getElementById('svName').textContent = s.name
 				const meta = []
 				if (s.location) meta.push(`<span>📍 ${esc(s.location)}</span>`)
+				// Shown right on the supplier header so the employee can reach them for a
+				// new drop without opening the edit modal.
+				if (s.wechat) meta.push(`<span>💬 ${LANG === 'zh' ? '微信' : 'WeChat'}: ${esc(s.wechat)}</span>`)
+				if (s.qq) meta.push(`<span>🐧 QQ: ${esc(s.qq)}</span>`)
 				if (s.notes) meta.push(`<span style="color:var(--muted)">📝 ${esc(s.notes)}</span>`)
 				document.getElementById('svMeta').innerHTML = meta.join('') || `<span>${LANG === 'zh' ? '暂无店铺位置' : 'No shop location set yet'}</span>`
 				renderCatTabs()
@@ -1106,6 +1138,8 @@
 				document.getElementById('smTitle').textContent = edit ? t('editSupplier') : t('addSupplier')
 				document.getElementById('smName').value = s ? s.name : ''
 				document.getElementById('smLocation').value = s ? s.location : ''
+				document.getElementById('smWechat').value = s ? s.wechat || '' : ''
+				document.getElementById('smQq').value = s ? s.qq || '' : ''
 				document.getElementById('smNotes').value = s ? s.notes : ''
 				document.getElementById('smErr').textContent = ''
 				openModal('supplierModal')
@@ -1116,6 +1150,8 @@
 				const body = {
 					name: document.getElementById('smName').value.trim(),
 					location: document.getElementById('smLocation').value.trim(),
+					wechat: document.getElementById('smWechat').value.trim(),
+					qq: document.getElementById('smQq').value.trim(),
 					notes: document.getElementById('smNotes').value.trim(),
 				}
 				if (!body.name) {
@@ -1246,10 +1282,22 @@
 				;[...files].forEach((f) => uploadOne(f, category))
 			}
 
+			// Must match the server's MAX_BYTES ceiling on /api/sourcing/packages/upload.
+			const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024 // 1 GB
+
 			function uploadOne(file, category) {
 				const isZip = /\.zip$/i.test(file.name) || file.type === 'application/zip' || file.type === 'application/x-zip-compressed'
 				if (!isZip) {
 					toast((LANG === 'zh' ? '不是 .zip 文件：' : 'Not a .zip file: ') + file.name, 'err')
+					return
+				}
+				// Reject oversize files BEFORE sending. The server also enforces this, but it
+				// can only answer 413 mid-stream — by which point the browser has usually
+				// pushed the whole file, and an early response on an in-flight upload
+				// surfaces as xhr.onerror, so the operator was told "Network error" after a
+				// long wait instead of "too large" immediately.
+				if (file.size > MAX_UPLOAD_BYTES) {
+					toast((LANG === 'zh' ? '文件过大（上限 1 GB）：' : 'File is too large (max 1 GB): ') + file.name, 'err')
 					return
 				}
 				const queue = document.getElementById('uploadQueue')
