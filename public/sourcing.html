@@ -1,0 +1,1362 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<meta name="theme-color" content="#0f1117" />
+		<title>Sourcing Library · 货源库</title>
+		<link
+			rel="icon"
+			type="image/svg+xml"
+			href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231a1d27'/%3E%3Cpath d='M8 11h16v13a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1z' fill='%23f56400'/%3E%3Cpath d='M8 8a1 1 0 0 1 1-1h5l2 2h6a1 1 0 0 1 1 1v2H8z' fill='%23f7913f'/%3E%3C/svg%3E"
+		/>
+		<style>
+			*,
+			*::before,
+			*::after {
+				box-sizing: border-box;
+				margin: 0;
+				padding: 0;
+			}
+			:root {
+				--bg: #0f1117;
+				--surface: #1a1d27;
+				--card: #1c1e2a;
+				--card2: #22252f;
+				--border: #2a2d3a;
+				--text: #e8eaf0;
+				--muted: #7b8099;
+				--accent: #f56400;
+				--blue: #6c8fff;
+				--green: #22c55e;
+				--red: #ef4444;
+				--yellow: #f59e0b;
+				--radius: 10px;
+				--font: 'Inter', system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+			}
+			body {
+				background: var(--bg);
+				color: var(--text);
+				font-family: var(--font);
+				font-size: 14px;
+				line-height: 1.5;
+				min-height: 100vh;
+			}
+			a {
+				color: inherit;
+			}
+			button {
+				font-family: var(--font);
+			}
+
+			/* ── Top bar ─────────────────────────────────────────────── */
+			.topbar {
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				padding: 0 24px;
+				height: 56px;
+				background: var(--surface);
+				border-bottom: 1px solid var(--border);
+				position: sticky;
+				top: 0;
+				z-index: 20;
+			}
+			.brand {
+				display: flex;
+				align-items: center;
+				gap: 10px;
+				font-weight: 700;
+				font-size: 16px;
+			}
+			.brand .dot {
+				width: 10px;
+				height: 10px;
+				border-radius: 50%;
+				background: var(--accent);
+			}
+			.brand small {
+				color: var(--muted);
+				font-weight: 500;
+				font-size: 12px;
+			}
+			.topbar-right {
+				display: flex;
+				align-items: center;
+				gap: 12px;
+			}
+			.whoami {
+				color: var(--muted);
+				font-size: 12px;
+			}
+			.tbtn {
+				appearance: none;
+				border: 1px solid var(--border);
+				background: rgba(255, 255, 255, 0.04);
+				color: var(--text);
+				font-size: 13px;
+				font-weight: 600;
+				padding: 7px 12px;
+				border-radius: 8px;
+				cursor: pointer;
+				text-decoration: none;
+				display: inline-flex;
+				align-items: center;
+				gap: 6px;
+				transition:
+					background 0.12s ease,
+					border-color 0.12s ease;
+			}
+			.tbtn:hover {
+				background: rgba(255, 255, 255, 0.08);
+				border-color: #39405a;
+			}
+			.lang-switch {
+				display: inline-flex;
+				background: rgba(255, 255, 255, 0.05);
+				border: 1px solid var(--border);
+				border-radius: 8px;
+				padding: 2px;
+				gap: 2px;
+			}
+			.lang-switch button {
+				appearance: none;
+				border: none;
+				background: transparent;
+				color: var(--muted);
+				font-size: 12px;
+				font-weight: 600;
+				padding: 5px 10px;
+				border-radius: 6px;
+				cursor: pointer;
+			}
+			.lang-switch button.active {
+				background: var(--accent);
+				color: #fff;
+			}
+
+			/* ── Layout ──────────────────────────────────────────────── */
+			.layout {
+				display: grid;
+				grid-template-columns: 320px 1fr;
+				gap: 0;
+				height: calc(100vh - 56px);
+			}
+			.sidebar {
+				border-right: 1px solid var(--border);
+				background: var(--surface);
+				display: flex;
+				flex-direction: column;
+				min-height: 0;
+			}
+			.sidebar-head {
+				padding: 16px 16px 12px;
+				border-bottom: 1px solid var(--border);
+			}
+			.sidebar-head .row {
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				margin-bottom: 12px;
+			}
+			.sidebar-head h2 {
+				font-size: 14px;
+				letter-spacing: 0.02em;
+				text-transform: uppercase;
+				color: var(--muted);
+			}
+			.supplier-list {
+				overflow-y: auto;
+				flex: 1;
+				padding: 8px;
+				min-height: 0;
+			}
+			.supplier-card {
+				border: 1px solid transparent;
+				border-radius: var(--radius);
+				padding: 11px 12px;
+				cursor: pointer;
+				margin-bottom: 6px;
+				transition:
+					background 0.12s ease,
+					border-color 0.12s ease;
+			}
+			.supplier-card:hover {
+				background: var(--card);
+			}
+			.supplier-card.active {
+				background: var(--card);
+				border-color: var(--accent);
+			}
+			.supplier-card .name {
+				font-weight: 600;
+				font-size: 14px;
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				gap: 8px;
+			}
+			.supplier-card .loc {
+				color: var(--muted);
+				font-size: 12px;
+				margin-top: 2px;
+				white-space: nowrap;
+				overflow: hidden;
+				text-overflow: ellipsis;
+			}
+			.pill {
+				font-size: 11px;
+				font-weight: 700;
+				color: var(--muted);
+				background: rgba(255, 255, 255, 0.06);
+				border-radius: 999px;
+				padding: 2px 8px;
+				white-space: nowrap;
+			}
+
+			/* ── Main pane ───────────────────────────────────────────── */
+			.main {
+				overflow-y: auto;
+				min-height: 0;
+				padding: 22px 26px 60px;
+			}
+			.pane-head {
+				display: flex;
+				align-items: flex-start;
+				justify-content: space-between;
+				gap: 16px;
+				margin-bottom: 18px;
+			}
+			.pane-head h1 {
+				font-size: 22px;
+				font-weight: 700;
+			}
+			.pane-head .meta {
+				color: var(--muted);
+				font-size: 13px;
+				margin-top: 4px;
+				display: flex;
+				flex-wrap: wrap;
+				gap: 14px;
+			}
+			.pane-head .meta span {
+				display: inline-flex;
+				align-items: center;
+				gap: 5px;
+			}
+			.pane-actions {
+				display: flex;
+				gap: 8px;
+				flex-shrink: 0;
+			}
+
+			.cat-tabs {
+				display: flex;
+				gap: 6px;
+				border-bottom: 1px solid var(--border);
+				margin-bottom: 18px;
+				flex-wrap: wrap;
+			}
+			.cat-tab {
+				appearance: none;
+				background: none;
+				border: none;
+				border-bottom: 2px solid transparent;
+				color: var(--muted);
+				font-size: 13px;
+				font-weight: 600;
+				padding: 9px 12px;
+				cursor: pointer;
+				display: inline-flex;
+				align-items: center;
+				gap: 7px;
+				margin-bottom: -1px;
+			}
+			.cat-tab:hover {
+				color: var(--text);
+			}
+			.cat-tab.active {
+				color: var(--text);
+				border-bottom-color: var(--accent);
+			}
+			.cat-tab .count {
+				font-size: 11px;
+				font-weight: 700;
+				background: rgba(255, 255, 255, 0.07);
+				border-radius: 999px;
+				padding: 1px 7px;
+			}
+			.cat-tab.active .count {
+				background: var(--accent);
+				color: #fff;
+			}
+
+			.toolbar {
+				display: flex;
+				gap: 10px;
+				align-items: center;
+				margin-bottom: 16px;
+				flex-wrap: wrap;
+			}
+			input[type='text'],
+			input[type='search'],
+			textarea,
+			select {
+				background: var(--bg);
+				border: 1px solid var(--border);
+				color: var(--text);
+				border-radius: 8px;
+				padding: 8px 11px;
+				font-size: 13px;
+				font-family: var(--font);
+				outline: none;
+			}
+			input:focus,
+			textarea:focus,
+			select:focus {
+				border-color: var(--accent);
+			}
+			.toolbar input[type='search'] {
+				flex: 1;
+				min-width: 160px;
+			}
+			.btn {
+				appearance: none;
+				border: none;
+				border-radius: 8px;
+				padding: 8px 14px;
+				font-size: 13px;
+				font-weight: 600;
+				cursor: pointer;
+				display: inline-flex;
+				align-items: center;
+				gap: 6px;
+				background: var(--card2);
+				color: var(--text);
+				border: 1px solid var(--border);
+			}
+			.btn:hover {
+				background: #2a2e3a;
+			}
+			.btn.primary {
+				background: var(--accent);
+				border-color: var(--accent);
+				color: #fff;
+			}
+			.btn.primary:hover {
+				background: #e05a00;
+			}
+			.btn.danger {
+				color: var(--red);
+			}
+			.btn.danger:hover {
+				background: rgba(239, 68, 68, 0.12);
+			}
+			.btn.sm {
+				padding: 5px 10px;
+				font-size: 12px;
+			}
+			.btn:disabled {
+				opacity: 0.5;
+				cursor: not-allowed;
+			}
+
+			/* ── Dropzone ────────────────────────────────────────────── */
+			.dropzone {
+				border: 1.5px dashed var(--border);
+				border-radius: var(--radius);
+				padding: 22px;
+				text-align: center;
+				color: var(--muted);
+				margin-bottom: 20px;
+				transition:
+					border-color 0.15s ease,
+					background 0.15s ease;
+				cursor: pointer;
+			}
+			.dropzone:hover,
+			.dropzone.drag {
+				border-color: var(--accent);
+				background: rgba(245, 100, 0, 0.05);
+				color: var(--text);
+			}
+			.dropzone .dz-title {
+				font-size: 14px;
+				font-weight: 600;
+				color: var(--text);
+			}
+			.dropzone .dz-sub {
+				font-size: 12px;
+				margin-top: 4px;
+			}
+			.dz-controls {
+				display: flex;
+				gap: 10px;
+				align-items: center;
+				justify-content: center;
+				margin-top: 12px;
+				flex-wrap: wrap;
+			}
+			.upload-row {
+				display: flex;
+				align-items: center;
+				gap: 12px;
+				background: var(--card);
+				border: 1px solid var(--border);
+				border-radius: 8px;
+				padding: 10px 12px;
+				margin-bottom: 8px;
+				font-size: 13px;
+			}
+			.upload-row .fname {
+				flex: 1;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+			.progress {
+				flex: 1;
+				height: 6px;
+				background: rgba(255, 255, 255, 0.08);
+				border-radius: 999px;
+				overflow: hidden;
+				max-width: 220px;
+			}
+			.progress > div {
+				height: 100%;
+				background: var(--accent);
+				width: 0;
+				transition: width 0.15s ease;
+			}
+
+			/* ── Package table ───────────────────────────────────────── */
+			.pkg-table {
+				width: 100%;
+				border-collapse: collapse;
+			}
+			.pkg-table th {
+				text-align: left;
+				font-size: 11px;
+				text-transform: uppercase;
+				letter-spacing: 0.03em;
+				color: var(--muted);
+				padding: 8px 10px;
+				border-bottom: 1px solid var(--border);
+			}
+			.pkg-table td {
+				padding: 11px 10px;
+				border-bottom: 1px solid var(--border);
+				vertical-align: middle;
+			}
+			.pkg-table tr:hover td {
+				background: rgba(255, 255, 255, 0.02);
+			}
+			.pkg-title {
+				font-weight: 600;
+			}
+			.pkg-sub {
+				color: var(--muted);
+				font-size: 12px;
+				margin-top: 2px;
+			}
+			.badge {
+				display: inline-block;
+				font-size: 11px;
+				font-weight: 700;
+				padding: 2px 9px;
+				border-radius: 999px;
+				border: 1px solid transparent;
+				white-space: nowrap;
+			}
+			.badge.cat {
+				background: rgba(108, 143, 255, 0.13);
+				color: var(--blue);
+			}
+			.status-select {
+				font-size: 12px;
+				font-weight: 600;
+				padding: 5px 8px;
+			}
+			.st-new {
+				border-color: rgba(245, 159, 11, 0.5);
+				color: var(--yellow);
+			}
+			.st-in_progress {
+				border-color: rgba(108, 143, 255, 0.5);
+				color: var(--blue);
+			}
+			.st-listed {
+				border-color: rgba(34, 197, 94, 0.5);
+				color: var(--green);
+			}
+			.st-archived {
+				border-color: var(--border);
+				color: var(--muted);
+			}
+			.row-actions {
+				display: flex;
+				gap: 6px;
+				justify-content: flex-end;
+			}
+			.iconbtn {
+				appearance: none;
+				background: none;
+				border: 1px solid var(--border);
+				color: var(--muted);
+				border-radius: 7px;
+				width: 30px;
+				height: 30px;
+				cursor: pointer;
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				transition:
+					color 0.12s,
+					border-color 0.12s,
+					background 0.12s;
+			}
+			.iconbtn:hover {
+				color: var(--text);
+				border-color: #39405a;
+				background: rgba(255, 255, 255, 0.05);
+			}
+			.iconbtn.danger:hover {
+				color: var(--red);
+				border-color: rgba(239, 68, 68, 0.5);
+			}
+			.iconbtn svg {
+				width: 15px;
+				height: 15px;
+				fill: none;
+				stroke: currentColor;
+				stroke-width: 2;
+				stroke-linecap: round;
+				stroke-linejoin: round;
+			}
+
+			.empty {
+				text-align: center;
+				color: var(--muted);
+				padding: 48px 20px;
+				font-size: 14px;
+			}
+			.empty .big {
+				font-size: 15px;
+				color: var(--text);
+				font-weight: 600;
+				margin-bottom: 6px;
+			}
+			.loading {
+				text-align: center;
+				color: var(--muted);
+				padding: 40px;
+			}
+
+			/* ── Modal ───────────────────────────────────────────────── */
+			.modal-bg {
+				position: fixed;
+				inset: 0;
+				background: rgba(0, 0, 0, 0.55);
+				display: none;
+				align-items: center;
+				justify-content: center;
+				z-index: 100;
+				padding: 20px;
+			}
+			.modal-bg.open {
+				display: flex;
+			}
+			.modal {
+				background: var(--surface);
+				border: 1px solid var(--border);
+				border-radius: 14px;
+				width: 100%;
+				max-width: 440px;
+				padding: 22px;
+				box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+			}
+			.modal h3 {
+				font-size: 17px;
+				margin-bottom: 16px;
+			}
+			.field {
+				margin-bottom: 13px;
+			}
+			.field label {
+				display: block;
+				font-size: 12px;
+				font-weight: 600;
+				color: var(--muted);
+				margin-bottom: 5px;
+			}
+			.field input,
+			.field textarea,
+			.field select {
+				width: 100%;
+			}
+			.field textarea {
+				resize: vertical;
+				min-height: 64px;
+			}
+			.modal-actions {
+				display: flex;
+				justify-content: flex-end;
+				gap: 10px;
+				margin-top: 20px;
+			}
+			.modal-err {
+				color: var(--red);
+				font-size: 12px;
+				margin-top: 10px;
+				min-height: 14px;
+			}
+
+			/* ── Toast ───────────────────────────────────────────────── */
+			#toast {
+				position: fixed;
+				bottom: 24px;
+				left: 50%;
+				transform: translateX(-50%) translateY(20px);
+				background: var(--card2);
+				border: 1px solid var(--border);
+				border-radius: 10px;
+				padding: 11px 18px;
+				font-size: 13px;
+				font-weight: 500;
+				opacity: 0;
+				pointer-events: none;
+				transition:
+					opacity 0.2s ease,
+					transform 0.2s ease;
+				z-index: 200;
+				box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+			}
+			#toast.show {
+				opacity: 1;
+				transform: translateX(-50%) translateY(0);
+			}
+			#toast.err {
+				border-color: rgba(239, 68, 68, 0.6);
+			}
+			#toast.ok {
+				border-color: rgba(34, 197, 94, 0.6);
+			}
+
+			@media (max-width: 860px) {
+				.layout {
+					grid-template-columns: 1fr;
+					height: auto;
+				}
+				.sidebar {
+					border-right: none;
+					border-bottom: 1px solid var(--border);
+					max-height: 40vh;
+				}
+			}
+		</style>
+	</head>
+	<body>
+		<div class="topbar">
+			<div class="brand">
+				<span class="dot"></span>
+				<span data-i18n="brand">Sourcing Library</span>
+				<small data-i18n="brandSub">Supplier design intake</small>
+			</div>
+			<div class="topbar-right">
+				<span class="whoami" id="whoami"></span>
+				<a class="tbtn" id="backBtn" href="/" title="Back to dashboard">↩ <span data-i18n="dashboard">Dashboard</span></a>
+				<div class="lang-switch" role="group" aria-label="Language">
+					<button type="button" data-lang="en" onclick="setLang('en')">EN</button>
+					<button type="button" data-lang="zh" onclick="setLang('zh')">中文</button>
+				</div>
+				<button class="tbtn" id="logoutBtn" title="Sign out">🚪 <span data-i18n="logout">Log out</span></button>
+			</div>
+		</div>
+
+		<div class="layout">
+			<!-- ── Supplier sidebar ─────────────────────────────────── -->
+			<aside class="sidebar">
+				<div class="sidebar-head">
+					<div class="row">
+						<h2 data-i18n="suppliers">Suppliers</h2>
+						<button class="btn primary sm" onclick="openSupplierModal()">+ <span data-i18n="add">Add</span></button>
+					</div>
+					<input type="search" id="supplierSearch" placeholder="Search suppliers…" style="width: 100%" oninput="renderSuppliers()" />
+				</div>
+				<div class="supplier-list" id="supplierList">
+					<div class="loading" data-i18n="loading">Loading…</div>
+				</div>
+			</aside>
+
+			<!-- ── Package pane ─────────────────────────────────────── -->
+			<main class="main" id="mainPane">
+				<div class="empty" id="noSupplier">
+					<div class="big" data-i18n="pickTitle">Select a supplier</div>
+					<div data-i18n="pickSub">Choose a supplier on the left, or add a new one, to manage its product folders.</div>
+				</div>
+
+				<div id="supplierView" style="display: none">
+					<div class="pane-head">
+						<div>
+							<h1 id="svName">—</h1>
+							<div class="meta" id="svMeta"></div>
+						</div>
+						<div class="pane-actions">
+							<button class="btn sm" onclick="openSupplierModal(true)">✎ <span data-i18n="edit">Edit</span></button>
+							<button class="btn sm danger" onclick="deleteSupplier()">🗑 <span data-i18n="delete">Delete</span></button>
+						</div>
+					</div>
+
+					<div class="cat-tabs" id="catTabs"></div>
+
+					<!-- Upload -->
+					<div
+						class="dropzone"
+						id="dropzone"
+						onclick="document.getElementById('fileInput').click()"
+					>
+						<div class="dz-title" data-i18n="dropTitle">Drop zipped product folders here</div>
+						<div class="dz-sub" data-i18n="dropSub">or click to choose .zip files downloaded from WeChat / QQ</div>
+						<div class="dz-controls" onclick="event.stopPropagation()">
+							<label style="font-size: 12px; color: var(--muted)" data-i18n="uploadAs">Upload as:</label>
+							<select id="uploadCategory"></select>
+							<button class="btn sm" onclick="document.getElementById('fileInput').click()" data-i18n="chooseFiles">Choose files</button>
+						</div>
+						<input type="file" id="fileInput" accept=".zip,application/zip,application/x-zip-compressed" multiple style="display: none" />
+					</div>
+					<div id="uploadQueue"></div>
+
+					<!-- Package toolbar -->
+					<div class="toolbar">
+						<input type="search" id="pkgSearch" placeholder="Search product folders…" oninput="scheduleRenderPackages()" />
+						<select id="statusFilter" onchange="renderPackages()">
+							<option value="" data-i18n="allStatuses">All statuses</option>
+						</select>
+					</div>
+
+					<div id="pkgArea"></div>
+				</div>
+			</main>
+		</div>
+
+		<!-- ── Supplier modal ───────────────────────────────────────── -->
+		<div class="modal-bg" id="supplierModal">
+			<div class="modal">
+				<h3 id="smTitle" data-i18n="addSupplier">Add supplier</h3>
+				<div class="field">
+					<label data-i18n="fName">Supplier name *</label>
+					<input type="text" id="smName" placeholder="e.g. Shenzhen Case Studio" />
+				</div>
+				<div class="field">
+					<label data-i18n="fLocation">Shop Location</label>
+					<input type="text" id="smLocation" placeholder="e.g. Huaqiangbei, Shenzhen" />
+				</div>
+				<div class="field">
+					<label data-i18n="fNotes">Notes</label>
+					<textarea id="smNotes" placeholder="What they specialise in, terms, etc."></textarea>
+				</div>
+				<div class="modal-err" id="smErr"></div>
+				<div class="modal-actions">
+					<button class="btn" onclick="closeModal('supplierModal')" data-i18n="cancel">Cancel</button>
+					<button class="btn primary" id="smSave" onclick="saveSupplier()" data-i18n="save">Save</button>
+				</div>
+			</div>
+		</div>
+
+		<!-- ── Package edit modal ───────────────────────────────────── -->
+		<div class="modal-bg" id="pkgModal">
+			<div class="modal">
+				<h3 data-i18n="editPackage">Edit product folder</h3>
+				<div class="field">
+					<label data-i18n="fTitle">Title</label>
+					<input type="text" id="pmTitle" />
+				</div>
+				<div class="field">
+					<label data-i18n="fCategory">Category</label>
+					<select id="pmCategory"></select>
+				</div>
+				<div class="field">
+					<label data-i18n="fStatus">Status</label>
+					<select id="pmStatus"></select>
+				</div>
+				<div class="field">
+					<label data-i18n="fNotes">Notes</label>
+					<textarea id="pmNotes"></textarea>
+				</div>
+				<div class="modal-err" id="pmErr"></div>
+				<div class="modal-actions">
+					<button class="btn" onclick="closeModal('pkgModal')" data-i18n="cancel">Cancel</button>
+					<button class="btn primary" id="pmSave" onclick="savePackage()" data-i18n="save">Save</button>
+				</div>
+			</div>
+		</div>
+
+		<div id="toast"></div>
+
+		<script>
+			'use strict'
+			// ── Same-origin API (cookies carry the session) ──────────────────────
+			const API = window.location.origin
+			const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
+
+			// ── i18n (lightweight; labels applied via [data-i18n]) ────────────────
+			const STR = {
+				brand: { en: 'Sourcing Library', zh: '货源库' },
+				brandSub: { en: 'Supplier design intake', zh: '供应商设计归档' },
+				dashboard: { en: 'Dashboard', zh: '仪表盘' },
+				logout: { en: 'Log out', zh: '退出' },
+				suppliers: { en: 'Suppliers', zh: '供应商' },
+				add: { en: 'Add', zh: '新增' },
+				loading: { en: 'Loading…', zh: '加载中…' },
+				pickTitle: { en: 'Select a supplier', zh: '选择一个供应商' },
+				pickSub: { en: 'Choose a supplier on the left, or add a new one, to manage its product folders.', zh: '在左侧选择供应商，或新增一个，以管理其产品文件夹。' },
+				edit: { en: 'Edit', zh: '编辑' },
+				delete: { en: 'Delete', zh: '删除' },
+				dropTitle: { en: 'Drop zipped product folders here', zh: '将产品压缩包拖到此处' },
+				dropSub: { en: 'or click to choose .zip files downloaded from WeChat / QQ', zh: '或点击选择从微信 / QQ 下载的 .zip 文件' },
+				uploadAs: { en: 'Upload as:', zh: '上传为：' },
+				chooseFiles: { en: 'Choose files', zh: '选择文件' },
+				allStatuses: { en: 'All statuses', zh: '全部状态' },
+				addSupplier: { en: 'Add supplier', zh: '新增供应商' },
+				editSupplier: { en: 'Edit supplier', zh: '编辑供应商' },
+				fName: { en: 'Supplier name *', zh: '供应商名称 *' },
+				fLocation: { en: 'Shop Location', zh: '店铺位置' },
+				fNotes: { en: 'Notes', zh: '备注' },
+				fTitle: { en: 'Title', zh: '标题' },
+				fCategory: { en: 'Category', zh: '类别' },
+				fStatus: { en: 'Status', zh: '状态' },
+				cancel: { en: 'Cancel', zh: '取消' },
+				save: { en: 'Save', zh: '保存' },
+				editPackage: { en: 'Edit product folder', zh: '编辑产品文件夹' },
+				allCat: { en: 'All', zh: '全部' },
+				colProduct: { en: 'Product folder', zh: '产品文件夹' },
+				colCategory: { en: 'Category', zh: '类别' },
+				colSize: { en: 'Size', zh: '大小' },
+				colStatus: { en: 'Status', zh: '状态' },
+				colAdded: { en: 'Added', zh: '添加时间' },
+				colActions: { en: '', zh: '' },
+				noPackages: { en: 'No product folders yet', zh: '暂无产品文件夹' },
+				noPackagesSub: { en: 'Upload the zip folders you downloaded for this supplier.', zh: '上传你为该供应商下载的压缩包。' },
+				noMatch: { en: 'No folders match your filters.', zh: '没有符合筛选条件的文件夹。' },
+				download: { en: 'Download', zh: '下载' },
+			}
+			let LANG = localStorage.getItem('sourcingLang') || 'en'
+			function t(key) {
+				return (STR[key] && STR[key][LANG]) || (STR[key] && STR[key].en) || key
+			}
+			function applyLang() {
+				document.documentElement.lang = LANG === 'zh' ? 'zh' : 'en'
+				document.querySelectorAll('[data-i18n]').forEach((el) => {
+					el.textContent = t(el.getAttribute('data-i18n'))
+				})
+				document.querySelectorAll('.lang-switch button').forEach((b) => b.classList.toggle('active', b.dataset.lang === LANG))
+			}
+			function setLang(l) {
+				LANG = l
+				localStorage.setItem('sourcingLang', l)
+				applyLang()
+				renderAll()
+			}
+
+			// ── Toast ─────────────────────────────────────────────────────────
+			let toastTimer = null
+			function toast(msg, kind) {
+				const el = document.getElementById('toast')
+				el.textContent = msg
+				el.className = 'show' + (kind ? ' ' + kind : '')
+				clearTimeout(toastTimer)
+				toastTimer = setTimeout(() => (el.className = ''), 3200)
+			}
+
+			// ── Fetch helper ────────────────────────────────────────────────────
+			async function api(path, opts = {}) {
+				const res = await fetch(API + path, { credentials: 'same-origin', ...opts })
+				if (res.status === 401) {
+					window.location.href = '/login'
+					throw new Error('Not signed in')
+				}
+				const ct = res.headers.get('content-type') || ''
+				const data = ct.includes('application/json') ? await res.json() : {}
+				if (!res.ok) throw new Error(data.error || `Request failed (HTTP ${res.status})`)
+				return data
+			}
+
+			function fmtBytes(n) {
+				const b = Number(n) || 0
+				if (b < 1024) return b + ' B'
+				const u = ['KB', 'MB', 'GB', 'TB']
+				let v = b / 1024,
+					i = 0
+				while (v >= 1024 && i < u.length - 1) {
+					v /= 1024
+					i++
+				}
+				return (v >= 100 ? Math.round(v) : v.toFixed(1)) + ' ' + u[i]
+			}
+			function fmtDate(sec) {
+				if (!sec) return '—'
+				const d = new Date(sec * 1000)
+				return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+			}
+
+			// ── State ─────────────────────────────────────────────────────────
+			let META = { categories: [], statuses: [] }
+			let SUPPLIERS = []
+			let PACKAGES = []
+			let selectedId = null
+			let catFilter = 'all'
+			let editingSupplier = false
+			let editingPkgId = null
+
+			function catLabel(id) {
+				const c = META.categories.find((x) => x.id === id)
+				if (!c) return id
+				return LANG === 'zh' ? c.label_zh : c.label
+			}
+			function statusLabel(id) {
+				const s = META.statuses.find((x) => x.id === id)
+				if (!s) return id
+				return LANG === 'zh' ? s.label_zh : s.label
+			}
+
+			// ── Load ──────────────────────────────────────────────────────────
+			async function boot() {
+				applyLang()
+				try {
+					const me = await api('/api/auth/me')
+					if (me.user) document.getElementById('whoami').textContent = (LANG === 'zh' ? '已登录：' : 'Signed in: ') + me.user
+					if (me.authEnabled === false) document.getElementById('logoutBtn').style.display = 'none'
+				} catch (e) {
+					/* handled by api() redirect */
+				}
+				try {
+					META = await api('/api/sourcing/meta')
+				} catch (e) {
+					toast(e.message, 'err')
+				}
+				fillCategorySelects()
+				fillStatusSelects()
+				await loadSuppliers()
+			}
+
+			function fillCategorySelects() {
+				const uploadSel = document.getElementById('uploadCategory')
+				const pmSel = document.getElementById('pmCategory')
+				const opts = META.categories.map((c) => `<option value="${c.id}">${esc(LANG === 'zh' ? c.label_zh : c.label)}</option>`).join('')
+				uploadSel.innerHTML = opts
+				pmSel.innerHTML = opts
+			}
+			function fillStatusSelects() {
+				const sf = document.getElementById('statusFilter')
+				sf.innerHTML = `<option value="">${esc(t('allStatuses'))}</option>` + META.statuses.map((s) => `<option value="${s.id}">${esc(LANG === 'zh' ? s.label_zh : s.label)}</option>`).join('')
+				const pm = document.getElementById('pmStatus')
+				pm.innerHTML = META.statuses.map((s) => `<option value="${s.id}">${esc(LANG === 'zh' ? s.label_zh : s.label)}</option>`).join('')
+			}
+
+			async function loadSuppliers() {
+				try {
+					const data = await api('/api/sourcing/suppliers')
+					SUPPLIERS = data.suppliers || []
+					renderSuppliers()
+					if (selectedId && !SUPPLIERS.some((s) => s.id === selectedId)) selectedId = null
+					if (selectedId) renderSupplierView()
+				} catch (e) {
+					document.getElementById('supplierList').innerHTML = `<div class="empty">${esc(e.message)}</div>`
+				}
+			}
+
+			function renderSuppliers() {
+				const q = (document.getElementById('supplierSearch').value || '').toLowerCase()
+				const list = document.getElementById('supplierList')
+				const rows = SUPPLIERS.filter((s) => !q || s.name.toLowerCase().includes(q) || (s.location || '').toLowerCase().includes(q))
+				if (!SUPPLIERS.length) {
+					list.innerHTML = `<div class="empty" style="padding:30px 14px"><div class="big">${LANG === 'zh' ? '暂无供应商' : 'No suppliers yet'}</div><div>${LANG === 'zh' ? '点击“新增”添加第一个货源。' : 'Click “Add” to record your first supplier.'}</div></div>`
+					return
+				}
+				if (!rows.length) {
+					list.innerHTML = `<div class="empty" style="padding:30px 14px">${LANG === 'zh' ? '无匹配供应商' : 'No matching suppliers'}</div>`
+					return
+				}
+				list.innerHTML = rows
+					.map((s) => {
+						const active = s.id === selectedId ? ' active' : ''
+						const loc = s.location ? esc(s.location) : LANG === 'zh' ? '未填写所在地' : 'No location set'
+						return `<div class="supplier-card${active}" onclick="selectSupplier(${s.id})">
+							<div class="name"><span>${esc(s.name)}</span><span class="pill">${s.package_count || 0}</span></div>
+							<div class="loc">📍 ${loc}</div>
+						</div>`
+					})
+					.join('')
+			}
+
+			function selectSupplier(id) {
+				selectedId = id
+				catFilter = 'all'
+				renderSuppliers()
+				renderSupplierView()
+				loadPackages()
+			}
+
+			function currentSupplier() {
+				return SUPPLIERS.find((s) => s.id === selectedId) || null
+			}
+
+			function renderSupplierView() {
+				const s = currentSupplier()
+				document.getElementById('noSupplier').style.display = s ? 'none' : 'block'
+				document.getElementById('supplierView').style.display = s ? 'block' : 'none'
+				if (!s) return
+				document.getElementById('svName').textContent = s.name
+				const meta = []
+				if (s.location) meta.push(`<span>📍 ${esc(s.location)}</span>`)
+				if (s.notes) meta.push(`<span style="color:var(--muted)">📝 ${esc(s.notes)}</span>`)
+				document.getElementById('svMeta').innerHTML = meta.join('') || `<span>${LANG === 'zh' ? '暂无店铺位置' : 'No shop location set yet'}</span>`
+				renderCatTabs()
+			}
+
+			function renderCatTabs() {
+				const s = currentSupplier()
+				if (!s) return
+				const counts = s.package_counts || {}
+				const total = s.package_count || 0
+				const tabs = [{ id: 'all', label: t('allCat'), count: total }].concat(META.categories.map((c) => ({ id: c.id, label: catLabel(c.id), count: counts[c.id] || 0 })))
+				document.getElementById('catTabs').innerHTML = tabs
+					.map((tb) => `<button class="cat-tab${tb.id === catFilter ? ' active' : ''}" onclick="setCatFilter('${tb.id}')">${esc(tb.label)} <span class="count">${tb.count}</span></button>`)
+					.join('')
+			}
+			function setCatFilter(id) {
+				catFilter = id
+				if (id !== 'all') document.getElementById('uploadCategory').value = id
+				renderCatTabs()
+				renderPackages()
+			}
+
+			async function loadPackages() {
+				if (!selectedId) return
+				const area = document.getElementById('pkgArea')
+				area.innerHTML = `<div class="loading">${esc(t('loading'))}</div>`
+				try {
+					const data = await api('/api/sourcing/packages?supplier_id=' + selectedId)
+					PACKAGES = data.packages || []
+					renderPackages()
+				} catch (e) {
+					area.innerHTML = `<div class="empty">${esc(e.message)}</div>`
+				}
+			}
+
+			let renderTimer = null
+			function scheduleRenderPackages() {
+				clearTimeout(renderTimer)
+				renderTimer = setTimeout(renderPackages, 140)
+			}
+
+			function renderPackages() {
+				const area = document.getElementById('pkgArea')
+				const q = (document.getElementById('pkgSearch').value || '').toLowerCase()
+				const st = document.getElementById('statusFilter').value
+				let rows = PACKAGES.slice()
+				if (catFilter !== 'all') rows = rows.filter((p) => p.category === catFilter)
+				if (st) rows = rows.filter((p) => p.status === st)
+				if (q) rows = rows.filter((p) => (p.title || '').toLowerCase().includes(q) || (p.original_filename || '').toLowerCase().includes(q) || (p.notes || '').toLowerCase().includes(q))
+
+				if (!PACKAGES.length) {
+					area.innerHTML = `<div class="empty"><div class="big">${esc(t('noPackages'))}</div><div>${esc(t('noPackagesSub'))}</div></div>`
+					return
+				}
+				if (!rows.length) {
+					area.innerHTML = `<div class="empty">${esc(t('noMatch'))}</div>`
+					return
+				}
+				const body = rows
+					.map((p) => {
+						const title = esc(p.title || p.original_filename || 'Untitled')
+						const fname = p.original_filename && p.original_filename !== p.title ? `<div class="pkg-sub">${esc(p.original_filename)}${p.uploaded_by ? ' · ' + esc(p.uploaded_by) : ''}</div>` : p.uploaded_by ? `<div class="pkg-sub">${esc(p.uploaded_by)}</div>` : ''
+						const statusOpts = META.statuses.map((s) => `<option value="${s.id}"${s.id === p.status ? ' selected' : ''}>${esc(LANG === 'zh' ? s.label_zh : s.label)}</option>`).join('')
+						return `<tr>
+							<td><div class="pkg-title">${title}</div>${fname}</td>
+							<td><span class="badge cat">${esc(catLabel(p.category))}</span></td>
+							<td style="color:var(--muted)">${fmtBytes(p.size_bytes)}</td>
+							<td><select class="status-select st-${esc(p.status)}" onchange="changeStatus(${p.id}, this.value)">${statusOpts}</select></td>
+							<td style="color:var(--muted);white-space:nowrap">${fmtDate(p.created_at)}</td>
+							<td><div class="row-actions">
+								<button class="iconbtn" title="${esc(t('download'))}" onclick="downloadPkg(${p.id})"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 11 5 5 5-5"/><path d="M5 21h14"/></svg></button>
+								<button class="iconbtn" title="${esc(t('edit'))}" onclick="openPkgModal(${p.id})"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
+								<button class="iconbtn danger" title="${esc(t('delete'))}" onclick="deletePkg(${p.id})"><svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg></button>
+							</div></td>
+						</tr>`
+					})
+					.join('')
+				area.innerHTML = `<table class="pkg-table"><thead><tr>
+					<th>${esc(t('colProduct'))}</th><th>${esc(t('colCategory'))}</th><th>${esc(t('colSize'))}</th><th>${esc(t('colStatus'))}</th><th>${esc(t('colAdded'))}</th><th></th>
+				</tr></thead><tbody>${body}</tbody></table>`
+			}
+
+			function renderAll() {
+				fillCategorySelects()
+				fillStatusSelects()
+				renderSuppliers()
+				renderSupplierView()
+				renderPackages()
+			}
+
+			// ── Supplier CRUD ───────────────────────────────────────────────────
+			function openSupplierModal(edit) {
+				editingSupplier = !!edit
+				const s = edit ? currentSupplier() : null
+				document.getElementById('smTitle').textContent = edit ? t('editSupplier') : t('addSupplier')
+				document.getElementById('smName').value = s ? s.name : ''
+				document.getElementById('smLocation').value = s ? s.location : ''
+				document.getElementById('smNotes').value = s ? s.notes : ''
+				document.getElementById('smErr').textContent = ''
+				openModal('supplierModal')
+				setTimeout(() => document.getElementById('smName').focus(), 50)
+			}
+
+			async function saveSupplier() {
+				const body = {
+					name: document.getElementById('smName').value.trim(),
+					location: document.getElementById('smLocation').value.trim(),
+					notes: document.getElementById('smNotes').value.trim(),
+				}
+				if (!body.name) {
+					document.getElementById('smErr').textContent = LANG === 'zh' ? '请填写供应商名称。' : 'Please enter a supplier name.'
+					return
+				}
+				const btn = document.getElementById('smSave')
+				btn.disabled = true
+				try {
+					let data
+					if (editingSupplier && selectedId) {
+						data = await api('/api/sourcing/suppliers/' + selectedId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+					} else {
+						data = await api('/api/sourcing/suppliers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+						if (data.supplier) selectedId = data.supplier.id
+					}
+					SUPPLIERS = data.suppliers || SUPPLIERS
+					closeModal('supplierModal')
+					renderSuppliers()
+					renderSupplierView()
+					toast(LANG === 'zh' ? '已保存' : 'Saved', 'ok')
+				} catch (e) {
+					document.getElementById('smErr').textContent = e.message
+				} finally {
+					btn.disabled = false
+				}
+			}
+
+			async function deleteSupplier() {
+				const s = currentSupplier()
+				if (!s) return
+				const n = s.package_count || 0
+				const msg = LANG === 'zh' ? `删除“${s.name}”？这将同时删除其 ${n} 个产品文件夹，且无法撤销。` : `Delete “${s.name}”? This also removes its ${n} product folder(s) and cannot be undone.`
+				if (!confirm(msg)) return
+				try {
+					const data = await api('/api/sourcing/suppliers/' + s.id, { method: 'DELETE' })
+					SUPPLIERS = data.suppliers || []
+					selectedId = null
+					renderSuppliers()
+					renderSupplierView()
+					toast(LANG === 'zh' ? '供应商已删除' : 'Supplier deleted', 'ok')
+				} catch (e) {
+					toast(e.message, 'err')
+				}
+			}
+
+			// ── Package edit / status / delete ──────────────────────────────────
+			function openPkgModal(id) {
+				const p = PACKAGES.find((x) => x.id === id)
+				if (!p) return
+				editingPkgId = id
+				document.getElementById('pmTitle').value = p.title || ''
+				document.getElementById('pmCategory').value = p.category
+				document.getElementById('pmStatus').value = p.status
+				document.getElementById('pmNotes').value = p.notes || ''
+				document.getElementById('pmErr').textContent = ''
+				openModal('pkgModal')
+			}
+
+			async function savePackage() {
+				if (!editingPkgId) return
+				const body = {
+					title: document.getElementById('pmTitle').value.trim(),
+					category: document.getElementById('pmCategory').value,
+					status: document.getElementById('pmStatus').value,
+					notes: document.getElementById('pmNotes').value.trim(),
+				}
+				const btn = document.getElementById('pmSave')
+				btn.disabled = true
+				try {
+					const data = await api('/api/sourcing/packages/' + editingPkgId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+					if (data.suppliers) SUPPLIERS = data.suppliers
+					closeModal('pkgModal')
+					await loadPackages()
+					renderSuppliers()
+					renderSupplierView()
+					toast(LANG === 'zh' ? '已保存' : 'Saved', 'ok')
+				} catch (e) {
+					document.getElementById('pmErr').textContent = e.message
+				} finally {
+					btn.disabled = false
+				}
+			}
+
+			async function changeStatus(id, status) {
+				try {
+					await api('/api/sourcing/packages/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) })
+					const p = PACKAGES.find((x) => x.id === id)
+					if (p) p.status = status
+					renderPackages()
+				} catch (e) {
+					toast(e.message, 'err')
+					loadPackages()
+				}
+			}
+
+			async function deletePkg(id) {
+				const p = PACKAGES.find((x) => x.id === id)
+				if (!p) return
+				const msg = LANG === 'zh' ? `删除“${p.title || p.original_filename}”？此操作无法撤销。` : `Delete “${p.title || p.original_filename}”? This cannot be undone.`
+				if (!confirm(msg)) return
+				try {
+					const data = await api('/api/sourcing/packages/' + id, { method: 'DELETE' })
+					if (data.suppliers) SUPPLIERS = data.suppliers
+					PACKAGES = PACKAGES.filter((x) => x.id !== id)
+					renderPackages()
+					renderSuppliers()
+					renderSupplierView()
+					toast(LANG === 'zh' ? '已删除' : 'Deleted', 'ok')
+				} catch (e) {
+					toast(e.message, 'err')
+				}
+			}
+
+			function downloadPkg(id) {
+				// Navigating to the download URL keeps the session cookie and lets the
+				// browser save the file with its original name (Content-Disposition).
+				window.location.href = API + '/api/sourcing/packages/' + id + '/download'
+			}
+
+			// ── Upload (streamed via XHR for progress) ────────────────────────────
+			function handleFiles(files) {
+				if (!selectedId) {
+					toast(LANG === 'zh' ? '请先选择供应商。' : 'Select a supplier first.', 'err')
+					return
+				}
+				const category = document.getElementById('uploadCategory').value
+				;[...files].forEach((f) => uploadOne(f, category))
+			}
+
+			function uploadOne(file, category) {
+				const isZip = /\.zip$/i.test(file.name) || file.type === 'application/zip' || file.type === 'application/x-zip-compressed'
+				if (!isZip) {
+					toast((LANG === 'zh' ? '不是 .zip 文件：' : 'Not a .zip file: ') + file.name, 'err')
+					return
+				}
+				const queue = document.getElementById('uploadQueue')
+				const row = document.createElement('div')
+				row.className = 'upload-row'
+				row.innerHTML = `<span class="fname">${esc(file.name)}</span><div class="progress"><div></div></div><span class="pct" style="color:var(--muted);min-width:38px;text-align:right">0%</span>`
+				queue.prepend(row)
+				const bar = row.querySelector('.progress > div')
+				const pct = row.querySelector('.pct')
+
+				const params = new URLSearchParams({ supplier_id: String(selectedId), category, filename: file.name })
+				const xhr = new XMLHttpRequest()
+				xhr.open('POST', API + '/api/sourcing/packages/upload?' + params.toString())
+				xhr.withCredentials = true
+				xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+				xhr.upload.onprogress = (e) => {
+					if (e.lengthComputable) {
+						const p = Math.round((e.loaded / e.total) * 100)
+						bar.style.width = p + '%'
+						pct.textContent = p + '%'
+					}
+				}
+				xhr.onload = () => {
+					let data = {}
+					try {
+						data = JSON.parse(xhr.responseText)
+					} catch {}
+					if (xhr.status >= 200 && xhr.status < 300) {
+						pct.textContent = '✓'
+						bar.style.width = '100%'
+						if (data.suppliers) SUPPLIERS = data.suppliers
+						setTimeout(() => row.remove(), 1200)
+						loadPackages()
+						renderSuppliers()
+						renderSupplierView()
+						toast((LANG === 'zh' ? '已上传：' : 'Uploaded: ') + file.name, 'ok')
+					} else {
+						if (xhr.status === 401) {
+							window.location.href = '/login'
+							return
+						}
+						pct.textContent = '✕'
+						pct.style.color = 'var(--red)'
+						toast((data.error || (LANG === 'zh' ? '上传失败' : 'Upload failed')) + ' — ' + file.name, 'err')
+						setTimeout(() => row.remove(), 4000)
+					}
+				}
+				xhr.onerror = () => {
+					pct.textContent = '✕'
+					pct.style.color = 'var(--red)'
+					toast((LANG === 'zh' ? '网络错误：' : 'Network error: ') + file.name, 'err')
+					setTimeout(() => row.remove(), 4000)
+				}
+				xhr.send(file)
+			}
+
+			// ── Modal helpers ─────────────────────────────────────────────────
+			function openModal(id) {
+				document.getElementById(id).classList.add('open')
+			}
+			function closeModal(id) {
+				document.getElementById(id).classList.remove('open')
+			}
+
+			// ── Wire up events ─────────────────────────────────────────────────
+			document.getElementById('fileInput').addEventListener('change', (e) => {
+				handleFiles(e.target.files)
+				e.target.value = ''
+			})
+			const dz = document.getElementById('dropzone')
+			;['dragenter', 'dragover'].forEach((ev) =>
+				dz.addEventListener(ev, (e) => {
+					e.preventDefault()
+					dz.classList.add('drag')
+				}),
+			)
+			;['dragleave', 'drop'].forEach((ev) =>
+				dz.addEventListener(ev, (e) => {
+					e.preventDefault()
+					if (ev === 'dragleave' && dz.contains(e.relatedTarget)) return
+					dz.classList.remove('drag')
+				}),
+			)
+			dz.addEventListener('drop', (e) => {
+				if (e.dataTransfer && e.dataTransfer.files) handleFiles(e.dataTransfer.files)
+			})
+			// Prevent the whole window from navigating away if a file is dropped outside the zone.
+			window.addEventListener('dragover', (e) => e.preventDefault())
+			window.addEventListener('drop', (e) => e.preventDefault())
+
+			document.querySelectorAll('.modal-bg').forEach((bg) =>
+				bg.addEventListener('click', (e) => {
+					if (e.target === bg) bg.classList.remove('open')
+				}),
+			)
+			document.addEventListener('keydown', (e) => {
+				if (e.key === 'Escape') document.querySelectorAll('.modal-bg.open').forEach((m) => m.classList.remove('open'))
+			})
+
+			document.getElementById('logoutBtn').addEventListener('click', async () => {
+				try {
+					await fetch(API + '/api/auth/logout', { method: 'POST', credentials: 'same-origin' })
+				} catch {}
+				window.location.href = '/login'
+			})
+
+			boot()
+		</script>
+	</body>
+</html>

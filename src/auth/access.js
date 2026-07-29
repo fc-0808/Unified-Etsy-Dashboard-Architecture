@@ -64,6 +64,13 @@ const PACKER_ALLOW = [
 	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/clear-needs-purchase$/ },
 	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/items\/component-status$/ },
 	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/items\/purchase-state$/ },
+	// Verification (two-person integrity gate) — the packer confirms an order's
+	// products are physically in hand each morning before packing. Only ever
+	// stamps verification state (never finance/listings/admin), so it belongs in
+	// the packer's remit alongside the purchase-status surface above.
+	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/items\/verify$/ },
+	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/verify-all$/ },
+	{ m: 'POST', re: /^\/api\/orders\/bulk-verify$/ },
 	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/mark-packaged$/ },
 	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/unmark-packaged$/ },
 	{ m: 'POST', re: /^\/api\/orders\/bulk-mark-packaged$/ },
@@ -95,6 +102,17 @@ const PACKER_ALLOW = [
 	{ m: 'GET', re: /^\/api\/shop\/stream$/ },
 	{ m: 'POST', re: /^\/api\/shop\/assign$/ },
 	{ m: 'POST', re: /^\/api\/shop\/cost$/ },
+	// "Same product" declarations — see the shopper allowlist below for why the
+	// person on the shop floor is the right (and only) judge of this.
+	{ m: 'POST', re: /^\/api\/route\/product-merges$/ },
+	{ m: 'DELETE', re: /^\/api\/route\/product-merges$/ },
+	// Wrong-model exchange ("Fix model") — a packer working the buy queue may flag a
+	// line whose design is right but the phone model is wrong, so the correct model
+	// is tracked and the line is held out of buying until swapped. These only touch
+	// the local order_exchanges table (no finance / listings / Etsy), so they belong
+	// in the packer's fulfilment remit alongside done/reopen.
+	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/exchanges$/ },
+	{ m: 'DELETE', re: /^\/api\/exchanges\/[^/]+$/ },
 	{ m: 'POST', re: /^\/api\/exchanges\/[^/]+\/done$/ },
 	{ m: 'POST', re: /^\/api\/exchanges\/[^/]+\/reopen$/ },
 	{ m: 'GET', re: /^\/api\/route\/floor-map$/ },
@@ -102,6 +120,11 @@ const PACKER_ALLOW = [
 	{ m: 'GET', re: /^\/api\/route\/manual-image\/[^/]+$/ },
 	{ m: 'GET', re: /^\/api\/route\/substitution-image\/[^/]+$/ },
 	{ m: 'GET', re: /^\/api\/route\/charm-image$/ },
+	// Sourcing Library — the employee's back-office job: register the WeChat/QQ
+	// design suppliers and file the zipped product folders they publish. It only
+	// ever touches the sourcing_* tables + the on-disk zip store (never finance,
+	// listings, Etsy or admin), so the whole surface is in the packer's remit.
+	{ m: '*', re: /^\/api\/sourcing\/.*/ },
 	// Read-only charm shopping list for the Need-to-purchase tab (aggregated charm
 	// pieces + supplier/stall + progress). Status changes go through the per-item
 	// component-status endpoint above, so this stays a read of purchasing data.
@@ -119,6 +142,13 @@ const SHOPPER_ALLOW = [
 	{ m: 'GET', re: /^\/api\/shop\/stream$/ }, // real-time SSE feed
 	{ m: 'POST', re: /^\/api\/shop\/assign$/ }, // update a purchase status
 	{ m: 'POST', re: /^\/api\/shop\/cost$/ }, // set a product/charm purchase cost
+	// Declare / undo "these listings are the same physical product". Two shops
+	// routinely photograph one product differently, which no image hash can link,
+	// so the same order splits into two cards and gets bought twice. The shopper
+	// at the stall is holding the product and is the only reliable judge — this
+	// writes purchasing metadata only (product_merges), never finance/listings.
+	{ m: 'POST', re: /^\/api\/route\/product-merges$/ },
+	{ m: 'DELETE', re: /^\/api\/route\/product-merges$/ },
 	{ m: 'POST', re: /^\/api\/exchanges\/[^/]+\/done$/ }, // mark a wrong-model swap done
 	{ m: 'POST', re: /^\/api\/exchanges\/[^/]+\/reopen$/ }, // undo a swap-done
 	{ m: 'GET', re: /^\/api\/route\/floor-map$/ }, // in-person supplier map
@@ -318,7 +348,8 @@ function createAuth(opts = {}) {
 		if (!enabled) return next()
 		const isDash = req.path === '/' || req.path === '/index.html'
 		const isShop = req.path === '/shop' || req.path === '/shop.html'
-		if (!isDash && !isShop) return next()
+		const isSourcing = req.path === '/sourcing' || req.path === '/sourcing.html'
+		if (!isDash && !isShop && !isSourcing) return next()
 		if (!req.auth || !req.auth.role) return res.redirect('/login')
 		// Guard the full dashboard: a shopper is always bounced to /shop; a packer
 		// is bounced only when NOT on the LAN (so Packing Mode is excluded through
@@ -326,6 +357,9 @@ function createAuth(opts = {}) {
 		if (isDash && req.auth.role !== 'owner') {
 			if (req.auth.role === 'shopper' || !isLocalRequest(req)) return res.redirect('/shop')
 		}
+		// Sourcing Library is a desk task for the owner + packer. A shopper (mobile
+		// in-person shopping only) never sources, so bounce them to their route.
+		if (isSourcing && req.auth.role === 'shopper') return res.redirect('/shop')
 		return next()
 	}
 

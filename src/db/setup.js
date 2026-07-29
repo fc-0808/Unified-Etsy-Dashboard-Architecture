@@ -328,6 +328,12 @@ function initDb(dbPath) {
     CREATE TABLE IF NOT EXISTS listing_phash (
       listing_id  INTEGER PRIMARY KEY,
       phash       TEXT    NOT NULL,
+      -- Design-region hash: the same dHash computed over only the LOWER part of
+      -- the image, dropping the top camera-cutout band. The SAME case design
+      -- photographed on different phone models differs mainly in that top band, so
+      -- this lets re-lists of one product (across models) match when the full-image
+      -- hash can't. Nullable for legacy rows until re-hashed.
+      design_phash TEXT,
       sha         TEXT    NOT NULL,
       algo        TEXT,
       canonical_key TEXT,
@@ -877,6 +883,59 @@ function initDb(dbPath) {
       UNIQUE(listing_id, style_key)
     );
     CREATE INDEX IF NOT EXISTS idx_listing_style_images_listing ON listing_style_images(listing_id);
+
+    -- ─────────────────────────────────────────────────────────────────
+    -- SOURCING LIBRARY (design intake from WeChat/QQ suppliers)
+    --
+    -- Distinct from supplier_directory (which is the physical shopping-mall
+    -- stall map used by the in-person Shopping Route). This is the back-office
+    -- registry the owner + employee use to catalogue the *design* suppliers who
+    -- publish zipped product folders on WeChat / QQ, and to file each downloaded
+    -- zip against the supplier it came from and the product type it contains.
+    --
+    -- sourcing_suppliers — the master supplier list (name + location + the chat
+    --   handles the employee needs to reach them). name is UNIQUE (case-folded
+    --   uniqueness is enforced in the accessor) so a supplier is never entered
+    --   twice. Deleting a supplier cascades to its packages (files removed by
+    --   the route layer, which owns the on-disk store).
+    -- ─────────────────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS sourcing_suppliers (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      name       TEXT    NOT NULL,
+      location   TEXT    NOT NULL DEFAULT '',
+      wechat     TEXT    NOT NULL DEFAULT '',
+      qq         TEXT    NOT NULL DEFAULT '',
+      notes      TEXT    NOT NULL DEFAULT '',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_sourcing_suppliers_name ON sourcing_suppliers(name COLLATE NOCASE);
+
+    -- sourcing_packages — one row per uploaded zip folder of product designs.
+    --   The zip BYTES live on disk under <data>/sourcing-library/<supplierId>/
+    --   <category>/<stored_name> (zips are large + binary — never a good fit for
+    --   a SQLite BLOB); this table is the searchable, sortable index over them.
+    --   category is constrained to the three product types the shop sells so the
+    --   library can be filtered by phone case / grip / charm. sha256 lets us
+    --   detect a byte-identical re-upload; status tracks the intake workflow.
+    CREATE TABLE IF NOT EXISTS sourcing_packages (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      supplier_id       INTEGER NOT NULL REFERENCES sourcing_suppliers(id) ON DELETE CASCADE,
+      category          TEXT    NOT NULL,           -- 'phone_case' | 'grip' | 'charm'
+      title             TEXT    NOT NULL DEFAULT '',
+      original_filename TEXT    NOT NULL DEFAULT '',
+      stored_name       TEXT    NOT NULL,           -- unique on-disk file name (never trusted from client)
+      size_bytes        INTEGER NOT NULL DEFAULT 0,
+      sha256            TEXT    NOT NULL DEFAULT '',
+      status            TEXT    NOT NULL DEFAULT 'new', -- new | in_progress | listed | archived
+      notes             TEXT    NOT NULL DEFAULT '',
+      uploaded_by       TEXT    NOT NULL DEFAULT '',
+      created_at        INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      updated_at        INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_sourcing_packages_supplier ON sourcing_packages(supplier_id);
+    CREATE INDEX IF NOT EXISTS idx_sourcing_packages_category ON sourcing_packages(category);
   `);
 
   // ── Migrations ────────────────────────────────────────────────────────────
@@ -1100,6 +1159,24 @@ function initDb(dbPath) {
     // ON CONFLICT leaves it untouched). Can be cleared (unmark) if set in error.
     ['packaged_at',            'INTEGER'],
 
+    // ── Purchase-completion cohort stamp ────────────────────────────────────────
+    // Unix epoch marking the moment this order became FULLY purchased (its last
+    // outstanding component/line flipped to Purchased so `orderHasOutstanding`
+    // went false). This is the "you finished shopping for this order" timestamp —
+    // distinct from packaged_at (packing) and shipment_notified_at (shipping).
+    //
+    // WHY: the shopper buys an order's items on one trip; the packer packs them the
+    // NEXT morning. This stamp lets the packing queue surface exactly "the orders I
+    // shopped yesterday / on my last trip" (see the `purchased_cohort` filter),
+    // instead of an undifferentiated pile of everything ever purchased — so a
+    // shopped-but-never-packed order can't silently hide in the backlog.
+    //
+    // Re-stamped every time an order transitions outstanding → fully-purchased
+    // (a returned/out-of-stock line that gets re-bought updates it), and cleared
+    // back to NULL if the order falls back to outstanding. Preserved across Etsy
+    // re-syncs (never written by upsertReceipt).
+    ['purchase_completed_at',  'INTEGER'],
+
     // ── Order origin ──────────────────────────────────────────────────────────
     // Distinguishes how a receipt entered the system:
     //   'etsy'   = synced from the Etsy API (the default for every real order).
@@ -1194,6 +1271,7 @@ function initDb(dbPath) {
     CREATE INDEX IF NOT EXISTS idx_receipts_archived_at       ON receipts(archived_at);
     CREATE INDEX IF NOT EXISTS idx_receipts_needs_purchase    ON receipts(needs_purchase_at);
     CREATE INDEX IF NOT EXISTS idx_receipts_packaged_at       ON receipts(packaged_at);
+    CREATE INDEX IF NOT EXISTS idx_receipts_purchase_completed ON receipts(purchase_completed_at);
     CREATE INDEX IF NOT EXISTS idx_receipts_source            ON receipts(source)
   `);
 
@@ -1264,12 +1342,28 @@ function initDb(dbPath) {
     // active. This is distinct from `excluded` (which keeps the line visible for
     // reference but skips it in the next generated route). Reversible via Restore.
     ['dismissed_at', 'INTEGER', 'NULL'],
+    // ── Verification (two-person integrity) ─────────────────────────────────────
+    // "Purchased" is asserted by the SHOPPER in the field; "verified" is confirmed
+    // by the PACKER the next morning when the physical item is actually in hand.
+    // Keeping them separate turns the morning check into a real audit gate (the
+    // packing queue can require verified, not merely purchased) and records WHO
+    // confirmed it. verified_at = unix epoch of the confirmation (NULL = not yet
+    // verified); verified_by = the confirming operator's username.
+    ['verified_at', 'INTEGER', 'NULL'],
+    ['verified_by', 'TEXT', "''"],
   ];
   for (const [col, type, dflt] of newRouteCols) {
     if (!routeCols.includes(col)) {
       db.exec(`ALTER TABLE route_assignments ADD COLUMN ${col} ${type} DEFAULT ${dflt}`);
     }
   }
+
+  // receipt_item_purchase — mirror the verification columns onto no-component
+  // lines (which track a single binary needs_purchase flag) so the verify gate is
+  // uniform across every line-item, however its purchase state is modelled.
+  const ripCols = db.pragma('table_info(receipt_item_purchase)').map(c => c.name);
+  if (!ripCols.includes('verified_at')) db.exec('ALTER TABLE receipt_item_purchase ADD COLUMN verified_at INTEGER');
+  if (!ripCols.includes('verified_by')) db.exec("ALTER TABLE receipt_item_purchase ADD COLUMN verified_by TEXT DEFAULT ''");
 
   // sort_order for supplier_directory — preserves the Excel row order
   const supDirCols = db.pragma('table_info(supplier_directory)').map(c => c.name);
@@ -1311,6 +1405,7 @@ function initDb(dbPath) {
   const phashCols = db.pragma('table_info(listing_phash)').map(c => c.name);
   if (!phashCols.includes('algo')) db.exec('ALTER TABLE listing_phash ADD COLUMN algo TEXT');
   if (!phashCols.includes('canonical_key')) db.exec('ALTER TABLE listing_phash ADD COLUMN canonical_key TEXT');
+  if (!phashCols.includes('design_phash')) db.exec('ALTER TABLE listing_phash ADD COLUMN design_phash TEXT');
   db.exec('CREATE INDEX IF NOT EXISTS idx_listing_phash_canonical ON listing_phash(canonical_key)');
 
   // seq for bulk_job_items — preserves the scanner's natural-sort order
@@ -3400,6 +3495,96 @@ function setRouteDismissed(db, a) {
 }
 
 /**
+ * Set (or clear) the VERIFICATION stamp on a single order line. "Verified" means a
+ * packer physically confirmed the item is in hand — a distinct, stronger signal
+ * than the shopper's "Purchased" assertion. Upsert so a line with no prior saved
+ * assignment can still be verified. Only the verification fields change; charm /
+ * status / supplier fields are preserved. Works for real + manual receipts alike.
+ *
+ * @param {Database.Database} db
+ * @param {{ receipt_id:number, item_key:string, title?:string, verified:boolean, by?:string }} a
+ * @returns {{ receipt_id:number, item_key:string, verified_at:number|null, verified_by:string }}
+ */
+function setRouteVerified(db, a) {
+  if (a.receipt_id == null || !a.item_key) {
+    throw new Error('setRouteVerified requires receipt_id and item_key');
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const verifiedAt = a.verified ? now : null;
+  const verifiedBy = a.verified ? String(a.by || '').slice(0, 60) : '';
+  db.prepare(`
+    INSERT INTO route_assignments (receipt_id, item_key, title, verified_at, verified_by, updated_at)
+    VALUES (@receipt_id, @item_key, @title, @verified_at, @verified_by, @updated_at)
+    ON CONFLICT(receipt_id, item_key) DO UPDATE SET
+      verified_at = excluded.verified_at,
+      verified_by = excluded.verified_by,
+      updated_at  = excluded.updated_at
+  `).run({
+    receipt_id:  Number(a.receipt_id),
+    item_key:    String(a.item_key),
+    title:       a.title ?? '',
+    verified_at: verifiedAt,
+    verified_by: verifiedBy,
+    updated_at:  now,
+  });
+  return { receipt_id: Number(a.receipt_id), item_key: String(a.item_key), verified_at: verifiedAt, verified_by: verifiedBy };
+}
+
+/**
+ * Verify (or unverify) a NO-COMPONENT line tracked in receipt_item_purchase.
+ *
+ * Upsert (not update-only): a no-component product that was in stock is "in hand"
+ * without ever having been flagged to buy, so it may have NO purchase row yet — but
+ * the packer must still be able to verify it (otherwise such an order could never
+ * satisfy the verify gate and would be stranded). On insert we therefore create the
+ * row as needs_purchase = 0 (in hand). On conflict we ONLY stamp the verification
+ * fields — needs_purchase / flagged_at / purchased_at are left exactly as they were.
+ *
+ * @param {Database.Database} db
+ * @param {{ receipt_id:number, item_key:string, title?:string, verified:boolean, by?:string }} a
+ * @returns {number} rows changed
+ */
+function setItemPurchaseVerified(db, a) {
+  const now = Math.floor(Date.now() / 1000);
+  const verifiedAt = a.verified ? now : null;
+  const verifiedBy = a.verified ? String(a.by || '').slice(0, 60) : '';
+  try {
+    const info = db.prepare(`
+      INSERT INTO receipt_item_purchase (receipt_id, item_key, title, needs_purchase, verified_at, verified_by, updated_at)
+      VALUES (@receipt_id, @item_key, @title, 0, @verified_at, @verified_by, @updated_at)
+      ON CONFLICT(receipt_id, item_key) DO UPDATE SET
+        verified_at = excluded.verified_at,
+        verified_by = excluded.verified_by,
+        title       = COALESCE(excluded.title, title),
+        updated_at  = excluded.updated_at
+    `).run({
+      receipt_id:  Number(a.receipt_id),
+      item_key:    String(a.item_key),
+      title:       a.title ?? null,
+      verified_at: verifiedAt,
+      verified_by: verifiedBy,
+      updated_at:  now,
+    });
+    return info.changes || 0;
+  } catch { return 0; }
+}
+
+/**
+ * Clear any VERIFICATION stamp on a single line whenever it is no longer confirmed
+ * in hand (its purchase status regressed). Keeps verification honest without the
+ * caller having to reason about which storage table backs the line.
+ * @param {Database.Database} db
+ */
+function clearRouteVerified(db, receiptId, itemKey) {
+  try {
+    db.prepare("UPDATE route_assignments SET verified_at = NULL, verified_by = '' WHERE receipt_id = ? AND item_key = ?").run(Number(receiptId), String(itemKey));
+  } catch { /* ignore */ }
+  try {
+    db.prepare("UPDATE receipt_item_purchase SET verified_at = NULL, verified_by = '' WHERE receipt_id = ? AND item_key = ?").run(Number(receiptId), String(itemKey));
+  } catch { /* ignore */ }
+}
+
+/**
  * Clear any "removed" markers on every line of a receipt. Used when the operator
  * explicitly pulls an order back into the dashboard via "Add Order", which is an
  * unambiguous intent to un-remove it.
@@ -4211,6 +4396,224 @@ function deleteSupplierDirectoryRow(db, { shop_name, stall }) {
   ).run(shop, st);
   renumberSupplierDirectory(db);
   return info.changes;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SOURCING LIBRARY — design-supplier registry + uploaded-zip index.
+//
+// These accessors follow the same contract as the rest of this module: they take
+// `db` as the first arg, throw Error objects tagged with a `.code`
+// ('REQUIRED' | 'DUPLICATE' | 'NOT_FOUND') that the HTTP layer maps to a status,
+// and never touch the filesystem (the route layer owns the on-disk zip store and
+// deletes files alongside the rows these functions remove).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * List sourcing suppliers (newest-updated first within sort_order), each with a
+ * live package count per category so the UI can render the sidebar in one query.
+ */
+function getSourcingSuppliers(db) {
+  const rows = db.prepare(
+    'SELECT * FROM sourcing_suppliers ORDER BY sort_order ASC, name COLLATE NOCASE ASC'
+  ).all();
+  // Aggregate package counts by (supplier, category) in a single pass.
+  const counts = db.prepare(
+    'SELECT supplier_id, category, COUNT(*) AS n FROM sourcing_packages GROUP BY supplier_id, category'
+  ).all();
+  const byId = new Map();
+  for (const c of counts) {
+    if (!byId.has(c.supplier_id)) byId.set(c.supplier_id, { total: 0, by_category: {} });
+    const e = byId.get(c.supplier_id);
+    e.total += c.n;
+    e.by_category[c.category] = c.n;
+  }
+  return rows.map((r) => ({
+    ...r,
+    package_count: byId.get(r.id) ? byId.get(r.id).total : 0,
+    package_counts: byId.get(r.id) ? byId.get(r.id).by_category : {},
+  }));
+}
+
+/** Fetch a single sourcing supplier by id, or null. */
+function getSourcingSupplierById(db, id) {
+  const n = parseInt(id, 10);
+  if (!Number.isInteger(n)) return null;
+  return db.prepare('SELECT * FROM sourcing_suppliers WHERE id = ?').get(n) || null;
+}
+
+/**
+ * Create a sourcing supplier.
+ * @throws {Error} code 'REQUIRED' (blank name) or 'DUPLICATE' (name taken)
+ * @returns the inserted row
+ */
+function insertSourcingSupplier(db, r) {
+  const name = String(r.name || '').trim();
+  if (!name) throw Object.assign(new Error('Supplier name is required.'), { code: 'REQUIRED' });
+  const clash = db.prepare('SELECT 1 FROM sourcing_suppliers WHERE name = ? COLLATE NOCASE').get(name);
+  if (clash) throw Object.assign(new Error('A supplier with this name already exists.'), { code: 'DUPLICATE' });
+  const maxSort = db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM sourcing_suppliers').get().m;
+  const now = Math.floor(Date.now() / 1000);
+  const info = db.prepare(`
+    INSERT INTO sourcing_suppliers (name, location, wechat, qq, notes, sort_order, created_at, updated_at)
+    VALUES (@name, @location, @wechat, @qq, @notes, @sort, @now, @now)
+  `).run({
+    name,
+    location: String(r.location || '').trim(),
+    wechat: String(r.wechat || '').trim(),
+    qq: String(r.qq || '').trim(),
+    notes: String(r.notes || '').trim(),
+    sort: maxSort + 1,
+    now,
+  });
+  return getSourcingSupplierById(db, info.lastInsertRowid);
+}
+
+/**
+ * Update a sourcing supplier. Unspecified fields keep their current value.
+ * @throws {Error} code 'NOT_FOUND', 'REQUIRED', or 'DUPLICATE'
+ */
+function updateSourcingSupplier(db, id, r) {
+  const cur = getSourcingSupplierById(db, id);
+  if (!cur) throw Object.assign(new Error('Supplier not found.'), { code: 'NOT_FOUND' });
+  const name = r.name != null ? String(r.name).trim() : cur.name;
+  if (!name) throw Object.assign(new Error('Supplier name is required.'), { code: 'REQUIRED' });
+  if (name.toLowerCase() !== String(cur.name).toLowerCase()) {
+    const clash = db.prepare('SELECT 1 FROM sourcing_suppliers WHERE name = ? COLLATE NOCASE AND id <> ?').get(name, cur.id);
+    if (clash) throw Object.assign(new Error('A supplier with this name already exists.'), { code: 'DUPLICATE' });
+  }
+  db.prepare(`
+    UPDATE sourcing_suppliers
+       SET name = @name, location = @location, wechat = @wechat, qq = @qq, notes = @notes,
+           updated_at = @now
+     WHERE id = @id
+  `).run({
+    id: cur.id,
+    name,
+    location: r.location != null ? String(r.location).trim() : cur.location,
+    wechat: r.wechat != null ? String(r.wechat).trim() : cur.wechat,
+    qq: r.qq != null ? String(r.qq).trim() : cur.qq,
+    notes: r.notes != null ? String(r.notes).trim() : cur.notes,
+    now: Math.floor(Date.now() / 1000),
+  });
+  return getSourcingSupplierById(db, cur.id);
+}
+
+/**
+ * Delete a sourcing supplier and (via ON DELETE CASCADE) all its package rows.
+ * Returns the list of package rows removed so the caller can delete their files
+ * from disk. Runs in a transaction so the DB is never left half-deleted.
+ * @throws {Error} code 'NOT_FOUND'
+ */
+function deleteSourcingSupplier(db, id) {
+  const cur = getSourcingSupplierById(db, id);
+  if (!cur) throw Object.assign(new Error('Supplier not found.'), { code: 'NOT_FOUND' });
+  const pkgs = db.prepare('SELECT * FROM sourcing_packages WHERE supplier_id = ?').all(cur.id);
+  const tx = db.transaction(() => {
+    // Explicit child delete first: ON DELETE CASCADE requires foreign_keys=ON,
+    // which we set, but deleting explicitly keeps the intent obvious + portable.
+    db.prepare('DELETE FROM sourcing_packages WHERE supplier_id = ?').run(cur.id);
+    db.prepare('DELETE FROM sourcing_suppliers WHERE id = ?').run(cur.id);
+  });
+  tx();
+  return { supplier: cur, packages: pkgs };
+}
+
+/**
+ * List packages, optionally filtered by supplier, category and a free-text query
+ * (matched against title + original filename + notes). Newest first.
+ * @param {{ supplier_id?, category?, q? }} [opts]
+ */
+function getSourcingPackages(db, opts = {}) {
+  const where = [];
+  const params = {};
+  if (opts.supplier_id != null && opts.supplier_id !== '') {
+    where.push('supplier_id = @supplier_id');
+    params.supplier_id = parseInt(opts.supplier_id, 10);
+  }
+  if (opts.category) {
+    where.push('category = @category');
+    params.category = String(opts.category);
+  }
+  const q = String(opts.q || '').trim();
+  if (q) {
+    where.push('(title LIKE @q OR original_filename LIKE @q OR notes LIKE @q)');
+    params.q = `%${q}%`;
+  }
+  const sql =
+    'SELECT * FROM sourcing_packages' +
+    (where.length ? ' WHERE ' + where.join(' AND ') : '') +
+    ' ORDER BY created_at DESC, id DESC';
+  return db.prepare(sql).all(params);
+}
+
+/** Fetch a single package row by id, or null. */
+function getSourcingPackageById(db, id) {
+  const n = parseInt(id, 10);
+  if (!Number.isInteger(n)) return null;
+  return db.prepare('SELECT * FROM sourcing_packages WHERE id = ?').get(n) || null;
+}
+
+/**
+ * Insert a package index row after its bytes are safely on disk. Validation of
+ * the category / supplier existence happens in the route layer (which also owns
+ * the file); this just records the metadata.
+ * @returns the inserted row
+ */
+function insertSourcingPackage(db, r) {
+  const now = Math.floor(Date.now() / 1000);
+  const info = db.prepare(`
+    INSERT INTO sourcing_packages
+      (supplier_id, category, title, original_filename, stored_name, size_bytes, sha256, status, notes, uploaded_by, created_at, updated_at)
+    VALUES
+      (@supplier_id, @category, @title, @original_filename, @stored_name, @size_bytes, @sha256, @status, @notes, @uploaded_by, @now, @now)
+  `).run({
+    supplier_id: parseInt(r.supplier_id, 10),
+    category: String(r.category),
+    title: String(r.title || '').trim(),
+    original_filename: String(r.original_filename || '').trim(),
+    stored_name: String(r.stored_name),
+    size_bytes: parseInt(r.size_bytes, 10) || 0,
+    sha256: String(r.sha256 || ''),
+    status: String(r.status || 'new'),
+    notes: String(r.notes || '').trim(),
+    uploaded_by: String(r.uploaded_by || '').trim(),
+    now,
+  });
+  return getSourcingPackageById(db, info.lastInsertRowid);
+}
+
+/**
+ * Update a package's editable metadata (title, category, status, notes). The
+ * stored bytes / filename / hash are immutable once uploaded.
+ * @throws {Error} code 'NOT_FOUND'
+ */
+function updateSourcingPackage(db, id, r) {
+  const cur = getSourcingPackageById(db, id);
+  if (!cur) throw Object.assign(new Error('Package not found.'), { code: 'NOT_FOUND' });
+  db.prepare(`
+    UPDATE sourcing_packages
+       SET title = @title, category = @category, status = @status, notes = @notes, updated_at = @now
+     WHERE id = @id
+  `).run({
+    id: cur.id,
+    title: r.title != null ? String(r.title).trim() : cur.title,
+    category: r.category != null ? String(r.category) : cur.category,
+    status: r.status != null ? String(r.status) : cur.status,
+    notes: r.notes != null ? String(r.notes).trim() : cur.notes,
+    now: Math.floor(Date.now() / 1000),
+  });
+  return getSourcingPackageById(db, cur.id);
+}
+
+/**
+ * Delete a package row and return it (so the caller can remove its file).
+ * @throws {Error} code 'NOT_FOUND'
+ */
+function deleteSourcingPackage(db, id) {
+  const cur = getSourcingPackageById(db, id);
+  if (!cur) throw Object.assign(new Error('Package not found.'), { code: 'NOT_FOUND' });
+  db.prepare('DELETE FROM sourcing_packages WHERE id = ?').run(cur.id);
+  return cur;
 }
 
 /** Return the charm shop directory. */
@@ -5680,7 +6083,31 @@ function deleteManualOrder(db, receiptId) {
 /**
  * Toggle the LOCAL shipped state of a manual order (manual orders are never
  * pushed to Etsy, so "shipped" here is a purely local flag the operator sets
- * once a manual order has left the warehouse). source must be 'manual'.
+ * — e.g. from the integrated "Ship with 4PX" auto-complete step, which creates
+ * the label + tracking and then flips this flag). source must be 'manual'.
+ *
+ * CRITICAL — why this stamps `shipment_notified_at`:
+ * Shipping is DECOUPLED from packaging. Marking an order shipped (a label
+ * exists / it is on its way) does NOT mean the operator has physically packed
+ * it, so a just-shipped-but-not-yet-packaged parcel MUST stay in the
+ * "📦 To pack & ship" queue until it is packaged. That queue
+ * (packQueue.readyToPackShipStateSql) only keeps a shipped order when it looks
+ * PRE-TRANSIT: is_shipped=1 AND tracking_code IS NOT NULL AND
+ * shipment_notified_at IS NOT NULL (recent) AND carrier_confirmed_at IS NULL.
+ * If we set is_shipped=1 WITHOUT stamping shipment_notified_at, the order fails
+ * the Pre-transit branch AND is caught by the In-transit filter's
+ * `shipment_notified_at IS NULL` clause — so it silently vanishes from the pack
+ * queue even though it was never packaged. Stamping it here (COALESCE preserves
+ * any earlier real timestamp) makes a manual ship behave EXACTLY like the Etsy
+ * ship path (shipEtsyReceipt) and the manual add-tracking path
+ * (setManualOrderTracking), which both already do this. carrier_confirmed_at /
+ * tracking_checked_at are reset so the parcel legitimately re-enters life as
+ * Pre-transit until the carrier physically scans it.
+ *
+ * Un-shipping reverts cleanly to "needs shipping" and CLEARS the shipment
+ * timestamps (mirroring setManualOrderTracking's clear path) so a later re-ship
+ * gets a fresh Pre-transit window instead of a stale, already-expired one.
+ * (tracking_code itself is left intact — it is carrier metadata, not ship state.)
  *
  * @param {Database.Database} db
  * @param {number} receiptId
@@ -5692,9 +6119,26 @@ function setManualOrderShipped(db, receiptId, shipped) {
   const existing = db.prepare('SELECT source FROM receipts WHERE receipt_id = ?').get(rid);
   if (!existing) { const e = new Error('Order not found.'); e.code = 'NOT_FOUND'; throw e; }
   if (existing.source !== 'manual') { const e = new Error('Only manual orders can be marked shipped locally.'); e.code = 'FORBIDDEN'; throw e; }
+  const now = Math.floor(Date.now() / 1000);
   const info = shipped
-    ? db.prepare("UPDATE receipts SET is_shipped = 1, status = 'Completed' WHERE receipt_id = ? AND source = 'manual'").run(rid)
-    : db.prepare("UPDATE receipts SET is_shipped = 0, status = 'Paid'      WHERE receipt_id = ? AND source = 'manual'").run(rid);
+    ? db.prepare(`
+        UPDATE receipts SET
+          is_shipped           = 1,
+          status               = 'Completed',
+          shipment_notified_at = COALESCE(shipment_notified_at, @now),
+          carrier_confirmed_at = NULL,
+          tracking_checked_at  = NULL
+        WHERE receipt_id = @rid AND source = 'manual'
+      `).run({ now, rid })
+    : db.prepare(`
+        UPDATE receipts SET
+          is_shipped           = 0,
+          status               = 'Paid',
+          shipment_notified_at = NULL,
+          carrier_confirmed_at = NULL,
+          tracking_checked_at  = NULL
+        WHERE receipt_id = @rid AND source = 'manual'
+      `).run({ rid });
   return info.changes > 0;
 }
 
@@ -5846,6 +6290,9 @@ module.exports = {
   getPurchaseSyncRun,
   upsertRouteAssignment,
   setRouteDismissed,
+  setRouteVerified,
+  setItemPurchaseVerified,
+  clearRouteVerified,
   clearDismissedByReceipt,
   getAllRouteAssignments,
   upsertProductAssignment,
@@ -5909,6 +6356,16 @@ module.exports = {
   MANUAL_SHOP_NAME,
   getSupplierDirectory,
   getCharmShopDirectory,
+  getSourcingSuppliers,
+  getSourcingSupplierById,
+  insertSourcingSupplier,
+  updateSourcingSupplier,
+  deleteSourcingSupplier,
+  getSourcingPackages,
+  getSourcingPackageById,
+  insertSourcingPackage,
+  updateSourcingPackage,
+  deleteSourcingPackage,
   getProductMapByNorm,
   setProductCost,
   setCharmCost,

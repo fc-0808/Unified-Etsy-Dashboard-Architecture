@@ -11,6 +11,10 @@
 		<link rel="manifest" href="/shop.webmanifest" />
 		<link rel="apple-touch-icon" href="/shop-icon.svg" />
 		<link rel="icon" type="image/svg+xml" href="/shop-icon.svg" />
+		<!-- Durable offline write-queue (IndexedDB + Background Sync). Loaded before
+		     the app script so ShopSync is available at boot; cached in the SW shell
+		     so it works offline after first load. -->
+		<script src="/shop-sync.js"></script>
 		<style>
 			*,
 			*::before,
@@ -477,7 +481,9 @@
 			.markall.exbtn {
 				background: var(--blue);
 			}
-			/* Divider inside a supplier group separating "buy" from "exchange". */
+			/* Divider inside a supplier group separating "buy" from "exchange" — and
+			   from the charms this same merchant sells (purple, matching the Charms
+			   section accent, so the kind of item is obvious at a glance). */
 			.gsublabel {
 				font-size: 10.5px;
 				font-weight: 800;
@@ -487,6 +493,9 @@
 				margin: 4px 2px 8px;
 				padding-top: 10px;
 				border-top: 1px dashed var(--border);
+			}
+			.gsublabel.ch {
+				color: var(--purple);
 			}
 			.group {
 				margin-top: 10px;
@@ -1309,6 +1318,9 @@
 				letter-spacing: 0.05em;
 				margin: 4px 2px 8px;
 			}
+			.sheet-lab:empty {
+				display: none;
+			}
 			.opt-grid {
 				display: grid;
 				grid-template-columns: 1fr 1fr;
@@ -1325,6 +1337,173 @@
 			.opt.mini.sel {
 				background: var(--surface);
 				box-shadow: inset 0 0 0 1px var(--accent);
+			}
+			/* ── "Same product" merge ───────────────────────────────
+			   Two shops routinely photograph ONE product differently, which no image
+			   hash can link, so its orders split into two cards and get bought twice.
+			   The shopper at the stall is holding the product and is the only reliable
+			   judge, so the card carries a quiet control to say so — deliberately
+			   understated (a mis-tap must never merge anything: the sheet confirms). */
+			.pmerge {
+				display: inline-flex;
+				align-items: center;
+				gap: 5px;
+				align-self: flex-start;
+				background: transparent;
+				border: 1px dashed var(--border);
+				border-radius: 9px;
+				color: var(--muted);
+				font: inherit;
+				font-size: 12px;
+				font-weight: 700;
+				padding: 5px 9px;
+				min-height: 30px;
+				cursor: pointer;
+			}
+			.pmerge svg {
+				width: 14px;
+				height: 14px;
+				fill: none;
+				stroke: currentColor;
+				stroke-width: 1.9;
+				stroke-linecap: round;
+			}
+			.pmerge:active {
+				transform: scale(0.97);
+			}
+			.pmerge.linked {
+				border-style: solid;
+				border-color: rgba(108, 143, 255, 0.45);
+				background: var(--blue-bg);
+				color: var(--blue);
+			}
+			.sheet-note {
+				font-size: 12.5px;
+				line-height: 1.45;
+				color: var(--muted);
+				margin: -6px 2px 14px;
+			}
+			/* Candidate row: the PHOTO is the decision, so it leads and is large. */
+			.mcand {
+				display: flex;
+				align-items: center;
+				gap: 12px;
+				width: 100%;
+				text-align: left;
+				padding: 10px;
+				margin-bottom: 8px;
+				border: 1px solid var(--border);
+				border-radius: 12px;
+				background: var(--surface2);
+				font: inherit;
+				color: var(--text);
+				cursor: pointer;
+			}
+			.mcand.sel {
+				border-color: var(--accent);
+				box-shadow: inset 0 0 0 1px var(--accent);
+			}
+			/* background-COLOR, not the shorthand: the shared .thumb.ph placeholder art
+			   is a background-image, and a shorthand here would wipe it out. */
+			.mcand .mthumb {
+				width: 62px;
+				height: 62px;
+				border-radius: 10px;
+				object-fit: cover;
+				background-color: var(--surface);
+				flex-shrink: 0;
+			}
+			.mcand .mtext {
+				flex: 1;
+				min-width: 0;
+			}
+			.mcand .mtitle {
+				font-size: 13px;
+				font-weight: 700;
+				line-height: 1.35;
+				display: -webkit-box;
+				-webkit-line-clamp: 2;
+				-webkit-box-orient: vertical;
+				overflow: hidden;
+			}
+			.mcand .msub {
+				font-size: 12px;
+				color: var(--muted);
+				margin-top: 3px;
+			}
+			.mcand .mtick {
+				width: 22px;
+				height: 22px;
+				border-radius: 50%;
+				border: 2px solid var(--border);
+				flex-shrink: 0;
+			}
+			.mcand.sel .mtick {
+				border-color: var(--accent);
+				background: var(--accent);
+				background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23130800' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='4,12.5 9.5,18 20,6.5'/%3E%3C/svg%3E");
+				background-repeat: no-repeat;
+				background-position: center;
+				background-size: 14px;
+			}
+			/* The card being merged INTO, shown for reference (never selectable). */
+			.mcand.anchor {
+				background: var(--surface);
+				border-style: dashed;
+				cursor: default;
+			}
+			.merge-actions {
+				display: flex;
+				gap: 10px;
+				margin-top: 4px;
+			}
+			.merge-actions button {
+				font: inherit;
+				font-size: 16px;
+				font-weight: 800;
+				border-radius: 12px;
+				padding: 15px 14px;
+				border: 1px solid var(--border);
+				cursor: pointer;
+			}
+			.merge-actions .merge-cancel {
+				flex: 0 0 auto;
+				background: var(--surface2);
+				color: var(--muted);
+			}
+			.merge-actions .merge-save {
+				flex: 1;
+				background: var(--accent);
+				color: #130800;
+				border-color: transparent;
+			}
+			.merge-actions button:disabled {
+				opacity: 0.45;
+			}
+			.merge-actions button:active {
+				transform: scale(0.98);
+			}
+			.merge-split {
+				display: block;
+				width: 100%;
+				margin-top: 10px;
+				padding: 13px 14px;
+				font: inherit;
+				font-size: 14px;
+				font-weight: 800;
+				border-radius: 12px;
+				border: 1px solid rgba(239, 68, 68, 0.4);
+				background: var(--red-bg);
+				color: var(--red);
+				cursor: pointer;
+			}
+			.merge-split:active {
+				transform: scale(0.98);
+			}
+			.merge-empty {
+				font-size: 13px;
+				color: var(--muted);
+				padding: 6px 2px 12px;
 			}
 			/* Quantity split: how many of N identical units are bought / out of stock;
 			   the rest stay "to buy". Tap ± to move ONE unit — no per-order grids. */
@@ -1937,6 +2116,22 @@
 			</div>
 		</div>
 
+		<div class="sheet-bg" id="mergeBg">
+			<div class="sheet" id="mergeSheet" role="dialog" aria-modal="true" aria-labelledby="mergeTitle">
+				<div class="grip"></div>
+				<h4 id="mergeTitle"></h4>
+				<p class="sheet-note" id="mergeHint"></p>
+				<div id="mergeAnchor"></div>
+				<div class="sheet-lab" id="mergeListLab"></div>
+				<div id="mergeList"></div>
+				<div class="merge-actions">
+					<button class="merge-cancel" id="mergeCancel"></button>
+					<button class="merge-save" id="mergeSave"></button>
+				</div>
+				<button class="merge-split" id="mergeSplit"></button>
+			</div>
+		</div>
+
 		<div id="toast" role="status" aria-live="polite"></div>
 
 		<script>
@@ -1960,6 +2155,23 @@
 			// its supplier, and its charm part under its charm stall.
 			const CASE_GRIP = [COMP_CASE, COMP_GRIP]
 			const CHARM = [COMP_CHARM]
+			// An AirPods case carries the charm ATTACHED (it's in the product photo),
+			// so it's bought together with the case at the SAME supplier — never at a
+			// charm stall, and with no charm code/image. We therefore shop it exactly
+			// like a grip: as a component of the product in the Cases & Grips section.
+			const CASE_GRIP_CHARM = [COMP_CASE, COMP_GRIP, COMP_CHARM]
+			// A charm that ships as part of the product (server-classified: AirPods
+			// case with a charm). Falls back to false for older payloads, so the page
+			// degrades gracefully to the classic charm-stall behaviour.
+			const isIntegralCharm = (r) => !!r.charm_integral && !!r.has_charm
+			// Components bought at THIS row's product supplier. An integral charm joins
+			// the case + grip; a phone case keeps just case + grip.
+			const productComps = (r) => (isIntegralCharm(r) ? CASE_GRIP_CHARM : CASE_GRIP)
+			// Section membership — the single source of truth for which list a row
+			// appears in. An integral charm lives with its product (cg), never in the
+			// separately-sourced Charms section.
+			const inCgSection = (r) => r.has_case || r.has_grip || isIntegralCharm(r)
+			const inCharmSection = (r) => r.has_charm && !isIntegralCharm(r)
 			// status → { css class, swatch color, EN, ZH }
 			const STATUS_META = {
 				Pending: { cls: 'pending', color: '#8a90a6', en: 'To buy', zh: '待购' },
@@ -2025,12 +2237,32 @@
 				connecting: { en: 'Connecting', zh: '连接中' },
 				saving: { en: 'Saving…', zh: '保存中…' },
 				offline: { en: 'Offline', zh: '离线' },
+				unsavedLogout: {
+					en: 'You have changes that haven’t been saved to the server yet (you appear to be offline). If you sign out now they will be saved the next time you sign in on this phone. Sign out anyway?',
+					zh: '有改动尚未保存到服务器（当前可能离线）。现在退出登录，这些改动会在您下次用本手机登录时自动保存。仍要退出吗？',
+				},
 				overview: { en: 'Overview', zh: '总览' },
 				otherFloor: { en: 'Other', zh: '其他' },
 				leftSummary: { en: 'left to buy', zh: '待购' },
 				mixed: { en: 'Mixed', zh: '混合' },
 				setAll: { en: 'Set all', zh: '全部设为' },
 				splitQty: { en: 'Or split by quantity', zh: '或按数量分配' },
+				sameProduct: { en: 'Same product', zh: '同款' },
+				mergeTitle: { en: 'Mark as the same product', zh: '标记为同款商品' },
+				mergeHint: {
+					en: 'Pick the cards that are the SAME item on this stall’s shelf. They merge into one card everywhere, from now on — use it when one product was listed with different photos.',
+					zh: '选出货架上其实是同一件商品的卡片。合并后它们会永久显示为一张卡——同一款商品用了不同图片时用这个。',
+				},
+				mergeThis: { en: 'This product', zh: '当前商品' },
+				mergePick: { en: 'Also the same product', zh: '同款的其他卡片' },
+				mergeNone: { en: 'No other products at this stall to merge with.', zh: '此摊位没有其他可合并的商品。' },
+				mergeDo: { en: 'Merge', zh: '合并同款' },
+				mergeSplit: { en: 'Undo merge (split apart)', zh: '取消同款（拆回多张卡）' },
+				merged: { en: 'Merged into one product', zh: '已合并为同款' },
+				mergeSplitDone: { en: 'Split back apart', zh: '已拆分' },
+				mergeFail: { en: "Couldn't merge — try again", zh: '合并失败，请重试' },
+				mergeOffline: { en: 'Needs a connection to merge', zh: '合并需要联网' },
+				cancel: { en: 'Cancel', zh: '取消' },
 			}
 			const t = (k) => (T[k] ? T[k][LANG] : k)
 			const compLabel = (c) => (LANG === 'zh' ? c.labelZh : c.label)
@@ -2096,12 +2328,22 @@
 			let showDone = false
 			let searchQ = ''
 			const rowIndex = new Map() // `${receipt_id}\x00${item_key}` → row
-			const pending = new Map() // key → patch awaiting server (retry queue)
+			// Durable write-queue mirror: entry.id → { id, url, body, ts }. Backed by
+			// IndexedDB via ShopSync so a queued tap survives a tab eviction / crash /
+			// reboot; rehydrated on boot and drained by flush() + Background Sync.
+			const pending = new Map()
 			let flushing = false
 			const collapseOverride = new Map() // groupKey → bool (user's explicit expand/collapse)
 			let LAST_GROUPS = [] // groups as last rendered (for collapse + auto-scroll)
 			const AGG = new Map() // aggId → [rows] for aggregated charm cards (rebuilt each render)
 			let MODEL_AGG_SEQ = 0
+			// Product cards as last rendered, so the "same product" sheet can offer the
+			// SIBLING cards standing at the same stall: cardId → { lines, siblings }.
+			const PCARD = new Map()
+			let PCARD_SEQ = 0
+			// Listings whose identity came from an operator merge (server-provided), so
+			// only those cards offer to undo it.
+			let MANUAL_MERGE = new Set()
 
 			const $ = (id) => document.getElementById(id)
 			const keyOf = (r) => r.receipt_id + '\x00' + r.item_key
@@ -2138,7 +2380,10 @@
 				const present = comps.filter((c) => r[c.flag])
 				return present.length > 0 && present.every((c) => (r[c.status] || 'Pending') === 'Purchased')
 			}
-			const cgDone = (r) => partDone(r, CASE_GRIP)
+			// "Done" for the product-supplier section: case + grip, plus an integral
+			// (AirPods) charm when the line carries one — so a Case+Charm AirPods line
+			// isn't marked done until its charm is bought too.
+			const cgDone = (r) => partDone(r, productComps(r))
 			const charmDone = (r) => partDone(r, CHARM)
 
 			// ── Snackbar (message + optional action + optional countdown line) ────
@@ -2230,6 +2475,60 @@
 			const charmKeyOf = (r) => {
 				const shop = (r.charm_shop || '').trim()
 				return shop ? shop.toLowerCase() : '\uffff'
+			}
+
+			// ── Charms sold at a stall we already visit ──────────────────────────
+			// A sourced charm normally has its own stop in the Charms section. But some
+			// charm stalls ARE case/grip suppliers (one merchant sells both), and making
+			// the shopper walk back to a stall they already stood at is wasted time. So a
+			// charm whose stall is a stop already on the Cases & Grips route is shopped
+			// THERE — the same principle as an integral (AirPods) charm, which is bought
+			// with its case. The charm keeps its own card (code, photo, price, quantity
+			// merged across orders); only the STOP it hangs under changes.
+			const shopIdent = (s) => String(s || '').trim().toLowerCase()
+			// Case/grip stops of the WHOLE route, indexed by merchant and by stop key.
+			// Built from every case/grip line — never the filtered view — so a charm's
+			// home stop can't flip just because a case was bought, hidden or searched out.
+			// Memoised on the ROWS identity (ROWS is replaced, never mutated in place).
+			let _cgStops = { rows: null, idx: null }
+			function cgStopIndex() {
+				if (_cgStops.rows === ROWS) return _cgStops.idx
+				const byKey = new Map() // stop key → { key, shop, stall, floor }
+				const byShop = new Map() // merchant → [stop, …]
+				for (const r of ROWS) {
+					if (!inCgSection(r)) continue
+					const id = shopIdent(r.supplier_shop)
+					if (!id) continue // no merchant name → nothing to match a charm against
+					const key = supKeyOf(r)
+					if (byKey.has(key)) continue
+					const stop = { key, shop: (r.supplier_shop || '').trim(), stall: (r.supplier_stall || '').trim(), floor: r.supplier_floor }
+					byKey.set(key, stop)
+					const list = byShop.get(id)
+					list ? list.push(stop) : byShop.set(id, [stop])
+				}
+				const idx = { byKey, byShop }
+				_cgStops = { rows: ROWS, idx }
+				return idx
+			}
+			// The case/grip stop key a charm should be shopped at, or null to keep it in
+			// the Charms section. Deliberately FAIL-SAFE: merge only when the physical
+			// booth is unambiguous — same merchant AND the same stall code (merged-stall
+			// aliases included), or the merchant holds exactly one stop and one side has
+			// no stall recorded. A merchant with two booths whose charm sits at the other
+			// one is never merged: sending a shopper to the wrong counter is worse than a
+			// second stop.
+			function charmMergeStop(r) {
+				if (!inCharmSection(r)) return null
+				const stops = cgStopIndex().byShop.get(shopIdent(r.charm_shop))
+				if (!stops || !stops.length) return null
+				const stall = (r.charm_stall || '').trim()
+				if (stall) {
+					const same = stops.find((s) => s.stall && stallCodesOverlap(s.stall, stall))
+					if (same) return same.key
+					// Both sides name a stall, but a different one → a different stop.
+					if (stops.some((s) => s.stall)) return null
+				}
+				return stops.length === 1 ? stops[0].key : null
 			}
 			function groupRows(rows) {
 				const groups = new Map()
@@ -2341,7 +2640,7 @@
 				const qty = rows.filter((r) => r[comp.flag]).reduce((n, r) => n + (r.quantity || 1), 0)
 				const identity = comp.key === 'case'
 					? `<span class="cmodel">${esc(rows[0].phone_model || '—')}</span>`
-					: `<span class="cmodel">${esc(compLabel(COMP_GRIP))}</span>`
+					: `<span class="cmodel">${esc(compLabel(comp))}</span>`
 				const button = done
 					? `<button class="markall done compact" data-agg="${aggId}" data-comp="${comp.key}">${t('bought')}</button>`
 					: `<button class="markall compact" data-agg="${aggId}" data-comp="${comp.key}">${t('markBought')}</button>`
@@ -2355,9 +2654,31 @@
 				</div>`
 			}
 
+			// Distinct positive Etsy listing ids behind a product card. Manual/synthetic
+			// order lines have no (or a non-positive) listing id and can't be merged.
+			function cardListingIds(lines) {
+				const ids = new Set()
+				for (const r of lines) {
+					const id = Number(r.listing_id)
+					if (Number.isInteger(id) && id > 0) ids.add(id)
+				}
+				return [...ids]
+			}
+
+			// The card's "same product" control. Only offered when there is something to
+			// act on: another mergeable card at this stall, or an existing merge to undo.
+			function mergeBtnHtml(cardId, listingIds, siblingCount) {
+				if (!listingIds.length) return ''
+				const linked = listingIds.some((id) => MANUAL_MERGE.has(id))
+				if (!linked && siblingCount < 1) return ''
+				const icon = `<svg viewBox="0 0 24 24"><path d="M9.5 14.5l5-5"/><path d="M13.2 6.6l1.6-1.6a3.7 3.7 0 0 1 5.2 5.2l-1.6 1.6"/><path d="M10.8 17.4l-1.6 1.6a3.7 3.7 0 0 1-5.2-5.2l1.6-1.6"/></svg>`
+				return `<button class="pmerge${linked ? ' linked' : ''}" data-pcard="${cardId}">${icon}${t('sameProduct')}</button>`
+			}
+
 			// Render a supplier group's Case/Grip cards, unifying multiple orders of
-			// the SAME product (identical image across shops → same product_key) into a
-			// single product card: the image is shown ONCE, with a row per model to buy.
+			// the SAME product (same canonical product_key → same physical item on the
+			// stall's shelf) into a single product card: the image is shown ONCE, with a
+			// row per model to buy.
 			function renderCgCards(g) {
 				const byProduct = new Map()
 				for (const r of g.rows) {
@@ -2374,8 +2695,15 @@
 					if (ar !== br) return ar - br
 					return String(a[0].title || '').localeCompare(String(b[0].title || ''), undefined, { numeric: true, sensitivity: 'base' })
 				})
+				// Register this stall's cards up front so each one's merge sheet can list
+				// its siblings (they're all candidates — the shopper decides from the
+				// photos, which is the only signal that reliably settles it).
+				const cardIds = products.map(() => 'p' + PCARD_SEQ++)
+				products.forEach((lines, i) => {
+					PCARD.set(cardIds[i], { lines, siblings: cardIds.filter((_, j) => j !== i) })
+				})
 				let html = ''
-				for (const lines of products) {
+				for (const [productIdx, lines] of products.entries()) {
 					// EVERY product — whether it's one order or many — renders with the
 					// SAME anatomy: an image + still-to-buy header, then one card per
 					// component (a case row per phone model, and a single model-agnostic
@@ -2388,8 +2716,12 @@
 					// grip — from Case+Grip combos AND Grip-Only orders — is ONE batch count.
 					const caseLines = lines.filter((r) => r.has_case)
 					const gripLines = lines.filter((r) => r.has_grip)
+					// Integral (AirPods) charms shop here as a product component — like a
+					// grip, model-agnostic, at the case supplier — so batch them the same.
+					const charmLines = lines.filter(isIntegralCharm)
 					const caseNeed = caseLines.filter((r) => (r.status_case || 'Pending') !== 'Purchased').reduce((n, r) => n + (r.quantity || 1), 0)
 					const gripNeed = gripLines.filter((r) => (r.status_grip || 'Pending') !== 'Purchased').reduce((n, r) => n + (r.quantity || 1), 0)
+					const charmNeed = charmLines.filter((r) => (r.status_charm || 'Pending') !== 'Purchased').reduce((n, r) => n + (r.quantity || 1), 0)
 					const caseCost = lines.find((r) => r.cost_case != null)?.cost_case ?? null
 					const gripCost = lines.find((r) => r.cost_grip != null)?.cost_grip ?? null
 					const sharedPrices = []
@@ -2420,11 +2752,20 @@
 						AGG.set(aggId, gripLines)
 						rowsHtml.push(cgComponentCardHtml(gripLines, COMP_GRIP, aggId))
 					}
+					// ONE model-agnostic integral-charm batch (AirPods). Rendered after
+					// the grip batch so the product reads case → grip → charm.
+					if (charmLines.length) {
+						const aggId = 'm' + MODEL_AGG_SEQ++
+						AGG.set(aggId, charmLines)
+						rowsHtml.push(cgComponentCardHtml(charmLines, COMP_CHARM, aggId))
+					}
 					// Header summary = ONLY the still-to-buy per-component counts
 					// (壳 ×N · 支架 ×M). The old "N models ×total" line conflated cases
 					// and grips (e.g. "1 model ×2" for a product that is 1 case + 2 grips),
 					// which read as if a case count was wrong — so it's gone. The case
 					// rows below list the models; the totals give the honest quantities.
+					const cardId = cardIds[productIdx]
+					const mergeBtn = mergeBtnHtml(cardId, cardListingIds(lines), products.length - 1)
 					html += `<div class="product">
 						<div class="product-head">
 							${imgHtml(r0)}
@@ -2432,8 +2773,10 @@
 								<div class="component-totals">
 									${caseNeed ? `<span class="component-total case">${compLabel(COMP_CASE)}${caseNeed > 1 ? ` ×${caseNeed}` : ''}</span>` : ''}
 									${gripNeed ? `<span class="component-total grip">${compLabel(COMP_GRIP)}${gripNeed > 1 ? ` ×${gripNeed}` : ''}</span>` : ''}
+									${charmNeed ? `<span class="component-total charm">${compLabel(COMP_CHARM)}${charmNeed > 1 ? ` ×${charmNeed}` : ''}</span>` : ''}
 								</div>
 								${sharedPrices.length ? `<div class="product-prices">${sharedPrices.join('')}</div>` : ''}
+								${mergeBtn}
 							</div>
 						</div>
 						<div class="plines">${rowsHtml.join('')}</div>
@@ -2455,7 +2798,11 @@
 				const btn = done
 					? `<button class="markall done" data-agg="${a.aggId}" data-sec="charm">${t('bought')}</button>`
 					: `<button class="markall" data-agg="${a.aggId}" data-sec="charm">${t('markBought')}</button>`
-				return `<div class="card ${done ? 'done' : ''}">
+				// `charm-card` marks a SOURCED charm card wherever it renders (its own
+				// charm stall, or merged into a supplier stop). The live-patch lookup keys
+				// on it so it can never be confused with the integral (AirPods) charm chip
+				// that renders inside a product card.
+				return `<div class="card charm-card ${done ? 'done' : ''}">
 					<div class="ctop">
 						${img}
 						<div class="cinfo">
@@ -2515,12 +2862,14 @@
 				const img = x.image_url
 					? `<img class="thumb" loading="lazy" decoding="async" src="${esc(x.image_url)}" onerror="this.classList.add('ph');this.removeAttribute('src')" />`
 					: `<div class="thumb ph"></div>`
-				const comps = (x.components || '')
-					.split(',')
-					.map((s) => s.trim())
-					.filter(Boolean)
-					.map((c) => (c === 'case' ? compLabel(COMP_CASE) : c === 'grip' ? compLabel(COMP_GRIP) : c === 'charm' ? compLabel(COMP_CHARM) : c))
-					.join(' + ')
+				// A wrong-model fix is ALWAYS a case-only action: the case is the only
+				// model-specific piece, so it's the one thing swapped (or bought) at the
+				// stall. Any grip/charm on the same line are universal and stay in hand —
+				// they're never swapped or re-bought. Older exchanges stored the full
+				// component set (e.g. "case,grip,charm"), which showed on the swap card as
+				// "壳 + 支架 + 挂件" and misled shoppers into thinking they had to swap all
+				// three. The swap card therefore always shows just the Case.
+				const comps = compLabel(COMP_CASE)
 				const have = (x.have_model || '').trim()
 				const swapHtml = have
 					? `<div class="exswap">
@@ -2599,36 +2948,66 @@
 					return
 				}
 
-				// Section 1 — Cases & Grips, MERGED with exchanges at the same stall.
-				// A shopper standing at a supplier sees, in one place, what to BUY and
-				// what to SWAP there — no need to backtrack for exchanges later.
+				// Section 1 — Cases & Grips, MERGED with everything else owed at the same
+				// stall: exchanges to swap, and charms this merchant sells. A shopper
+				// standing at a supplier sees, in one place, everything to BUY and SWAP
+				// there — no backtracking to a second section later.
 				const merged = new Map()
+				const newGroup = (floor, shop, stall) => ({ floor, shop, stall, matched: !!(shop || stall), rows: [], exRows: [], charmRows: [] })
 				const ensureGroup = (r) => {
 					const k = supKeyOf(r)
-					if (!merged.has(k)) {
-						const shop = (r.supplier_shop || '').trim()
-						const stall = (r.supplier_stall || '').trim()
-						merged.set(k, { floor: r.supplier_floor, shop, stall, matched: !!(shop || stall), rows: [], exRows: [] })
-					}
+					if (!merged.has(k)) merged.set(k, newGroup(r.supplier_floor, (r.supplier_shop || '').trim(), (r.supplier_stall || '').trim()))
 					return merged.get(k)
 				}
-				let cg = ROWS.filter((r) => r.has_case || r.has_grip)
+				let cg = ROWS.filter(inCgSection)
 				cg = applySearch(cg.filter((r) => showDone || !cgDone(r)))
 				for (const r of cg) ensureGroup(r).rows.push(r)
 				for (const x of applySearch(EXCHANGES)) ensureGroup(x).exRows.push(x)
+
+				// Section 2 — Charms. Those sold at a stall this route ALREADY stops at
+				// for cases/grips move into that supplier's group above (one stop, one
+				// visit); the rest keep their own charm stalls here. Integral (AirPods)
+				// charms are excluded entirely — they shop as a component of their case,
+				// so they must never appear here as a "no charm code" stray.
+				let ch = ROWS.filter(inCharmSection)
+				ch = applySearch(ch.filter((r) => showDone || !charmDone(r)))
+				const chOwn = []
+				for (const r of ch) {
+					const stopKey = charmMergeStop(r)
+					if (stopKey == null) {
+						chOwn.push(r)
+						continue
+					}
+					let g = merged.get(stopKey)
+					if (!g) {
+						// Every case/grip at this stop is already bought (and hidden), but its
+						// charm isn't — keep the stop alive so the shopper still sees the one
+						// thing left to buy there, instead of it jumping back to the Charms
+						// section mid-trip. Display fields come from the SUPPLIER side so the
+						// header reads identically however the stop was created.
+						const stop = cgStopIndex().byKey.get(stopKey)
+						g = newGroup(stop ? stop.floor : r.charm_floor, stop ? stop.shop : (r.charm_shop || '').trim(), stop ? stop.stall : (r.charm_stall || '').trim())
+						merged.set(stopKey, g)
+					}
+					g.charmRows.push(r)
+				}
+
 				const cgGroups = [...merged.keys()]
 					.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
-					.map((k) => ({ ...merged.get(k), section: 'cg', comps: CASE_GRIP, doneFn: cgDone, sortKey: 'cg\x01' + k }))
+					.map((k) => {
+						const g = merged.get(k)
+						return { ...g, section: 'cg', comps: CASE_GRIP, doneFn: cgDone, sortKey: 'cg\x01' + k, charmAggs: g.charmRows.length ? aggregateCharms(g.charmRows) : [] }
+					})
+				const chGroups = groupCharmRows(chOwn).map((g) => ({ ...g, section: 'charm', comps: CHARM, doneFn: charmDone, sortKey: 'ch\x01' + g.sortKey, aggs: aggregateCharms(g.rows) }))
 
-				// Section 2 — Charms, grouped by charm stall, then merged by charm code.
-				let ch = ROWS.filter((r) => r.has_charm)
-				ch = applySearch(ch.filter((r) => showDone || !charmDone(r)))
-				const chGroups = groupCharmRows(ch).map((g) => ({ ...g, section: 'charm', comps: CHARM, doneFn: charmDone, sortKey: 'ch\x01' + g.sortKey, aggs: aggregateCharms(g.rows) }))
-
-				// Register every merged charm so its buttons can act on all its lines.
+				// Register every merged charm so its buttons can act on all its lines —
+				// both the charms shopped at a supplier stop and those at charm stalls.
 				AGG.clear()
 				MODEL_AGG_SEQ = 0
+				PCARD.clear()
+				PCARD_SEQ = 0
 				let ac = 0
+				for (const g of cgGroups) for (const a of g.charmAggs) { a.aggId = 'a' + ac++; AGG.set(a.aggId, a.rows) }
 				for (const g of chGroups) for (const a of g.aggs) { a.aggId = 'a' + ac++; AGG.set(a.aggId, a.rows) }
 
 				LAST_GROUPS = [...cgGroups, ...chGroups]
@@ -2647,10 +3026,14 @@
 				if (prevScroll > 0) requestAnimationFrame(() => window.scrollTo(0, prevScroll))
 			}
 
-			// Items still needing action in a group = unbought lines + open exchanges.
+			// Items still needing action in a group = unbought lines + charms sourced at
+			// this same stall + open exchanges. (A charm-stall group carries its charms in
+			// `rows`, so `charmRows` is only ever set on a supplier group — no double
+			// count, and the two section badges still add up to the same page total.)
 			function groupRemaining(g) {
 				const buy = g.rows.filter((r) => !g.doneFn(r)).length
-				return buy + ((g.exRows && g.exRows.length) || 0)
+				const charms = (g.charmRows || []).filter((r) => !charmDone(r)).length
+				return buy + charms + ((g.exRows && g.exRows.length) || 0)
 			}
 			// Amount still to PAY at this stall (sum of unbought line costs). Exchanges
 			// are swaps, not purchases, so they're excluded. anyUnpriced flags that some
@@ -2658,12 +3041,18 @@
 			function groupSubtotal(g) {
 				let sum = 0
 				let anyUnpriced = false
-				if (g.section === 'charm') {
-					for (const a of g.aggs || []) {
-						if (a.done) continue
+				// Live check rather than the aggregate's build-time `done` flag, so a
+				// subtotal patched between renders (e.g. after a price edit) can't quote a
+				// charm that has since been bought.
+				const addCharms = (aggs) => {
+					for (const a of aggs || []) {
+						if (a.rows.every(charmDone)) continue
 						if (a.charm_cost != null) sum += Number(a.charm_cost) * (a.qty || 1)
 						else anyUnpriced = true
 					}
+				}
+				if (g.section === 'charm') {
+					addCharms(g.aggs)
 				} else {
 					for (const r of g.rows) {
 						if (g.doneFn(r)) continue
@@ -2671,6 +3060,8 @@
 						if (r.has_case) r.cost_case != null ? (sum += Number(r.cost_case) * qty) : (anyUnpriced = true)
 						if (r.has_grip) r.cost_grip != null ? (sum += Number(r.cost_grip) * qty) : (anyUnpriced = true)
 					}
+					// Charms bought at this same stall are part of what's owed here.
+					addCharms(g.charmAggs)
 				}
 				return { sum: Math.round(sum * 100) / 100, anyUnpriced }
 			}
@@ -2730,10 +3121,20 @@
 						cards = g.aggs.map((a) => charmCardHtml(a)).join('')
 					} else {
 						cards = renderCgCards(g)
+						// A divider only earns its keep when there's something ABOVE it to
+						// separate from — otherwise it's a stray rule at the top of the group
+						// (e.g. a stop whose cases are all bought but whose charm isn't).
+						const divider = (cls, label) => (cards ? `<div class="gsublabel${cls ? ' ' + cls : ''}">${label}</div>` : '')
+						// Charms this same merchant sells — bought here in the one visit
+						// instead of a second trip to the Charms section. Same card as the
+						// Charms section uses (code, photo, price, merged quantity).
+						if (g.charmAggs && g.charmAggs.length) {
+							cards += divider('ch', t('secCharm')) + g.charmAggs.map((a) => charmCardHtml(a)).join('')
+						}
 						// Exchanges to swap at THIS same stall, under a small divider so the
 						// shopper handles buying and swapping in one visit.
 						if (g.exRows && g.exRows.length) {
-							cards += `<div class="gsublabel">${t('secEx')}</div>` + g.exRows.map((x) => exCardHtml(x)).join('')
+							cards += divider('', t('secEx')) + g.exRows.map((x) => exCardHtml(x)).join('')
 						}
 					}
 					body = `<div class="gbody">${cards}</div>`
@@ -2757,21 +3158,34 @@
 			}
 			// Exchange → same supplier-location key as the buy list (they're merged).
 			const exCgKey = (x) => cgGroupKey(x)
+			// The stop a charm is SHOPPED at — its supplier group when that merchant is
+			// already on the case/grip route, else its own charm stall. One source of
+			// truth with the renderer, so the "stall finished" celebration and auto-
+			// advance always name the group the shopper is actually looking at.
 			function charmGroupKey(r) {
+				const stopKey = charmMergeStop(r)
+				if (stopKey != null) return 'cg\x01' + stopKey
 				const shop = (r.charm_shop || '').trim()
 				return 'ch\x01' + (shop ? shop.toLowerCase() : '\uffff')
 			}
 			function cgGroupDone(key) {
-				const rs = ROWS.filter((r) => (r.has_case || r.has_grip) && cgGroupKey(r) === key)
-				const buysDone = rs.length > 0 && rs.every(cgDone)
+				const rs = ROWS.filter((r) => inCgSection(r) && cgGroupKey(r) === key)
+				// Charms sourced at this same stall are part of the stop's work, so it
+				// isn't finished until they're bought either.
+				const chs = ROWS.filter((r) => inCharmSection(r) && charmGroupKey(r) === key)
+				const buysDone = rs.length + chs.length > 0 && rs.every(cgDone) && chs.every(charmDone)
 				// The stall isn't "done" while a swap is still owed there.
 				const swapPending = EXCHANGES.some((x) => exCgKey(x) === key)
 				return buysDone && !swapPending
 			}
 			function charmGroupDone(key) {
-				const rs = ROWS.filter((r) => r.has_charm && charmGroupKey(r) === key)
+				const rs = ROWS.filter((r) => inCharmSection(r) && charmGroupKey(r) === key)
 				return rs.length > 0 && rs.every(charmDone)
 			}
+			// Is the STOP named by this key finished? A key names either a supplier group
+			// ('cg…') or a charm stall ('ch…') — and a charm merged into a supplier stop
+			// carries the supplier's key, so it must be judged by the whole stop.
+			const stopDone = (key) => (String(key).startsWith('ch\x01') ? charmGroupDone(key) : cgGroupDone(key))
 
 			// ── Navigation drawer (route tree: Section → Floor → Supplier) ───────
 			const treeCollapsed = new Set() // tree node ids the user has collapsed
@@ -2858,6 +3272,7 @@
 			// press so the manager knows the history entry is already consumed.
 			function closeTopOverlay(fromPop) {
 				if ($('zoomBg').classList.contains('open')) return closeZoom(fromPop), true
+				if ($('mergeBg').classList.contains('open')) return closeMergeSheet(fromPop), true
 				if ($('priceBg').classList.contains('open')) return closePriceSheet(fromPop), true
 				if ($('sheetBg').classList.contains('open')) return closeSheet(fromPop), true
 				if (mapOpen()) return closeMap(fromPop), true
@@ -3046,16 +3461,22 @@
 					e.total++
 					if (remaining) e.remaining++
 				}
-				for (const r of ROWS) if (r.has_case || r.has_grip) bump(r.supplier_stall, !cgDone(r))
+				for (const r of ROWS) if (inCgSection(r)) bump(r.supplier_stall, !cgDone(r))
+				// Charms count at their own stall too. Without this, a stall whose cases are
+				// bought but whose charm still isn't would read as DONE on the map and get
+				// skipped — the very trip this merge is meant to save.
+				for (const r of ROWS) if (inCharmSection(r)) bump(r.charm_stall, !charmDone(r))
 				for (const x of EXCHANGES) bump(x.supplier_stall, true)
 				return m
 			}
 
-			// Index of the rendered cg group for a stall (for tap-to-jump), or -1.
+			// Index of the rendered group for a stall (for tap-to-jump), or -1. Supplier
+			// groups are checked first (they lead LAST_GROUPS), so a stall that sells both
+			// lands on the stop that now carries its charms too.
 			function groupIdxForStall(norm) {
 				for (let i = 0; i < LAST_GROUPS.length; i++) {
 					const g = LAST_GROUPS[i]
-					if (g.section === 'cg' && stallCodesOverlap(g.stall, norm)) return i
+					if (stallCodesOverlap(g.stall, norm)) return i
 				}
 				return -1
 			}
@@ -3333,9 +3754,14 @@
 				}
 				return rows.every(cgDone)
 			}
-			// Locate the merged-charm card covering a row via the live AGG map.
+			// Locate the merged-charm card covering a row via the live AGG map. Scoped to
+			// SOURCED charm cards (`.charm-card`), which now render either at their own
+			// charm stall or inside a supplier group that sells them: an integral (AirPods)
+			// charm renders a charm chip inside a product card instead, and that one is
+			// handled via the cg cards — so this must not match it, or the two paths would
+			// fight over one row.
 			function findCharmCard(r) {
-				for (const btn of document.querySelectorAll('.comp[data-agg][data-c="charm"]')) {
+				for (const btn of document.querySelectorAll('.card.charm-card .comp[data-agg][data-c="charm"]')) {
 					const rows = AGG.get(btn.dataset.agg)
 					if (rows && rows.includes(r)) return { el: btn.closest('.card'), rows }
 				}
@@ -3393,11 +3819,14 @@
 				const values = {
 					case: rows.filter((r) => r.has_case && (r.status_case || 'Pending') !== 'Purchased').reduce((n, r) => n + (r.quantity || 1), 0),
 					grip: rows.filter((r) => r.has_grip && (r.status_grip || 'Pending') !== 'Purchased').reduce((n, r) => n + (r.quantity || 1), 0),
+					// Integral (AirPods) charm — patched in place like case/grip so the
+					// header total stays accurate after a tap without a full re-render.
+					charm: rows.filter((r) => isIntegralCharm(r) && (r.status_charm || 'Pending') !== 'Purchased').reduce((n, r) => n + (r.quantity || 1), 0),
 				}
 				for (const [key, qty] of Object.entries(values)) {
 					const el = productEl.querySelector('.component-total.' + key)
 					if (!el) continue
-					const comp = key === 'case' ? COMP_CASE : COMP_GRIP
+					const comp = key === 'case' ? COMP_CASE : key === 'grip' ? COMP_GRIP : COMP_CHARM
 					// Hide the "×1" — a lone unit reads cleaner as just "壳" / "支架"
 					// (matches the initial render so live patches never diverge).
 					el.textContent = compLabel(comp) + (qty > 1 ? ` ×${qty}` : '')
@@ -3421,6 +3850,22 @@
 					btn.textContent = done ? t('bought') : t('markBought')
 				}
 			}
+			// Drop any sub-label ("Charms" / "Exchanges") whose cards have all been bought
+			// away, so a group never shows a heading with nothing under it.
+			function pruneSubLabels(groupEl) {
+				if (!groupEl) return
+				for (const lab of groupEl.querySelectorAll('.gsublabel')) {
+					let hasCard = false
+					for (let n = lab.nextElementSibling; n; n = n.nextElementSibling) {
+						if (n.classList.contains('gsublabel')) break // next section starts
+						if (n.classList.contains('card') || n.querySelector('.card')) {
+							hasCard = true
+							break
+						}
+					}
+					if (!hasCard) lab.remove()
+				}
+			}
 			// Remove a card; drop its product wrapper / group / section when empty.
 			function removeCardEl(el) {
 				const productEl = el.closest('.product')
@@ -3430,6 +3875,7 @@
 				if (productEl && !productEl.querySelector('.card')) productEl.remove()
 				else updateProductSummary(productEl)
 				if (groupEl && !groupEl.querySelector('.card')) groupEl.remove()
+				else pruneSubLabels(groupEl)
 				if (sectionEl && !sectionEl.querySelector('.card')) sectionEl.remove()
 			}
 			// Recompute every count badge (group, section, summary, drawer) + collapse
@@ -3474,7 +3920,11 @@
 			// Patch the UI in place for one status change across one/many lines.
 			function patchUi(rowsArr, touchesCharm) {
 				for (const r of rowsArr) {
-					if (touchesCharm) {
+					// A sourced charm lives in the Charm section (its own card). A
+					// case/grip change — OR an integral (AirPods) charm, which renders as
+					// a component of its product — is patched through the cg cards, where
+					// findCgCards also picks up the integral charm chip via `.model-group`.
+					if (touchesCharm && !isIntegralCharm(r)) {
 						const found = findCharmCard(r)
 						if (found) {
 							if (!showDone && found.rows.every(charmDone)) removeCardEl(found.el)
@@ -3512,12 +3962,37 @@
 				Object.assign(r, patch)
 			}
 
-			// Queue the change for the server (optimistic; retried on failure).
+			// Ask the service worker to drain the queue in the background when
+			// connectivity returns — even if this tab is later closed/evicted. A no-op
+			// where Background Sync is unsupported (iOS Safari); the online/foreground
+			// flush below is the fallback there.
+			function requestBgSync() {
+				if (!('serviceWorker' in navigator) || !navigator.serviceWorker.ready) return
+				navigator.serviceWorker.ready
+					.then((reg) => reg.sync && reg.sync.register(ShopSync.SYNC_TAG))
+					.catch(() => {})
+			}
+
+			// Queue a status change for the server (optimistic; DURABLE + retried on
+			// failure). Coalesces repeated taps on the same line into one write.
 			function enqueueNetwork(r, patch) {
-				const k = keyOf(r)
-				const op = pending.get(k) || { receipt_id: r.receipt_id, item_key: r.item_key, title: r.title }
-				Object.assign(op, patch)
-				pending.set(k, op)
+				const prev = pending.get(ShopSync.assignOpId(r.receipt_id, r.item_key))
+				const entry = ShopSync.makeAssignEntry(prev, { receipt_id: r.receipt_id, item_key: r.item_key, title: r.title, patch }, Date.now())
+				pending.set(entry.id, entry)
+				ShopSync.putEntry(entry).catch(() => {}) // persist before we rely on it
+				requestBgSync()
+				setConn(sse && sse.readyState === 1 ? 'live' : 'off')
+				flush()
+			}
+
+			// Queue a price change (same durability guarantees as a status change, so a
+			// price entered in a dead zone is never lost). Replaces any prior queued
+			// price for the same product-component / charm.
+			function enqueueCost(body) {
+				const entry = ShopSync.makeCostEntry(body, Date.now())
+				pending.set(entry.id, entry)
+				ShopSync.putEntry(entry).catch(() => {})
+				requestBgSync()
 				setConn(sse && sse.readyState === 1 ? 'live' : 'off')
 				flush()
 			}
@@ -3542,22 +4017,27 @@
 					})
 					action = pushUndo({ type: 'assign', changes })
 				}
-				const touchesCG = 'status_case' in patch || 'status_grip' in patch
 				const touchesCharm = 'status_charm' in patch
+				// Which SECTION's completion may have changed. An integral (AirPods)
+				// charm completes its Cases & Grips stall, not a charm stall; a sourced
+				// charm completes a charm stall. Case/grip always affect the cg stall.
+				const affectsCg = 'status_case' in patch || 'status_grip' in patch || (touchesCharm && rowsArr.some(isIntegralCharm))
+				const affectsCharm = touchesCharm && rowsArr.some((r) => !isIntegralCharm(r))
 				const cgKeys = new Set(rowsArr.map(cgGroupKey))
 				const chKeys = new Set(rowsArr.map(charmGroupKey))
-				const wasCg = new Map([...cgKeys].map((k) => [k, cgGroupDone(k)]))
-				const wasCh = new Map([...chKeys].map((k) => [k, charmGroupDone(k)]))
+				const wasCg = new Map([...cgKeys].map((k) => [k, stopDone(k)]))
+				const wasCh = new Map([...chKeys].map((k) => [k, stopDone(k)]))
 				for (const r of rowsArr) {
 					applyLocal(r, patch)
 					enqueueNetwork(r, patch)
 				}
 				patchUi(rowsArr, touchesCharm)
 				let completedKey = null
-				if (touchesCharm) {
-					for (const k of chKeys) if (!wasCh.get(k) && charmGroupDone(k)) { completedKey = k; break }
-				} else if (touchesCG) {
-					for (const k of cgKeys) if (!wasCg.get(k) && cgGroupDone(k)) { completedKey = k; break }
+				if (affectsCharm) {
+					for (const k of chKeys) if (!wasCh.get(k) && stopDone(k)) { completedKey = k; break }
+				}
+				if (!completedKey && affectsCg) {
+					for (const k of cgKeys) if (!wasCg.get(k) && stopDone(k)) { completedKey = k; break }
 				}
 				return { action, completedKey }
 			}
@@ -3582,28 +4062,60 @@
 			async function flush() {
 				if (flushing || !pending.size) return
 				flushing = true
-				for (const [k, op] of [...pending]) {
+				let failed = false
+				for (const id of [...pending.keys()]) {
+					// Always send the LATEST coalesced state for this line: a tap may have
+					// merged into it since the loop began.
+					const entry = pending.get(id)
+					if (!entry) continue // already acknowledged/removed
 					try {
-						const resp = await fetch('/api/shop/assign', {
+						const resp = await fetch(entry.url, {
 							method: 'POST',
 							headers: { 'Content-Type': 'application/json' },
 							credentials: 'same-origin',
-							body: JSON.stringify(op),
+							body: JSON.stringify(entry.body),
 						})
 						if (resp.status === 401) {
+							// Session lost — stop draining and re-auth. The entry stays in
+							// IndexedDB, so nothing is lost; it replays after sign-in.
+							flushing = false
 							location.href = '/login'
 							return
 						}
-						if (!resp.ok) throw new Error('HTTP ' + resp.status)
-						pending.delete(k)
+						// 2xx = applied. A non-auth 4xx means the op is permanently
+						// rejected (e.g. the order was deleted) — drop it so one bad op can
+						// never wedge the whole queue. 5xx / network → keep and retry.
+						if (resp.ok || (resp.status >= 400 && resp.status < 500)) {
+							// Clear ONLY if nothing newer coalesced onto this line WHILE the
+							// request was in flight. enqueueNetwork REPLACES the entry with a
+							// freshly-merged object, so a changed reference means there's
+							// still-unsent desired state. Deleting it here is exactly what made
+							// a rapid case-then-grip tap "relapse": the grip was applied
+							// locally + queued, then dropped after the case-only POST, and the
+							// server echo reverted it. Leave it queued; the re-flush sends it.
+							if (pending.get(id) === entry) {
+								pending.delete(id)
+								ShopSync.deleteEntry(id).catch(() => {})
+							}
+						} else {
+							throw new Error('HTTP ' + resp.status)
+						}
 					} catch (e) {
-						// keep in queue; retry shortly
+						failed = true // network/5xx — keep queued, retry
 					}
 				}
 				flushing = false
 				if (pending.size) {
-					setConn('off')
-					setTimeout(flush, 3000)
+					if (failed) {
+						// A genuine failure — back off so we don't hammer a flaky network.
+						setConn('off')
+						setTimeout(flush, 3000)
+					} else {
+						// Only freshly-coalesced (mid-flight) entries remain; send them
+						// promptly so a still-unsent change can't linger and later relapse.
+						setConn(sse && sse.readyState === 1 ? 'live' : 'off')
+						setTimeout(flush, 0)
+					}
 				} else {
 					setConn(sse && sse.readyState === 1 ? 'live' : 'off')
 				}
@@ -3791,11 +4303,14 @@
 					ROWS.forEach((r) => {
 						if (String(r.charm_code || '').trim() === cd) r.charm_cost = cost
 					})
-					// Charm subtotals read from the (cached) aggregate objects, so keep
-					// them in sync too — otherwise the stall total lags behind the chip.
-					LAST_GROUPS.forEach((g) => (g.aggs || []).forEach((a) => {
-						if (String(a.charm_code || '').trim() === cd) a.charm_cost = cost
-					}))
+					// Charm subtotals read from the (cached) aggregate objects, so keep them
+					// in sync too — otherwise the stall total lags behind the chip. Covers
+					// charm-stall groups AND charms merged into a supplier stop.
+					LAST_GROUPS.forEach((g) => {
+						for (const a of [...(g.aggs || []), ...(g.charmAggs || [])]) {
+							if (String(a.charm_code || '').trim() === cd) a.charm_cost = cost
+						}
+					})
 				}
 			}
 			// Recompute + patch ONE group's subtotal chip in place (insert / update /
@@ -3912,23 +4427,159 @@
 						cost = Math.round(n * 100) / 100
 					}
 				}
-				// Optimistic: reflect immediately (surgical — no list rebuild), then persist.
+				// Optimistic: reflect immediately (surgical — no list rebuild), then queue
+				// durably. The write survives a dead zone / crash exactly like a status
+				// change, so a price entered on the shop floor is never lost.
 				applyCostLocally(kind, key, cost, part)
 				patchPricesLocally(kind, key, cost, part)
 				closePriceSheet()
+				const body = kind === 'product' ? { kind, title: key, part, cost } : { kind, code: key, cost }
+				enqueueCost(body)
+				toast(t('priceSaved'))
+			}
+
+			// ── "Same product" merge ─────────────────────────────────────────────
+			// The residual the automatic matcher provably cannot reach: one physical
+			// product listed by two shops with completely different photos. Perceptual
+			// hashes of those photos are ~50% apart (indistinguishable from unrelated
+			// products), and titles don't separate them either, so guessing would either
+			// miss these or fuse genuinely different designs. The shopper standing at
+			// the stall IS the sensor — this records their judgement durably
+			// (product_merges) so the two orders become one card for good.
+			let mergeTarget = null // { cardId, listingIds, candidates: [{cardId, listingIds}] }
+			const mergePicked = new Set() // candidate cardIds selected in the open sheet
+
+			// Distinct phone models a card still has to buy — the secondary cue (after
+			// the photo) that tells two similar-looking cards apart.
+			function cardModels(lines) {
+				const models = []
+				for (const r of lines) {
+					const m = String(r.phone_model || '').trim()
+					if (m && !models.includes(m)) models.push(m)
+				}
+				return models
+			}
+			function mergeCandHtml(cardId, lines, opts = {}) {
+				const r0 = lines[0]
+				const models = cardModels(lines)
+				const thumb = r0.image_url
+					? `<img class="mthumb" loading="lazy" decoding="async" src="${esc(r0.image_url)}" alt="" />`
+					: `<div class="mthumb thumb ph"></div>`
+				const sub = models.length ? esc(models.join(' · ')) : esc(r0.style || '')
+				const cls = opts.anchor ? 'mcand anchor' : 'mcand' + (mergePicked.has(cardId) ? ' sel' : '')
+				const attrs = opts.anchor ? '' : ` data-mcand="${cardId}"`
+				const tick = opts.anchor ? '' : '<span class="mtick"></span>'
+				return `<button type="button" class="${cls}"${attrs}>
+					${thumb}
+					<span class="mtext"><span class="mtitle">${esc(r0.title || '')}</span>${sub ? `<span class="msub">${sub}</span>` : ''}</span>
+					${tick}
+				</button>`
+			}
+			function renderMergeSheet() {
+				if (!mergeTarget) return
+				const anchor = PCARD.get(mergeTarget.cardId)
+				$('mergeTitle').textContent = t('mergeTitle')
+				$('mergeHint').textContent = t('mergeHint')
+				$('mergeAnchor').innerHTML = anchor ? `<div class="sheet-lab">${t('mergeThis')}</div>` + mergeCandHtml(mergeTarget.cardId, anchor.lines, { anchor: true }) : ''
+				$('mergeListLab').textContent = mergeTarget.candidates.length ? t('mergePick') : ''
+				$('mergeList').innerHTML = mergeTarget.candidates.length
+					? mergeTarget.candidates.map((c) => mergeCandHtml(c.cardId, c.lines)).join('')
+					: `<div class="merge-empty">${t('mergeNone')}</div>`
+				$('mergeCancel').textContent = t('cancel')
+				const save = $('mergeSave')
+				save.textContent = t('mergeDo')
+				save.disabled = mergePicked.size === 0
+				const split = $('mergeSplit')
+				split.textContent = t('mergeSplit')
+				split.style.display = mergeTarget.linked ? '' : 'none'
+			}
+			function openMergeSheet(cardId) {
+				const card = PCARD.get(cardId)
+				if (!card) return
+				const listingIds = cardListingIds(card.lines)
+				if (!listingIds.length) return
+				const candidates = card.siblings
+					.map((id) => {
+						const sib = PCARD.get(id)
+						return sib ? { cardId: id, lines: sib.lines, listingIds: cardListingIds(sib.lines) } : null
+					})
+					.filter((c) => c && c.listingIds.length)
+					// Most plausible first — a convenience ordering only (the photos, shown
+					// large above, are what the shopper actually decides on).
+					.sort((a, b) => mergeRank(card.lines[0], b.lines[0]) - mergeRank(card.lines[0], a.lines[0]))
+				mergePicked.clear()
+				mergeTarget = { cardId, listingIds, candidates, linked: listingIds.some((id) => MANUAL_MERGE.has(id)) }
+				rememberFocus()
+				renderMergeSheet()
+				$('mergeBg').classList.add('open')
+				Overlay.opened($('mergeSheet'))
+			}
+			function closeMergeSheet(fromPop) {
+				if (!$('mergeBg').classList.contains('open')) return
+				$('mergeBg').classList.remove('open')
+				mergeTarget = null
+				mergePicked.clear()
+				restoreFocus()
+				Overlay.closed(fromPop)
+			}
+			// Jaccard overlap of the two titles' distinctive words (phone models, format
+			// words and generic gift phrasing stripped) — mirrors the server's ordering
+			// helper closely enough to rank a short list.
+			const MERGE_STOPWORDS = new Set(
+				('iphone pro max plus se mini ultra magsafe 17 16 15 14 13 12 11 xr xs x 8 7 for her him with and the of w case cover phone gift set').split(' '),
+			)
+			function mergeRank(a, b) {
+				const toks = (s) =>
+					new Set(
+						String(s || '')
+							.toLowerCase()
+							.replace(/[^a-z0-9]+/g, ' ')
+							.trim()
+							.split(/\s+/)
+							.filter((w) => w.length > 1 && !MERGE_STOPWORDS.has(w)),
+					)
+				const A = toks(a && a.title)
+				const B = toks(b && b.title)
+				if (!A.size || !B.size) return 0
+				let inter = 0
+				for (const w of A) if (B.has(w)) inter++
+				return inter / (A.size + B.size - inter)
+			}
+			// Merging changes which lines share a card, so — unlike a status/price edit —
+			// it can't be applied optimistically or replayed from the offline queue: the
+			// server owns the resulting grouping. We therefore require a live round-trip
+			// and re-pull the route, which is also what tells every other device.
+			async function saveMerge() {
+				if (!mergeTarget || !mergePicked.size) return
+				const ids = new Set(mergeTarget.listingIds)
+				for (const cardId of mergePicked) {
+					const c = mergeTarget.candidates.find((x) => x.cardId === cardId)
+					if (c) c.listingIds.forEach((id) => ids.add(id))
+				}
+				closeMergeSheet()
+				await postMerge('POST', { listing_ids: [...ids] }, t('merged'))
+			}
+			async function splitMerge() {
+				if (!mergeTarget) return
+				const ids = mergeTarget.listingIds
+				closeMergeSheet()
+				await postMerge('DELETE', { listing_ids: ids }, t('mergeSplitDone'))
+			}
+			async function postMerge(method, body, okMsg) {
 				try {
-					const body = kind === 'product' ? { kind, title: key, part, cost } : { kind, code: key, cost }
-					const resp = await fetch('/api/shop/cost', {
-						method: 'POST',
-						headers: { 'Content-Type': 'application/json' },
+					const r = await fetch('/api/route/product-merges', {
+						method,
 						credentials: 'same-origin',
+						headers: { 'Content-Type': 'application/json' },
 						body: JSON.stringify(body),
 					})
-					if (resp.status === 401) return (location.href = '/login')
-					if (!resp.ok) throw new Error('HTTP ' + resp.status)
-					toast(t('priceSaved'))
-				} catch (e) {
-					toast(t('priceSaveFail'))
+					if (r.status === 401) return void (location.href = '/login')
+					if (!r.ok) throw new Error('HTTP ' + r.status)
+					haptic(12)
+					toast(okMsg)
+					await load(false)
+				} catch {
+					toast(navigator.onLine === false ? t('mergeOffline') : t('mergeFail'))
 				}
 			}
 
@@ -3981,6 +4632,11 @@
 				const priceEl = e.target.closest('.price')
 				if (priceEl) {
 					openPriceSheet(priceEl.dataset)
+					return
+				}
+				const mergeEl = e.target.closest('.pmerge')
+				if (mergeEl) {
+					openMergeSheet(mergeEl.dataset.pcard)
 					return
 				}
 				const comp = e.target.closest('.comp')
@@ -4076,6 +4732,19 @@
 			$('priceInput').addEventListener('keydown', (e) => {
 				if (e.key === 'Enter') savePrice(false)
 			})
+
+			$('mergeBg').addEventListener('click', (e) => {
+				if (e.target === $('mergeBg')) return closeMergeSheet()
+				const cand = e.target.closest('.mcand[data-mcand]')
+				if (!cand || !mergeTarget) return
+				const id = cand.dataset.mcand
+				if (mergePicked.has(id)) mergePicked.delete(id)
+				else mergePicked.add(id)
+				renderMergeSheet()
+			})
+			$('mergeCancel').addEventListener('click', () => closeMergeSheet())
+			$('mergeSave').addEventListener('click', () => saveMerge())
+			$('mergeSplit').addEventListener('click', () => splitMerge())
 
 			$('zoomBg').addEventListener('click', () => closeZoom())
 
@@ -4229,10 +4898,28 @@
 			$('dashBtn').addEventListener('click', () => (location.href = '/'))
 			$('refreshBtn').addEventListener('click', () => load(true))
 			$('logoutBtn').addEventListener('click', async () => {
+				// Don't strand unsynced work: try one last drain, and if writes remain
+				// (still offline), make the shopper explicitly confirm before signing out
+				// (logging out clears the session the queued writes need to replay).
+				if (pending.size) {
+					await flush()
+					if (pending.size && !confirm(t('unsavedLogout'))) return
+				}
 				try {
 					await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' })
 				} catch {}
 				location.href = '/login'
+			})
+
+			// Last-line safety net: warn before leaving/closing the tab with writes that
+			// haven't reached the server yet. The queue is durable so they'd replay on
+			// next open, but a visible prompt prevents a shopper walking away thinking
+			// everything saved. Native browser confirm — no custom text is shown.
+			window.addEventListener('beforeunload', (e) => {
+				if (pending.size) {
+					e.preventDefault()
+					e.returnValue = ''
+				}
 			})
 			// ── Data loading ─────────────────────────────────────────────────────
 			async function whoAmI() {
@@ -4267,6 +4954,7 @@
 					const data = await r.json()
 					ROWS = data.rows || []
 					EXCHANGES = data.exchanges || []
+					MANUAL_MERGE = new Set((data.manual_merge_listings || []).map(Number))
 					rowIndex.clear()
 					for (const row of ROWS) rowIndex.set(keyOf(row), row)
 					render()
@@ -4310,7 +4998,12 @@
 							'/' +
 							(r.cost_grip ?? '') +
 							'/' +
-							(r.charm_cost ?? ''),
+							(r.charm_cost ?? '') +
+							// Product identity is part of the signature: a merge changes which
+							// lines share a card without changing any line's own fields, and
+							// that MUST still trigger a re-render.
+							':' +
+							(r.product_key || ''),
 					)
 				}
 				parts.push('x:' + (exchanges || []).map((e) => e.exchange_id).join(','))
@@ -4320,6 +5013,7 @@
 				return (
 					$('sheetBg').classList.contains('open') ||
 					$('priceBg').classList.contains('open') ||
+					$('mergeBg').classList.contains('open') ||
 					$('zoomBg').classList.contains('open') ||
 					mapOpen() ||
 					drawerOpen()
@@ -4343,6 +5037,7 @@
 					if (routeSig(rows, exchanges) === routeSig(ROWS, EXCHANGES)) return
 					ROWS = rows
 					EXCHANGES = exchanges
+					MANUAL_MERGE = new Set((data.manual_merge_listings || []).map(Number))
 					rowIndex.clear()
 					for (const row of ROWS) rowIndex.set(keyOf(row), row)
 					render()
@@ -4466,8 +5161,9 @@
 					}
 					if (msg.type !== 'assign') return
 					const k = msg.receipt_id + '\x00' + msg.item_key
-					// Don't clobber a change we're still trying to save.
-					if (pending.has(k)) return
+					// Don't clobber a change we're still trying to save. The durable queue
+					// is keyed by op-id (assign\0<receipt>\0<item>), NOT the rowIndex key.
+					if (pending.has(ShopSync.assignOpId(msg.receipt_id, msg.item_key))) return
 					const r = rowIndex.get(k)
 					if (!r) {
 						// A line we don't have yet — it just entered the route (e.g. a newly
@@ -4532,9 +5228,29 @@
 				if (h) document.documentElement.style.setProperty('--stick-top', h.offsetHeight + 'px')
 			}
 
+			// Rehydrate any writes that were queued in a previous session but never
+			// acknowledged (app was closed/evicted/rebooted while offline). Load them
+			// back into the in-memory mirror and drain — this is what guarantees a
+			// shopped tap is never silently lost across a restart.
+			async function hydrateQueue() {
+				if (!(window.ShopSync && ShopSync.hasIDB())) return
+				try {
+					const entries = await ShopSync.getAll()
+					for (const e of entries) if (e && e.id) pending.set(e.id, e)
+					if (pending.size) {
+						setConn('off') // shows "Saving…" until drained
+						requestBgSync()
+						flush()
+					}
+				} catch (_) {
+					/* IndexedDB blocked (e.g. private mode) — fall back to in-memory only */
+				}
+			}
+
 			async function boot() {
 				applyStaticI18n()
 				syncStickTop()
+				hydrateQueue()
 				if (window.ResizeObserver) new ResizeObserver(syncStickTop).observe(document.querySelector('header'))
 				window.addEventListener('resize', syncStickTop)
 				// Start real-time + identity checks in PARALLEL with loading the list,

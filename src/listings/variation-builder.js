@@ -95,16 +95,20 @@ const STYLE_ORDER = ['Case+Grip+Charm', 'Case+Grip', 'Case+Charm', 'Case Only', 
 
 /**
  * Coerce an arbitrary {styleKey: truthy} map into a clean boolean map over the
- * 6 known styles. "Case Only" is forced on (a listing must always offer the
- * bare case), so the operator can never ship an empty listing.
+ * 6 known styles. This is a FAITHFUL, side-effect-free normaliser: it reflects
+ * the operator's exact selection and never re-enables a style on its own.
+ *
+ * Historically this forced "Case Only" on so a listing could never be empty.
+ * That invariant now lives with the layers that actually know about CUSTOM
+ * variation values (which can carry a listing on their own): buildInventory()
+ * re-enables a canonical fallback only when no bundle AND no custom value is
+ * offered, and the bulk editor guards the same rule in the UI. Forcing it here
+ * would resurrect "Case Only" for a valid custom-only listing — exactly the bug
+ * we must avoid.
  */
 function normaliseEnabledStyles(input = {}) {
   const out = {};
   for (const key of STYLE_ORDER) out[key] = Boolean(input[key]);
-  // "Case Only" is always available (a listing must offer the bare case). Force it
-  // on here so the generated copy ("What's Included") can never disagree with the
-  // inventory buildInventory() actually publishes, which already re-enables it.
-  out['Case Only'] = true;
   return out;
 }
 
@@ -115,8 +119,8 @@ const CUSTOM_STYLE_MAX_COUNT = 24; // keep models × styles well under Etsy's li
 /**
  * Sanitise an operator-defined list of CUSTOM style variations. Each entry
  * becomes one "Styles" variation value (e.g. "Case1 + Charm1") with its own
- * price and (optional) linked product-image rank. When a non-empty list is
- * returned it fully REPLACES the canonical bundle matrix for that listing.
+ * price and (optional) linked product-image rank. Custom values are offered
+ * ALONGSIDE the canonical bundles in the same dropdown — see buildInventory().
  *
  * Rules: label required (trimmed, ≤45 chars) and unique (case-insensitive);
  * price must be a positive number; imageRank is a positive integer or null.

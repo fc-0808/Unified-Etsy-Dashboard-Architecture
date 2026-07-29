@@ -15,7 +15,13 @@
 const fs   = require('fs');
 const path = require('path');
 
-const { getCharmLibrary, replaceCharmLibrary } = require('../db/setup');
+const {
+  getCharmLibrary, replaceCharmLibrary,
+  getCharmByCode, insertCharmLibraryRow, updateCharmLibraryRow,
+  getCharmShopDirectory, insertCharmShopDirectoryRow, updateCharmShopDirectoryRow,
+  upsertRouteAssignment, upsertProductAssignment, mergeProductMapSupplierCharm,
+  getSubstitutionForLine,
+} = require('../db/setup');
 const routeDashboard = require('./dashboard');
 const enginePaths    = require('./engine-paths');
 
@@ -244,6 +250,126 @@ function reorderCharmImages(config, renames) {
   }
 }
 
+/**
+ * Link a charm to a supplier's shop — "this charm is bought at the same stall as
+ * the case/grip" — as ONE transaction.
+ *
+ * Composes every write that must hold for that statement to be true:
+ *   1. charm_shop_directory — the supplier becomes a charm shop if it isn't one
+ *      yet. Matched by NAME only (the table is keyed (name, stall)), so a
+ *      merchant can never end up listed twice.
+ *   2. charm_library — the code → shop mapping. This is the SINGLE SOURCE OF
+ *      TRUTH every view resolves a charm's shop through (see buildRouteRows), so
+ *      writing only the per-order snapshot would leave the UI on the old shop.
+ *      A brand-new (or legacy hand-typed) code is created here; an existing one
+ *      keeps its sku / notes / photo.
+ *   3. route_assignments — this order line's charm.
+ *   4. product_assignments + product_map — the per-product default, so future
+ *      orders of the same product inherit it (mirrors POST /api/route/assign).
+ *
+ * Idempotent: re-running with the same inputs converges to the same state.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ receipt_id: number, item_key: string, title?: string, code: string,
+ *           shop_name: string, stall?: string, image_file?: string }} o
+ *        `image_file` is only applied when provided; omit it to keep the charm's
+ *        current photo.
+ * @returns {{ code: string, charm_shop: string, charm_stall: string,
+ *             created_charm: boolean, created_shop: boolean,
+ *             filled_stall: boolean, stall_mismatch: string|null,
+ *             assignment: object }}
+ * @throws {Error} with code 'REQUIRED' on invalid input
+ */
+function linkCharmToSupplier(db, o) {
+  const code = String(o.code || '').trim();
+  if (!CODE_RE.test(code)) {
+    throw Object.assign(new Error('Charm code may only contain letters, digits, "-" and "_".'), { code: 'REQUIRED' });
+  }
+  const shopName = String(o.shop_name || '').trim();
+  if (!shopName) {
+    throw Object.assign(new Error('A supplier shop name is required.'), { code: 'REQUIRED' });
+  }
+  const receiptId = Number(o.receipt_id);
+  const itemKey = String(o.item_key || '');
+  if (!Number.isFinite(receiptId) || !itemKey) {
+    throw Object.assign(new Error('receipt_id and item_key are required.'), { code: 'REQUIRED' });
+  }
+  const stall = String(o.stall || '').trim();
+  const existing = getCharmByCode(db, code);
+
+  const out = {
+    code,
+    charm_shop: shopName,
+    charm_stall: stall,
+    created_charm: !existing,
+    created_shop: false,
+    filled_stall: false,
+    stall_mismatch: null,
+    assignment: null,
+  };
+
+  db.transaction(() => {
+    // 1. Charm-shop directory.
+    const hit = getCharmShopDirectory(db).find(
+      (s) => String(s.shop_name || '').trim().toLowerCase() === shopName.toLowerCase()
+    );
+    if (!hit) {
+      insertCharmShopDirectoryRow(db, { shop_name: shopName, stall, notes: '' });
+      out.created_shop = true;
+    } else {
+      const hitStall = String(hit.stall || '').trim();
+      if (stall && !hitStall) {
+        // Listed, but with no stall recorded — complete it, since the shopper's
+        // charm stall is derived from this directory.
+        updateCharmShopDirectoryRow(db, {
+          orig_shop_name: hit.shop_name, orig_stall: hit.stall || '',
+          shop_name: hit.shop_name, stall, notes: hit.notes,
+        });
+        out.filled_stall = true;
+      } else if (stall && hitStall.toLowerCase() !== stall.toLowerCase()) {
+        // The directory disagrees with the supplier's stall. Operator / Excel data
+        // wins (never overwritten) — but report it so the caller can say so rather
+        // than silently sending the shopper somewhere else.
+        out.stall_mismatch = hitStall;
+        out.charm_stall = hitStall;
+      }
+    }
+
+    // 2. Charm library — the authoritative code → shop mapping.
+    const libRow = { code, default_charm_shop: shopName };
+    if (o.image_file != null) libRow.image_file = o.image_file;
+    if (!existing) insertCharmLibraryRow(db, libRow);
+    else updateCharmLibraryRow(db, { orig_code: code, ...libRow });
+
+    // 3. This order line.
+    out.assignment = upsertRouteAssignment(db, {
+      receipt_id: receiptId,
+      item_key: itemKey,
+      title: o.title,
+      charm_code: code,
+      charm_shop: shopName,
+    });
+
+    // 4. Per-product default + catalog write-through. A CUSTOM upload has no
+    //    catalog product (productKey === null); we skip it there so a one-off
+    //    title never invents a catalog entry — exactly like /api/route/assign.
+    const sub = getSubstitutionForLine(db, receiptId, itemKey);
+    const productKey = routeDashboard.productDefaultsKey(itemKey, sub);
+    const effectiveTitle = sub && sub.new_title ? sub.new_title : o.title;
+    if (productKey) {
+      upsertProductAssignment(db, { item_key: productKey, title: effectiveTitle, charm_code: code, charm_shop: shopName });
+      try {
+        mergeProductMapSupplierCharm(db, { title: effectiveTitle, charm_code: code, charm_shop: shopName });
+      } catch (e) {
+        // The catalog table is optional; the assignment above still stands.
+        console.warn('[charm] product-map write-through failed:', e.message);
+      }
+    }
+  })();
+
+  return out;
+}
+
 module.exports = {
   charmImagesDir,
   seedCharmLibraryIfEmpty,
@@ -255,4 +381,5 @@ module.exports = {
   reorderCharmImages,
   charmImageVersion,
   charmImageVersionMap,
+  linkCharmToSupplier,
 };

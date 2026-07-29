@@ -51,6 +51,12 @@ function buildApp(store) {
 	app.post('/api/orders/:id/items/component-status', (_req, res) => res.json({ ok: true }))
 	app.post('/api/orders/:id/items/purchase-state', (_req, res) => res.json({ ok: true }))
 	app.post('/api/orders/bulk-needs-purchase', (_req, res) => res.json({ ok: true }))
+	// Wrong-model exchange ("Fix model") — create/remove/done/reopen are packer-safe
+	// (local order_exchanges table only, no finance/listings/Etsy).
+	app.post('/api/orders/:id/exchanges', (_req, res) => res.json({ ok: true, exchange: { id: 1 } }))
+	app.delete('/api/exchanges/:id', (_req, res) => res.json({ ok: true }))
+	app.post('/api/exchanges/:id/done', (_req, res) => res.json({ ok: true }))
+	app.post('/api/exchanges/:id/reopen', (_req, res) => res.json({ ok: true }))
 	// Charm shopping list: read-only bundle is employee-safe; the full route planner is not.
 	app.get('/api/route/charms-to-buy', (_req, res) => res.json({ ok: true, rows: [], charms: [], charm_shops: [], progress: {} }))
 	app.get('/api/route/dashboard', (_req, res) => res.json({ rows: [] }))
@@ -104,6 +110,19 @@ async function suiteA() {
 	// Bulk needs-purchase stays owner-only (the packer UI never exposes it).
 	r = await post('/api/orders/bulk-needs-purchase')
 	check('Employee BLOCKED from bulk needs-purchase (403)', r.status === 403, `got ${r.status}`)
+
+	// Wrong-model exchange ("Fix model") — an employee sourcing the buy queue can
+	// flag a design-right/model-wrong line to swap, and manage that exchange.
+	r = await post('/api/orders/5/exchanges')
+	check('Employee CAN flag a wrong-model exchange (200)', r.status === 200, `got ${r.status}`)
+	r = await post('/api/exchanges/9/done')
+	check('Employee CAN mark an exchange done (200)', r.status === 200, `got ${r.status}`)
+	r = await post('/api/exchanges/9/reopen')
+	check('Employee CAN reopen an exchange (200)', r.status === 200, `got ${r.status}`)
+	r = await fetch(base + '/api/orders/9/exchanges', { method: 'GET', headers: { cookie: packer } })
+	check('Employee BLOCKED from a non-allowlisted method on exchanges (403)', r.status === 403, `got ${r.status}`)
+	r = await fetch(base + '/api/exchanges/9', { method: 'DELETE', headers: { cookie: packer } })
+	check('Employee CAN remove an exchange (200)', r.status === 200, `got ${r.status}`)
 
 	// Charms-to-buy list is read-only + employee-safe; the owner route planner and
 	// its assign endpoint stay blocked (employees persist via component-status).

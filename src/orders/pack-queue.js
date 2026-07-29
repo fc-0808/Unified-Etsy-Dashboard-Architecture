@@ -111,9 +111,70 @@ function openExchangeHoldCount(db, config = {}) {
 	}
 }
 
+/**
+ * Start-of-local-day (unix seconds) for the day containing `nowMs`. Cohorts are
+ * expressed in the operator's LOCAL day because "shopped yesterday" means the
+ * previous *working day* on the packing bench, not a UTC boundary.
+ */
+function startOfLocalDaySec(nowMs) {
+	const d = new Date(nowMs)
+	d.setHours(0, 0, 0, 0)
+	return Math.floor(d.getTime() / 1000)
+}
+
+/**
+ * SQL fragment — restrict a receipts scope to a purchase-completion COHORT, i.e.
+ * orders whose shopping was FINISHED (receipts.purchase_completed_at stamped) in a
+ * given local-day window. This is what lets the packer pull up exactly "the orders
+ * I shopped yesterday / on my last trip" the next morning, instead of the whole
+ * ever-purchased pile — so a shopped-but-never-packed order can't hide in backlog.
+ *
+ *   'today'     — completed since local midnight today.
+ *   'yesterday' — completed during the whole of the previous local day.
+ *   'recent'    — completed since the start of yesterday (yesterday + today; the
+ *                 usual "my last shopping trip → this morning's packing" span).
+ *   anything else / '' — no cohort restriction (returns TRUE).
+ *
+ * @param {string} cohort   one of 'today' | 'yesterday' | 'recent'
+ * @param {string} alias    the `receipts` table alias used by the caller (e.g. 'r')
+ * @param {number} [nowMs]  injectable clock for tests (default Date.now())
+ */
+function purchasedCohortSql(cohort, alias = 'r', nowMs = Date.now()) {
+	const a = alias
+	const col = `${a}.purchase_completed_at`
+	const startToday = startOfLocalDaySec(nowMs)
+	const DAY = 24 * 3600
+	switch (String(cohort || '')) {
+		case 'today':
+			return `(${col} IS NOT NULL AND ${col} >= ${startToday})`
+		case 'yesterday':
+			return `(${col} IS NOT NULL AND ${col} >= ${startToday - DAY} AND ${col} < ${startToday})`
+		case 'recent':
+			return `(${col} IS NOT NULL AND ${col} >= ${startToday - DAY})`
+		default:
+			return '1 = 1'
+	}
+}
+
+/**
+ * Whether the packing queue must require VERIFICATION (packer physically confirmed
+ * the item in hand), not merely the shopper's "Purchased" assertion, before an
+ * order is packable. Off by default so existing shops see no behavior change; turn
+ * on with config.require_verify_before_pack = true to enforce the two-person gate.
+ *
+ * @param {object} config - dashboard config.
+ * @returns {boolean}
+ */
+function requireVerifyBeforePack(config = {}) {
+	return config.require_verify_before_pack === true
+}
+
 module.exports = {
 	readyToPackShipStateSql,
 	openExchangeExistsSql,
 	excludeOpenExchangeSql,
 	openExchangeHoldCount,
+	purchasedCohortSql,
+	requireVerifyBeforePack,
+	startOfLocalDaySec,
 }

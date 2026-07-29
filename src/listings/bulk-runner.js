@@ -97,6 +97,7 @@ class BulkJobManager {
     this._subscribers = new Map(); // job_id → Set<res>
     this._running = new Set();     // job_ids currently executing
     this._control = new Map();     // job_id → 'pause' | 'cancel' (cooperative signal)
+    this._itemRevs = new Map();    // job_id\0folder → write revision (lost-update guard)
     this._reconcileOrphans();
   }
 
@@ -777,6 +778,21 @@ class BulkJobManager {
   }
 
   /**
+   * The listing's advertised "from" price. Custom variation values are offered
+   * ALONGSIDE the canonical bundles, so the minimum is the lowest of the enabled
+   * canonical prices AND the custom prices. Shared by every path that rewrites
+   * the matrix, so they can't drift apart.
+   */
+  _effectiveMinPrice(preview) {
+    const canonMin = this._recomputeMinPrice(preview);
+    const custom = Array.isArray(preview.customStyles) ? preview.customStyles : [];
+    const customPrices = custom.map((s) => Number(s.price)).filter((n) => Number.isFinite(n) && n > 0);
+    if (!customPrices.length) return canonMin;
+    const min = Math.min(canonMin, ...customPrices);
+    return Number.isFinite(min) ? min : canonMin;
+  }
+
+  /**
    * Apply edited per-style prices to one item. Persists to the preview and, for
    * an already-created (real) listing, re-pushes the variation inventory so the
    * Etsy draft/listing reflects the new prices immediately.
@@ -868,6 +884,18 @@ class BulkJobManager {
     } else if (!preview.enabledStyles || !Object.keys(preview.enabledStyles).length) {
       preview.enabledStyles = computeEnabledStyles(preview.imageAnalysis || ai.imageAnalysis || []);
     }
+    // Invariant (defence-in-depth): a listing must always offer at least one
+    // VISIBLE variation. The operator may disable every canonical bundle —
+    // including "Case Only" — but ONLY while a custom value carries the listing.
+    // If a request somehow disables all bundles with no custom value (e.g. the UI
+    // guard was bypassed), re-enable "Case Only" so we never persist an empty
+    // matrix. This mirrors buildInventory()'s custom-aware fallback and replaces
+    // the old unconditional force that resurrected "Case Only" for valid
+    // custom-only listings.
+    const hasActiveCustom = Array.isArray(activeCustom) && activeCustom.length > 0;
+    if (!hasActiveCustom && !STYLE_ORDER.some((k) => preview.enabledStyles[k])) {
+      preview.enabledStyles['Case Only'] = true;
+    }
     let aiModelsDirty = false;
     if (enabledModels && typeof enabledModels === 'object') {
       preview.enabledModels = normaliseEnabledModels(enabledModels, productType);
@@ -895,15 +923,7 @@ class BulkJobManager {
       ai.styleImageMapping = preview.styleImageMapping;
       aiDirty = true;
     }
-    // Custom variations are ADDED on top of the bundles, so the listing minimum
-    // is the lowest of the enabled canonical prices AND the custom prices.
-    const canonMin = this._recomputeMinPrice(preview);
-    let minP = canonMin;
-    if (activeCustom && activeCustom.length) {
-      const cMin = Math.min(...activeCustom.map((s) => Number(s.price)).filter((n) => Number.isFinite(n) && n > 0));
-      if (Number.isFinite(cMin)) minP = Math.min(minP, cMin);
-    }
-    preview.minPrice = Number.isFinite(minP) ? minP : canonMin;
+    preview.minPrice = this._effectiveMinPrice(preview);
     this._updateItem(jobId, item.product_folder, {
       preview_json: JSON.stringify(preview),
       ...(aiDirty || aiModelsDirty || aiCustomDirty ? { ai_json: JSON.stringify(ai) } : {}),
@@ -1158,9 +1178,14 @@ class BulkJobManager {
    * created (real) listing pushes the new title/description/tags to Etsy.
    * Runs detached from the HTTP request; emits SSE progress events.
    */
-  async _runRegenerateItemCopy(jobId, item, job, { characterName, magsafe, enabledModels, enabledStyles, styleImageMapping } = {}) {
+  async _runRegenerateItemCopy(jobId, item, job, { characterName, magsafe, enabledModels, enabledStyles, styleImageMapping, customStyles, variationOrder } = {}) {
     this._emit(jobId, { type: 'regen_start', folder: item.product_folder, seq: item.seq });
     const productType = jobProductType(job);
+    const folder = item.product_folder;
+    // Revision of the row we're about to snapshot. Generating copy takes seconds;
+    // if the operator's variation autosave lands in that window this moves, and
+    // their newer intent wins the merge below.
+    const revAtStart = this._itemRev(jobId, folder);
 
     let ai = {};
     try { ai = item.ai_json ? JSON.parse(item.ai_json) : {}; } catch { ai = {}; }
@@ -1180,6 +1205,14 @@ class BulkJobManager {
     const stylesForCopy = (enabledStyles && typeof enabledStyles === 'object' && Object.keys(enabledStyles).length)
       ? enabledStyles
       : (preview.enabledStyles || ai.enabledStyles || null);
+    // Operator-defined CUSTOM variation values ("Case 1 + Charm 1", …). "Apply &
+    // regenerate copy" commits the whole editor, so a list in the request IS what
+    // was on screen and wins over the persisted one — both for the copy the AI
+    // writes and for what we store below. Absent (older client / other caller) =
+    // no opinion, keep whatever is saved.
+    const explicitCustom = customStyles !== undefined ? normaliseCustomStyles(customStyles) : null;
+    const customForCopy = explicitCustom
+      || (Array.isArray(preview.customStyles) ? preview.customStyles : (Array.isArray(ai.customStyles) ? ai.customStyles : null));
 
     // Only an EXPLICIT operator MagSafe toggle overrides the cached (dedicated-pass)
     // detection — never auto-clear it, so a correctly detected MagSafe survives a
@@ -1216,47 +1249,110 @@ class BulkJobManager {
       imageAnalysis, productSummary, characterOverride: characterName,
       shopName: job.shop_name, brandTags, enabledModels: modelsForCopy, enabledStyles: stylesForCopy,
       styleImageMapping: savedStyleImages, attributeMenu, productType,
-      customStyles: preview.customStyles || ai.customStyles || null,
+      customStyles: customForCopy && customForCopy.length ? customForCopy : null,
     });
     // Persist the (possibly overridden) image analysis so the corrected MagSafe
     // state sticks for future regenerations and the real create.
     copy.imageAnalysis = imageAnalysis;
 
-    const newAi = { ...ai, ...copy };
-    preview.title = copy.title;
-    preview.description = copy.description;
-    preview.tags = copy.tags || [];
-    preview.primaryColor = copy.primaryColor || preview.primaryColor;
-    preview.secondaryColor = copy.secondaryColor || preview.secondaryColor;
-    preview.character = copy.characterName || '';
-    preview.characterDetected = copy.characterDetected || '';
-    preview.characterFranchise = copy.characterFranchise || '';
-    preview.characterConfidence = copy.characterConfidence;
-    preview.characterEvidence = copy.characterEvidence || '';
-    preview.characterAlternatives = copy.characterAlternatives || [];
-    preview.characterLowConfidence = copy.characterLowConfidence || false;
-    preview.styleImageMapping = copy.styleImageMapping || preview.styleImageMapping || {};
-    preview.enabledModels = copy.enabledModels || preview.enabledModels;
-    preview.aiAttributes = copy.aiAttributes || preview.aiAttributes || null;
+    // ── Merge onto the CURRENT row, never the snapshot we started from ────────
+    // `preview_json` is a single blob shared with the inspector's variation
+    // autosave. Writing back the object parsed before the (multi-second) AI call
+    // would silently delete anything saved in between — that is exactly how a
+    // custom variation vanished moments after "Apply & regenerate copy". Re-read
+    // here and overwrite only the fields this regeneration genuinely owns.
+    const fresh = this.getItemBySeq(jobId, item.seq) || item;
+    const racedWithSave = this._itemRev(jobId, folder) !== revAtStart;
+    let next = {};
+    try { next = fresh.preview_json ? JSON.parse(fresh.preview_json) : {}; } catch { next = {}; }
+    let freshAi = {};
+    try { freshAi = fresh.ai_json ? JSON.parse(fresh.ai_json) : {}; } catch { freshAi = {}; }
 
-    this._updateItem(jobId, item.product_folder, {
-      ai_json: JSON.stringify(newAi), title: copy.title, preview_json: JSON.stringify(preview),
+    // Copy-owned fields — the regeneration is authoritative for every one of these.
+    next.title = copy.title;
+    next.description = copy.description;
+    next.tags = copy.tags || [];
+    next.primaryColor = copy.primaryColor || next.primaryColor;
+    next.secondaryColor = copy.secondaryColor || next.secondaryColor;
+    next.character = copy.characterName || '';
+    next.characterDetected = copy.characterDetected || '';
+    next.characterFranchise = copy.characterFranchise || '';
+    next.characterConfidence = copy.characterConfidence;
+    next.characterEvidence = copy.characterEvidence || '';
+    next.characterAlternatives = copy.characterAlternatives || [];
+    next.characterLowConfidence = copy.characterLowConfidence || false;
+    next.aiAttributes = copy.aiAttributes || next.aiAttributes || null;
+    // The MagSafe override mutates `imageAnalysis` in place. That array came from
+    // the snapshot, so mirror the corrected flag onto the freshly-read preview's
+    // own copy — otherwise the toggle would spring back on the next render.
+    if (typeof magsafe === 'boolean' && Array.isArray(next.imageAnalysis)) {
+      for (const img of next.imageAnalysis) img.has_magsafe_ring = magsafe;
+    }
+
+    // Matrix fields — the request describes what the operator saw when they
+    // pressed the button, so it wins, UNLESS a save landed while we generated.
+    // That save is the newer intent, so we leave the freshly-read matrix alone.
+    if (!racedWithSave) {
+      if (explicitCustom) next.customStyles = explicitCustom.length ? explicitCustom : null;
+      if (variationOrder !== undefined) {
+        next.variationOrder = Array.isArray(variationOrder) && variationOrder.length ? variationOrder.map(String) : null;
+      }
+      if (explicitImages) next.styleImageMapping = this._sanitizeStyleImageMapping(explicitImages, next);
+      else next.styleImageMapping = copy.styleImageMapping || next.styleImageMapping || {};
+      next.enabledModels = copy.enabledModels || modelsForCopy || next.enabledModels;
+      // Persist the EXACT style selection behind the button (parity with
+      // enabledModels above), so the stored matrix is a single source of truth
+      // independent of autosave timing. Same "never persist an empty matrix"
+      // invariant as updateItemVariations: a canonical fallback is re-enabled
+      // ONLY when no bundle and no custom value carries the listing — checked
+      // against the customs we just resolved, not a stale snapshot.
+      if (enabledStyles && typeof enabledStyles === 'object' && Object.keys(enabledStyles).length) {
+        const normStyles = normaliseEnabledStyles(enabledStyles);
+        const custom = Array.isArray(next.customStyles) ? next.customStyles : null;
+        if (!(custom && custom.length) && !STYLE_ORDER.some((k) => normStyles[k])) normStyles['Case Only'] = true;
+        next.enabledStyles = normStyles;
+      }
+    } else {
+      // A newer save owns the matrix. Re-fit the generated text to it so the
+      // title's device range and the "Device Compatibility" list can't advertise
+      // models the listing no longer offers.
+      const finalModels = normaliseEnabledModels(next.enabledModels, productType);
+      if (next.title) next.title = retitleForModels(next.title, finalModels, productType);
+      if (next.description) next.description = filterModelsInDescription(next.description, finalModels, productType);
+    }
+    next.minPrice = this._effectiveMinPrice(next);
+
+    // Cached AI copy: layer the regenerated copy over the CURRENT cached object
+    // (so a concurrent save's mirrors survive), then re-assert the matrix mirrors
+    // — `copy` knows nothing about custom values or the operator's order.
+    const newAi = { ...freshAi, ...copy };
+    newAi.title = next.title;
+    newAi.description = next.description;
+    newAi.styleImageMapping = next.styleImageMapping;
+    newAi.enabledModels = next.enabledModels;
+    newAi.customStyles = next.customStyles || null;
+    newAi.variationOrder = next.variationOrder || null;
+
+    this._updateItem(jobId, folder, {
+      ai_json: JSON.stringify(newAi), title: next.title, preview_json: JSON.stringify(next),
     });
 
     let pushed = false;
     if (job.dry_run !== 1 && item.listing_id) {
       const { shopClient, numericShopId } = await this.resolveShopClient(job.shop_name);
       await updateListing(shopClient, numericShopId, item.listing_id, {
-        title: copy.title, description: copy.description, tags: copy.tags || [],
+        title: next.title, description: next.description, tags: next.tags || [],
       });
       pushed = true;
     }
-    this._emit(jobId, { type: 'item', folder: item.product_folder, seq: item.seq, status: item.status, title: copy.title });
+    this._emit(jobId, { type: 'item', folder, seq: item.seq, status: item.status, title: next.title });
     this._emit(jobId, {
-      type: 'regen_done', folder: item.product_folder, seq: item.seq,
-      title: copy.title, character: copy.characterName, characterConfidence: copy.characterConfidence, pushed,
+      type: 'regen_done', folder, seq: item.seq,
+      title: next.title, character: copy.characterName, characterConfidence: copy.characterConfidence, pushed,
+      enabledStyles: next.enabledStyles, enabledModels: next.enabledModels,
+      customStyles: next.customStyles || null, variationOrder: next.variationOrder || null,
     });
-    return { ok: true, pushed, title: copy.title, character: copy.characterName, characterConfidence: copy.characterConfidence };
+    return { ok: true, pushed, title: next.title, character: copy.characterName, characterConfidence: copy.characterConfidence };
   }
   _updateJob(jobId, fields) {
     const keys = Object.keys(fields);
@@ -1269,7 +1365,19 @@ class BulkJobManager {
     const set = [...keys.map((k) => `${k} = @${k}`), "updated_at = strftime('%s','now')"].join(', ');
     this.db.prepare(`UPDATE bulk_job_items SET ${set} WHERE job_id = @job_id AND product_folder = @folder`)
       .run({ ...fields, job_id: jobId, folder });
+    const key = this._itemRevKey(jobId, folder);
+    this._itemRevs.set(key, (this._itemRevs.get(key) || 0) + 1);
   }
+
+  // ── Item write revision (optimistic-concurrency token) ──────────────────────
+  // `preview_json` is ONE blob rewritten by several independent paths: the
+  // inspector's variation autosave, price edits, and the background copy
+  // regeneration. Every write bumps this counter, so a slow writer that read the
+  // blob before an `await` can tell whether someone else has written since — and
+  // merge instead of clobbering. `updated_at` can't serve here: it has one-second
+  // granularity, and these writes land milliseconds apart.
+  _itemRevKey(jobId, folder) { return `${jobId}\u0000${folder}`; }
+  _itemRev(jobId, folder) { return this._itemRevs.get(this._itemRevKey(jobId, folder)) || 0; }
 
   /**
    * Create a job + item rows and kick off processing (async, non-blocking).
@@ -1692,7 +1800,23 @@ class BulkJobManager {
           const signal = this._control.get(jobId);
           if (signal) { stoppedBy = signal; break; }
           const it = queue.shift();
-          if (it) await processItem(it);
+          if (!it) continue;
+          // Defence-in-depth: processItem already catches its own errors, but an
+          // UNEXPECTED throw — e.g. a transient SQLite lock (this DB can live on a
+          // OneDrive-synced path) hitting the DB write in processItem's finally —
+          // would otherwise reject Promise.all, abort the whole run, and strand
+          // every remaining product as 'pending' with the job stuck in 'error'.
+          // Contain the failure to THIS product and keep the pipeline moving so
+          // the run still settles cleanly and the operator gets per-item Retry.
+          try {
+            await processItem(it);
+          } catch (err) {
+            failed++;
+            const msg = (err && (err.response?.data?.error || err.message)) || 'Unexpected error';
+            try { this._updateItem(jobId, it.product_folder, { status: 'failed', error: msg }); } catch { /* best effort */ }
+            try { this._updateJob(jobId, { completed, failed }); } catch { /* best effort */ }
+            this._emit(jobId, { type: 'item', folder: it.product_folder, status: 'failed', error: msg });
+          }
         }
       });
       await Promise.all(workers);

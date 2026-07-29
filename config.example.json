@@ -20,6 +20,9 @@
   "_recently_packaged_comment": "recently_packaged_days: look-back window (in days) for the Packing Station's 'Recently packaged' review tab. Lists orders whose packaged_at falls within this window, newest first, so a packer can catch and fix a mispacked parcel (wrong item / buyer / model) shortly after sealing it. Independent of ship state. 7 days is the default; raise it for a longer safety net.",
   "recently_packaged_days": 7,
 
+  "_require_verify_comment": "require_verify_before_pack: two-person integrity gate. When true, an order must be packer-VERIFIED (items physically confirmed in hand via the 'Verify purchases' worklist) — not merely shopper-marked 'Purchased' — before it enters the 'To pack & ship' queue. Leave false (default) for a single-operator shop where the same person shops and packs (no behavior change). Set true when a separate shopper and packer create a useful check-in step.",
+  "require_verify_before_pack": false,
+
   "_fourpx_comment": "4PX Official Open Platform API credentials (https://open.4px.com). When set, the sync worker uses the authenticated tr.order.tracking.get endpoint to determine precise pre-transit/in-transit status for 4PX shipments. These credentials ALSO power the 'Create 4PX Shipment' feature in the Orders tab. Register at https://open.4px.com to obtain these values.",
   "fourpx_app_key": "YOUR_4PX_APP_KEY",
   "fourpx_app_secret": "YOUR_4PX_APP_SECRET",

@@ -175,6 +175,109 @@ function rowFullyPurchased(row) {
   return present.length > 0 && present.every(s => s === 'Purchased');
 }
 
+// ── Wrong-model exchange × shopping: the component boundary ──────────────────
+//
+// A wrong-model "Fix model" ONLY ever applies to the CASE — a case is model-
+// specific (it must fit the phone), whereas a grip is universal and a charm has
+// no model at all, so neither has an "alternative model" to swap. The exchange
+// therefore holds ONLY the case out of the buy set (we already have it, just in
+// the wrong model, and will swap it in person). The grip and charm on the SAME
+// line still have to be sourced normally.
+//
+// Historically the exchange was treated as an all-or-nothing LINE hold, so a
+// Case+Grip+Charm line with a case exchange dropped its grip AND charm from the
+// shopping route entirely — the operator never saw the pieces they still had to
+// buy. These helpers are the SINGLE SOURCE OF TRUTH for the component boundary
+// so every consumer (mobile shop route, Orders rollup, desktop route, Excel
+// generation) agrees on exactly which pieces an open exchange holds vs. which
+// remain shoppable.
+const EXCHANGE_COMPONENTS = ['case', 'grip', 'charm'];
+
+/**
+ * The set of components an OPEN wrong-model exchange holds out of buying on a
+ * row. Robust to legacy rows that stored multiple pieces, but treats a flagged
+ * exchange with an empty/blank component list as case-only (the current rule).
+ * Returns an empty set when the row has no open exchange.
+ * @param {{needs_exchange?:boolean, exchange_components?:string}} row
+ * @returns {Set<string>}
+ */
+function exchangeHeldComponents(row) {
+  if (!row || !row.needs_exchange) return new Set();
+  const raw = String(row.exchange_components || '')
+    .split(',')
+    .map(c => c.trim().toLowerCase())
+    .filter(c => EXCHANGE_COMPONENTS.includes(c));
+  // A flagged exchange with no explicit pieces defaults to the case (a model
+  // fix is always about the case), so we never fall back to "holds nothing".
+  return new Set(raw.length ? raw : ['case']);
+}
+
+/**
+ * Which components a shopper still has to BUY for this row: every component the
+ * line actually carries MINUS the ones an open exchange already holds (in hand,
+ * to be swapped in person). This is the shopping-facing view of the line.
+ * @param {object} row
+ * @returns {{ has_case:boolean, has_grip:boolean, has_charm:boolean }}
+ */
+function shoppableComponentFlags(row) {
+  const held = exchangeHeldComponents(row);
+  return {
+    has_case:  !!row.has_case  && !held.has('case'),
+    has_grip:  !!row.has_grip  && !held.has('grip'),
+    has_charm: !!row.has_charm && !held.has('charm'),
+  };
+}
+
+/**
+ * True when the row STILL has pieces to buy once exchange-held components are
+ * set aside — i.e. it belongs in the shopping route (as opposed to being a pure
+ * swap that lives only in the "To exchange" bucket).
+ * @param {object} row
+ * @returns {boolean}
+ */
+function rowHasShoppingWork(row) {
+  const s = shoppableComponentFlags(row);
+  const present = [];
+  if (s.has_case)  present.push(row.status_case  || DEFAULT_STATUS);
+  if (s.has_grip)  present.push(row.status_grip  || DEFAULT_STATUS);
+  if (s.has_charm) present.push(row.status_charm || DEFAULT_STATUS);
+  return present.some(st => st !== 'Purchased');
+}
+
+/**
+ * The shopping-facing projection of a row: the shoppable component flags applied
+ * over the original row, with `fully_purchased` recomputed against them. Returns
+ * null when nothing remains to buy (a pure exchange handled entirely elsewhere).
+ * Callers use this so the case being swapped disappears from the buy list while
+ * the grip/charm on the same line stay put.
+ * @param {object} row
+ * @returns {object|null}
+ */
+function rowShoppingProjection(row) {
+  if (!row.needs_exchange) return row;
+  const flags = shoppableComponentFlags(row);
+  if (!flags.has_case && !flags.has_grip && !flags.has_charm) return null;
+  const view = { ...row, ...flags };
+  view.fully_purchased = rowFullyPurchased(view);
+  return view;
+}
+
+/**
+ * Rebuild a canonical "Case+Grip+Charm"-style string from component flags. Used
+ * to hand the batch route generator (which derives components from `style`) an
+ * exchange line whose held pieces have been dropped, so the case being swapped
+ * is not re-bought while the grip/charm are still listed.
+ * @param {{has_case?:boolean, has_grip?:boolean, has_charm?:boolean}} flags
+ * @returns {string}
+ */
+function styleFromComponentFlags(flags) {
+  const parts = [];
+  if (flags.has_case)  parts.push('Case');
+  if (flags.has_grip)  parts.push('Grip');
+  if (flags.has_charm) parts.push('Charm');
+  return parts.join('+');
+}
+
 /**
  * Does an active design switch SUPERSEDE an open fulfilment issue on the same
  * line — i.e. should the line flow into purchasing DESPITE the "on hold" flag?
@@ -223,6 +326,31 @@ function styleComponents(style) {
     hasGrip:  s.includes('grip') || s.includes('stand'),
     hasCharm: s.includes('charm'),
   };
+}
+
+/**
+ * Is this line an AirPods case (as opposed to a phone case)?
+ *
+ * AirPods cases are the only product whose charm is INTEGRAL to the item: the
+ * dangling charm ships attached to the case and is baked into the product photo
+ * (see product-types.js — AirPods styles are Case+Charm / Case Only / Charm
+ * Only, never a separately-sourced charm with its own code/image/stall). This is
+ * the SINGLE place that classifies a line as AirPods, so the Route tab and the
+ * mobile Shopping view agree without duplicating any regex.
+ *
+ * The model VARIATION value is authoritative ("AirPods Pro 2", "AirPods 4", …);
+ * the title is only consulted as a fallback for legacy/manual lines that carry
+ * no model. A phone case never has an "AirPods" model, so this can't misfire on
+ * one.
+ *
+ * @param {string} phoneModel - the resolved model variation value
+ * @param {string} [title]    - product title (fallback only)
+ * @returns {boolean}
+ */
+function isAirpodsProduct(phoneModel, title) {
+  const model = String(phoneModel ?? '').trim();
+  if (model) return /air\s*pods?/i.test(model);
+  return /air\s*pods?/i.test(String(title ?? ''));
 }
 
 /**
@@ -472,6 +600,30 @@ function buildRouteRows(db, config, filters = {}) {
   // The Etsy receipt is never touched — this is a purely local override.
   const substitutionMap = getSubstitutionMap(db);
 
+  // A CATALOG switch renders the REPLACEMENT listing's photo, which is usually a
+  // DIFFERENT listing than any ordered line — so its thumbnail isn't in imageMap
+  // (built from ordered listings only). Load those images too, so a switched line
+  // never falls back to the ORIGINAL design's photo. Best-effort + de-duped.
+  try {
+    const subListingIds = new Set();
+    substitutionMap.forEach((s) => {
+      if (s && s.source_listing_id != null && !(s.source_listing_id in imageMap)) subListingIds.add(Number(s.source_listing_id));
+    });
+    if (subListingIds.size > 0) {
+      const subPh = [...subListingIds].map(() => '?').join(',');
+      db.prepare(`SELECT listing_id, url FROM listing_images WHERE listing_id IN (${subPh}) AND url IS NOT NULL AND url <> ''`)
+        .all([...subListingIds])
+        .forEach(row => { if (!(row.listing_id in imageMap)) imageMap[row.listing_id] = row.url; });
+      const stillMissing = [...subListingIds].filter(id => !(id in imageMap));
+      if (stillMissing.length > 0) {
+        const mPh = stillMissing.map(() => '?').join(',');
+        db.prepare(`SELECT listing_id, primary_image_url FROM listings WHERE listing_id IN (${mPh}) AND primary_image_url IS NOT NULL AND primary_image_url <> ''`)
+          .all(stillMissing)
+          .forEach(row => { if (!(row.listing_id in imageMap)) imageMap[row.listing_id] = row.primary_image_url; });
+      }
+    }
+  } catch { /* best-effort: switched lines fall back to their stored image_url */ }
+
   // Authoritative product map from Excel "Product Map" sheet, keyed by title_norm.
   // Priority: route_assignments > product_assignments > excel_product_map > OSP catalog.
   const excelProductMap = getProductMapByNorm(db);
@@ -534,21 +686,29 @@ function buildRouteRows(db, config, filters = {}) {
     const style       = sub && sub.new_style ? sub.new_style : (line.style || '');
     const comps       = styleComponents(style);
     const titleNorm = normalizeTitle(title);
-    // Switched image: uploaded bytes are served from our endpoint; a catalog pick
-    // stores a CDN url. Falls through to the line's own image when neither is set.
+    // Switched image, resolved so a switched line ALWAYS shows the REPLACEMENT
+    // design — never the original the buyer moved away from:
+    //   1. uploaded bytes served from our endpoint (custom switch), else
+    //   2. the switch's own stored CDN url (catalog switch), else
+    //   3. the replacement listing's cached thumbnail (via source_listing_id,
+    //      loaded into imageMap above) — fixes switches saved before the image
+    //      was resolved at write time, else
+    //   4. null → a neutral placeholder. We deliberately do NOT fall back to
+    //      line.image_url (the ORIGINAL design's photo), which made a switched
+    //      line look unchanged ("same old case").
     if (sub) {
-      line = {
-        ...line,
-        image_url: sub.has_image_data
-          // Content-addressed: the `v` token changes whenever the operator
-          // re-uploads the switched-design photo (updated_at moves), so the URL
-          // changes too and the mobile service worker's cache-first image cache
-          // can never serve the previous/original photo. Without it, a re-uploaded
-          // switched image stays stale on the shopping floor (desktop, which has
-          // no service worker, showed the new one — the source of the mismatch).
-          ? `/api/route/substitution-image/${sub.id}?v=${sub.updated_at || 0}`
-          : (sub.image_url || line.image_url),
-      };
+      const subImg = sub.has_image_data
+        // Content-addressed: the `v` token changes whenever the operator
+        // re-uploads the switched-design photo (updated_at moves), so the URL
+        // changes too and the mobile service worker's cache-first image cache
+        // can never serve the previous/original photo. Without it, a re-uploaded
+        // switched image stays stale on the shopping floor (desktop, which has
+        // no service worker, showed the new one — the source of the mismatch).
+        ? `/api/route/substitution-image/${sub.id}?v=${sub.updated_at || 0}`
+        : (sub.image_url && String(sub.image_url).trim())
+          ? sub.image_url
+          : (sub.source_listing_id != null ? (imageMap[sub.source_listing_id] || null) : null);
+      line = { ...line, image_url: subImg };
     }
     const saved    = assignMap[`${meta.receipt_id}\x00${key}`] || {};
     // Per-product saved defaults (supplier / charm). On a SWITCHED line these
@@ -722,16 +882,30 @@ function buildRouteRows(db, config, filters = {}) {
       quantity:    line.quantity || 1,
       phone_model: phoneModel,
       style,
-      image_url:   line.image_url != null
-        ? line.image_url
-        : (styleImg
-            // Content-addressed (see substitution image): busts the mobile
-            // service-worker cache when the variant photo is replaced.
-            ? `/api/route/style-image/${styleImg.id}?v=${styleImg.updated_at || 0}`
-            : (line.listing_id ? (imageMap[line.listing_id] || null) : null)),
+      // A SWITCHED line's image was fully resolved above (replacement upload /
+      // CDN / source-listing thumbnail, or null for a neutral placeholder); it
+      // must NEVER fall back to imageMap[line.listing_id] — that is the ORIGINAL
+      // design the buyer moved away from ("same old case"). Only an UNSWITCHED
+      // line uses the per-variant override → listing thumbnail chain.
+      image_url:   sub
+        ? (line.image_url != null ? line.image_url : null)
+        : (line.image_url != null
+            ? line.image_url
+            : (styleImg
+                // Content-addressed (see substitution image): busts the mobile
+                // service-worker cache when the variant photo is replaced.
+                ? `/api/route/style-image/${styleImg.id}?v=${styleImg.updated_at || 0}`
+                : (line.listing_id ? (imageMap[line.listing_id] || null) : null))),
       has_case:    comps.hasCase,
       has_grip:    comps.hasGrip,
       has_charm:   comps.hasCharm,
+      // The charm is INTEGRAL to the product (ships attached, shown in the
+      // product photo) rather than a separately-sourced charm. True only for
+      // AirPods cases that carry a charm — for those the charm needs no code /
+      // image / charm-stall and is shopped alongside the case, exactly like a
+      // grip is for a phone case. Consumed by the Route tab (charm column) and
+      // the mobile Shopping view; empty on every phone-case line.
+      charm_integral: comps.hasCharm && isAirpodsProduct(phoneModel, title),
       charm_code:  effectiveCharmCode,
       charm_shop:  effectiveCharmShop,
       status_case:  statusCase,
@@ -838,8 +1012,15 @@ function buildRouteRows(db, config, filters = {}) {
   // ── Manual (operator-created) line-items ──────────────────────────────────
   // These persist server-side and are always part of the working route set
   // (they bypass the date/shop/pending scope — they're deliberate additions).
-  // Suppressed in three situations:
-  //   1. Single-receipt / explicit-receipt-set lookups ("Add Order" path).
+  // Suppressed / narrowed in two situations:
+  //   1. An explicit-receipt scope (single receipt_id, or a receipt_ids set) is
+  //      active. We STILL surface manual items, but ONLY those belonging to the
+  //      requested receipts — so an explicit lookup sees the manual line instead
+  //      of coming up empty. (This is what lets a wrong-model exchange on a
+  //      MANUAL order resolve its supplier, and lets GET /api/route/order/:id add
+  //      a manual order. Previously ANY receipt scope skipped manual items
+  //      wholesale, so a manual-order exchange lost its supplier and fell into
+  //      "Supplier not set".)
   //   2. A REAL shop_id filter is active — manual items carry no shop_id so they
   //      would bleed into every filtered shop view, creating noise. When the
   //      operator selects a specific shop they want to see only that shop's
@@ -849,12 +1030,22 @@ function buildRouteRows(db, config, filters = {}) {
   //      makes Route-created manual orders visible under the "Manual orders"
   //      filter — their receipt is de-duped out above and re-emitted here).
   const manualOnlyScope = filters.shop_id === MANUAL_SHOP_ID;
+  // The set of receipts an explicit scope restricts manual items to (null = no
+  // explicit scope, so every manual item is in play, as on the full dashboard).
+  const explicitReceiptScope =
+    filters.receipt_id != null
+      ? new Set([Number(filters.receipt_id)].filter(Number.isInteger))
+      : (Array.isArray(filters.receipt_ids) && filters.receipt_ids.length
+          ? new Set(filters.receipt_ids.map(Number).filter(Number.isInteger))
+          : null);
   if (filters.include_manual !== false &&
-      (!filters.shop_id || manualOnlyScope) &&
-      filters.receipt_id == null &&
-      !(Array.isArray(filters.receipt_ids) && filters.receipt_ids.length)) {
+      (!filters.shop_id || manualOnlyScope)) {
     let manualItems = [];
     try { manualItems = getManualItems(db); } catch { manualItems = []; }
+    // Narrow to the requested receipts when an explicit receipt scope is active.
+    if (explicitReceiptScope) {
+      manualItems = manualItems.filter((m) => explicitReceiptScope.has(Number(m.receipt_id)));
+    }
     // Pull the linked manual ORDER (receipts row) for each sidecar so the Route
     // shows the real buyer name / country / notes the operator filled in from the
     // Orders tab, instead of a generic "Manual entry" placeholder.
@@ -1428,10 +1619,19 @@ function writeStatusCache(outputDir, rows) {
  */
 function rowsToImportOrders(rows) {
   const byReceipt = new Map();
-  for (const row of rows) {
-    if (row.excluded) continue;
-    // A line awaiting a wrong-model exchange is already in hand — never re-buy it.
-    if (row.needs_exchange) continue;
+  for (const original of rows) {
+    if (original.excluded) continue;
+    // A line awaiting a wrong-model exchange holds ONLY the swapped piece (the
+    // case) out of buying — we already have it. Its grip/charm must still be
+    // sourced, so we keep the line but pass a style that drops the held pieces
+    // (the Python generator derives components from `style`). A pure case swap
+    // with nothing else to buy projects to null and is skipped entirely.
+    let row = original;
+    if (original.needs_exchange) {
+      const projected = rowShoppingProjection(original);
+      if (!projected) continue;
+      row = { ...projected, style: styleFromComponentFlags(projected) };
+    }
     if (!byReceipt.has(row.receipt_id)) {
       byReceipt.set(row.receipt_id, {
         order_number:    String(row.receipt_id),
@@ -1733,9 +1933,16 @@ module.exports = {
   productDefaultsKey,
   LINE_KEY_MARKER,
   rowFullyPurchased,
+  EXCHANGE_COMPONENTS,
+  exchangeHeldComponents,
+  shoppableComponentFlags,
+  rowHasShoppingWork,
+  rowShoppingProjection,
+  styleFromComponentFlags,
   substitutionSupersedesIssue,
   styleComponents,
   parseVariations,
+  isAirpodsProduct,
   buildRouteRows,
   buildProductCatalog,
   buildProductImageMap,

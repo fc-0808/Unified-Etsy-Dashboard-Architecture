@@ -2909,6 +2909,87 @@
 				background: rgba(148, 163, 184, 0.12);
 				text-decoration: line-through;
 			}
+			/* ── Per-line "In hand" verification toggle (stock reconciliation) ─────
+			   Shown on already-purchased lines in the Need-to-purchase view so a
+			   packer can confirm the physical item is in hand — including the bought
+			   products of a partially on-hold order. */
+			.item-verify {
+				display: inline-flex;
+				align-items: center;
+				gap: 4px;
+				margin-top: 6px;
+				padding: 2px 9px;
+				border-radius: 20px;
+				font-size: 10px;
+				font-weight: 600;
+				cursor: pointer;
+				white-space: nowrap;
+				color: var(--muted);
+				background: transparent;
+				border: 1px dashed rgba(255, 255, 255, 0.25);
+				transition: background 0.15s, border-color 0.15s, color 0.15s;
+			}
+			.item-verify:hover {
+				color: #60a5fa;
+				border-color: rgba(96, 165, 250, 0.55);
+				border-style: solid;
+				background: rgba(96, 165, 250, 0.1);
+			}
+			.item-verify.verified {
+				color: #60a5fa;
+				border: 1px solid rgba(96, 165, 250, 0.5);
+				background: rgba(96, 165, 250, 0.14);
+			}
+			/* ── Per-order reconciliation chip: "N in hand · M on hold" ─────────── */
+			.recon-chip {
+				display: inline-flex;
+				align-items: center;
+				gap: 8px;
+				margin-bottom: 7px;
+				padding: 3px 10px;
+				border-radius: 8px;
+				font-size: 10.5px;
+				font-weight: 600;
+				background: rgba(255, 255, 255, 0.04);
+				border: 1px solid var(--border);
+			}
+			.recon-chip .recon-inhand {
+				color: var(--green);
+			}
+			.recon-chip .recon-onhold {
+				color: #fb7185;
+			}
+			/* ── Need-to-purchase segmented sub-filter (All / To buy / On hold) ─── */
+			.np-subfilter {
+				display: inline-flex;
+				gap: 0;
+				margin: 4px 0 2px;
+				border: 1px solid var(--border);
+				border-radius: 8px;
+				overflow: hidden;
+			}
+			.np-sub-btn {
+				padding: 5px 14px;
+				font-size: 12px;
+				font-weight: 600;
+				cursor: pointer;
+				color: var(--muted);
+				background: transparent;
+				border: none;
+				border-right: 1px solid var(--border);
+				transition: background 0.15s, color 0.15s;
+			}
+			.np-sub-btn:last-child {
+				border-right: none;
+			}
+			.np-sub-btn:hover {
+				color: var(--text);
+				background: rgba(255, 255, 255, 0.05);
+			}
+			.np-sub-btn.active {
+				color: #fff;
+				background: var(--accent);
+			}
 			/* ── Fulfilment issue (out of production / model unavailable) ───────── */
 			/* Rose/red — the only red hue in the order-status language, signalling
 			   "blocked: needs an operator decision". Used for the order-level badge,
@@ -7663,6 +7744,17 @@
 			.exchange-comp-opt input {
 				accent-color: #f59e0b;
 			}
+			.exchange-comp-fixed {
+				display: flex;
+				align-items: center;
+				flex-wrap: wrap;
+				gap: 6px;
+				padding: 8px 12px;
+				border-radius: 8px;
+				border: 1px solid var(--border);
+				background: rgba(245, 158, 11, 0.08);
+				font-size: 13px;
+			}
 			.exchange-swap-preview {
 				display: flex;
 				align-items: center;
@@ -7878,6 +7970,35 @@
 				align-items: center;
 				gap: 8px;
 			}
+			/* Integral charm (AirPods case) — no image/code/assign; the charm ships
+			   attached to the case and is shown in the product photo, so we present a
+			   stacked "Included with case" tag above just its purchasing status. */
+			.charm-cell-integral {
+				flex-direction: column;
+				align-items: stretch;
+				gap: 5px;
+			}
+			.charm-integral-tag {
+				display: inline-flex;
+				align-items: center;
+				gap: 5px;
+				align-self: flex-start;
+				padding: 2px 9px;
+				border-radius: 999px;
+				font-size: 11px;
+				font-weight: 600;
+				color: var(--muted);
+				background: rgba(123, 128, 153, 0.12);
+				border: 1px solid var(--border);
+				cursor: help;
+			}
+			.charm-integral-tag::before {
+				content: '🔗';
+				font-size: 11px;
+			}
+			.charm-cell-integral .charm-status-row {
+				margin-top: 0;
+			}
 			/* Charm purchasing-status dropdown (in the Charm column) */
 			.charm-status-row {
 				margin-top: 5px;
@@ -7951,6 +8072,40 @@
 			}
 			.charm-assign-btn:hover {
 				background: rgba(108, 143, 255, 0.22);
+			}
+			/* ── "Buy this charm at the case/grip supplier" actions ───────────── */
+			.charm-sup-row {
+				display: flex;
+				gap: 4px;
+				align-items: center;
+				margin-top: 4px;
+			}
+			.charm-sup-btn {
+				font-size: 10.5px;
+				padding: 2px 7px;
+				border-radius: 5px;
+				cursor: pointer;
+				white-space: nowrap;
+				background: rgba(16, 185, 129, 0.1);
+				color: #6ee7b7;
+				border: 1px solid rgba(16, 185, 129, 0.32);
+			}
+			.charm-sup-btn:hover {
+				background: rgba(16, 185, 129, 0.22);
+			}
+			.charm-sup-btn:disabled {
+				opacity: 0.55;
+				cursor: default;
+			}
+			/* Confirms the charm is already sourced at the case/grip supplier's stall. */
+			.charm-same-tag {
+				font-size: 9.5px;
+				font-weight: 600;
+				color: #6ee7b7;
+				background: rgba(16, 185, 129, 0.12);
+				border-radius: 4px;
+				padding: 0 4px;
+				margin-left: 3px;
 			}
 			.charm-na {
 				font-size: 11px;
@@ -11494,6 +11649,42 @@
 				font-size: 12px;
 				font-weight: 500;
 			}
+			.bulk-error-banner {
+				display: flex;
+				align-items: flex-start;
+				gap: 10px;
+				margin-top: 12px;
+				padding: 12px 14px;
+				border-radius: 10px;
+				background: rgba(248, 113, 113, 0.09);
+				border: 1px solid rgba(248, 113, 113, 0.4);
+				color: #fca5a5;
+				font-size: 13px;
+				line-height: 1.5;
+			}
+			.bulk-error-banner .bulk-error-ico {
+				flex-shrink: 0;
+				font-size: 15px;
+				line-height: 1.4;
+			}
+			.bulk-error-banner .bulk-error-body {
+				flex: 1;
+				min-width: 0;
+			}
+			.bulk-error-banner .bulk-error-title {
+				font-weight: 700;
+				color: #f87171;
+				margin-bottom: 2px;
+			}
+			.bulk-error-banner .bulk-error-msg {
+				color: var(--text);
+				word-break: break-word;
+			}
+			.bulk-error-banner .bulk-error-hint {
+				color: var(--muted);
+				margin-top: 5px;
+				font-size: 12px;
+			}
 			.bulk-step-line {
 				display: flex;
 				align-items: center;
@@ -12091,6 +12282,20 @@
 			.bins-var-row.dragging {
 				opacity: 0.55;
 				border-color: var(--accent);
+			}
+			/* A custom row that isn't a valid Etsy option value yet (no name, no
+			   price, or a duplicate name). Flagged on commit so it can't silently
+			   drop out of the variation list. */
+			.bins-var-row.invalid {
+				border-style: solid;
+				border-color: rgba(248, 113, 113, 0.65);
+				background: rgba(248, 113, 113, 0.07);
+			}
+			.bins-var-err {
+				margin-top: 6px;
+				font-size: 11.5px;
+				line-height: 1.35;
+				color: #f87171;
 			}
 			.bins-drag {
 				cursor: grab;
@@ -13162,6 +13367,10 @@
 				     purchase status while shopping in person). Available to owner and
 				     packer alike; shoppers land there directly at sign-in. -->
 				<button type="button" class="role-toggle" id="shoppingModeBtn" onclick="window.location.href = '/shop'" title="Open the shopping route to view and update purchase status while shopping in person">🛒 Shopping Mode</button>
+				<!-- Sourcing Library — back-office workspace to register WeChat/QQ design
+				     suppliers and file the zipped product folders downloaded from them.
+				     Available to owner and packer (the employee's intake job). -->
+				<button type="button" class="role-toggle" id="sourcingBtn" onclick="window.location.href = '/sourcing'" title="Open the Sourcing Library to manage design suppliers and their uploaded product folders">🗂️ Sourcing</button>
 				<!-- Role / Packing Mode toggle. Label + action are set by ROLE.init()
 				     so it reads correctly in both modes and both languages. -->
 				<button type="button" class="role-toggle" id="roleToggleBtn" onclick="ROLE.onToggleClick()" title="Switch between the full owner dashboard and the simplified packing station">📦 Packing Mode</button>
@@ -13448,6 +13657,12 @@
 				<!-- Packing Mode simplified queue switcher (packer-only) -->
 				<div class="packer-presets packer-only" id="packerPresets">
 					<button type="button" class="packer-preset-btn" data-preset="needpurchase" onclick="ROLE.applyPreset('needpurchase')">🛒 Need to purchase<span class="pp-count" style="display: none"></span></button>
+					<!-- Hidden until the server confirms verification is a REQUIRED stage
+					     (require_verify_before_pack). Shipping it visible made the default
+					     install, where the gate is off, flash a tab that then vanished on the
+					     first /api/orders response. _verifyQueueOn starts null, so the first
+					     setVerifyQueueEnabled(true) is still a real transition and reveals it. -->
+					<button type="button" class="packer-preset-btn" data-preset="verify" style="display: none" onclick="ROLE.applyPreset('verify')">🔎 Verify purchases<span class="pp-count" style="display: none"></span></button>
 					<button type="button" class="packer-preset-btn active" data-preset="topack" onclick="ROLE.applyPreset('topack')">📦 To pack &amp; ship<span class="pp-count" style="display: none"></span></button>
 					<button type="button" class="packer-preset-btn" data-preset="packaged" onclick="ROLE.applyPreset('packaged')">✅ Recently packaged<span class="pp-count" style="display: none"></span></button>
 				</div>
@@ -13459,6 +13674,27 @@
 				<div class="packer-charm-bar packer-only" id="packerCharmBar" style="display: none">
 					<button type="button" class="packer-charm-btn" onclick="openCharmPurchaseModal()" title="Every charm needed for the orders still to buy — grouped with totals, supplier and purchase status. Mark pieces purchased as you shop.">✨ Charms to buy</button>
 				</div>
+				<!-- Need-to-purchase sub-filter. The buy queue now also surfaces ON-HOLD
+				     orders so a packer can reconcile the in-hand (already-bought) products
+				     of a partially-blocked multi-product order. This segmented control
+				     splits the view: All (default) · still-to-buy · on-hold. Shown only in
+				     the Need-to-purchase view (toggled in fetchOrders). -->
+				<div class="np-subfilter" id="npSubFilter" style="display: none">
+					<button type="button" class="np-sub-btn active" data-np="all" onclick="setNpFilter('all')" title="Every order in the buy queue — still-to-buy and on-hold together.">All</button>
+					<button type="button" class="np-sub-btn" data-np="tobuy" onclick="setNpFilter('tobuy')" title="Only orders that still have products to purchase.">🛒 To buy</button>
+					<button type="button" class="np-sub-btn" data-np="onhold" onclick="setNpFilter('onhold')" title="Orders held by an issue (out of production / model unavailable). Some may have other products already in hand to verify.">⏸ On hold</button>
+				</div>
+				<!-- Issues / on-hold sub-filter. A cancelled or fully-refunded order can
+				     linger in this queue with an unresolved issue but no longer needs
+				     action, cluttering the live worklist. This segmented control splits
+				     the view: All (default — live orders first, closed-out ones grouped
+				     below) · Active (still actionable) · Cancelled (closed-out, incl.
+				     refunded). Shown only in the Issues view (toggled in fetchOrders). -->
+				<div class="np-subfilter" id="issueSubFilter" style="display: none">
+					<button type="button" class="np-sub-btn active" data-issue="all" onclick="setIssueFilter('all')" title="Every on-hold order. Live, actionable orders are listed first; cancelled/refunded orders are grouped at the bottom.">All</button>
+					<button type="button" class="np-sub-btn" data-issue="active" onclick="setIssueFilter('active')" title="Only orders that still need an operator decision — hides cancelled and fully-refunded orders.">⏸ Active</button>
+					<button type="button" class="np-sub-btn" data-issue="cancelled" onclick="setIssueFilter('cancelled')" title="Only closed-out orders (Etsy-cancelled or fully refunded) that still carry an unresolved issue — review and resolve to clear them.">✕ Cancelled</button>
+				</div>
 				<!-- Reassurance chip: orders held out of the pack queue because they still
 				     owe a wrong-model supplier swap. Hidden when none (display set in JS). -->
 				<div class="packer-exchange-note packer-only" id="packerExchangeNote" style="display: none"></div>
@@ -13467,6 +13703,7 @@
 						id="filterShipped"
 						class="owner-only"
 						onchange="
+							window.__packerCohort = ''
 							loadOrders()
 							_updateDeadlineSelectBtns()
 						"
@@ -13474,6 +13711,7 @@
 						<option value="false" selected>Needs shipping</option>
 						<option value="pre_transit">Pre-transit</option>
 						<option value="needs_purchase">Needs purchase</option>
+						<option value="to_verify">To verify</option>
 						<option value="ready_to_pack">Ready to pack</option>
 						<option value="recently_packaged">Recently packaged</option>
 						<option value="in_transit">In transit</option>
@@ -13762,7 +14000,7 @@
 						<div class="bulk-controls" id="bulkControls">
 							<button class="btn" id="bulkPauseBtn" onclick="bulkPause()" style="display: none">⏸ Pause</button>
 							<button class="btn btn-primary" id="bulkResumeBtn" onclick="bulkResume()" style="display: none">▶ Resume</button>
-							<button class="btn" id="bulkRetryBtn" onclick="bulkRetry()" style="display: none">↻ Retry failed</button>
+							<button class="btn" id="bulkRetryBtn" onclick="bulkRetry()" style="display: none">↻ Retry / Resume</button>
 							<button class="btn" id="bulkEditPricesBtn" onclick="bulkOpenPriceEditor()" style="display: none">💲 Edit all prices</button>
 							<button class="btn btn-primary" id="bulkCreateDraftsBtn" onclick="bulkCreateDrafts()" style="display: none">📤 Create Etsy drafts</button>
 							<button class="btn btn-primary" id="bulkPublishAllBtn" onclick="bulkPublishAll()" style="display: none">🚀 Publish all drafts</button>
@@ -13770,6 +14008,7 @@
 						</div>
 					</div>
 					<div class="bulk-stats" id="bulkStats"></div>
+					<div id="bulkErrorBanner" class="bulk-error-banner" role="alert" style="display: none"></div>
 					<div id="bulkProgressBarWrap" class="bulk-bar-wrap" style="margin-top: 12px"><div id="bulkProgressBar" class="bulk-progress-fill"></div></div>
 					<!-- Bulk-select action bar (shown when ≥1 generated listing is ticked) -->
 					<div id="bulkSelectBar" class="bulk-selbar" style="display: none">
@@ -14848,6 +15087,7 @@
 				'Signed in as': '登录账号：',
 				'👥 Team': '👥 团队',
 				'📋 Activity': '📋 操作记录',
+				'🗂️ Sourcing': '🗂️ 货源库',
 				'🛒 Need to purchase': '🛒 待采购',
 				'✨ Charms to buy': '✨ 待购吊饰',
 				'Awaiting charm code': '待分配吊饰编号',
@@ -15061,6 +15301,16 @@
 					// product/component purchased with the chips on the row as you source it;
 					// the order then flows automatically into "To pack & ship".
 					needpurchase: { shipped: 'needs_purchase', purchase: '', packaged: '', sort: 'oldest' },
+					// The morning verification worklist — orders that are fully purchased
+					// (shopped, in principle in hand) but the packer has NOT yet physically
+					// confirmed. This IS "what I recently shopped, waiting to be checked in":
+					// as soon as a line is verified (and the order packed) it leaves this
+					// list, so it never shows stale work — and, deliberately, it does NOT pin
+					// a date cohort, so an order shopped a few days ago that's still
+					// unverified can never silently hide from the packer. Oldest (closest to
+					// ship-by) first. (A date cohort remains available via the
+					// ?purchased_cohort= API param for reporting.)
+					verify: { shipped: 'to_verify', purchase: '', packaged: '', sort: 'oldest' },
 					// The packing queue MUST match the owner's canonical "Ready to pack"
 					// (shipped=ready_to_pack): fully purchased, not-yet-packaged orders that
 					// still need to leave the warehouse — this INCLUDES pre-transit parcels
@@ -15077,13 +15327,15 @@
 				// Query strings used to live-count each preset (mirror the PRESETS above).
 				const PRESET_COUNT_QS = {
 					needpurchase: 'shipped=needs_purchase',
+					verify: 'shipped=to_verify',
 					topack: 'shipped=ready_to_pack',
 					packaged: 'shipped=recently_packaged',
 				}
 				// Plain-language explanation shown under the tabs for the active queue.
 				const PRESET_HINT = {
-					needpurchase: '🛒 These orders still need products bought. Work top to bottom — tap each product’s chip once you’ve purchased it. When everything in an order is purchased it moves to “To pack & ship”.',
-					topack: '👉 These are ready to pack. Work top to bottom — pack each parcel, then press “Ship with 4PX”. Most urgent first.',
+					needpurchase: '🛒 These orders still need products bought. Tap each product’s chip once purchased — an order moves to “To pack & ship” when everything is bought. Orders on hold (an item out of production / unavailable) also appear here: for those, confirm the products you already have with “✓ In hand”. Use the All / To buy / On hold filter to focus.',
+					verify: '🔎 Check yesterday’s shopping against each order. When you’ve confirmed every item for an order is physically in hand, select it and press “✓ Mark verified”. Verified orders move on to “To pack & ship”.',
+					topack: '👉 Ready to pack — every item here has been verified in hand. Work top to bottom: pack each parcel, then press “Ship with 4PX”. Most urgent first.',
 					packaged: 'Parcels you packed recently, newest first. Review them here — if something looks wrong, open the order and press “Unmark packaged” to fix it.',
 				}
 
@@ -15152,6 +15404,14 @@
 					set('filterPurchase', p.purchase)
 					set('filterPackaged', p.packaged)
 					set('filterSort', p.sort)
+					// Extension point: a preset MAY pin a purchase-completion cohort, which
+					// fetchOrders appends as purchased_cohort. No preset currently sets one —
+					// Verify deliberately does not (see its note above: pinning a date cohort
+					// would hide an order shopped a few days ago that is still unverified) —
+					// so this resolves to '' and the param is omitted. A manual filter change
+					// clears it (see filterShipped onchange) so owner scopes are never
+					// silently narrowed if a preset does start pinning one.
+					window.__packerCohort = p.cohort || ''
 					document.querySelectorAll('#packerPresets .packer-preset-btn').forEach((b) => b.classList.toggle('active', b.dataset.preset === key))
 					const hint = document.getElementById('packerQueueHint')
 					if (hint) hint.textContent = I18N.t(PRESET_HINT[key] || '')
@@ -15160,6 +15420,20 @@
 					if (charmBar) charmBar.style.display = key === 'needpurchase' ? 'block' : 'none'
 					if (typeof loadOrders === 'function') loadOrders()
 					if (typeof _updateDeadlineSelectBtns === 'function') _updateDeadlineSelectBtns()
+				}
+
+				// Show/hide the "Verify purchases" queue button based on whether the
+				// server has verification gating enabled. Idempotent + guards against a
+				// render loop: if we're hiding the button while it's the active view, we
+				// fall back to "To pack & ship" (which triggers exactly one reload).
+				let _verifyQueueOn = null
+				function setVerifyQueueEnabled(on) {
+					const btn = document.querySelector('#packerPresets .packer-preset-btn[data-preset="verify"]')
+					if (!btn) return
+					if (_verifyQueueOn === on) return // no change → nothing to do (no loop)
+					_verifyQueueOn = on
+					btn.style.display = on ? '' : 'none'
+					if (!on && btn.classList.contains('active')) applyPreset('topack')
 				}
 
 				// Live count badges on the three queue buttons so the (auto-selected)
@@ -15307,7 +15581,7 @@
 					}
 				}
 
-				return { get, isPacker, init, onToggleClick, logout, openSetup, closeSetup, confirmEnter, requestExit, closeExit, confirmExit, applyPreset, refreshPresetCounts }
+				return { get, isPacker, init, onToggleClick, logout, openSetup, closeSetup, confirmEnter, requestExit, closeExit, confirmExit, applyPreset, refreshPresetCounts, setVerifyQueueEnabled }
 			})()
 
 			if (document.readyState === 'loading') {
@@ -17060,6 +17334,28 @@
 				await fetchOrders()
 			}
 
+			// Need-to-purchase segmented sub-filter: 'all' (default) | 'tobuy' | 'onhold'.
+			// Sent to the server as np_filter only while the Need-to-purchase view is
+			// active; lets a packer isolate on-hold (partially blocked) orders to
+			// reconcile their in-hand stock.
+			let npFilter = 'all'
+			function setNpFilter(v) {
+				npFilter = v === 'tobuy' || v === 'onhold' ? v : 'all'
+				document.querySelectorAll('#npSubFilter .np-sub-btn').forEach((b) => b.classList.toggle('active', b.dataset.np === npFilter))
+				loadOrders()
+			}
+
+			// Issues / on-hold segmented sub-filter: 'all' (default) | 'active' | 'cancelled'.
+			// Sent to the server as issue_filter only while the Issues view is active. Lets
+			// the operator hide (or isolate) cancelled/refunded orders that still carry an
+			// unresolved issue, so the live worklist stays readable.
+			let issueFilter = 'all'
+			function setIssueFilter(v) {
+				issueFilter = v === 'active' || v === 'cancelled' ? v : 'all'
+				document.querySelectorAll('#issueSubFilter .np-sub-btn').forEach((b) => b.classList.toggle('active', b.dataset.issue === issueFilter))
+				loadOrders()
+			}
+
 			// Clear the order-number lookup and fall back to the normal scope filters.
 			function clearOrderSearch() {
 				const box = document.getElementById('filterOrderSearch')
@@ -17106,7 +17402,7 @@
 				// (mark/clear needs-purchase + send to route).
 				// Use cb-hidden class (width:0 + padding:0) instead of display:none —
 				// display:none on <th>/<td> is unreliable for table column layout.
-				let showCb = shipped === 'false' || shipped === 'pre_transit' || shipped === 'needs_purchase' || shipped === 'ready_to_pack'
+				let showCb = shipped === 'false' || shipped === 'pre_transit' || shipped === 'needs_purchase' || shipped === 'ready_to_pack' || shipped === 'to_verify'
 				// Employees have no bulk action in the buy queue (bulk needs-purchase is
 				// owner-only, and "Send to Route" is owner-only too), so the checkbox column
 				// there would only ever produce an empty selection bar. Hide it for them —
@@ -17125,6 +17421,7 @@
 				const _isPreTransitView = shipped === 'pre_transit'
 				const _isNeedsPurchaseView = shipped === 'needs_purchase'
 				const _isReadyToPackView = shipped === 'ready_to_pack'
+				const _isToVerifyView = shipped === 'to_verify'
 				// Bulk Complete / 4PX only make sense for unshipped orders. The
 				// Ready-to-pack queue deliberately MIXES Needs-shipping (unshipped) and
 				// Pre-transit (already shipped) rows, so its safe bulk action is the
@@ -17141,6 +17438,9 @@
 				_setBulkBtn('bulkBarClearPurchaseBtn', _isNeedsPurchaseView)
 				_setBulkBtn('bulkBarMarkPackagedBtn', _isPreTransitView || _isReadyToPackView)
 				_setBulkBtn('bulkBarUnmarkPackagedBtn', _isPreTransitView)
+				// The morning verification worklist gets one action: confirm the selected
+				// orders' items are physically in hand.
+				_setBulkBtn('bulkBarVerifyBtn', _isToVerifyView)
 				// Packaged sub-filter — useful in Needs-shipping and Pre-transit (split by
 				// packing progress). Hidden in Ready-to-pack (that view is already the
 				// not-yet-packaged set) and everywhere else.
@@ -17194,6 +17494,33 @@
 				// already implies purchase=ready server-side, so don't double-send it.
 				const purchaseFilter = filterPurchaseEl?.value || ''
 				if (purchaseFilter && shipped !== 'ready_to_pack') params.set('purchase', purchaseFilter)
+				// Purchase-completion cohort (set by the Verify preset). Only meaningful on
+				// the purchasing/packing scopes; ignored elsewhere so it can never narrow a
+				// general owner view unexpectedly.
+				if (window.__packerCohort && (shipped === 'to_verify' || shipped === 'ready_to_pack' || shipped === 'needs_purchase')) {
+					params.set('purchased_cohort', window.__packerCohort)
+				}
+				// Need-to-purchase segmented sub-filter (All / To buy / On hold). Only the
+				// Need-to-purchase view surfaces on-hold orders, so the control + param are
+				// scoped to it; the bar is shown/hidden to match.
+				const npBar = document.getElementById('npSubFilter')
+				if (shipped === 'needs_purchase') {
+					if (npBar) npBar.style.display = ''
+					if (npFilter !== 'all') params.set('np_filter', npFilter)
+				} else if (npBar) {
+					npBar.style.display = 'none'
+				}
+
+				// Issues / on-hold segmented sub-filter (All / Active / Cancelled). Only the
+				// Issues view surfaces cancelled orders that still carry an open issue, so the
+				// control + param are scoped to it; the bar is shown/hidden to match.
+				const issueBar = document.getElementById('issueSubFilter')
+				if (shipped === 'issues') {
+					if (issueBar) issueBar.style.display = ''
+					if (issueFilter !== 'all') params.set('issue_filter', issueFilter)
+				} else if (issueBar) {
+					issueBar.style.display = 'none'
+				}
 
 				// ── Order-number lookup ───────────────────────────────────────
 				// A specific order number takes precedence over the scope filters: we
@@ -17215,6 +17542,20 @@
 				// so rendering our (older) result would clobber the correct one.
 				if (_req !== _ordersReqSeq) return
 				ordersTotal = data.total
+				// The "Verify purchases" queue only makes sense when verification is a
+				// REQUIRED stage before packing. When the gate is off, "To verify" and
+				// "To pack & ship" resolve to the SAME orders (nothing is verified, so
+				// nothing is held back) — a confusing duplicate. So show the Verify tab
+				// only when the gate is on; otherwise hide it (and leave this view if we
+				// were on it). Server is the source of truth (require_verify_before_pack).
+				if (typeof ROLE !== 'undefined' && data.require_verify_before_pack != null) {
+					ROLE.setVerifyQueueEnabled(!!data.require_verify_before_pack)
+					// Hiding the tab while it is the ACTIVE view falls back to "To pack &
+					// ship", which kicks off a fresh (un-awaited) load. Ours is now the stale
+					// one, so re-check the guard rather than painting the abandoned queue
+					// over the one the packer is about to be shown.
+					if (_req !== _ordersReqSeq) return
+				}
 				// Keep the packer's queue-count badges live after every reload (view
 				// switch, 2-min refresh, and after packing/shipping an order).
 				if (typeof ROLE !== 'undefined' && ROLE.isPacker()) ROLE.refreshPresetCounts()
@@ -17383,15 +17724,33 @@
 										ppCtrl = `<div class="pp-comps">${chip}</div>`
 									}
 								}
-								// "Flag issue" affordance — available on any purchasable product that
-								// isn't already on hold, so the operator can mark it out of production
-								// or model-unavailable straight from the order.
-								// Owner-only fulfilment decisions — hidden from employees (packing
-								// mode) because they call endpoints outside the packer allowlist.
+								// Fulfilment affordances — deliberately DECOUPLED from the purchasing
+								// state. A problem can surface at ANY point in an order's life, not
+								// just while it's in the buy queue: a product is discovered
+								// discontinued, or the wrong model was shipped/ordered, long after the
+								// label is made or the parcel is in transit. The operator must always
+								// be able to start the buyer-contact / listing workflow (Flag issue) or
+								// record a model correction (Fix model) from the order itself.
+								//   • ⚑ Flag issue — owner-only (starts the buyer-contact / listing
+								//     workflow, which calls endpoints outside the packer allowlist).
+								//   • 🔁 Fix model — the wrong-model exchange. Available to the OWNER
+								//     everywhere, and ALSO to a PACKER while actively sourcing (the
+								//     Need-to-purchase view) so an employee can flag a design-right/
+								//     model-wrong line to swap. It only writes the local order_exchanges
+								//     table (allowlisted), never finance/listings/Etsy.
+								// Safe on shipped orders: both endpoints accept any order, and the
+								// needs-purchase rollup never re-queues a carrier-confirmed order for
+								// purchase — so this can't drag a completed order back into the buy
+								// list. Suppressed only when the line already HAS an open issue/
+								// exchange (its own chip renders instead) or isn't a real catalogued
+								// line (no item_key).
 								let flagIssueCtrl = ''
 								let flagExchangeCtrl = ''
-								if (!_employeeView && !_issueOpen && !_exchangeOpen && showPurchaseChips && tx.item_key) {
+								const _lineFlaggable = !_issueOpen && !_exchangeOpen && !!tx.item_key
+								if (_lineFlaggable && !_employeeView) {
 									flagIssueCtrl = `<button class="item-flag-issue" onclick="openIssueModal(${o.receipt_id},'${jsAttr(tx.item_key)}')" title="Product discontinued, or the buyer's phone model is no longer offered? Flag it to hold it out of purchasing and start the buyer-contact workflow.">⚑ Flag issue</button>`
+								}
+								if (_lineFlaggable && (!_employeeView || (shipped === 'needs_purchase' && showPurchaseChips))) {
 									flagExchangeCtrl = `<button class="item-flag-exchange" onclick="openExchangeModalForOrder(${o.receipt_id},'${jsAttr(tx.item_key)}')" title="Need a different model than ordered — a wrong model in hand to swap, or a buyer model-change to buy? Flag it so the correct model is tracked and the line is held out of the normal buy list until it's sorted.">🔁 Fix model</button>`
 								}
 
@@ -17408,6 +17767,19 @@
 									fixImageCtrl = _hasStyleImg ? `<button class="item-fix-image active" onclick="openStyleImageModal(${o.receipt_id},'${jsAttr(tx.item_key)}')" title="A custom image is set for this variant — click to change it or revert to the Etsy photo.">📷 Image set</button>` : `<button class="item-fix-image" onclick="openStyleImageModal(${o.receipt_id},'${jsAttr(tx.item_key)}')" title="Etsy shows one photo per listing, so a single-component variant (e.g. grip only) can be unclear. Upload a photo of exactly what this variant is — it shows on every order of this product + style, everywhere.">📷 Fix image</button>`
 								}
 
+								// Per-line "In hand" verification — only in the Need-to-purchase view,
+								// on lines physically in hand (purchased + unblocked). Lets a packer
+								// confirm the already-bought products of a partially on-hold order for
+								// stock reconciliation. Writes to the same verification store the pack
+								// gate reads, so a confirmed line counts everywhere.
+								let verifyCtrl = ''
+								if (shipped === 'needs_purchase' && tx.in_hand && tx.item_key) {
+									const vargs = `${o.receipt_id},'${jsAttr(tx.item_key)}','${jsAttr(tx.title || '')}'`
+									verifyCtrl = tx.verified
+										? `<button class="item-verify verified" onclick="verifyLineItem(${vargs},false)" title="Confirmed physically in hand. Click to un-confirm.">✓ In hand</button>`
+										: `<button class="item-verify" onclick="verifyLineItem(${vargs},true)" title="Confirm this already-purchased product is physically in hand (stock reconciliation).">Mark in hand</button>`
+								}
+
 								// Title cell: switched lines show the new design + a badge and the
 								// original ("was: …") for reference; normal lines show the title.
 								const titleHtml = _sub
@@ -17421,6 +17793,7 @@
           ${titleHtml}
           ${metaRows.length ? `<div class="product-meta">${metaRows.join('')}</div>` : ''}
           ${ppCtrl}
+          ${verifyCtrl}
           ${switchCtrl}
           ${flagIssueCtrl}${flagExchangeCtrl}${fixImageCtrl}
         </div>
@@ -17859,10 +18232,23 @@
 							dupBadgeHtml = `<div class="dup-badge" title="${tip}"><span class="dup-icon">⚠</span>${label} · #${o.receipt_id}</div>`
 						}
 
+						// Reconciliation chip for partially-blocked orders in the Need-to-purchase
+						// view: at a glance, how many products are in hand (verifiable) vs on hold.
+						let reconChip = ''
+						if (shipped === 'needs_purchase' && (o.on_hold_items || 0) > 0) {
+							const inHand = o.in_hand_items || 0
+							const ver = o.verified_items || 0
+							reconChip = `<div class="recon-chip" title="This order is partially blocked. ${inHand} product(s) have items purchased and in hand — verify them for stock; ${o.on_hold_items} on hold pending a decision.">
+          <span class="recon-inhand">🟢 ${inHand} in hand${ver ? ` · ${ver}✓` : ''}</span>
+          <span class="recon-onhold">⏸ ${o.on_hold_items} on hold</span>
+        </div>`
+						}
+
 						return `<tr class="order-row${isCancelledOrder ? ' order-row-cancelled' : ''}${o.possible_duplicate && !o.duplicate_primary ? ' order-row-dup-secondary' : ''}" id="order-row-${o.receipt_id}">
       <td class="col-check">${cbHtml}</td>
       <td>
         <div class="product-cell">
+          ${reconChip}
           ${itemsHtml}
           <div class="product-shop">${o.shop_name}</div>
           ${isManual ? '<div class="manual-badge" title="This order was created manually in the dashboard (not synced from Etsy).">✎ Manual</div>' : ''}
@@ -19402,12 +19788,15 @@
 
 				if (!ex) {
 					// ── Phase 1: flag a new exchange ───────────────────────────────
-					const savedComps = ctx.presentComps || []
-					const compBoxes = ['case', 'grip', 'charm']
-						.filter((c) => savedComps.includes(c))
-						.map((c) => `<label class="exchange-comp-opt"><input type="checkbox" class="exchange-comp-check" value="${c}" checked /> ${EXCHANGE_COMP_LABELS[c]}</label>`)
-						.join('')
-					const compSection = compBoxes ? `<div class="modal-field"><label class="modal-label">Which pieces are the wrong model?</label><div class="exchange-comp-grid">${compBoxes}</div></div>` : ''
+					// A model fix ALWAYS applies to the case only: a case is model-
+					// specific (must fit the phone) while a grip is universal and a
+					// charm has no model, so neither has an alternative model to swap.
+					// Any grip/charm on the same line keep being sourced through the
+					// normal buy list — never held out by this exchange.
+					const hasGrip = (ctx.presentComps || []).includes('grip')
+					const hasCharm = (ctx.presentComps || []).includes('charm')
+					const otherPieces = [hasGrip ? EXCHANGE_COMP_LABELS.grip : '', hasCharm ? EXCHANGE_COMP_LABELS.charm : ''].filter(Boolean).join(' & ')
+					const compSection = `<div class="modal-field"><label class="modal-label">What gets fixed</label><div class="exchange-comp-fixed">🔁 <strong>${EXCHANGE_COMP_LABELS.case}</strong> only — the model swap${otherPieces ? ` · <span style="color:var(--muted)">${escHtml(otherPieces)} stay${otherPieces.includes('&') ? '' : 's'} in the shopping list to buy as normal</span>` : ''}</div></div>`
 					const supplierHint =
 						ctx.supplierShop || ctx.supplierStall
 							? `<div class="modal-field"><label class="modal-label">Exchange at (supplier)</label>
@@ -19491,14 +19880,15 @@
 				const btn = document.getElementById('exchangeCreateBtn')
 				const have = (document.getElementById('exchangeHaveModel')?.value || '').trim()
 				const need = (document.getElementById('exchangeNeedModel')?.value || '').trim()
-				const comps = [...document.querySelectorAll('#exchangeModalBody input.exchange-comp-check:checked')].map((c) => c.value)
+				// A model fix is ALWAYS a case-only swap (grip/charm have no alternative
+				// model), so the component set is fixed — no per-piece selection.
+				const comps = ['case']
 				const shop = (document.getElementById('exchangeShop')?.value || '').trim()
 				const stall = (document.getElementById('exchangeStall')?.value || '').trim()
 				const note = (document.getElementById('exchangeNote')?.value || '').trim()
 				// The model to fulfil (need) is the one thing we always require — it's what
 				// gets packed. `have` is optional: blank = buy the correct model (no swap).
 				if (!need) return _exchangeError('Enter the model the order needs (the one you will pack).')
-				if (!comps.length) return _exchangeError('Select at least one piece to fix (case, grip or charm).')
 				const isPurchase = !have
 				if (btn) {
 					btn.disabled = true
@@ -19649,6 +20039,12 @@
 						json = await resp.json()
 					} catch {
 						json = {}
+					}
+					// The order isn't sealable yet (still needs purchase / on hold / awaiting
+					// a swap): show the reason calmly and stop — this is expected, not an error.
+					if (resp.status === 409 || json.code === 'NOT_SEALABLE') {
+						showRouteToast('⚠ ' + (json.error || "This order can't be packaged yet."))
+						return
 					}
 					if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status} — try reloading the page.`)
 					showRouteToast('📦 Order marked as packaged')
@@ -20123,10 +20519,48 @@
 					}
 					if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status} — try reloading the page.`)
 					clearSelection()
-					showRouteToast(packaged ? `📦 Marked ${json.changed} order${json.changed !== 1 ? 's' : ''} as packaged` : `Cleared packaged flag on ${json.changed} order${json.changed !== 1 ? 's' : ''}`)
+					if (packaged) {
+						// Some selected orders may have been skipped because they aren't
+						// sealable yet (still need purchase / on hold / awaiting a swap). Report
+						// both outcomes so the operator knows exactly what happened.
+						const nSkip = (json.skipped || []).length
+						let msg = `📦 Marked ${json.changed} order${json.changed !== 1 ? 's' : ''} as packaged`
+						if (nSkip) msg += ` · ⚠ skipped ${nSkip} not yet ready (still need purchase / on hold)`
+						showRouteToast(msg)
+					} else {
+						showRouteToast(`Cleared packaged flag on ${json.changed} order${json.changed !== 1 ? 's' : ''}`)
+					}
 					await fetchOrders()
 				} catch (e) {
 					alert('Bulk packaged update failed: ' + e.message)
+				}
+			}
+
+			// Bulk verification — the packer confirms the selected orders' products are
+			// physically in hand (the second half of the Purchased → Verified gate). A
+			// verified order that is otherwise ready leaves this worklist for "To pack".
+			async function bulkVerify(verified) {
+				const cbs = getSelectedCbs()
+				if (!cbs.length) return
+				const ids = cbs.map((cb) => Number(cb.dataset.receipt))
+				try {
+					const resp = await fetch(`${API}/api/orders/bulk-verify`, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ receipt_ids: ids, verified }),
+					})
+					let json
+					try {
+						json = await resp.json()
+					} catch {
+						json = {}
+					}
+					if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status} — try reloading the page.`)
+					clearSelection()
+					showRouteToast(verified ? `✓ Verified ${json.changed} order${json.changed !== 1 ? 's' : ''} — in hand` : `Cleared verification on ${json.changed} order${json.changed !== 1 ? 's' : ''}`)
+					await fetchOrders()
+				} catch (e) {
+					alert('Bulk verify failed: ' + e.message)
 				}
 			}
 
@@ -20196,6 +20630,31 @@
 					tip = `${c.label} still to buy — click once purchased`
 				}
 				return `<button class="pp-comp ${cls}" onclick="setComponentStatus(${args},'${c.comp}','${next}')" title="${tip}">${label}</button>`
+			}
+
+			// Verify (or un-verify) a single line as physically in hand — the per-line
+			// "In hand" toggle used for stock reconciliation in the Need-to-purchase view
+			// (esp. the already-bought products of a partially on-hold order). Writes to
+			// the same verification store the packing gate reads.
+			async function verifyLineItem(receiptId, itemKey, title, verified) {
+				try {
+					const resp = await fetch(`${API}/api/orders/${receiptId}/items/verify`, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ item_key: itemKey, title, verified }),
+					})
+					let json
+					try {
+						json = await resp.json()
+					} catch {
+						json = {}
+					}
+					if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status} — try reloading the page.`)
+					showRouteToast(verified ? '✓ Confirmed in hand' : 'Marked not in hand')
+					await fetchOrders()
+				} catch (e) {
+					alert('Could not update verification: ' + e.message)
+				}
 			}
 
 			// Set one product's component (case/grip/charm) purchase status. Writes the same
@@ -21894,8 +22353,15 @@
 					btn.innerHTML = `<span class="fpx-spin"></span> Printing…`
 				}
 
+				// Client-side deadline. The server already retries a flaky 4PX CDN
+				// (up to 4 attempts) plus renders + prints, so give it generous
+				// head-room (90 s). Without this the browser can itself abort a slow
+				// request and report "socket hang up" even though nothing was wrong
+				// with the printer.
+				const controller = new AbortController()
+				const deadline = setTimeout(() => controller.abort(), 90_000)
 				try {
-					const response = await fetch(`${API}/api/4px/label-print/${receiptId}`)
+					const response = await fetch(`${API}/api/4px/label-print/${receiptId}`, { signal: controller.signal })
 					const data = await response.json().catch(() => ({}))
 					if (!response.ok || !data.ok) {
 						throw new Error(data.error || `Server returned ${response.status}`)
@@ -21906,14 +22372,45 @@
 					}
 				} catch (err) {
 					console.error('[4px] row label print error:', err)
-					const reason = err.message || 'Unknown error'
+					const reason = _humanizePrintError(err)
 					if (btn) {
 						btn.innerHTML = `<span style="color:var(--red)">⚠</span> Failed`
 						btn.title = reason
 						setTimeout(resetBtn, 4000)
 					}
 					alert(`Label did not print:\n\n${reason}`)
+				} finally {
+					clearTimeout(deadline)
 				}
+			}
+
+			/**
+			 * Turn a raw print failure into an actionable, human-readable message.
+			 * Transient transport faults ("socket hang up") are recoverable, so we
+			 * tell the operator to simply try again rather than showing a cryptic
+			 * low-level error string.
+			 */
+			function _humanizePrintError(err) {
+				if (err && err.name === 'AbortError') {
+					return 'The print request took too long and was cancelled. The printer or the 4PX label service may be slow — please try again.'
+				}
+				const raw = (err && err.message) ? String(err.message) : 'Unknown error'
+				const lower = raw.toLowerCase()
+				// PRINTER faults are checked FIRST, and the transport branch below matches
+				// only specific transport tokens. A bare 'network' test here would claim a
+				// 4PX hiccup for a message like "Printer offline (network printer not
+				// ready)" — sending the operator to retry a download while the printer is
+				// the thing that's actually down.
+				if (lower.includes('offline') || lower.includes('not ready') ||
+					lower.includes('out of paper') || lower.includes('jam')) {
+					return `${raw}\n\n(Check the printer, then click Print again.)`
+				}
+				if (lower.includes('socket hang up') || lower.includes('econnreset') ||
+					lower.includes('failed to fetch') || lower.includes('networkerror') ||
+					lower.includes('dropping the connection')) {
+					return 'Temporary network hiccup while fetching the label from 4PX. Please click Print again — it usually works on the next try.'
+				}
+				return raw
 			}
 
 			// Mark label button as ready — does NOT auto-download.
@@ -24781,6 +25278,7 @@
 			let _bulkSettings = null
 			let _bulkEventSource = null
 			let _bulkJobState = null // running|paused|done|error|cancelled
+			let _bulkJobError = null // last job-level error message (shown when state === 'error')
 			let _bulkDryRun = false // whether the active job is a dry run
 			let _bulkPublishing = false // publish-all in flight
 			let _bulkRepricing = false // bulk price update in flight
@@ -24791,8 +25289,8 @@
 			let _binsDetail = null // full detail payload for the open Inspector
 			let _bulkCharCatalog = null // { characters:[{name,franchise}], by_franchise:{} }
 			let _bvpStyle = null // variation-row token whose photo picker is currently open
-			// Operator-defined CUSTOM variation values for the open item. When one or
-			// more exist they REPLACE the standard bundles for that listing.
+			// Operator-defined CUSTOM variation values for the open item. These are
+			// offered ALONGSIDE the standard bundles, in one shared "Styles" dropdown.
 			// Each: { id, label, price, imageRank }.
 			let _binsCustomStyles = []
 			let _binsCustomCleared = false // set when custom is intentionally emptied → persist a clear
@@ -24915,6 +25413,7 @@
 					}
 					_bulkJobId = jobId
 					_bulkJobState = job.state
+					_bulkJobError = job.state === 'error' ? job.error || 'The run stopped with an error.' : null
 					_bulkDryRun = job.dry_run === 1
 					_bulkPublishing = false
 					_bulkRepricing = false
@@ -25223,6 +25722,7 @@
 					if (!res.ok) throw new Error(json.error || 'Run failed')
 					_bulkJobId = json.job.job_id
 					_bulkJobState = 'running'
+					_bulkJobError = null
 					_bulkDryRun = dryRun
 					_bulkDoneTimes = []
 					document.getElementById('bulkProgress').style.display = ''
@@ -25289,6 +25789,7 @@
 					if (ev.job) {
 						_bulkJobState = ev.job.state
 						_bulkDryRun = ev.job.dry_run === 1
+						_bulkJobError = ev.job.state === 'error' ? ev.job.error || 'The run stopped with an error.' : null
 						bulkUpdateJobState(ev.job)
 					}
 					bulkRenderItems()
@@ -25340,7 +25841,7 @@
 					// without yanking the operator to the top. Events for a different
 					// listing (e.g. A finishing while you're editing B) only touch the
 					// background table — they never reload the open inspector.
-					if (_bulkInspectSeq === ev.seq) bulkInspectorOpen(ev.seq, { preserveScroll: true })
+					if (_bulkInspectSeq === ev.seq) bulkInspectorRefreshAfterRegen(ev.seq)
 				} else if (ev.type === 'regen_failed') {
 					const cur = ev.folder ? _bulkItems.get(ev.folder) : bulkItemBySeq(ev.seq)
 					if (cur) {
@@ -25358,7 +25859,8 @@
 					}
 				} else if (ev.type === 'job') {
 					_bulkJobState = ev.state
-					bulkUpdateJobState({ state: ev.state, completed: ev.completed, failed: ev.failed })
+					_bulkJobError = ev.state === 'error' ? ev.error || 'The run stopped with an error.' : null
+					bulkUpdateJobState({ state: ev.state, completed: ev.completed, failed: ev.failed, error: ev.error })
 					if ((ev.state === 'done' || ev.state === 'error' || ev.state === 'cancelled' || ev.state === 'paused') && !_bulkPublishing) {
 						if (_bulkEventSource) {
 							_bulkEventSource.close()
@@ -25476,7 +25978,7 @@
 				} else if (ev.type === 'item_deleted') {
 					if (ev.folder && _bulkItems.has(ev.folder)) _bulkItems.delete(ev.folder)
 					if (ev.seq != null) _bulkSelected.delete(ev.seq)
-					if (_bulkInspectSeq === ev.seq) bulkInspectorClose()
+					if (_bulkInspectSeq === ev.seq) bulkInspectorClose({ discard: true })
 					bulkRenderItems()
 				}
 			}
@@ -25498,6 +26000,14 @@
 				}
 				if (it.status === 'done') {
 					return `<span class="bulk-muted">${escHtml((it.title || 'Preview ready').slice(0, 80))}</span>` + `<span class="bulk-pill bulk-pill-draft">Preview</span>`
+				}
+				// In-flight statuses left behind by a job that stopped (error /
+				// cancelled) are not actually progressing — show them as interrupted
+				// so the operator sees an honest state instead of a perpetual spinner.
+				// They are picked up (idempotently) by Retry / Resume.
+				const jobActive = _bulkJobState === 'running' || _bulkJobState === 'pausing' || _bulkJobState === 'cancelling'
+				if (!jobActive && (it.status === 'running' || it.status === 'ai_done' || it.status === 'created')) {
+					return `<span class="bulk-muted">⏹ Interrupted — will resume on retry</span>`
 				}
 				// In-flight: show the live step + optional image sub-progress.
 				if (it.status === 'running' || it.status === 'ai_done' || it.status === 'created') {
@@ -25532,7 +26042,33 @@
 				document.getElementById('bulkStats').innerHTML =
 					`<span class="bulk-stat"><span class="num">${pct}%</span><span class="lbl">complete</span></span>` + `<span class="bulk-stat"><span class="dot dot-done"></span><span class="num">${done}</span><span class="lbl">done</span></span>` + `<span class="bulk-stat"><span class="dot dot-running"></span><span class="num">${running}</span><span class="lbl">running</span></span>` + `<span class="bulk-stat"><span class="dot dot-pending"></span><span class="num">${pending}</span><span class="lbl">pending</span></span>` + `<span class="bulk-stat"><span class="dot dot-failed"></span><span class="num">${failed}</span><span class="lbl">failed</span></span>` + (done > 0 ? `<span class="bulk-stat"><span class="dot dot-reviewed"></span><span class="num">${reviewed}/${done}</span><span class="lbl">reviewed</span></span>` : '') + (eta ? `<span class="bulk-eta">${eta}</span>` : '')
 
+				bulkRenderErrorBanner(pending, failed)
 				bulkUpdateControls(failed)
+			}
+
+			// Show the job-level error (a run that stopped at the setup/orchestration
+			// level, e.g. a token refresh or shop-settings failure) with an
+			// actionable recovery hint. Unlike a per-item failure, a job-level error
+			// can leave products in a 'pending' (never-attempted) state — the banner
+			// makes the cause visible and the Retry button below resumes them.
+			function bulkRenderErrorBanner(pending, failed) {
+				const el = document.getElementById('bulkErrorBanner')
+				if (!el) return
+				if (_bulkJobState !== 'error' || !_bulkJobError) {
+					el.style.display = 'none'
+					el.innerHTML = ''
+					return
+				}
+				const remaining = (Number(pending) || 0) + (Number(failed) || 0)
+				const hint = remaining > 0 ? `${remaining} product(s) still need processing. Click <strong>“↻ Retry / Resume”</strong> to continue from where it stopped — products already completed are skipped, so retrying is safe.` : 'You can retry this run safely — completed products are skipped.'
+				el.innerHTML =
+					`<span class="bulk-error-ico">⚠</span>` +
+					`<div class="bulk-error-body">` +
+					`<div class="bulk-error-title">This run stopped with an error</div>` +
+					`<div class="bulk-error-msg">${escHtml(_bulkJobError)}</div>` +
+					`<div class="bulk-error-hint">${hint}</div>` +
+					`</div>`
+				el.style.display = ''
 			}
 
 			// Rolling ETA from the average time between completed items.
@@ -25570,7 +26106,25 @@
 				pauseBtn.textContent = _bulkJobState === 'pausing' ? 'Pausing…' : '⏸ Pause'
 				show('bulkResumeBtn', paused)
 				show('bulkCancelBtn', running || paused)
-				show('bulkRetryBtn', (terminal || paused) && failedCount > 0)
+
+				// Recovery: a job can settle into a terminal/paused state with work
+				// still outstanding — either per-item failures (status 'failed') OR
+				// products never attempted because the run stopped at the
+				// orchestration level (a job-level 'error'/'cancelled' leaves them
+				// 'pending', NOT 'failed'). Gating retry on failedCount alone stranded
+				// those runs with no way forward. We now offer Retry whenever ANY
+				// non-done product remains, since the backend resume is idempotent
+				// (onlyUnfinished — completed products are skipped).
+				const incomplete = [..._bulkItems.values()].filter((i) => i.status !== 'done' && !i.excluded).length
+				const recoverable = _bulkJobState === 'error' || _bulkJobState === 'cancelled'
+				const canRetry = (terminal || paused) && (failedCount > 0 || (recoverable && incomplete > 0))
+				show('bulkRetryBtn', canRetry)
+				const retryBtn = document.getElementById('bulkRetryBtn')
+				if (retryBtn && canRetry && !retryBtn.dataset._t) {
+					// While retrying, bulkJobAction owns the label (dataset._t is set) —
+					// don't fight it. Otherwise reflect what the click will actually do.
+					retryBtn.textContent = failedCount > 0 ? `↻ Retry failed (${failedCount})` : `↻ Retry / Resume (${incomplete})`
+				}
 
 				// "Publish all drafts": real run, settled, with created-but-unpublished listings.
 				const unpublished = [..._bulkItems.values()].filter((i) => i.listing_id && !i.published_at).length
@@ -25748,7 +26302,7 @@
 							if (it.seq === seq) _bulkItems.delete(folder)
 						}
 						_bulkSelected.delete(seq)
-						if (_bulkInspectSeq === seq) bulkInspectorClose()
+						if (_bulkInspectSeq === seq) bulkInspectorClose({ discard: true })
 						removed++
 					} catch (err) {
 						firstError = firstError || err.message
@@ -25861,10 +26415,18 @@
 			}
 
 			// Delegated: click a finished row (not a link/button inside it) to inspect.
-			document.getElementById('bulkItemsBody').addEventListener('click', (e) => {
+			document.getElementById('bulkItemsBody').addEventListener('click', async (e) => {
 				if (e.target.closest('a, button')) return
 				const tr = e.target.closest('tr[data-inspect-seq]')
-				if (tr) bulkInspectorOpen(parseInt(tr.dataset.inspectSeq, 10))
+				if (!tr) return
+				// Switching listings from the table REPLACES the editor, so this is one of
+				// the commits that must flush first (see bulkFlushVariationSave). Without
+				// it, an edit still inside its 550 ms debounce is queued against the OLD
+				// seq, and by the time the timer fires bulkInspectorOpen has already moved
+				// _bulkInspectSeq on — so the save is dropped by the seq guard and the
+				// operator's price/label silently never reaches the server.
+				await bulkFlushVariationSave(_bulkInspectSeq)
+				bulkInspectorOpen(parseInt(tr.dataset.inspectSeq, 10))
 			})
 
 			// ── Run controls: pause / resume / cancel / retry ─────────────
@@ -25912,6 +26474,9 @@
 				try {
 					await bulkJobAction('resume', 'bulkResumeBtn', 'Resuming…')
 					_bulkJobState = 'running'
+					_bulkJobError = null
+					bulkRenderErrorBanner(0, 0)
+					bulkUpdateControls(0)
 					bulkStream(_bulkJobId)
 				} catch {
 					/* alerted */
@@ -25931,9 +26496,12 @@
 
 			async function bulkRetry() {
 				try {
-					await bulkJobAction('retry', 'bulkRetryBtn')
+					await bulkJobAction('retry', 'bulkRetryBtn', 'Retrying…')
 					_bulkJobState = 'running'
+					_bulkJobError = null
 					document.getElementById('bulkRetryBtn').style.display = 'none'
+					bulkRenderErrorBanner(0, 0)
+					bulkUpdateControls(0)
 					bulkStream(_bulkJobId)
 				} catch {
 					/* alerted */
@@ -25964,6 +26532,7 @@
 					_bulkCreatingDrafts = false
 					_bulkDryRun = false
 					_bulkJobState = 'running'
+					_bulkJobError = null
 					const titleEl = document.getElementById('bulkProgressTitle')
 					if (titleEl) titleEl.textContent = `Progress — creating drafts · ${n} product(s)`
 					bulkStream(_bulkJobId)
@@ -26104,9 +26673,21 @@
 				}
 			}
 
-			function bulkInspectorClose() {
+			// `discard: true` skips the flush — used when the listing itself is gone,
+			// where saving its matrix would only produce a 404.
+			async function bulkInspectorClose(opts = {}) {
+				const seq = _bulkInspectSeq
 				document.getElementById('bulkInspector').style.display = 'none'
-				_bulkInspectSeq = null
+				// Hide immediately, then let the debounced save land. `_bulkInspectSeq`
+				// stays set until it does — the editor's (now hidden) DOM is still the
+				// source of truth for that save, and clearing it early would make the
+				// save drop itself as belonging to a listing we've left.
+				if (seq == null || opts.discard) {
+					_bulkInspectSeq = null
+					return
+				}
+				await bulkFlushVariationSave(seq)
+				if (_bulkInspectSeq === seq) _bulkInspectSeq = null
 			}
 
 			// ── Inspector review-queue navigation ─────────────────────────
@@ -26127,12 +26708,14 @@
 				return seqs.find((s) => s > afterSeq) ?? seqs[0]
 			}
 			// Step to the previous/next generated listing (no wrap at the edges).
-			function bulkInspectorNav(dir) {
+			async function bulkInspectorNav(dir) {
 				const seqs = bulkInspectableSeqs()
 				if (!seqs.length || _bulkInspectSeq == null) return
 				const i = seqs.indexOf(_bulkInspectSeq)
 				const ni = i === -1 ? 0 : i + dir
 				if (ni < 0 || ni >= seqs.length) return
+				// Persist this listing's pending edits before its editor is replaced.
+				await bulkFlushVariationSave(_bulkInspectSeq)
 				bulkInspectorOpen(seqs[ni])
 			}
 			// Header progress chip + prev/next enabled state.
@@ -26323,6 +26906,7 @@
 					imageRank: s.imageRank != null ? Number(s.imageRank) : null,
 				}))
 				_binsCustomCleared = false
+				_binsLastSaveError = null // fresh server state — previous failures no longer apply
 				// Resolve the saved order (an array of value labels) into tokens, then
 				// append anything not listed (canonical first, then custom).
 				const labelToToken = {}
@@ -26559,9 +27143,85 @@
 			}
 
 			// Any label/price edit in a custom row → update summary + auto-save.
+			// Validation only CLEARS messages here: flagging a row the moment it's
+			// added would nag before the operator has had a chance to fill it in.
+			// Errors are raised when they commit (see bulkInspectorRegenerate).
 			function bulkCustomChanged() {
+				bulkValidateCustomRows({ mark: 'resolve' })
 				bulkUpdateVarSummary()
 				bulkAutoSaveVariations()
+			}
+
+			// Canonical bundle names that are actually offerable: ENABLED (the checkbox is
+			// what bulkInspectorGatherStyles persists) and carrying a price. A custom value
+			// colliding with one is dropped when the inventory is built — Etsy rejects
+			// duplicate option values — so it's worth catching early.
+			//
+			// The enabled check is essential, not belt-and-braces: disabling a bundle only
+			// greys its price input (bulkVarToggle) and the value is still persisted, so
+			// judging by price alone counts every switched-off bundle as offered. That
+			// wrongly rejected the workflow bulkVarToggle exists to allow — disable
+			// "Case + Grip", then re-offer that same buyer-facing name as a custom value
+			// with its own price and photo — leaving regenerate blocked with no way out.
+			function bulkOfferedCanonicalLabels() {
+				const out = new Set()
+				for (const row of document.querySelectorAll('#binsVarList .bins-var-row[data-kind="bundle"]')) {
+					const cb = row.querySelector('.bins-style-cb')
+					if (!cb || !cb.checked) continue
+					const price = Number((row.querySelector('.bins-price-in') || {}).value)
+					if (!isFinite(price) || price <= 0) continue
+					const key = row.dataset.key
+					out.add(String((BULK_STYLE_DISPLAY[key] || {}).name || key).toLowerCase())
+				}
+				return out
+			}
+
+			// Check every custom row on screen and explain the ones that aren't yet a
+			// valid Etsy option value. A row only becomes a real variation once it has
+			// a unique name AND a price above 0; incomplete rows are dropped on save,
+			// so saying so is the difference between "the editor told me" and "my
+			// option silently disappeared". `mark`: 'all' paints every verdict,
+			// 'resolve' only clears the ones that are now fixed, 'none' just reports.
+			function bulkValidateCustomRows({ mark = 'all' } = {}) {
+				const canon = bulkOfferedCanonicalLabels()
+				const seen = new Set()
+				const problems = []
+				for (const row of document.querySelectorAll('#binsVarList .bins-var-row[data-kind="custom"]')) {
+					const labelEl = row.querySelector('.bins-custom-label')
+					const priceEl = row.querySelector('.bins-custom-price')
+					const label = String((labelEl || {}).value || '').trim()
+					const price = Number((priceEl || {}).value)
+					const priced = isFinite(price) && price > 0
+					let message = ''
+					let focusEl = labelEl
+					if (!label && !priced) message = 'Give this variation a name and a price, or remove it.'
+					else if (!label) message = 'This variation needs a name.'
+					else if (!priced) {
+						message = `“${label}” needs a price above 0.`
+						focusEl = priceEl
+					} else if (seen.has(label.toLowerCase())) message = `“${label}” is already used by another variation — names must be unique.`
+					else if (canon.has(label.toLowerCase())) message = `“${label}” is already a standard bundle name — choose a different one.`
+					if (!message) seen.add(label.toLowerCase())
+					if (mark === 'all' || (mark === 'resolve' && !message)) bulkMarkVarRow(row, message)
+					if (message) problems.push({ row, focusEl, message })
+				}
+				return problems
+			}
+
+			// Paint (or clear) a row's inline validation message.
+			function bulkMarkVarRow(row, message) {
+				row.classList.toggle('invalid', !!message)
+				let el = row.querySelector('.bins-var-err')
+				if (!message) {
+					if (el) el.remove()
+					return
+				}
+				if (!el) {
+					el = document.createElement('div')
+					el.className = 'bins-var-err'
+					;(row.querySelector('.bins-var-body') || row).appendChild(el)
+				}
+				el.textContent = message
 			}
 
 			function bulkCustomRemove(btn) {
@@ -26572,6 +27232,8 @@
 				_binsCustomStyles = _binsCustomStyles.filter((s) => s.id !== id)
 				// No custom rows left → persist a revert to just the bundles.
 				if (!document.querySelector('#binsVarList .bins-var-row[data-kind="custom"]')) _binsCustomCleared = true
+				// Deleting a row can resolve a duplicate-name flag on the row it clashed with.
+				bulkValidateCustomRows({ mark: 'resolve' })
 				bulkUpdateVarSummary()
 				bulkAutoSaveVariations()
 			}
@@ -26996,6 +27658,10 @@
 				if (!order.length) return
 				const status = document.getElementById('binsImgStatus')
 				if (status) status.textContent = 'Saving…'
+				// Store pending variation edits BEFORE the reorder: the server remaps
+				// variation-photo links onto the new ranks, and the refresh below
+				// rebuilds the editor from the result.
+				await bulkFlushVariationSave(seq)
 				try {
 					const res = await fetch(API + '/api/bulk/jobs/' + _bulkJobId + '/items/' + seq + '/images', {
 						method: 'POST',
@@ -27067,6 +27733,9 @@
 					showToast(`Only ${room} more photo${room === 1 ? '' : 's'} fit — adding the first ${room}.`, 'error')
 					queue = queue.slice(0, room)
 				}
+				// Uploading refreshes the inspector at the end, which rebuilds the
+				// variation editor — store anything still pending in it first.
+				await bulkFlushVariationSave(seq)
 
 				let done = 0
 				for (const file of queue) {
@@ -27185,40 +27854,97 @@
 				el.innerHTML = head + (qty != null ? ` · ${qty} qty/variation` : '')
 			}
 
-			// Debounced auto-save: any change to styles, models, prices, or variation
-			// photos persists automatically (no button). Coalesces rapid edits.
+			// ── Variation auto-save ──────────────────────────────────────────────────
+			// Every change to styles, models, prices, photos, custom values or their
+			// order persists on its own (there is no Save button). Edits are coalesced
+			// behind a short debounce, so at any instant there can be BOTH a timer
+			// waiting to fire and a request already on the wire. Two rules keep that
+			// safe:
+			//
+			//   • Saves are serialised through one promise chain, so two POSTs can
+			//     never race and land on the server out of order.
+			//   • Each save is bound to the seq it was queued for, so a timer that
+			//     fires after the operator moved on can't write one listing's matrix
+			//     onto another.
+			//
+			// Anything that COMMITS the editor — regenerating copy, or a refresh that
+			// rebuilds it from server state — must call bulkFlushVariationSave() first.
+			// Until the save lands, the newest rows exist only in the DOM.
 			let _binsAutoSaveTimer = null
 			let _binsAutoSaveSeq = 0
-			function bulkAutoSaveVariations() {
+			let _binsSaveChain = Promise.resolve()
+			let _binsLastSaveError = null // why the most recent save attempt failed
+
+			function bulkSetVarStatus(txt, cls) {
 				const status = document.getElementById('binsPriceStatus')
-				if (status) {
-					status.textContent = 'Saving…'
-					status.className = 'bins-autosave saving'
-				}
-				clearTimeout(_binsAutoSaveTimer)
-				_binsAutoSaveTimer = setTimeout(() => bulkInspectorSaveVariations(), 550)
+				if (!status) return
+				status.textContent = txt
+				status.className = 'bins-autosave' + (cls ? ' ' + cls : '')
 			}
 
-			async function bulkInspectorSaveVariations() {
-				if (!_bulkJobId || _bulkInspectSeq == null) return
-				const status = document.getElementById('binsPriceStatus')
-				const setStatus = (txt, cls) => {
-					if (status) {
-						status.textContent = txt
-						status.className = 'bins-autosave' + (cls ? ' ' + cls : '')
-					}
+			function bulkAutoSaveVariations() {
+				bulkSetVarStatus('Saving…', 'saving')
+				const seq = _bulkInspectSeq
+				clearTimeout(_binsAutoSaveTimer)
+				_binsAutoSaveTimer = setTimeout(() => {
+					_binsAutoSaveTimer = null
+					bulkQueueVariationSave(seq)
+				}, 550)
+			}
+
+			// Queue a save behind any already in flight; resolves when this one is done.
+			function bulkQueueVariationSave(seq) {
+				const run = () => bulkInspectorSaveVariations(seq)
+				_binsSaveChain = _binsSaveChain.then(run, run)
+				return _binsSaveChain
+			}
+
+			// Persist NOW and resolve once the server has it: cancel the armed debounce
+			// (so it can't fire a duplicate later) and drain the queue. Resolves
+			// immediately when nothing is outstanding. Returns true when the matrix is
+			// safely durable — callers that are about to discard the DOM must check it.
+			async function bulkFlushVariationSave(seq) {
+				if (seq == null) seq = _bulkInspectSeq
+				// An armed debounce is outstanding work — but so is a PREVIOUS FAILURE.
+				// _binsLastSaveError is sticky (cleared only by a new attempt or a re-seed
+				// from server state), so retrying is the only thing that can clear it. Left
+				// out, one transient failure dead-ends the editor: with no timer armed the
+				// chain is already resolved, so every later flush returns false and
+				// "Apply & regenerate copy" keeps reporting the original stale error, with
+				// no path forward except nudging a field to arm another debounce.
+				if (_binsAutoSaveTimer || _binsLastSaveError) {
+					clearTimeout(_binsAutoSaveTimer)
+					_binsAutoSaveTimer = null
+					bulkQueueVariationSave(seq)
 				}
+				try {
+					await _binsSaveChain
+				} catch {
+					/* bulkInspectorSaveVariations reports its own failures */
+				}
+				return !_binsLastSaveError
+			}
+
+			async function bulkInspectorSaveVariations(seq) {
+				if (seq == null) seq = _bulkInspectSeq
+				// The inspector moved on before this save ran: the DOM now describes a
+				// different listing, so persisting it under `seq` would corrupt that
+				// listing's matrix. Drop it — the new listing has its own saves.
+				if (!_bulkJobId || seq == null || seq !== _bulkInspectSeq) return
+				const setStatus = bulkSetVarStatus
 				const enabled = bulkInspectorGatherStyles()
 				const prices = bulkInspectorGatherPrices()
 				const styleImages = bulkInspectorGatherStyleImages()
 				const models = bulkInspectorGatherModels()
 				const custom = bulkInspectorGatherCustomStyles()
 				if (!Object.values(enabled).some(Boolean) && !custom.length) {
-					setStatus('Enable at least one style.', 'err')
+					_binsLastSaveError = 'Enable at least one style.'
+					setStatus(_binsLastSaveError, 'err')
 					return
 				}
 				if (!Object.values(models).some(Boolean)) {
-					setStatus('Enable at least one model.', 'err')
+					_binsLastSaveError = 'Enable at least one model.'
+					setStatus(_binsLastSaveError, 'err')
 					return
 				}
 				const payload = { enabled_styles: enabled, style_prices: prices, style_image_mapping: styleImages, enabled_models: models }
@@ -27227,15 +27953,18 @@
 				// Custom variations: persist valid rows; explicitly clear when emptied.
 				// Mid-typing (rows exist but none valid yet) sends nothing so we don't wipe.
 				const customRowCount = document.querySelectorAll('#binsVarList .bins-var-row[data-kind="custom"]').length
-				if (customRowCount > 0 && custom.length > 0) payload.custom_styles = custom
-				else if (_binsCustomCleared) {
+				if (customRowCount > 0 && custom.length > 0) {
+					payload.custom_styles = custom
+					_binsCustomCleared = false
+				} else if (_binsCustomCleared) {
 					payload.custom_styles = []
 					_binsCustomCleared = false
 				}
 				const mySeq = ++_binsAutoSaveSeq // guard against out-of-order responses
+				_binsLastSaveError = null
 				setStatus('Saving…', 'saving')
 				try {
-					const res = await fetch(API + '/api/bulk/jobs/' + _bulkJobId + '/items/' + _bulkInspectSeq + '/variations', {
+					const res = await fetch(API + '/api/bulk/jobs/' + _bulkJobId + '/items/' + seq + '/variations', {
 						method: 'POST',
 						headers: { 'Content-Type': 'application/json' },
 						body: JSON.stringify(payload),
@@ -27250,6 +27979,7 @@
 						if (json.enabledModels) _binsDetail.preview.enabledModels = json.enabledModels
 						_binsDetail.preview.minPrice = json.minPrice
 						if (json.customStyles !== undefined) _binsDetail.preview.customStyles = json.customStyles
+						if (json.variationOrder !== undefined) _binsDetail.preview.variationOrder = json.variationOrder
 						if (json.styleImageMapping) _binsDetail.preview.styleImageMapping = json.styleImageMapping
 						// A model change rewrites the title's device range — reflect it live.
 						if (json.title && json.title !== _binsDetail.preview.title) {
@@ -27258,7 +27988,7 @@
 							if (tEl) tEl.textContent = json.title
 							const cEl = document.querySelector('#binsBody .bins-charcount')
 							if (cEl) cEl.textContent = `${json.title.length}/140 characters`
-							const it = bulkItemBySeq(_bulkInspectSeq)
+							const it = bulkItemBySeq(seq)
 							if (it) {
 								it.title = json.title
 								bulkRenderItems()
@@ -27266,6 +27996,7 @@
 						}
 					}
 				} catch (err) {
+					_binsLastSaveError = err.message
 					if (mySeq === _binsAutoSaveSeq) setStatus(err.message, 'err')
 				}
 			}
@@ -27279,25 +28010,51 @@
 				return /magsafe/i.test((p && p.title) || '')
 			}
 
+			// "Apply & regenerate copy" COMMITS the whole editor: it rewrites the copy
+			// for the matrix on screen, and finishing re-renders the inspector from
+			// server state. So before the AI call starts, that matrix must be both
+			// valid (an incomplete custom row is dropped on save) and durable (the
+			// auto-save debounce may not have fired yet). Skipping either step is how
+			// a variation could look correct, then be missing once the copy came back.
 			async function bulkInspectorRegenerate() {
 				if (!_bulkJobId || _bulkInspectSeq == null) return
 				const seq = _bulkInspectSeq
 				const btn = document.getElementById('binsRegenBtn')
+
+				const problems = bulkValidateCustomRows()
+				if (problems.length) {
+					const first = problems[0]
+					first.row.scrollIntoView({ block: 'center', behavior: 'smooth' })
+					if (first.focusEl) first.focusEl.focus()
+					bulkSetVarStatus(problems.length === 1 ? first.message : `${problems.length} custom variations need a name and a price.`, 'err')
+					showToast(first.message, 'error')
+					return
+				}
+
 				const character = bulkChosenCharacter()
 				const magsafeCb = document.getElementById('binsMagsafeCb')
 				if (btn) {
 					btn.disabled = true
-					btn.textContent = 'Regenerating…'
+					btn.textContent = 'Saving…'
 				}
 				try {
+					// Flush the pending auto-save so the server regenerates against the
+					// matrix the operator is looking at, not the one from 550 ms ago.
+					const saved = await bulkFlushVariationSave(seq)
+					if (seq !== _bulkInspectSeq) return // navigated away mid-flush
+					if (!saved) throw new Error(_binsLastSaveError || 'Could not save the variation matrix.')
+					if (btn) btn.textContent = 'Regenerating…'
 					const body = { character_name: character }
 					if (magsafeCb) body.magsafe = magsafeCb.checked
-					// Send the CURRENT model + style selections AND the variation-image
-					// links so the regenerated copy matches exactly and the manually
-					// linked images are preserved (never re-derived).
+					// Send the FULL matrix on screen — models, bundles, variation photos,
+					// custom values and their dropdown order. The regenerated copy then
+					// describes exactly this listing, and the server re-persists what we
+					// sent rather than trusting a snapshot that may already be stale.
 					body.enabled_models = bulkInspectorGatherModels()
 					body.enabled_styles = bulkInspectorGatherStyles()
 					body.style_image_mapping = bulkInspectorGatherStyleImages()
+					body.custom_styles = bulkInspectorGatherCustomStyles()
+					body.variation_order = bulkGatherVariationOrder()
 					// Fire-and-forget: the server runs the regeneration as a detached
 					// background task and streams the result over SSE. Once this POST
 					// returns we no longer depend on the request staying alive, so the
@@ -27326,6 +28083,16 @@
 						btn.textContent = '✎ Apply & regenerate copy'
 					}
 				}
+			}
+
+			// A background regeneration finished while the inspector is open on that
+			// item. The refresh rebuilds the variation editor from server state, so
+			// anything typed while the copy was generating — still only in the DOM —
+			// has to be persisted first, or it would disappear on the re-render.
+			async function bulkInspectorRefreshAfterRegen(seq) {
+				await bulkFlushVariationSave(seq)
+				if (_bulkInspectSeq !== seq) return
+				bulkInspectorOpen(seq, { preserveScroll: true })
 			}
 
 			function bulkInspectorRefreshFooter(it, job) {
@@ -27397,6 +28164,9 @@
 				const currentlyReviewed = !!(_binsDetail && _binsDetail.item && _binsDetail.item.reviewed_at)
 				const next = !currentlyReviewed
 				btn.disabled = true
+				// Signing off can glide straight to the next listing, so make sure this
+				// one's pending matrix edits are stored before its editor is replaced.
+				await bulkFlushVariationSave(_bulkInspectSeq)
 				try {
 					const res = await fetch(API + '/api/bulk/jobs/' + _bulkJobId + '/items/' + _bulkInspectSeq + '/reviewed', {
 						method: 'POST',
@@ -29526,6 +30296,39 @@
 			}
 
 			/**
+			 * Components an OPEN wrong-model exchange holds out of buying on a row.
+			 * A model fix is always case-only (grip/charm have no alternative model),
+			 * so a flagged exchange with no explicit pieces defaults to the case.
+			 * Mirrors the server's routeDashboard.exchangeHeldComponents.
+			 */
+			function _exchangeHeldComps(row) {
+				if (!row || !row.needs_exchange) return { case: false, grip: false, charm: false }
+				const set = new Set(
+					String(row.exchange_components || '')
+						.split(',')
+						.map((c) => c.trim().toLowerCase())
+						.filter((c) => c === 'case' || c === 'grip' || c === 'charm'),
+				)
+				if (!set.size) set.add('case')
+				return { case: set.has('case'), grip: set.has('grip'), charm: set.has('charm') }
+			}
+
+			/**
+			 * True when the row STILL has pieces to buy once exchange-held components
+			 * (the swapped case) are set aside — i.e. its grip/charm remain shoppable.
+			 * A pure case-only swap returns false (nothing left to buy). Mirrors the
+			 * server's routeDashboard.rowHasShoppingWork.
+			 */
+			function _rowHasBuyWork(row) {
+				const held = _exchangeHeldComps(row)
+				const present = []
+				if (row.has_case && !held.case) present.push(row.status_case || 'Pending')
+				if (row.has_grip && !held.grip) present.push(row.status_grip || 'Pending')
+				if (row.has_charm && !held.charm) present.push(row.status_charm || 'Pending')
+				return present.some((s) => s !== 'Purchased')
+			}
+
+			/**
 			 * Recompute the summary headline from the in-memory rows so it reflects
 			 * what STILL needs shopping the moment a status changes. Mirrors the
 			 * server-side shape in GET /api/route/dashboard exactly — fully purchased
@@ -29534,10 +30337,12 @@
 			function _computeRouteSummary(rows) {
 				// Removed (dismissed) lines are a separate bucket — never shopping work.
 				const live = rows.filter((r) => !r.dismissed)
-				// Lines awaiting a wrong-model exchange are already in hand — they drop
-				// out of the "to shop" buy set (like fully purchased) and are surfaced
-				// separately via `to_exchange`.
-				const active = live.filter((r) => !r.excluded && !_rowFullyPurchased(r) && !r.needs_exchange)
+				// A wrong-model exchange only holds its CASE out of the buy set (it's
+				// swapped in person and surfaced separately via `to_exchange`). Any
+				// grip/charm on the SAME line still need buying, so an exchange line
+				// counts as "to shop" whenever it has such pieces left — only a pure
+				// case-only swap (nothing else to buy) drops out of the shopping set.
+				const active = live.filter((r) => !r.excluded && !_rowFullyPurchased(r) && (!r.needs_exchange || _rowHasBuyWork(r)))
 				return {
 					orders: new Set(active.map((r) => r.receipt_id)).size,
 					items: active.length,
@@ -29545,8 +30350,10 @@
 					fully_purchased: live.filter((r) => !r.excluded && !r.needs_exchange && _rowFullyPurchased(r)).length,
 					to_exchange: live.filter((r) => !r.excluded && r.needs_exchange).length,
 					dismissed: rows.filter((r) => r.dismissed).length,
-					charms_needed: active.filter((r) => r.has_charm).length,
-					charms_assigned: active.filter((r) => r.has_charm && r.charm_code).length,
+					// Mirror the server: integral (AirPods) charms need no code, so they
+					// are excluded from the charm-assignment progress metric.
+					charms_needed: active.filter((r) => r.has_charm && !r.charm_integral).length,
+					charms_assigned: active.filter((r) => r.has_charm && !r.charm_integral && r.charm_code).length,
 					supplier_matched: live.filter((r) => r.supplier_in_catalog).length,
 					supplier_missing: live.filter((r) => !r.supplier_in_catalog).length,
 				}
@@ -29608,17 +30415,19 @@
 
 					// Checkbox filters (active list only)
 					if (onlyUnmatched) rows = rows.filter((r) => !r.supplier_in_catalog && !r.supplier_is_override)
-					if (onlyCharm) rows = rows.filter((r) => r.has_charm && !r.charm_code)
+					if (onlyCharm) rows = rows.filter((r) => r.has_charm && !r.charm_integral && !r.charm_code)
 					if (hideExcluded) rows = rows.filter((r) => !r.excluded)
 					if (onlyWithNote) rows = rows.filter((r) => (r.team_note || '').trim().length > 0)
 					// Fully purchased lines need no more shopping — hide them from the
 					// active queue by default so the operator only sees outstanding work.
 					// The "✓ N fully purchased" pill toggles this filter to reveal them.
 					if (hideFullyPurchased) rows = rows.filter((r) => !_rowFullyPurchased(r))
-					// Wrong-model exchange lines are already in hand — hide them from the
-					// buy queue by default. The "🔁 N to exchange" pill reveals them (as a
-					// swap checklist) without ever putting them back in the buy route.
-					if (hideExchange) rows = rows.filter((r) => !r.needs_exchange)
+					// Wrong-model exchange lines have their CASE in hand — hide them from
+					// the buy queue by default. The "🔁 N to exchange" pill reveals them
+					// (as a swap checklist). A line whose grip/charm still need buying is
+					// NOT hidden: the swapped case is shown alongside the buyable pieces so
+					// the operator never loses sight of what they still have to purchase.
+					if (hideExchange) rows = rows.filter((r) => !r.needs_exchange || _rowHasBuyWork(r))
 				}
 
 				// 3. Column sort
@@ -29651,11 +30460,74 @@
 				return `<div class="charm-status-row"><select class="comp-select charm-status-select ${cls}" title="Charm purchasing status"` + ` onchange="saveRouteStatus(${row.receipt_id}, '${jsAttr(row.item_key)}', 'charm', this.value, this)">${opts}</select></div>`
 			}
 
+			/**
+			 * Is this line's charm already sourced at the case/grip supplier's stall?
+			 * Compares the RESOLVED charm shop (library-backed, matching what the row
+			 * displays) against the row's effective supplier.
+			 */
+			function _charmAtSupplier(row) {
+				const sup = String(row.supplier_shop || '').trim().toLowerCase()
+				if (!sup) return false
+				const c = _charmByCode[row.charm_code] || {}
+				const shop = String(row.charm_shop || c.default_charm_shop || '').trim().toLowerCase()
+				return !!shop && shop === sup
+			}
+
+			/**
+			 * "Buy this charm at the case/grip supplier" actions for the Charm cell.
+			 * Shown only when there IS a supplier to link to, and never in Packing Mode
+			 * (a charm's shop is an owner catalog decision). Two affordances:
+			 *   ＝ / ＋ Supplier — point the charm's shop at this supplier, creating the
+			 *                     charm code and the charm-shop entry when they're new.
+			 *   📷              — the same, plus upload the charm's photo. Offered only
+			 *                     while the charm has NO image, so a photo shared by
+			 *                     every product using that code is never silently
+			 *                     replaced (use Manage charms to deliberately change it).
+			 */
+			function _charmSupplierActionsHtml(row) {
+				if (_employeeCharmMode()) return ''
+				const shop = String(row.supplier_shop || '').trim()
+				if (!shop) return ''
+				const target = `${row.receipt_id},'${jsAttr(row.item_key)}'`
+				const code = String(row.charm_code || '').trim()
+				const c = code ? _charmByCode[code] || {} : null
+				const stall = String(row.supplier_stall || '').trim()
+				const where = shop + (stall ? ' · ' + stall : '')
+				const btns = []
+				if (!_charmAtSupplier(row)) {
+					const tip = code
+						? `Buy charm ${code} at the case/grip supplier (${where}). Updates the charm's shop in the library — which every order line using ${code} follows — and adds the supplier to the charm-shop list if it isn't there yet.`
+						: `Create a charm for this line and buy it at the case/grip supplier (${where}). Adds the supplier to the charm-shop list if it isn't there yet.`
+					btns.push(`<button class="charm-sup-btn" title="${escAttr(tip)}" onclick="charmFromSupplier(${target},false,this)">${code ? '＝' : '＋'} Supplier</button>`)
+				}
+				if (!c || !c.has_image) {
+					btns.push(`<button class="charm-sup-btn cam" title="${escAttr(`Upload a photo of this charm and buy it at the case/grip supplier (${where}).`)}" onclick="charmFromSupplier(${target},true,this)">📷</button>`)
+				}
+				return btns.length ? `<div class="charm-sup-row">${btns.join('')}</div>` : ''
+			}
+
 			function _charmCellHtml(row) {
 				if (!row.has_charm) return '<span class="charm-na">No charm</span>'
 				const target = `'${row.receipt_id}','${jsAttr(row.item_key)}'`
 				const statusSel = _charmStatusSelect(row)
+
+				// AirPods case: the charm ships ATTACHED to the case and is already
+				// shown in the product photo, so there is no separate charm to source —
+				// no code, no thumbnail, no charm stall. It is bought together with the
+				// case, exactly like a grip on a phone case, so we surface only its
+				// purchasing status here (dropping the image/code/assign affordances the
+				// phone-case charm workflow needs).
+				if (row.charm_integral) {
+					return (
+						`<div class="charm-cell charm-cell-integral">` +
+						`<span class="charm-integral-tag" title="This charm ships attached to the AirPods case and is included in the product photo — there is no separate charm to source or assign.">Included with case</span>` +
+						statusSel +
+						`</div>`
+					)
+				}
 				const codeInp = `<div class="charm-code-input-row">` + `<input class="charm-code-input" type="text" maxlength="12"` + `  value="${escAttr(row.charm_code || '')}" placeholder="CH-XXXXX"` + `  title="Type a charm code and press Enter"` + `  onkeydown="if(event.key==='Enter'){applyCharmCodeInput(${target},this.value);event.preventDefault()}"` + `  onblur="applyCharmCodeInput(${target},this.value)">` + (row.charm_code ? `<button class="charm-code-clear" title="Clear charm" onclick="applyCharmCodeInput(${target},'')">✕</button>` : '') + `</div>`
+
+				const supActions = _charmSupplierActionsHtml(row)
 
 				if (row.charm_code) {
 					const c = _charmByCode[row.charm_code] || {}
@@ -29667,7 +30539,10 @@
              onmouseenter="showCharmPreview(this,'${imgSrc0}')" onmouseleave="hideCharmPreview()"
              onclick="openCharmModal(${target})" title="Hover to preview · Click to change">`
 						: `<div class="charm-cell-ph" onclick="openCharmModal(${target})">🔗</div>`
-					return `<div class="charm-cell">${img}` + `<div class="charm-cell-info">` + (shop ? `<span class="charm-cell-shop">${escHtml(shop)}${stall ? ` · 📍${escHtml(stall)}` : ''}</span>` : '') + codeInp + statusSel + `</div></div>`
+					// Same stall as the case/grip → say so, so the shopper knows this is a
+					// one-stop line rather than a second trip.
+					const sameTag = _charmAtSupplier(row) ? `<span class="charm-same-tag" title="Bought at the same stall as the case/grip supplier">= supplier</span>` : ''
+					return `<div class="charm-cell">${img}` + `<div class="charm-cell-info">` + (shop ? `<span class="charm-cell-shop">${escHtml(shop)}${stall ? ` · 📍${escHtml(stall)}` : ''}${sameTag}</span>` : '') + supActions + codeInp + statusSel + `</div></div>`
 				}
 				if (row.suggested_charm_code) {
 					const c = _charmByCode[row.suggested_charm_code] || {}
@@ -29678,9 +30553,137 @@
              onmouseenter="showCharmPreview(this,'${imgSrc1}')" onmouseleave="hideCharmPreview()"
              onclick="openCharmModal(${target})" title="Suggested — hover to preview · Click to change">`
 						: `<div class="charm-cell-ph" onclick="openCharmModal(${target})">🔗</div>`
-					return `<div class="charm-cell">${img}` + `<div class="charm-cell-info">` + `<span class="charm-cell-code" style="color:var(--muted)">${escHtml(row.suggested_charm_code)} <span class="charm-suggest-tag">suggested</span></span>` + (shop ? `<span class="charm-cell-shop">${escHtml(shop)}</span>` : '') + `<button class="charm-assign-btn" style="margin-top:3px;padding:1px 7px" ` + `onclick="assignSuggestedCharm(${target}, '${jsAttr(row.suggested_charm_code)}', '${jsAttr(shop)}')">✓ Accept</button>` + codeInp + statusSel + `</div></div>`
+					return `<div class="charm-cell">${img}` + `<div class="charm-cell-info">` + `<span class="charm-cell-code" style="color:var(--muted)">${escHtml(row.suggested_charm_code)} <span class="charm-suggest-tag">suggested</span></span>` + (shop ? `<span class="charm-cell-shop">${escHtml(shop)}</span>` : '') + `<button class="charm-assign-btn" style="margin-top:3px;padding:1px 7px" ` + `onclick="assignSuggestedCharm(${target}, '${jsAttr(row.suggested_charm_code)}', '${jsAttr(shop)}')">✓ Accept</button>` + supActions + codeInp + statusSel + `</div></div>`
 				}
-				return `<div class="charm-cell">` + `<div class="charm-cell-ph" onclick="openCharmModal(${target})">＋</div>` + `<div class="charm-cell-info">` + `<button class="charm-assign-btn" onclick="openCharmModal(${target})">Assign charm</button>` + codeInp + statusSel + `</div></div>`
+				return `<div class="charm-cell">` + `<div class="charm-cell-ph" onclick="openCharmModal(${target})">＋</div>` + `<div class="charm-cell-info">` + `<button class="charm-assign-btn" onclick="openCharmModal(${target})">Assign charm</button>` + supActions + codeInp + statusSel + `</div></div>`
+			}
+
+			/**
+			 * Prompt for an image file and resolve { image_base64, image_ext }, or null
+			 * when the operator cancels / the file is unusable. The input is created on
+			 * demand so no hidden markup has to exist per row.
+			 */
+			function _pickCharmImage() {
+				return new Promise((resolve) => {
+					const inp = document.createElement('input')
+					inp.type = 'file'
+					inp.accept = 'image/*'
+					inp.style.display = 'none'
+					document.body.appendChild(inp)
+					let settled = false
+					const done = (v) => {
+						if (settled) return
+						settled = true
+						inp.remove()
+						resolve(v)
+					}
+					inp.onchange = () => {
+						const f = inp.files && inp.files[0]
+						if (!f) return done(null)
+						if (f.size > 18 * 1024 * 1024) {
+							alert('Image is too large (max 18 MB).')
+							return done(null)
+						}
+						const rd = new FileReader()
+						rd.onload = () => {
+							const m = /image\/([a-zA-Z0-9.+-]+)/.exec(f.type)
+							done({ image_base64: rd.result, image_ext: m ? m[1].toLowerCase() : 'png' })
+						}
+						rd.onerror = () => done(null)
+						rd.readAsDataURL(f)
+					}
+					// Browsers tell us the picker was dismissed via 'cancel', which is what
+					// resolves the promise and removes the input. Every current engine fires
+					// it; on one that didn't, this promise would stay pending and its hidden
+					// input would stay in <body> — so the caller must treat a never-resolving
+					// pick as "no image chosen" rather than assuming cleanup happened.
+					inp.addEventListener('cancel', () => done(null))
+					inp.click()
+				})
+			}
+
+			/**
+			 * "This charm is bought at the same stall as the case/grip."
+			 *
+			 * One server call does the whole chore atomically: add the supplier to the
+			 * charm-shop directory if it isn't a charm shop yet, create the charm code if
+			 * this line has none, optionally store its photo, point the charm's shop at
+			 * the supplier (in the charm LIBRARY — the source of truth every view
+			 * resolves through), and assign it to this line + the product default.
+			 * The supplier is re-resolved server-side, so it can't be linked to a stale
+			 * shop name this page happens to be holding.
+			 */
+			async function charmFromSupplier(receiptId, itemKey, withImage, btn) {
+				const row = _routeRows.find((r) => r.receipt_id === Number(receiptId) && r.item_key === itemKey)
+				if (!row) return
+				const shop = String(row.supplier_shop || '').trim()
+				if (!shop) {
+					alert("Set this line's supplier first — there is no shop to link the charm to.")
+					return
+				}
+				// Re-pointing an EXISTING code moves that charm for every product using
+				// it (the library is the single source of truth), so ask first when other
+				// loaded lines share the code and the shop actually changes.
+				const code = String(row.charm_code || '').trim()
+				if (code) {
+					const cur = String(row.charm_shop || _charmByCode[code]?.default_charm_shop || '').trim()
+					const others = new Set(_routeRows.filter((r) => r.charm_code === code && !(r.receipt_id === row.receipt_id && r.item_key === row.item_key)).map((r) => r.receipt_id + '\x00' + r.item_key)).size
+					if (others && cur && cur.toLowerCase() !== shop.toLowerCase()) {
+						const msg = `Charm ${code} is currently bought at “${cur}”.\n\n` + `Moving it to “${shop}” also moves it for ${others} other order line${others === 1 ? '' : 's'} using the same charm.\n\nContinue?`
+						if (!confirm(msg)) return
+					}
+				}
+
+				const image = withImage ? await _pickCharmImage() : null
+				if (withImage && !image) return // cancelled — nothing to do
+
+				const body = { receipt_id: Number(receiptId), item_key: itemKey, title: row.title }
+				if (image) Object.assign(body, image)
+				if (btn) btn.disabled = true
+				try {
+					const res = await fetch(`${API}/api/route/charm-from-supplier`, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify(body),
+					})
+					// Read defensively — an error response (e.g. 413) may not be JSON.
+					let data = {}
+					try {
+						data = await res.json()
+					} catch {
+						/* non-JSON error page */
+					}
+					if (!res.ok) {
+						alert(data.error || (res.status === 413 ? 'Image is too large to upload.' : `Failed (HTTP ${res.status}).`))
+						return
+					}
+					_adoptCharmPayload(data) // refreshed charm library + charm-shop list
+					_charmImgVer = Date.now() // fallback cache-bust for a fresh upload
+					// The library now maps this code to the new shop, so EVERY loaded line
+					// using it resolves there — mirror that locally instead of only the row
+					// we clicked, so the table matches the server without a reload.
+					_routeRows.forEach((r) => {
+						if (r.charm_code === data.code) r.charm_shop = data.charm_shop
+					})
+					row.charm_code = data.code
+					row.charm_shop = data.charm_shop
+					renderRouteDashboard()
+
+					const bits = [`Charm ${data.code} → ${data.charm_shop}${data.charm_stall ? ' · ' + data.charm_stall : ''}`]
+					if (data.created_charm) bits.push('charm created')
+					if (data.created_shop) bits.push('added to charm shops')
+					if (data.filled_stall) bits.push('stall recorded')
+					if (data.image_saved) bits.push('photo saved')
+					if (data.image_skipped) bits.push('kept existing photo')
+					showToast('✓ ' + bits.join(' · '), 'success')
+					if (data.stall_mismatch) {
+						showToast(`Note: “${data.charm_shop}” is already listed as a charm shop at stall ${data.stall_mismatch}, which differs from the supplier's ${row.supplier_stall || '—'}. Fix it in Manage shops if that's wrong.`)
+					}
+				} catch (err) {
+					alert('Network error: ' + err.message)
+				} finally {
+					if (btn) btn.disabled = false
+				}
 			}
 
 			/** Apply a directly typed charm code from the inline input field. */
@@ -29768,10 +30771,17 @@
         onclick="removeRouteRow(${target})">🗑</button>`
 				}
 
-				// Components column. For a wrong-model exchange the buy-status selects are
-				// irrelevant (we have it) — replace them with the swap detail + a one-tap
-				// "Mark exchanged". For normal rows, offer a quiet "Wrong model" flag.
-				const compsCell = needsExchange ? `${exchangeSwap}<button class="route-exchange-mark" onclick="markRouteExchanged(${target})" title="${_exBuy ? 'You bought the correct model — marks the pieces purchased and readies the order to ship.' : 'You swapped it at the supplier — marks the swapped pieces purchased and readies the order to ship.'}">${_exBuy ? '✓ Mark bought' : '✓ Mark exchanged'}</button> <button class="route-row-exchange-btn" onclick="openExchangeModalForRoute(${target})" title="View / edit this model fix">Manage</button>` : `${comps}<button class="route-row-exchange-btn" onclick="openExchangeModalForRoute(${target})" title="Wrong model in hand, or the buyer changed model? Flag it so it's held out of the normal buy list (instead of faking it as purchased).">🔁 Wrong model</button>`
+				// Components column. For a wrong-model exchange, the swapped CASE is in
+				// hand (shown as the swap detail + one-tap "Mark exchanged"), but any
+				// grip on the SAME line still has to be bought — so we keep its buy-status
+				// select right beside the swap. (The charm keeps its own column either
+				// way.) For normal rows, offer a quiet "Wrong model" flag.
+				let exchangeGripChip = ''
+				if (needsExchange) {
+					const held = _exchangeHeldComps(row)
+					if (row.has_grip && !held.grip) exchangeGripChip = `<div class="comp-chip-row" style="margin-top:6px">${_statusSelect(row, 'grip', true)}</div>`
+				}
+				const compsCell = needsExchange ? `${exchangeSwap}${exchangeGripChip}<button class="route-exchange-mark" onclick="markRouteExchanged(${target})" title="${_exBuy ? 'You bought the correct model — marks the swapped case purchased and readies the order to ship.' : 'You swapped it at the supplier — marks the swapped case purchased and readies the order to ship.'}">${_exBuy ? '✓ Mark bought' : '✓ Mark exchanged'}</button> <button class="route-row-exchange-btn" onclick="openExchangeModalForRoute(${target})" title="View / edit this model fix">Manage</button>` : `${comps}<button class="route-row-exchange-btn" onclick="openExchangeModalForRoute(${target})" title="Wrong model in hand, or the buyer changed model? Flag it so it's held out of the normal buy list (instead of faking it as purchased).">🔁 Wrong model</button>`
 
 				return `<tr class="${rowCls}">
     <td>${img}</td>
@@ -31350,7 +32360,11 @@
 				// _routeRows already includes any added (pre-transit) orders merged in
 				// by the server, so the charm scope is simply the full dashboard set —
 				// minus excluded and removed lines, which are not part of the shop.
-				return _routeRows.filter((r) => r.has_charm && !r.excluded && !r.dismissed)
+				// Integral (AirPods) charms are excluded: they ship attached to the
+				// case, carry no charm code, and are bought with the case — so they
+				// never belong in the charm-stall sourcing list (they'd otherwise show
+				// a spurious "needs a code" warning).
+				return _routeRows.filter((r) => r.has_charm && !r.charm_integral && !r.excluded && !r.dismissed)
 			}
 
 			/** Group charm rows → assigned (by code) and unassigned (by product). */
@@ -32638,6 +33652,7 @@
 			<button class="bulk-bar-route owner-only" onclick="sendSelectionToRoute()" title="Add these orders to the Route tab’s shopping list (kept on top of the orders already there)">📍 Send to Route</button>
 			<button class="bulk-bar-needs-purchase owner-only" id="bulkBarNeedsPurchaseBtn" style="display: none" onclick="bulkSetNeedsPurchase(true)" title="Flag the selected pre-transit orders as still out of stock — keeps them in the purchasing queue and pulls them into the Route until bought">🛒 Mark needs purchase</button>
 			<button class="bulk-bar-purchased owner-only" id="bulkBarClearPurchaseBtn" style="display: none" onclick="bulkSetNeedsPurchase(false)" title="Clear the needs-purchase flag on the selected orders (they have been bought)">Mark purchased</button>
+			<button class="bulk-bar-mark-packaged" id="bulkBarVerifyBtn" style="display: none" onclick="bulkVerify(true)" title="Confirm the selected orders' products are physically in hand. Verified orders become ready to pack.">✓ Mark verified</button>
 			<button class="bulk-bar-mark-packaged" id="bulkBarMarkPackagedBtn" style="display: none" onclick="bulkMarkPackaged(true)" title="Mark all selected orders as physically packaged and ready for carrier pickup">📦 Mark packaged</button>
 			<button class="bulk-bar-unmark-packaged" id="bulkBarUnmarkPackagedBtn" style="display: none" onclick="bulkMarkPackaged(false)" title="Remove the packaged flag from selected orders (e.g. they need to be repacked)">✕ Unmark packaged</button>
 			<button class="bulk-bar-4px" id="bulkBar4pxBtn" style="display: none" onclick="openFpxBulkModal()" title="Create 4PX shipments, download labels, and complete all selected orders in one flow">📦 Ship with 4PX</button>

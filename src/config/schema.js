@@ -19,7 +19,13 @@ const {
   enforceConfigCompliance,
 } = require('../compliance/suspension-guard');
 
-const CONFIG_PATH = path.resolve(__dirname, '../../config.json');
+// Config location. Defaults to the repo-root config.json, but can be overridden
+// with DASHBOARD_CONFIG_PATH — used to stand up an ISOLATED instance (e.g. an
+// integration test or a second local instance) against a throwaway config + DB
+// without touching the real config.json. Backward-compatible: unset → same as before.
+const CONFIG_PATH = process.env.DASHBOARD_CONFIG_PATH
+  ? path.resolve(process.env.DASHBOARD_CONFIG_PATH)
+  : path.resolve(__dirname, '../../config.json');
 
 /**
  * @typedef {object} ShopConfig
@@ -83,6 +89,10 @@ function usesGroupProxy(group) {
  *                                                          packaged_at falls within this window, newest first,
  *                                                          so a mispacked parcel can be caught and fixed shortly
  *                                                          after sealing. Default: 7 days.
+ * @property {boolean}       require_verify_before_pack   - When true, an order must be packer-VERIFIED (items
+ *                                                          confirmed in hand), not merely shopper-Purchased,
+ *                                                          before it enters the "To pack & ship" queue.
+ *                                                          Default: false (no behavior change).
  * @property {string}        db_path                      - Path to SQLite database file
  * @property {GroupConfig[]} groups                       - All shop groups
  * @property {boolean}       auto_restock_enabled         - Auto-restock zero-stock offerings (default true).
@@ -328,6 +338,12 @@ function loadConfig() {
     recently_packaged_days: typeof raw.recently_packaged_days === 'number' && raw.recently_packaged_days >= 1
       ? Math.floor(raw.recently_packaged_days)
       : 7,
+    // Two-person integrity gate. When true, an order is only packable once a packer
+    // has VERIFIED its products are physically in hand (not merely marked Purchased
+    // by the shopper) — the "To pack & ship" queue then shows verified orders only,
+    // and the "Verify purchases" worklist is where unverified-but-purchased orders
+    // wait. Off by default so existing single-operator shops see no behavior change.
+    require_verify_before_pack: raw.require_verify_before_pack === true,
     db_path: raw.db_path
       ? path.resolve(path.dirname(CONFIG_PATH), raw.db_path)
       : path.resolve(__dirname, '../../data/etsy_dashboard.db'),
