@@ -57,6 +57,7 @@ function makeDb() {
       tracking_code        TEXT,
       carrier_confirmed_at INTEGER,
       shipment_notified_at INTEGER,
+      packaged_at          INTEGER,
       archived_at          INTEGER
     );
     CREATE TABLE listing_images (listing_id INTEGER, url TEXT);

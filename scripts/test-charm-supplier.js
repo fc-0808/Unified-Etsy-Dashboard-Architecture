@@ -43,7 +43,7 @@ function makeDb() {
       shipping_country_iso TEXT, etsy_created_at INTEGER, all_transactions TEXT,
       is_paid INTEGER DEFAULT 1, is_shipped INTEGER DEFAULT 0, status TEXT,
       needs_purchase_at INTEGER, tracking_code TEXT, carrier_confirmed_at INTEGER,
-      shipment_notified_at INTEGER, archived_at INTEGER
+      shipment_notified_at INTEGER, packaged_at INTEGER, archived_at INTEGER
     );
     CREATE TABLE listing_images (listing_id INTEGER, url TEXT);
     CREATE TABLE route_manual_items (

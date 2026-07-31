@@ -64,6 +64,38 @@ function isProvisional(r) {
 }
 
 /**
+ * Whether a mirrored receipt is valid fulfilment work for the Orders tab.
+ * Manual orders are operator-authored and remain visible even without Etsy's
+ * payment/ship-by fields. A null source is treated as Etsy because legacy Etsy
+ * rows predate the source column and therefore legitimately contain NULL.
+ *
+ * @param {{source?: string|null, is_paid?: number, is_shipped?: number, first_ship_by?: number|null}} r
+ * @returns {boolean}
+ */
+function isActionableOrder(r) {
+	const source = String(r?.source || 'etsy').trim().toLowerCase();
+	return source === 'manual' || !isProvisional(r || {});
+}
+
+/**
+ * SQL equivalent of isActionableOrder. Keeping this beside the pure predicate
+ * gives API queries one canonical definition while retaining SQL-level filtering
+ * for exact counts and pagination.
+ *
+ * @param {string} alias trusted SQL table alias supplied by application code
+ * @returns {string}
+ */
+function actionableOrderSql(alias = 'r') {
+	if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) throw new TypeError('Invalid SQL alias');
+	return `NOT (
+		LOWER(COALESCE(${alias}.source, 'etsy')) != 'manual'
+		AND COALESCE(${alias}.is_paid, 0) = 0
+		AND COALESCE(${alias}.is_shipped, 0) = 0
+		AND ${alias}.first_ship_by IS NULL
+	)`;
+}
+
+/**
  * Cluster key: same shop + same buyer + same product.
  *   buyer   → buyer_user_id when present, else name+zip (guards against a missing
  *             user id on legacy/imported rows).
@@ -164,6 +196,8 @@ module.exports = {
 	DEDUP_WINDOW_SEC,
 	score,
 	isProvisional,
+	isActionableOrder,
+	actionableOrderSql,
 	buildClusterKey,
 	computeDuplicateSuppression,
 };

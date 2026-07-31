@@ -54,6 +54,10 @@ function makeDb() {
       tracking_code        TEXT,
       carrier_confirmed_at INTEGER,
       shipment_notified_at INTEGER,
+      -- Stamped when the parcel is physically sealed. buildRouteRows carries it
+      -- onto every row so downstream consumers (notably the "Charms to buy"
+      -- shopping list) can drop work that is already boxed.
+      packaged_at          INTEGER,
       archived_at          INTEGER
     );
     CREATE TABLE listing_images (listing_id INTEGER, url TEXT);
@@ -123,6 +127,16 @@ function seed(db) {
   //    the route (you don't buy stock for an order that hasn't been paid for).
   ins.run({ receipt_id: 1006, shop_id: 'SHOP_A', name: 'Faye', etsy_created_at: now - 3600,
     all_transactions: TX, is_paid: 0, is_shipped: 0, status: 'Payment Processing', needs_purchase_at: null, tracking_code: null, shipment_notified_at: null });
+
+  // 7. A manual order (negative id) with its Route sidecar, already PACKAGED.
+  //    Manual orders are emitted from the sidecar rather than the receipts query,
+  //    so the sealed stamp has to be carried across explicitly — see below.
+  db.prepare(`INSERT INTO receipts (receipt_id, shop_id, name, etsy_created_at, all_transactions, is_paid, is_shipped, status, packaged_at)
+              VALUES (-9001, 'SHOP_A', 'Manual order', @created, '[]', 1, 0, 'Paid', @packaged)`)
+    .run({ created: now - 7200, packaged: now - 600 });
+  db.prepare(`INSERT INTO route_manual_items (receipt_id, item_key, title, phone_model, style, quantity, source, created_at)
+              VALUES (-9001, 'packed manual charm', 'Packed Manual Charm', 'iPhone 15', 'Case+Charm', 1, 'custom', @created)`)
+    .run({ created: now - 7200 });
 }
 
 function shopIds(rows) { return [...new Set(rows.map(r => r.shop_id))].sort(); }
@@ -172,6 +186,40 @@ console.log('Route dashboard shop-filter regression test\n');
     `no shop filter returns every paid pending / pre-transit order incl. unflagged pre-transit 1005 (got: ${rids.join(', ')})`);
   assert(!rids.includes(1006),
     `no shop filter still excludes the UNPAID order (1006) — purchasing is paid-only`);
+}
+
+// — An EXPLICIT but EMPTY receipt scope means "none", never "everything". —
+// A caller that computes a scope and legitimately finds zero orders (an empty
+// Need-to-purchase queue, say) must get zero rows back. If the empty array were
+// treated as "no filter" it would fall through to the default 30-day pending
+// scope and hand the caller the entire dashboard — the kind of silent blow-up
+// that turns an empty shopping list into a 40-order one.
+{
+  const rows = routeDashboard.buildRouteRows(db, cfg, { receipt_ids: [], enrich_supplier: false });
+  assert(rows.length === 0,
+    `receipt_ids: [] returns NO rows, not the whole dashboard (got ${rows.length})`);
+}
+
+// — A populated explicit scope returns exactly those receipts. —
+{
+  const rows = routeDashboard.buildRouteRows(db, cfg, { receipt_ids: [1002], enrich_supplier: false });
+  const rids = receiptIds(rows);
+  assert(rids.length === 1 && rids[0] === 1002,
+    `receipt_ids: [1002] returns only that receipt (got: ${rids.join(', ') || 'none'})`);
+}
+
+// — A manual order's row must carry the sealed stamp of its linked receipt. —
+// Manual orders are emitted from their Route sidecar, bypassing the receipts
+// query, so `packaged_at` has to be copied across by hand. When it was not, every
+// manual row read "not packaged" and an already-boxed manual order kept appearing
+// as shopping work on the "Charms to buy" list.
+{
+  const rows = routeDashboard.buildRouteRows(db, cfg, { enrich_supplier: false });
+  const manual = rows.find((r) => r.receipt_id === -9001);
+  assert(manual && manual.is_manual,
+    `the manual order is emitted from its sidecar (got: ${manual ? 'yes' : 'no'})`);
+  assert(manual && manual.packaged_at,
+    `a packaged manual order reports packaged_at, like any Etsy order (got: ${manual && manual.packaged_at})`);
 }
 
 db.close();

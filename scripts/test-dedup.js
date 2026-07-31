@@ -16,7 +16,13 @@
  */
 
 const assert = require('node:assert/strict');
-const { computeDuplicateSuppression, DEDUP_WINDOW_SEC } = require('../src/orders/dedup');
+const Database = require('better-sqlite3');
+const {
+	computeDuplicateSuppression,
+	DEDUP_WINDOW_SEC,
+	isActionableOrder,
+	actionableOrderSql,
+} = require('../src/orders/dedup');
 
 const DAY = 24 * 3600;
 let passed = 0;
@@ -89,11 +95,15 @@ test('two paid orders far apart are genuine re-purchases and both kept', () => {
 	assert.equal(suppressed.size, 0, 'neither real order is hidden');
 });
 
-// ── (D) A lone provisional order (no twin) stays visible ──────────────────────
-test('a lone provisional order with no duplicate is kept (incoming order signal)', () => {
+// ── (D) A lone provisional receipt is not duplicate-suppressed ───────────────
+// The dedup engine only answers whether a row has a twin. The Orders API applies
+// the separate fulfilment-validity gate (unpaid + unshipped + no ship-by) so a
+// singleton provisional receipt is retained for reconciliation/audit but is not
+// shown as actionable work.
+test('a lone provisional receipt is retained for reconciliation (not dedup-suppressed)', () => {
 	const g = ghost({ receipt_id: 4001 });
 	const { suppressed } = run([g]);
-	assert.equal(suppressed.size, 0, 'single-member group is never touched');
+	assert.equal(suppressed.size, 0, 'single-member group is never duplicate-suppressed');
 });
 
 // ── (E) A shipped order can NEVER be suppressed ───────────────────────────────
@@ -164,6 +174,53 @@ test('two paid orders exactly DEDUP_WINDOW_SEC apart collapse (inclusive bound)'
 	const b = paid({ receipt_id: 9002, etsy_created_at: 1_783_000_000 + DEDUP_WINDOW_SEC });
 	const { suppressed } = run([a, b]);
 	assert.equal(suppressed.size, 1, 'inclusive window collapses the pair');
+});
+
+// ── (L) Orders-tab validity gate ──────────────────────────────────────────────
+test('unpaid Etsy receipt without shipment or ship-by is not actionable', () => {
+	assert.equal(isActionableOrder(ghost({ source: 'etsy' })), false);
+});
+
+test('legacy NULL-source provisional receipt is treated as Etsy and hidden', () => {
+	assert.equal(isActionableOrder(ghost({ source: null })), false);
+});
+
+test('manual order remains actionable without Etsy payment metadata', () => {
+	assert.equal(isActionableOrder(ghost({ source: 'manual' })), true);
+});
+
+test('any commitment signal makes an Etsy receipt actionable', () => {
+	assert.equal(isActionableOrder(ghost({ source: 'etsy', is_paid: 1 })), true);
+	assert.equal(isActionableOrder(ghost({ source: 'etsy', is_shipped: 1 })), true);
+	assert.equal(isActionableOrder(ghost({ source: 'etsy', first_ship_by: 1_784_000_000 })), true);
+});
+
+test('SQL validity predicate matches pure classifier and preserves exact counts', () => {
+	const db = new Database(':memory:');
+	try {
+		db.exec(`CREATE TABLE receipts (
+			receipt_id INTEGER PRIMARY KEY,
+			source TEXT,
+			is_paid INTEGER,
+			is_shipped INTEGER,
+			first_ship_by INTEGER
+		)`);
+		const fixtures = [
+			{ receipt_id: 1, source: 'etsy', is_paid: 0, is_shipped: 0, first_ship_by: null },
+			{ receipt_id: 2, source: null, is_paid: 0, is_shipped: 0, first_ship_by: null },
+			{ receipt_id: 3, source: 'manual', is_paid: 0, is_shipped: 0, first_ship_by: null },
+			{ receipt_id: 4, source: 'etsy', is_paid: 1, is_shipped: 0, first_ship_by: null },
+			{ receipt_id: 5, source: 'ETSY', is_paid: null, is_shipped: null, first_ship_by: null },
+		];
+		const insert = db.prepare('INSERT INTO receipts VALUES (@receipt_id, @source, @is_paid, @is_shipped, @first_ship_by)');
+		db.transaction((rows) => rows.forEach((row) => insert.run(row)))(fixtures);
+		const actual = db.prepare(`SELECT receipt_id FROM receipts r WHERE ${actionableOrderSql('r')} ORDER BY receipt_id`).all().map((r) => r.receipt_id);
+		const expected = fixtures.filter(isActionableOrder).map((r) => r.receipt_id);
+		assert.deepEqual(actual, expected);
+		assert.throws(() => actionableOrderSql('r; DROP TABLE receipts'), /Invalid SQL alias/);
+	} finally {
+		db.close();
+	}
 });
 
 console.log(`\n${failures.length === 0 ? 'PASS' : 'FAIL'} — ${passed} passed, ${failures.length} failed`);

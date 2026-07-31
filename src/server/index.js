@@ -43,13 +43,18 @@ const { initDb, syncConfigToDb } = require('../db/setup')
 // Single source of truth for the Ready-to-pack ("To pack & ship") queue scope,
 // shared with scripts/test-pack-queue-exchange.js so the two can never drift.
 const packQueue = require('../orders/pack-queue')
+// Single source of truth for the Need-to-purchase ("🛒 Need to purchase") queue
+// scope AND for the charm shopping list derived from it, shared with
+// scripts/test-charms-to-buy-scope.js so the order list, the "Charms to buy"
+// list and the test can never disagree about what still has to be bought.
+const buyQueue = require('../orders/buy-queue')
 // Pure per-employee shift-summary rollup, shared with scripts/test-shift-summary.js.
 const { summarizeShift } = require('../orders/shift-summary')
 // Single source of truth for Etsy double-fire / "ghost receipt" suppression,
 // shared with scripts/test-dedup.js (synthetic unit tests) and
 // scripts/verify-dedup-fix.js (live-DB regression check) so the three can never
 // drift. The heavy reasoning lives in the module's header comment.
-const { computeDuplicateSuppression } = require('../orders/dedup')
+const { computeDuplicateSuppression, actionableOrderSql } = require('../orders/dedup')
 const { createGroupProxyClient } = require('../proxy/factory')
 const { buildShopClient, resolveShopId, createReceiptShipment, paginateListings, updateListing, createDraftListing, deleteListing, getListingInventory, updateListingInventory, getShop, updateShop, isQpdExhaustedError, getBudgetSnapshots, getShopSections, createShopSection, updateShopSection, deleteShopSection } = require('../etsy/client')
 const {
@@ -148,7 +153,6 @@ const {
 	upsertOrderExchange,
 	patchOrderExchange,
 	deleteOrderExchange,
-	getSubstitutionMap,
 	getSubstitutionsForReceipts,
 	getSubstitutionForLine,
 	upsertOrderSubstitution,
@@ -1005,172 +1009,21 @@ app.get('/api/summary', (req, res) => {
 	})
 })
 
-// Component purchase statuses that still require shopping. Mirrors
-// PURCHASE_OUTSTANDING_STATUSES used by the per-order rollup logic below so the
-// "fully purchased" predicate is computed identically everywhere.
-// 'Wrong Stall' joins the outstanding set — the item still needs sourcing once
-// the stall mapping is corrected. 'Model Unavailable' is terminal (like Out of
-// Production) and deliberately absent.
-const PURCHASE_QUEUE_OUTSTANDING = new Set(['Pending', 'Out of Stock', 'Wrong Stall'])
-
 /**
- * Classify a candidate set of receipts by purchasing progress.
+ * Classify a candidate set of receipts by purchasing progress —
+ * { ready, outstanding, verified, onHold }.
  *
- * A single order line is "to buy" when it has a recognised Case/Grip/Charm
- * component still Pending / Out of Stock (components default to Pending until the
- * operator marks them bought), OR — for a line with no components — when its
- * binary receipt_item_purchase flag is set. Components default to Pending, so a
- * brand-new order is "to buy" until the operator records each purchase.
- *
- * There are THREE distinct buckets, not two, because the operator can EXCLUDE a
- * line from the next route or DISMISS it from the dashboard. Such a line is out
- * of the active purchasing queue but is NOT therefore purchased — so it must fall
- * out of BOTH the buy queue and the ready-to-pack queue:
- *
- *   • outstanding (Needs purchase)  — at least one line is still to buy AND has
- *                                     NOT been excluded/dismissed. Mirrors the
- *                                     Route dashboard's active shopping list, so
- *                                     the two stay reconciled.
- *   • ready (Ready to pack)         — EVERY line is fully purchased, considering
- *                                     ALL lines INCLUDING excluded/dismissed ones
- *                                     (an excluded line whose product was never
- *                                     bought must never mark an order shippable).
- *   • neither                       — an order with an excluded/dismissed line
- *                                     that is still unpurchased sits in a
- *                                     deliberate limbo until the operator either
- *                                     buys it or re-includes it.
- *
- * `ready` and `outstanding` are mutually exclusive but NOT exhaustive. Loads the
- * route_assignments + receipt_item_purchase tables ONCE and reads each receipt's
- * already-cached `all_transactions`, so filtering a full page never triggers an
- * N+1 query storm.
+ * Thin binding of the shared buy-queue module to this server's database handle.
+ * The rule itself (what counts as "still to buy", "in hand" and "on hold") lives
+ * in src/orders/buy-queue.js, so the Orders API, the "Charms to buy" shopping
+ * list and the regression tests all classify identically. See that module's
+ * header for the full reasoning behind the three buckets.
  *
  * @param {Array<{receipt_id:number, all_transactions:string}>} candidates
  * @returns {{ ready:Set<number>, outstanding:Set<number>, verified:Set<number>, onHold:Set<number> }}
- *          verified ⊆ ready — fully in hand AND every packable line packer-confirmed.
- *          onHold — has ≥1 open, non-superseded fulfilment issue (buy-queue split).
  */
 function classifyPurchaseState(candidates) {
-	const ra = new Map() // `${receipt_id}\x00${item_key}` → component statuses
-	const rip = new Map() // `${receipt_id}\x00${item_key}` → { needs_purchase }
-	try {
-		db.prepare('SELECT receipt_id, item_key, status_case, status_grip, status_charm, excluded, dismissed_at, verified_at FROM route_assignments')
-			.all()
-			.forEach((x) => ra.set(`${x.receipt_id}\x00${x.item_key}`, x))
-	} catch {
-		/* table may be missing on first run */
-	}
-	try {
-		db.prepare('SELECT receipt_id, item_key, needs_purchase, verified_at FROM receipt_item_purchase')
-			.all()
-			.forEach((x) => rip.set(`${x.receipt_id}\x00${x.item_key}`, x))
-	} catch {
-		/* table may be missing on first run */
-	}
-	// Design switches — a switched line's components come from the REPLACEMENT
-	// design's style, so the buy/ready classification reflects what we actually buy.
-	let subMap = new Map()
-	try {
-		subMap = getSubstitutionMap(db)
-	} catch {
-		/* table may be missing on first run */
-	}
-	// Open fulfilment issues — used to derive the ON-HOLD set. An order is on hold
-	// when it has an open issue that is NOT superseded by a newer design switch
-	// (the exact rule the per-line `issue.on_hold` flag uses), so the buy-queue
-	// sub-filters ("To buy" vs "On hold") agree with the on-hold chip shown on the row.
-	const issueMap = new Map() // `${receipt_id}\x00${item_key}` → open issue row
-	try {
-		db.prepare("SELECT receipt_id, item_key, status, updated_at FROM order_issues WHERE status = 'open'")
-			.all()
-			.forEach((x) => issueMap.set(`${x.receipt_id}\x00${x.item_key}`, x))
-	} catch {
-		/* table may be missing on first run */
-	}
-
-	const ready = new Set()
-	const outstanding = new Set()
-	// on hold — has ≥1 genuinely-held line (open issue, not superseded by a switch).
-	const onHold = new Set()
-	// verified ⊆ ready: an order is "verified" when it is fully in hand AND every
-	// packable (non-excluded / non-dismissed) line has been physically confirmed by
-	// a packer (verified_at set). Drives the morning verification worklist and the
-	// optional require_verify_before_pack gate.
-	const verified = new Set()
-	for (const c of candidates) {
-		let txs = []
-		try {
-			txs = JSON.parse(c.all_transactions || '[]')
-		} catch {
-			txs = []
-		}
-		if (!Array.isArray(txs)) txs = []
-
-		const seen = new Set()
-		// buyQueueOutstanding — any NON-excluded / NON-dismissed line still to buy
-		//                       (drives the Needs-purchase queue; mirrors the Route).
-		// anyUnpurchased       — any line at all still to buy, INCLUDING excluded /
-		//                        dismissed ones (blocks ready-to-pack: the product is
-		//                        not actually in hand just because it was excluded).
-		let buyQueueOutstanding = false
-		let anyNotInHand = false
-		// allVerified — every packable, in-hand line carries a verified_at stamp.
-		// Starts true and is cleared the moment a required line is found unverified.
-		let allVerified = true
-		let orderOnHold = false
-		for (const t of txs) {
-			const key = routeDashboard.lineItemKey(t.title || '', t.listing_id)
-			if (seen.has(key)) continue
-			seen.add(key)
-			const a = ra.get(`${c.receipt_id}\x00${key}`) || {}
-			const sub = subMap.get(`${c.receipt_id}\x00${key}`)
-			const comps = sub && sub.new_style ? componentsFromStyle(sub.new_style) : txComponents(t)
-			// On-hold detection (superseded-aware) — matches the per-line issue.on_hold.
-			const iss = issueMap.get(`${c.receipt_id}\x00${key}`)
-			if (iss && !routeDashboard.substitutionSupersedesIssue(sub, iss)) orderOnHold = true
-			// Two DISTINCT per-line signals:
-			//   lineToBuy     — actively buyable but not yet bought (Pending / Out of Stock);
-			//                   drives the Needs-purchase / 等待备货 buy queue.
-			//   lineNotInHand — the component is anything other than "Purchased" (Pending,
-			//                   Out of Stock, OR Out of Production). Blocks Ready-to-pack:
-			//                   a product that isn't physically in hand can't be packed —
-			//                   an out-of-production item is NOT "purchased/ready" even
-			//                   though you can't buy it either.
-			let lineToBuy
-			let lineNotInHand
-			if (comps.length) {
-				lineToBuy = comps.some((comp) => PURCHASE_QUEUE_OUTSTANDING.has(a[`status_${comp}`] || 'Pending'))
-				lineNotInHand = comps.some((comp) => (a[`status_${comp}`] || 'Pending') !== 'Purchased')
-			} else {
-				const b = rip.get(`${c.receipt_id}\x00${key}`)
-				lineToBuy = !!(b && b.needs_purchase === 1)
-				lineNotInHand = lineToBuy // no components → the binary buy flag is the only signal
-			}
-			if (lineNotInHand) anyNotInHand = true
-			// Excluded / dismissed lines leave the ACTIVE buy queue (so they don't keep the
-			// order in Needs-purchase, matching the Route) but still block ready-to-pack.
-			if (lineToBuy && !a.excluded && !a.dismissed_at) buyQueueOutstanding = true
-			// Verification is only required for lines that will actually be packed:
-			// in hand (not lineNotInHand) and not excluded/dismissed. Component lines
-			// carry verified_at on the route_assignments row; no-component lines on the
-			// receipt_item_purchase row.
-			if (!lineNotInHand && !a.excluded && !a.dismissed_at) {
-				const lineVerified = comps.length ? !!a.verified_at : !!(rip.get(`${c.receipt_id}\x00${key}`) || {}).verified_at
-				if (!lineVerified) allVerified = false
-			}
-		}
-		if (buyQueueOutstanding) outstanding.add(c.receipt_id)
-		if (orderOnHold) onHold.add(c.receipt_id)
-		// Ready ⇔ EVERY line is Purchased (physically in hand). Anything not in hand —
-		// still to buy OR out of production — keeps the order out of the packing queue.
-		if (!anyNotInHand) {
-			ready.add(c.receipt_id)
-			// An order with no packable lines at all (e.g. everything excluded) is
-			// vacuously "verified"; otherwise it needs every packable line confirmed.
-			if (allVerified) verified.add(c.receipt_id)
-		}
-	}
-	return { ready, outstanding, verified, onHold }
+	return buyQueue.classifyPurchaseState(db, candidates)
 }
 
 /**
@@ -1225,7 +1078,11 @@ function computeSuppressedDuplicates() {
  *   purchase  — ready (fully purchased) | outstanding (still needs buying).
  *               Orthogonal to `shipped`; combine with Needs-shipping/Pre-transit
  *               to isolate "fully purchased but not yet packed" orders.
+ *   np_filter — needs_purchase view only: all (default) | tobuy | onhold.
  *   packaged  — true | false (parcel physically packed flag)
+ *
+ * Response adds `np_counts` ({ all, tobuy, onhold }) on the needs_purchase view —
+ * the size of every sub-filter, so the tab badge can count actionable work only.
  */
 app.get('/api/orders', (req, res) => {
 	const limit = Math.min(Math.max(parseInt(req.query.limit ?? 50, 10), 1), 5000)
@@ -1263,6 +1120,16 @@ app.get('/api/orders', (req, res) => {
 		conditions.push('r.status = @status')
 		params.status = req.query.status
 	}
+
+	// Etsy can emit a provisional receipt while checkout/payment is still pending.
+	// Those rows are not fulfilment orders and may never appear in Etsy's Orders
+	// manager (observed fingerprint: unpaid + unshipped + no ship-by date). Keep
+	// them in the local mirror so a later paid twin can be reconciled by the dedup
+	// engine, but never surface them as actionable Orders-tab work. This predicate
+	// is deliberately based on durable fields rather than the display status text,
+	// whose spelling/casing Etsy may change. A direct receipt-id lookup below still
+	// overrides it for diagnostics and audit.
+	conditions.push(actionableOrderSql('r'))
 
 	// Date range filter — date strings 'YYYY-MM-DD', compared against epoch column
 	if (req.query.date_from) {
@@ -1353,42 +1220,13 @@ app.get('/api/orders', (req, res) => {
 		//   2. It still has OUTSTANDING shopping work — at least one Case/Grip/Charm
 		//      component is not yet Purchased, or a no-component line is still flagged
 		//      to buy.
-		// The ship-state half (1) is expressed here; the "outstanding" half (2) is
-		// applied below via classifyPurchaseState (purchaseWant = 'outstanding') so
-		// this view uses the SAME single source of truth as the Ready-to-pack queue
-		// and the per-row purchase chips — they can never disagree.
-		//
-		// We additionally UNION in every order the operator has explicitly flagged
-		// (needs_purchase_at) regardless of ship state, so a manually-queued or an
-		// already-in-transit "out of stock" order never silently drops out of the buy
-		// queue (the flag rollup guarantees a flagged order is always outstanding, so
-		// the outstanding gate below keeps it).
-		const preTransitDays = config.pre_transit_days ?? 30
-		const cutoff = Math.floor(Date.now() / 1000) - preTransitDays * 24 * 3600
-		conditions.push(`(
-      (r.is_shipped = 0 AND r.status NOT IN ('Canceled', 'Cancelled', 'Fully Refunded', 'Fully refunded'))
-      OR
-      (r.is_shipped = 1
-        AND r.tracking_code IS NOT NULL
-        AND r.shipment_notified_at IS NOT NULL
-        AND r.shipment_notified_at >= ${cutoff}
-        AND r.carrier_confirmed_at IS NULL
-        AND r.status NOT IN ('Canceled', 'Cancelled', 'Fully Refunded', 'Fully refunded'))
-      OR
-      (r.needs_purchase_at IS NOT NULL
-        AND r.status NOT IN ('Canceled', 'Cancelled', 'Fully Refunded', 'Fully refunded'))
-    )`)
-		// Only PAID orders belong in the purchasing queue — you don't buy stock for an
-		// order that has not been paid for yet (e.g. "Payment Processing"). This keeps
-		// the Needs-purchase view aligned with the Route, which is paid-only.
-		conditions.push('r.is_paid = 1')
-		// A PACKAGED (physically sealed) order is done being handled — it must never
-		// sit in the buy queue, even if a line still reads outstanding (e.g. a
-		// component was flipped to Out-of-Stock after the parcel was packed, or it was
-		// bulk-marked packaged). Packing is the terminal local state, so it wins:
-		// mirrors ready_to_pack / to_verify, which are both packaged_at IS NULL by
-		// definition. (Re-open by "Unmark packaged" if a repack is genuinely needed.)
-		conditions.push('r.packaged_at IS NULL')
+		// The order-level half (1) — plus paid-only and not-yet-packaged — comes from
+		// the shared buy-queue module; the "outstanding" half (2) is applied below via
+		// classifyPurchaseState (purchaseWant = 'outstanding'). Both therefore use the
+		// SAME single source of truth as the "Charms to buy" shopping list opened from
+		// this very tab, so the two can never disagree about what still has to be
+		// bought. See src/orders/buy-queue.js for the full rule.
+		conditions.push(buyQueue.needsPurchaseScopeSql(config, 'r'))
 	} else if (req.query.shipped === 'ready_to_pack') {
 		// ── Ready-to-pack work queue ───────────────────────────────────────────
 		// The actionable "go pack & ship these" list: orders that still have to LEAVE
@@ -1470,6 +1308,9 @@ app.get('/api/orders', (req, res) => {
 	//   purchase=outstanding  → still needs buying
 	//   shipped=ready_to_pack → implies purchase=ready
 	let purchaseWant = null
+	// Need-to-purchase sub-filter sizes, attached to the response for the tab's
+	// count badge (see below). Stays null for every other view.
+	let npCounts = null
 	if (req.query.purchase === 'ready' || req.query.purchase === 'outstanding') {
 		purchaseWant = req.query.purchase
 	}
@@ -1508,18 +1349,15 @@ app.get('/api/orders', (req, res) => {
 		} else if (req.query.shipped === 'ready_to_pack' && packQueue.requireVerifyBeforePack(config)) {
 			keep = new Set([...ready].filter((id) => verified.has(id)))
 		} else if (npView) {
-			// Segmented sub-filter (np_filter): all (default) | tobuy | onhold.
-			//   • onhold → orders genuinely on hold (open, non-superseded issue).
-			//   • tobuy  → orders with real buy work that are NOT on hold. On-hold
-			//              orders are pending an owner decision (swap/refund), so they
-			//              are deliberately kept OUT of the clean buy list — even a
-			//              mixed order (one line to buy + one on hold) lives under
-			//              "On hold" until resolved, never in "To buy".
-			//   • all    → both, unioned.
-			const npFilter = String(req.query.np_filter || 'all')
-			if (npFilter === 'onhold') keep = onHold
-			else if (npFilter === 'tobuy') keep = new Set([...outstanding].filter((id) => !onHold.has(id)))
-			else keep = new Set([...outstanding, ...onHold]) // 'all'
+			// Segmented sub-filter (np_filter): all (default) | tobuy | onhold. The
+			// rule lives in the shared buy-queue module so the "Charms to buy" list
+			// resolves the exact same order set this tab is showing.
+			keep = buyQueue.resolveNeedsPurchaseSet({ outstanding, onHold }, String(req.query.np_filter || 'all'))
+			// Size of ALL THREE sub-filters, from this same classification pass — free
+			// (the sets are already in memory) and therefore guaranteed to agree with
+			// the list. Lets the tab's count badge report actionable work only, and
+			// still explain the difference against what is on screen, in ONE request.
+			npCounts = buyQueue.needsPurchaseBreakdown({ outstanding, onHold })
 		}
 		if (keep.size === 0) {
 			conditions.push('1 = 0') // no receipt qualifies → empty page (count stays 0)
@@ -2064,6 +1902,12 @@ app.get('/api/orders', (req, res) => {
 		// these were set aside on purpose — not silently lost. Filter-independent by
 		// design: the chip reflects the global hold, not the current page's scope.
 		exchange_hold_count: packQueue.openExchangeHoldCount(db, config),
+		// Need-to-purchase view only: how the queue splits across the All / To buy /
+		// On hold sub-filters ({ all, tobuy, onhold }, where all === tobuy + onhold).
+		// `total` above is the count for the sub-filter actually requested; this is
+		// the whole queue, so the tab badge can show the actionable figure (tobuy)
+		// and still reconcile it against the rows on screen.
+		...(npCounts ? { np_counts: npCounts } : {}),
 		orders: enriched,
 	})
 })
@@ -3975,12 +3819,6 @@ function componentsFromStyle(style) {
 	if (sc.hasGrip) out.push('grip')
 	if (sc.hasCharm) out.push('charm')
 	return out
-}
-
-/** Present Case/Grip/Charm components of a transaction (from its Style variation). */
-function txComponents(t) {
-	const { style } = routeDashboard.parseVariations(t.variations)
-	return componentsFromStyle(style)
 }
 
 /**
@@ -9015,19 +8853,43 @@ app.get('/api/route/charm-progress', (req, res) => {
  * same charm shopping list, so we expose ONLY the charm/purchase/supplier data
  * (never revenue) through one packer-safe route. Employees persist status changes
  * through the already-allowed per-item component-status endpoint, so this stays
- * read-only for them. Scope mirrors the Needs-purchase queue: pending (unshipped,
- * paid) orders plus pre-transit orders explicitly flagged needs-purchase — the
- * exact set buildRouteRows returns by default.
+ * read-only for them.
+ *
+ * SCOPE — the reason this endpoint resolves its own receipt set instead of
+ * reusing the Route dashboard's default one: the list is opened FROM the
+ * "Need to purchase" tab, so its totals have to reconcile against the orders on
+ * that screen. It therefore takes the tab's EXACT order set (the 'all' sub-filter
+ * = still-to-buy ∪ on-hold, dedup-suppressed, unpackaged, paid) from the shared
+ * buy-queue module, then keeps only the charm lines an employee can actually go
+ * and buy (isCharmShoppingRow). Previously it used the Route dashboard's 30-day
+ * pending scope, which also swept in orders that were already fully purchased —
+ * so the header read "18 pcs total" while the tab held only 13.
+ *
+ * The response carries a `scope` block so the count on screen can always be
+ * traced back to the orders that produced it.
  */
 app.get('/api/route/charms-to-buy', (req, res) => {
 	try {
-		const rows = routeDashboard.buildRouteRows(db, config, {
-			include_needs_purchase: true,
-			enrich_supplier: true,
-			include_dismissed: false,
+		const receiptIds = buyQueue.needsPurchaseReceiptIds(db, config, {
+			npFilter: 'all',
+			suppressedReceiptIds: computeSuppressedDuplicates().suppressed,
 		})
+		const rows = routeDashboard
+			.buildRouteRows(db, config, {
+				receipt_ids: [...receiptIds],
+				enrich_supplier: true,
+				include_dismissed: false,
+			})
+			.filter(buyQueue.isCharmShoppingRow)
 		const { charms, charm_shops } = _charmsPayload()
-		res.json({ ok: true, rows, charms, charm_shops, progress: getCharmPurchaseProgress(db) })
+		res.json({
+			ok: true,
+			rows,
+			charms,
+			charm_shops,
+			progress: getCharmPurchaseProgress(db),
+			scope: { source: 'needs_purchase', np_filter: 'all', orders: receiptIds.size, charm_lines: rows.length },
+		})
 	} catch (err) {
 		console.error('[route] charms-to-buy error:', err.message)
 		res.status(500).json({ error: err.message })

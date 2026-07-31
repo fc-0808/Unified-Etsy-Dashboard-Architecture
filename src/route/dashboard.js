@@ -389,6 +389,9 @@ function parseVariations(variations) {
  * @param {object} [filters]
  * @param {string} [filters.date_from] - YYYY-MM-DD
  * @param {string} [filters.date_to]   - YYYY-MM-DD
+ * @param {number[]} [filters.receipt_ids] - an EXPLICIT receipt scope that replaces
+ *        the date/shipped scope entirely. An empty array means "no receipts" and
+ *        returns nothing; omit the key to mean "no receipt filter".
  * @param {string} [filters.shop_id]
  * @param {boolean}[filters.include_shipped]
  * @param {boolean}[filters.enrich_supplier] - look up supplier shop/stall from OSP catalog
@@ -408,9 +411,15 @@ function buildRouteRows(db, config, filters = {}) {
   if (filters.receipt_id != null) {
     params.receipt_id = Number(filters.receipt_id);
     whereClause = 'r.is_paid = 1 AND r.receipt_id = @receipt_id';
-  } else if (Array.isArray(filters.receipt_ids) && filters.receipt_ids.length) {
+  } else if (Array.isArray(filters.receipt_ids)) {
     // Explicit receipt set. Bypasses the date + shipped filters so pre-transit
     // (label-created) orders are included.
+    //
+    // An EMPTY array means "these receipts: none" and must return nothing. It is
+    // deliberately NOT treated as "no filter": a caller that computed a scope and
+    // legitimately found zero orders (e.g. an empty Need-to-purchase queue) would
+    // otherwise silently fall through to the default 30-day pending scope and get
+    // the WHOLE dashboard back. Pass `undefined` to mean "no receipt filter".
     const ids = filters.receipt_ids.map(Number).filter(Number.isInteger);
     if (ids.length) {
       const ph = ids.map((_, i) => `@rid${i}`).join(',');
@@ -539,6 +548,7 @@ function buildRouteRows(db, config, filters = {}) {
            r.buyer_user_id, r.message_from_buyer, r.team_note,
            r.shipping_country_iso, r.etsy_created_at, r.all_transactions,
            r.is_shipped, r.carrier_confirmed_at, r.shipment_notified_at,
+           r.packaged_at,
            s.shop_name
     FROM receipts r
     JOIN shops s ON s.shop_id = r.shop_id
@@ -663,7 +673,7 @@ function buildRouteRows(db, config, filters = {}) {
    * both behave identically in the dashboard and in route generation.
    *
    * @param {object} meta - { receipt_id, shop_id, shop_name, buyer_name,
-   *   buyer_email, order_date, private_notes, team_note, country }
+   *   buyer_email, order_date, private_notes, team_note, country, packaged_at }
    * @param {object} line - { title, listing_id, quantity, phoneModel, style,
    *   image_url, is_manual?, manual_id? }
    */
@@ -950,6 +960,7 @@ function buildRouteRows(db, config, filters = {}) {
       // has not yet scanned the parcel. False for manual items (no Etsy shipment).
       is_pre_transit: meta.is_pre_transit || false,
       label_days_ago: meta.label_days_ago || 0,
+      packaged_at:   meta.packaged_at || null,
       // Supplier match (from OSP catalog) — null when enrichment is off.
       supplier_shop:        supplier ? supplier.shop_name : '',
       supplier_stall:       supplier ? supplier.stall : '',
@@ -993,6 +1004,7 @@ function buildRouteRows(db, config, filters = {}) {
       country:       r.shipping_country_iso || '',
       is_pre_transit: isPreTransit,
       label_days_ago: labelDaysAgo,
+      packaged_at:   r.packaged_at || null,
     };
 
     for (const t of txs) {
@@ -1032,10 +1044,12 @@ function buildRouteRows(db, config, filters = {}) {
   const manualOnlyScope = filters.shop_id === MANUAL_SHOP_ID;
   // The set of receipts an explicit scope restricts manual items to (null = no
   // explicit scope, so every manual item is in play, as on the full dashboard).
+  // An EMPTY receipt_ids array is a scope of "none" — matching the WHERE clause
+  // above — so manual items must be filtered out too, never treated as unscoped.
   const explicitReceiptScope =
     filters.receipt_id != null
       ? new Set([Number(filters.receipt_id)].filter(Number.isInteger))
-      : (Array.isArray(filters.receipt_ids) && filters.receipt_ids.length
+      : (Array.isArray(filters.receipt_ids)
           ? new Set(filters.receipt_ids.map(Number).filter(Number.isInteger))
           : null);
   if (filters.include_manual !== false &&
@@ -1056,7 +1070,8 @@ function buildRouteRows(db, config, filters = {}) {
         const ph = ids.map(() => '?').join(',');
         try {
           db.prepare(
-            `SELECT receipt_id, name, buyer_email, shipping_country_iso, etsy_created_at, message_from_buyer, team_note
+            `SELECT receipt_id, name, buyer_email, shipping_country_iso, etsy_created_at, message_from_buyer, team_note,
+                    packaged_at
              FROM receipts WHERE receipt_id IN (${ph})`
           ).all(ids).forEach((r) => { manualOrderById[r.receipt_id] = r; });
         } catch { /* receipts may lack rows for legacy sidecars */ }
@@ -1075,6 +1090,12 @@ function buildRouteRows(db, config, filters = {}) {
         private_notes: linked?.message_from_buyer || '',
         team_note:     linked?.team_note || '',
         country:       linked?.shipping_country_iso || '',
+        // Sidecars bypass the receipts query above, so the sealed stamp has to be
+        // carried over from the linked manual order explicitly. Without it every
+        // manual row reads "not packaged" and an already-boxed manual order keeps
+        // showing up as shopping work (notably on the "Charms to buy" list).
+        // Legacy sidecars with no linked receipt stay null, as before.
+        packaged_at:   linked?.packaged_at || null,
       }, {
         title:      m.title,
         item_key:   m.item_key,

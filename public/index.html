@@ -2969,6 +2969,9 @@
 				overflow: hidden;
 			}
 			.np-sub-btn {
+				display: inline-flex;
+				align-items: center;
+				gap: 6px;
 				padding: 5px 14px;
 				font-size: 12px;
 				font-weight: 600;
@@ -2978,6 +2981,22 @@
 				border: none;
 				border-right: 1px solid var(--border);
 				transition: background 0.15s, color 0.15s;
+			}
+			/* Live size of each sub-filter, so the split of the queue is readable at a
+			   glance — no clicking through the chips to find where the work sits. */
+			.np-sub-count {
+				font-size: 11px;
+				font-weight: 700;
+				background: rgba(255, 255, 255, 0.08);
+				border-radius: 999px;
+				padding: 0 6px;
+				min-width: 18px;
+				text-align: center;
+				opacity: 0.85;
+			}
+			.np-sub-btn.active .np-sub-count {
+				background: rgba(0, 0, 0, 0.22);
+				opacity: 1;
 			}
 			.np-sub-btn:last-child {
 				border-right: none;
@@ -15090,6 +15109,10 @@
 				'🗂️ Sourcing': '🗂️ 货源库',
 				'🛒 Need to purchase': '🛒 待采购',
 				'✨ Charms to buy': '✨ 待购吊饰',
+				'Charms to Buy': '待购吊饰',
+				'No charms to buy — nothing in the Need-to-purchase queue needs one.': '没有需要采购的吊饰 —— 待采购队列中没有订单需要吊饰。',
+				'🛒 These orders still need products bought. Tap each product’s chip once purchased — an order moves to “To pack & ship” when everything is bought. Orders on hold (an item out of production / unavailable) also appear here: for those, confirm the products you already have with “✓ In hand”. Use the All / To buy / On hold filter to focus. The number on the tab counts only orders you can buy for — those on hold are listed but not counted.':
+					'🛒 这些订单还有商品需要采购。采购好某个商品后，点击该商品的标签 —— 当一个订单的所有商品都已采购，它会自动进入“待打包发货”。搁置的订单（商品停产 / 无法购买）也会出现在这里：对于这些订单，请用“✓ 已有货”确认你手上已有的商品。可用 全部 / 待采购 / 搁置 筛选器聚焦。标签上的数字只统计你现在能去采购的订单 —— 搁置的订单会列出，但不计入。',
 				'Awaiting charm code': '待分配吊饰编号',
 				'📦 To pack & ship': '📦 待打包发货',
 				'✅ Recently packaged': '✅ 最近已打包',
@@ -15115,6 +15138,9 @@
 			   groups so the dynamic part is preserved verbatim. Order matters: the
 			   first match wins, so list the most specific patterns first. */
 			const I18N_PATTERNS = [
+				{ re: /^(\d+) to buy · (\d+) on hold · (\d+) in the tab\. The badge counts only what you can shop for\.$/, zh: (m) => `${m[1]} 个待采购 · ${m[2]} 个搁置 · 标签页共 ${m[3]} 个。徽标只统计你现在能去采购的订单。` },
+				{ re: /^Charms needed by the (\d+) orders? in Need to purchase — (\d+) of them carry a charm\. On-hold and out-of-production lines are left out\.$/, zh: (m) => `待采购队列中 ${m[1]} 个订单所需的吊饰 —— 其中 ${m[2]} 个订单含吊饰。已排除搁置和停产的商品（暂时无法采购）。` },
+				{ re: /^Every charm needed by the (\d+) orders? with charms in view\. On-hold and out-of-production lines are left out\.$/, zh: (m) => `当前视图中 ${m[1]} 个含吊饰订单所需的全部吊饰。已排除搁置和停产的商品。` },
 				{ re: /^Ship by (\d+) days ago$/, zh: (m) => `应在 ${m[1]} 天前发货（已逾期）` },
 				{ re: /^of (\d+) configured$/, zh: (m) => `共配置 ${m[1]} 个` },
 				{ re: /^Needs purchase · (\d+)\/(\d+)$/, zh: (m) => `待采购 · ${m[1]}/${m[2]}` },
@@ -15331,9 +15357,28 @@
 					topack: 'shipped=ready_to_pack',
 					packaged: 'shipped=recently_packaged',
 				}
+				// How a preset's badge number is read out of its /api/orders response.
+				// The default (below) is `total` — the number of rows the preset lists.
+				//
+				// "Need to purchase" is the one deliberate exception. Its list includes
+				// ON-HOLD orders so a packer can reconcile the in-hand pieces of a
+				// partially-blocked order, but those are waiting on an OWNER decision
+				// (message the buyer → swap or refund) and are not work the packer can
+				// pick up. Counting them made the badge overstate the shopping backlog,
+				// so it reports `tobuy` and the tooltip explains the difference against
+				// the rows on screen. Falls back to `total` on an older server response.
+				const PRESET_COUNT_OF = {
+					needpurchase: (d) => (d.np_counts ? d.np_counts.tobuy : d.total),
+				}
+				// Optional tooltip making a badge that is NOT simply "rows in the list"
+				// self-explanatory — every figure on screen stays reconcilable.
+				const PRESET_COUNT_TITLE = {
+					needpurchase: (d) => (d.np_counts ? `${d.np_counts.tobuy} to buy · ${d.np_counts.onhold} on hold · ${d.np_counts.all} in the tab. The badge counts only what you can shop for.` : ''),
+				}
 				// Plain-language explanation shown under the tabs for the active queue.
 				const PRESET_HINT = {
-					needpurchase: '🛒 These orders still need products bought. Tap each product’s chip once purchased — an order moves to “To pack & ship” when everything is bought. Orders on hold (an item out of production / unavailable) also appear here: for those, confirm the products you already have with “✓ In hand”. Use the All / To buy / On hold filter to focus.',
+					needpurchase:
+						'🛒 These orders still need products bought. Tap each product’s chip once purchased — an order moves to “To pack & ship” when everything is bought. Orders on hold (an item out of production / unavailable) also appear here: for those, confirm the products you already have with “✓ In hand”. Use the All / To buy / On hold filter to focus. The number on the tab counts only orders you can buy for — those on hold are listed but not counted.',
 					verify: '🔎 Check yesterday’s shopping against each order. When you’ve confirmed every item for an order is physically in hand, select it and press “✓ Mark verified”. Verified orders move on to “To pack & ship”.',
 					topack: '👉 Ready to pack — every item here has been verified in hand. Work top to bottom: pack each parcel, then press “Ship with 4PX”. Most urgent first.',
 					packaged: 'Parcels you packed recently, newest first. Review them here — if something looks wrong, open the order and press “Unmark packaged” to fix it.',
@@ -15436,10 +15481,12 @@
 					if (!on && btn.classList.contains('active')) applyPreset('topack')
 				}
 
-				// Live count badges on the three queue buttons so the (auto-selected)
-				// default view is self-explanatory — the packer sees exactly how many
-				// orders are in each queue. Each count uses the SAME query the preset
-				// applies, so the badge can never disagree with what the button shows.
+				// Live count badges on the queue buttons so the (auto-selected) default
+				// view is self-explanatory — the packer sees how much work each queue
+				// holds. Every count comes from the SAME query the preset applies, so a
+				// badge can never be computed from a different scope than the list it
+				// labels. What it counts within that scope is decided by PRESET_COUNT_OF:
+				// rows for most queues, actionable orders for Need-to-purchase.
 				async function refreshPresetCounts() {
 					await Promise.all(
 						Object.entries(PRESET_COUNT_QS).map(async ([key, qs]) => {
@@ -15447,7 +15494,11 @@
 							if (!badge) return
 							try {
 								const data = await fetch(API + '/api/orders?' + qs + '&limit=1', { credentials: 'same-origin' }).then((r) => r.json())
-								badge.textContent = data.total ?? 0
+								const read = PRESET_COUNT_OF[key]
+								badge.textContent = (read ? read(data) : data.total) ?? 0
+								const tip = PRESET_COUNT_TITLE[key] ? PRESET_COUNT_TITLE[key](data) : ''
+								if (tip) badge.title = tip
+								else badge.removeAttribute('title')
 								badge.style.display = ''
 							} catch {
 								badge.style.display = 'none'
@@ -17345,6 +17396,38 @@
 				loadOrders()
 			}
 
+			/**
+			 * Paint the live size of each Need-to-purchase sub-filter onto its chip.
+			 *
+			 * The numbers come from `np_counts` on the SAME response that produced the
+			 * rows, so a chip can never advertise a different figure than the list it
+			 * switches to. The breakdown describes the WHOLE queue rather than the
+			 * current page, which is what lets all three numbers stay put as the packer
+			 * clicks between chips — a count that moved when you selected it would be
+			 * describing the selection, not the work.
+			 *
+			 * Absent on every other view (and on an older server), in which case the
+			 * chips are left bare rather than showing a stale number.
+			 */
+			function updateNpSubCounts(counts) {
+				const bar = document.getElementById('npSubFilter')
+				if (!bar) return
+				bar.querySelectorAll('.np-sub-btn').forEach((btn) => {
+					const n = counts ? counts[btn.dataset.np] : null
+					let el = btn.querySelector('.np-sub-count')
+					if (n == null) {
+						if (el) el.remove()
+						return
+					}
+					if (!el) {
+						el = document.createElement('span')
+						el.className = 'np-sub-count'
+						btn.appendChild(el)
+					}
+					el.textContent = n
+				})
+			}
+
 			// Issues / on-hold segmented sub-filter: 'all' (default) | 'active' | 'cancelled'.
 			// Sent to the server as issue_filter only while the Issues view is active. Lets
 			// the operator hide (or isolate) cancelled/refunded orders that still carry an
@@ -17563,6 +17646,10 @@
 				// on purpose (not lost). Runs before the empty-queue early-return below so
 				// the chip is correct even when the current view has zero rows.
 				updateExchangeHoldNote(data.exchange_hold_count)
+				// Size of each All / To buy / On hold chip. Like the chip above, this runs
+				// before the empty-queue early-return so the split stays correct even when
+				// the selected sub-filter itself has zero rows.
+				updateNpSubCounts(data.np_counts)
 				// Cache the server-configured pre-transit window for badge logic below
 				const preTransitDays = data.pre_transit_days ?? 21
 				// Etsy's editable-tracking window (days). Drives the "Edit tracking" action.
@@ -32325,6 +32412,9 @@
 			// plus a section for charm orders that still need a code assigned.
 
 			let _cpmExpanded = new Set() // expanded group keys ("c:<code>" / "u:<item_key>")
+			// Scope descriptor from the packer bundle ({ orders, charm_lines, … }) — lets
+			// the header say exactly which orders the totals were computed from.
+			let _charmScope = null
 			// Legacy cache of the old per-code purchase counter. NO LONGER AUTHORITATIVE:
 			// charm purchase state is now derived purely from per-line `status_charm`
 			// (see _cpmPurchased). Kept only so older callers don't throw; do not key
@@ -32355,16 +32445,48 @@
 				return _aggregateCharms(_charmPurchaseScopeRows()).assigned.find((g) => g.code === code) || null
 			}
 
-			/** Charm-bearing rows in the current scope (pinned set aware, excludes dropped lines). */
+			// A charm status the shopper can never act on: the product is discontinued,
+			// or this phone model was never carried. Unlike "Out of Stock" (come back
+			// later) these are dead ends awaiting an owner decision, so they are neither
+			// buyable nor in hand — counting them would inflate the shopping list with
+			// pieces nobody can go and buy. Mirrors UNBUYABLE_STATUSES in
+			// src/orders/buy-queue.js.
+			const CHARM_UNBUYABLE_STATUSES = new Set(['Out of Production', 'Model Unavailable'])
+
+			/**
+			 * The charm lines the "Charms to buy" list covers, within whatever order set
+			 * is currently loaded into `_routeRows`.
+			 *
+			 * Two different order scopes feed this function, on purpose:
+			 *   • Employee (Packing Mode) — the server already narrowed `_routeRows` to
+			 *     the exact Need-to-purchase queue the tab is showing (see
+			 *     /api/route/charms-to-buy), so the totals reconcile against the orders
+			 *     on screen.
+			 *   • Owner (Route tab) — the whole purchasing planner currently in view.
+			 *
+			 * The per-LINE rules below are identical in both cases, and mirror
+			 * `isCharmShoppingRow` in src/orders/buy-queue.js rule for rule (that module
+			 * is the authority; this is the client-side copy the owner's view needs).
+			 * Keep the two in step: a charm piece is listed only when someone can
+			 * actually walk to a stall and buy it.
+			 */
 			function _charmPurchaseScopeRows() {
-				// _routeRows already includes any added (pre-transit) orders merged in
-				// by the server, so the charm scope is simply the full dashboard set —
-				// minus excluded and removed lines, which are not part of the shop.
-				// Integral (AirPods) charms are excluded: they ship attached to the
-				// case, carry no charm code, and are bought with the case — so they
-				// never belong in the charm-stall sourcing list (they'd otherwise show
-				// a spurious "needs a code" warning).
-				return _routeRows.filter((r) => r.has_charm && !r.charm_integral && !r.excluded && !r.dismissed)
+				return _routeRows.filter((r) => {
+					// Integral (AirPods) charms ship attached to the case and are bought
+					// with it — they carry no code and are not a charm-stall errand.
+					if (!r.has_charm || r.charm_integral) return false
+					// Dropped from the route, or already sealed in a box: not shopping work.
+					if (r.excluded || r.dismissed || r.packaged_at) return false
+					// Held out of purchasing by an open fulfilment issue (out of production
+					// / model unavailable) pending an owner decision. Route rows normally
+					// omit these entirely; the guard keeps the rule explicit here too.
+					if (r.has_issue) return false
+					// A wrong-model exchange holds only the pieces listed on it (the case,
+					// by default) — a charm on the same line still has to be bought, so we
+					// drop the CHARM only when the exchange itself covers it.
+					if (_exchangeHeldComps(r).charm) return false
+					return !CHARM_UNBUYABLE_STATUSES.has(r.status_charm || 'Pending')
+				})
 			}
 
 			/** Group charm rows → assigned (by code) and unassigned (by product). */
@@ -32449,6 +32571,9 @@
 					})
 					_charmShopDirectory = d.charm_shops || []
 					_charmProgress = d.progress || {}
+					// How many Need-to-purchase orders produced this list, so the header can
+					// state its scope and the totals can be reconciled against the tab.
+					_charmScope = d.scope || null
 				} catch {
 					/* non-fatal — modal shows an empty state */
 				}
@@ -32711,11 +32836,30 @@
 				return `<table class="cpm-table">${colgroup}${thead}<tbody>${tbody}</tbody></table>`
 			}
 
+			/**
+			 * One sentence stating exactly which orders the totals were computed from, so
+			 * a number on screen can always be reconciled with the queue behind it. The
+			 * employee list is scoped server-side to the Need-to-purchase tab; the owner's
+			 * is whatever the Route tab currently has in view.
+			 */
+			function _cpmScopeText(scopeRows) {
+				const orders = new Set(scopeRows.map((r) => r.receipt_id)).size
+				if (_employeeCharmMode()) {
+					const queued = _charmScope && _charmScope.orders != null ? _charmScope.orders : orders
+					return `Charms needed by the ${queued} order${queued !== 1 ? 's' : ''} in Need to purchase — ${orders} of them carry a charm. On-hold and out-of-production lines are left out.`
+				}
+				return `Every charm needed by the ${orders} order${orders !== 1 ? 's' : ''} with charms in view. On-hold and out-of-production lines are left out.`
+			}
+
 			function renderCharmPurchaseModal() {
-				const { assigned, unassigned } = _aggregateCharms(_charmPurchaseScopeRows())
+				const scopeRows = _charmPurchaseScopeRows()
+				const { assigned, unassigned } = _aggregateCharms(scopeRows)
 				const totalUnits = [...assigned, ...unassigned].reduce((s, g) => s + g.qty, 0)
 				const purchasedPcs = assigned.reduce((s, g) => s + _cpmPurchased(g), 0)
 				const toBuyPcs = totalUnits - purchasedPcs
+
+				const sub = document.getElementById('cpmSub')
+				if (sub) sub.textContent = _cpmScopeText(scopeRows)
 
 				const totals = document.getElementById('cpmTotals')
 				if (totals) {
@@ -32726,7 +32870,7 @@
 				const body = document.getElementById('cpmBody')
 				if (!body) return
 				if (!assigned.length && !unassigned.length) {
-					body.innerHTML = '<div class="cpm-empty">No charm orders in the current view.</div>'
+					body.innerHTML = `<div class="cpm-empty">${_employeeCharmMode() ? 'No charms to buy — nothing in the Need-to-purchase queue needs one.' : 'No charm orders in the current view.'}</div>`
 					return
 				}
 				body.innerHTML = _cpmBuildTable(assigned, unassigned)
