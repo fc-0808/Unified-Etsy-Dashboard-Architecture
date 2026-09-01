@@ -165,7 +165,7 @@
   "dependencies": {
     "@hyzyla/pdfium": "^2.1.13",
     "archiver": "^8.0.0",
-    "axios": "^1.16.1",
+    "axios": "^1.20.0",
     "better-sqlite3": "^12.10.0",
     "compression": "^1.8.1",
     "content-disposition": "^1.1.0",
@@ -174,17 +174,17 @@
     "exceljs": "^4.4.0",
     "express": "^5.2.1",
     "form-data": "^4.0.5",
-    "https-proxy-agent": "^9.0.0",
-    "node-cron": "^4.2.1",
+    "https-proxy-agent": "^9.1.0",
+    "node-cron": "^4.6.0",
     "openai": "^6.41.0",
-    "sharp": "^0.35.1",
+    "sharp": "^0.35.4",
     "socks": "^2.8.9",
-    "socks-proxy-agent": "^10.0.0",
+    "socks-proxy-agent": "^10.1.0",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "jsdom": "^29.1.1",
-    "pm2": "^7.0.1"
+    "pm2": "^7.0.4"
   },
   "overrides": {
     "exceljs": {
