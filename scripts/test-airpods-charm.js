@@ -69,7 +69,7 @@ function makeDb() {
       canonical_product_key TEXT, sort_order INTEGER DEFAULT 0, updated_at INTEGER
     );
     CREATE TABLE charm_library (
-      code TEXT PRIMARY KEY, sku TEXT DEFAULT '', default_charm_shop TEXT DEFAULT '',
+      code TEXT PRIMARY KEY, default_charm_shop TEXT DEFAULT '',
       notes TEXT DEFAULT '', image_file TEXT DEFAULT '', sort_order INTEGER DEFAULT 0,
       updated_at INTEGER
     );

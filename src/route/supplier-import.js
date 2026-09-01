@@ -33,8 +33,21 @@ function _normalizeTitle(text) {
   return String(text ?? '').replace(/\|/g, ',').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
-// Remembers the last-imported workbook mtime so repeated startups are no-ops.
-let _lastMtimeMs = 0;
+// Per-database, per-workbook mtime cache. Tests and maintenance tools can hold
+// several databases in one process; one must never suppress another's import.
+const _lastMtimeByDb = new WeakMap();
+function _lastMtime(db, xlsxPath) {
+  const paths = _lastMtimeByDb.get(db);
+  return paths ? (paths.get(xlsxPath) || 0) : 0;
+}
+function _rememberMtime(db, xlsxPath, mtimeMs) {
+  let paths = _lastMtimeByDb.get(db);
+  if (!paths) {
+    paths = new Map();
+    _lastMtimeByDb.set(db, paths);
+  }
+  paths.set(xlsxPath, mtimeMs);
+}
 
 /**
  * Resolve the absolute path to supplier_catalog.xlsx from config.
@@ -151,7 +164,7 @@ function importSupplierCatalog(db, config, opts = {}) {
   if (!fs.existsSync(xlsxPath)) return { ok: false, reason: 'supplier_catalog.xlsx not found', path: xlsxPath };
 
   const mtimeMs = fs.statSync(xlsxPath).mtimeMs;
-  if (!opts.force && mtimeMs === _lastMtimeMs) {
+  if (!opts.force && mtimeMs === _lastMtime(db, xlsxPath)) {
     return { ok: true, reason: 'unchanged', path: xlsxPath };
   }
 
@@ -161,20 +174,19 @@ function importSupplierCatalog(db, config, opts = {}) {
   const productMap  = _readProductMap(wb);
 
   // The supplier + charm-shop directories are the authoritative stores for
-  // in-app CRUD, so we only (re)seed them from Excel when explicitly asked —
-  // otherwise user edits would be wiped on every restart. The product map has
-  // no in-app CRUD, so it always refreshes.
-  let nSup = null;
-  if (!opts.skipSuppliers) {
-    nSup = replaceSupplierDirectory(db, _readSuppliers(wb));
-  }
-  let nCharm = null;
-  if (!opts.skipCharmShops) {
-    nCharm = replaceCharmShopDirectory(db, _readCharmShops(wb));
-  }
-  const nProdMap  = replaceProductMap(db, productMap);
+  // in-app CRUD, so we only (re)seed them from Excel when explicitly asked.
+  // Product Map is also edited in-app; replaceProductMap therefore performs a
+  // non-destructive merge. Manual rows and retirement tombstones omitted from
+  // an older workbook survive, while sheet rows still refresh their mapping.
+  const apply = db.transaction(() => {
+    const nSup = opts.skipSuppliers ? null : replaceSupplierDirectory(db, _readSuppliers(wb));
+    const nCharm = opts.skipCharmShops ? null : replaceCharmShopDirectory(db, _readCharmShops(wb));
+    const nProdMap = replaceProductMap(db, productMap);
+    return { nSup, nCharm, nProdMap };
+  });
+  const { nSup, nCharm, nProdMap } = apply();
 
-  _lastMtimeMs = mtimeMs;
+  _rememberMtime(db, xlsxPath, mtimeMs);
   return { ok: true, suppliers: nSup, charm_shops: nCharm, product_map: nProdMap, path: xlsxPath };
 }
 

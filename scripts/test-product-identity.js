@@ -92,6 +92,31 @@ console.log('Canonical product identity regression test\n')
 	assert(r.stats.deterministic === 1 && r.stats.byToken.title === 1, 'the merge is attributed to the title token')
 }
 
+// ── Visual tier: DESIGN-TITLE match resolves the reported A285 Usahana bug ──
+// Two re-lists of ONE Usahana case-and-heart-grip design at stall A285, with
+// compositionally unrelated photos (lifestyle hand-shot vs studio flat-lay) and
+// titles that differ only by optional fluff ("& Charm", "Now", "Aesthetic").
+// Before this fix the shopping route rendered them as two product cards.
+{
+	const farA = 'f'.repeat(64)
+	const farB = ZERO.slice(0, 32) + 'f'.repeat(32)
+	const r = S.resolveProductIdentity({
+		listings: [
+			{ listing_id: 4545666488, phash: farA, title: 'Usahana Pink MAGSAFE IPhone Case with Heart Grip & Charm, Kawaii Y2K Cute Cover for iPhone 17 16 15 Pro Max, Gift for Her Now', stalls: stall('A285') },
+			{ listing_id: 4541247998, phash: farB, title: 'Usahana Pink MAGSAFE iPhone Case with Heart Grip, Kawaii Y2K Cute Cover for iPhone 17 16 15 Pro Max, Gift for Her Aesthetic', stalls: stall('A285') },
+			{ listing_id: 4545666500, phash: ZERO, title: 'Usahana Pink MAGSAFE iPhone Case with Heart Grip & Charm for iPhone 15 Pro, Gift for Her', stalls: stall('A285') },
+			// A genuinely different design at the same stall must stay separate.
+			{ listing_id: 4539223596, phash: FAR_C, title: 'Cute Rainbow Bunny MAGSAFE iPhone Case with Grip & Charm, Kawaii Y2K Cute Cover for iPhone 17 16 15 Pro Max, Gift for Her Aesthetic!', stalls: stall('A285') },
+		],
+	})
+	assert(sameKey(r, 4545666488, 4541247998, 4545666500), 'Usahana re-lists with unrelated photos resolve to ONE product via the design-title match')
+	assert(!sameKey(r, 4545666488, 4539223596), 'an unrelated design at the same stall (Rainbow Bunny) is not swept in')
+	// All 3 pairs among the Usahana listings independently match, but the
+	// union-find spanning tree only needs 2 edges to join all 3 members.
+	assert(r.stats.visual === 2, 'the visual tier records the 2 spanning-tree edges that unify the Usahana triangle')
+	assert(keysOf(r, 4541247998)[0] === 'P-4541247998', 'the merged group keeps the smallest-listing-id canonical key')
+}
+
 // ── Deterministic tier: shared bulk source folder ──
 {
 	const folder = 'folder:C:\\Users\\shop\\Downloads\\0723_airpods\\imd耳机彩色蘑菇'

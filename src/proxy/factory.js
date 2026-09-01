@@ -6,8 +6,10 @@
  * Traffic path per API request:
  *   Node.js → localhost:vpnPort (VPN SOCKS5) → IPFoxy SOCKS5 → openapi.etsy.com
  *
- * Etsy sees only the IPFoxy static residential HK IP.
- * Your ISP sees only encrypted VPN traffic — cannot observe IPFoxy or Etsy.
+ * This is transport configuration only. It must never be used to conceal common
+ * ownership/control, evade a suspension, create false identities, or bypass an
+ * application/key/shop allocation. All Etsy developer and seller information
+ * must remain accurate, and written Etsy approval controls the allowed topology.
  *
  * Built on the proven chain from test_proxy.js, wrapped into an https.Agent
  * subclass so axios can use it as a standard agent drop-in.
@@ -73,6 +75,12 @@ class TwoHopSocksAgent extends https.Agent {
    * @param {Function} callback - (err, socket) callback
    */
   createConnection(options, callback) {
+    let completed = false;
+    const finish = (err, socket) => {
+      if (completed) return;
+      completed = true;
+      callback(err, socket);
+    };
     const destination = {
       host: options.host || options.hostname,
       port: options.port || 443,
@@ -90,16 +98,17 @@ class TwoHopSocksAgent extends https.Agent {
           rejectUnauthorized: options.rejectUnauthorized !== false,
         });
 
-        tlsSocket.once('secureConnect', () => callback(null, tlsSocket));
+        tlsSocket.once('secureConnect', () => finish(null, tlsSocket));
         tlsSocket.once('error', (err) => {
+          if (completed) return;
           // The two-hop chain connected but the TLS handshake failed. Destroy the
           // underlying SOCKS socket so we don't leak file descriptors on the
           // transient chain failures this agent is specifically built to weather.
           rawSocket.destroy();
-          callback(err);
+          finish(err);
         });
       })
-      .catch((err) => callback(err));
+      .catch((err) => finish(err));
   }
 
   /**
@@ -122,8 +131,8 @@ const _instanceCache = new Map();
  * Create (or retrieve from cache) an axios instance for a specific shop group.
  * The instance routes all traffic through that group's VPN → IPFoxy chain.
  *
- * Each group gets its own dedicated agent so connections are never mixed
- * between groups — Etsy will always see the correct static IP per group.
+ * Each group gets its own dedicated agent so credentials and connection state
+ * are not accidentally mixed. Network separation grants no policy permission.
  *
  * @param {object} groupConfig - A single entry from config.json groups[]
  * @param {string} groupConfig.group_id

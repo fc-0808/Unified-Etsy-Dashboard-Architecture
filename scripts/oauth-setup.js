@@ -3,34 +3,27 @@
 /**
  * One-time OAuth 2.0 setup wizard for each Etsy shop.
  *
- * Run this script ONCE for each shop inside its correct AdsPower browser profile
- * while the group's IPFoxy IP is active. This ensures the token is bound to the
- * same IP identity that will make all future API calls.
+ * Run this script as the authorized shop owner using Etsy's documented,
+ * user-driven OAuth flow. Network/proxy configuration does not change ownership,
+ * scope, application-purpose, or API-key obligations.
  *
  * What this script does:
  *   1. Lists all unauthenticated shops from config.json
  *   2. Lets you choose a shop to authenticate
  *   3. Generates the PKCE code challenge + OAuth URL
  *   4. Starts a local callback server on port 3003
- *   5. You open the URL in your browser (AdsPower profile for that group)
+ *   5. You open the URL in a browser signed in as the authorized shop owner
  *   6. After you authorize, Etsy redirects to localhost:3003/oauth/redirect
  *   7. The script exchanges the auth code for access_token + refresh_token
  *   8. Saves tokens to tokens.json (gitignored)
  *
  * Run: npm run oauth:setup
  *
- * OpSec note: Run this from within the correct AdsPower profile's browser,
- * NOT your system browser. The OAuth authorization page must be visited from
- * the group's designated IPFoxy IP to avoid linking the token to your home IP.
- *
- * IMPORTANT: For proxied groups this script routes BOTH the API-key ping and the
- * authorization-code → token exchange through the group's VPN→IPFoxy chain — the
- * exact same path the running dashboard uses for token refresh and every API call.
- * This guarantees Etsy only ever sees the group's single static residential IP for
- * a shop, from the very first grant onward (never the operator's home IP). The VPN
- * (localhost:vpn_local_port) must therefore be running when you set up a proxied
- * shop; the script fails closed with a clear message if the chain is unreachable.
- * Direct groups (proxy: "direct") intentionally use no proxy.
+ * IMPORTANT: For a configured proxied group, API-key checks and token exchange
+ * use that route and fail closed if it is unavailable. This is transport
+ * consistency only; do not use proxy/browser tooling to conceal common ownership
+ * or bypass Etsy controls. Etsy API Terms assign one designated key per
+ * application; obtain written approval before using multiple keys in this app.
  *
  * Required scopes (what we request):
  *   transactions_r  — read orders and receipts
@@ -45,7 +38,7 @@
 // Load .env so PORT (and any other overrides) match what the running server
 // uses — the post-OAuth hot-reload notification must hit the same port the
 // dashboard actually listens on.
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 
 const crypto = require('crypto');
 const http = require('http');
@@ -62,11 +55,9 @@ const ETSY_TOKEN_URL = 'https://api.etsy.com/v3/public/oauth/token';
 const ETSY_OAUTH_URL = 'https://www.etsy.com/oauth/connect';
 
 // Scopes required for this dashboard.
-// NOTE: Etsy's public OAuth v3 does NOT expose conversation scopes.
-// The messaging feature uses existing tokens with the scopes below.
-// If the undocumented conversation endpoints are accessible, they work
-// with these scopes. If not, the UI degrades gracefully with an "Open on Etsy"
-// fallback link directly to the conversation thread.
+// Etsy's public OAuth v3 does not expose conversation scopes. Buyer messages are
+// copied by the operator and pasted into Etsy manually; no undocumented endpoint
+// is used.
 const REQUIRED_SCOPES = [
   'transactions_r',
   'transactions_w',
@@ -94,6 +85,15 @@ function generatePKCE() {
   );
   const state = base64URLEncode(crypto.randomBytes(16));
   return { codeVerifier, codeChallenge, state };
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 // ─── Interactive shop selector ────────────────────────────────────────────────
@@ -147,10 +147,17 @@ async function selectShop(config, tokenManager) {
  */
 function waitForAuthCode(expectedState) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
     const server = http.createServer((req, res) => {
       if (!req.url.startsWith('/oauth/redirect')) {
         res.writeHead(404);
         res.end();
+        return;
+      }
+      if (settled) {
+        res.writeHead(409, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('This OAuth callback has already been consumed.');
         return;
       }
 
@@ -158,53 +165,81 @@ function waitForAuthCode(expectedState) {
       const code = url.searchParams.get('code');
       const state = url.searchParams.get('state');
       const error = url.searchParams.get('error');
+      const errorDescription = url.searchParams.get('error_description') || '';
 
-      if (error) {
-        res.writeHead(400, { 'Content-Type': 'text/html' });
-        res.end(`<h2>Authorization Failed</h2><p>${error}: ${url.searchParams.get('error_description')}</p>`);
-        server.close();
-        reject(new Error(`Etsy authorization error: ${error} — ${url.searchParams.get('error_description')}`));
+      // Validate state for success AND error callbacks before reflecting any
+      // provider-controlled text or settling the flow.
+      if (state !== expectedState) {
+        res.writeHead(400, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'",
+          'X-Content-Type-Options': 'nosniff',
+        });
+        res.end('<h2>State Mismatch</h2><p>CSRF check failed. Try running oauth:setup again.</p>');
+        finish(new Error('State mismatch — possible CSRF attack. Run setup again.'));
         return;
       }
 
-      if (state !== expectedState) {
-        res.writeHead(400, { 'Content-Type': 'text/html' });
-        res.end('<h2>State Mismatch</h2><p>CSRF check failed. Try running oauth:setup again.</p>');
-        server.close();
-        reject(new Error('State mismatch — possible CSRF attack. Run setup again.'));
+      if (error) {
+        res.writeHead(400, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'",
+          'X-Content-Type-Options': 'nosniff',
+        });
+        res.end(`<h2>Authorization Failed</h2><p>${escapeHtml(error)}: ${escapeHtml(errorDescription)}</p>`);
+        finish(new Error(`Etsy authorization error: ${error} — ${errorDescription}`));
         return;
       }
 
       if (!code) {
-        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.writeHead(400, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'",
+          'X-Content-Type-Options': 'nosniff',
+        });
         res.end('<h2>No Code</h2><p>No authorization code received.</p>');
-        server.close();
-        reject(new Error('No authorization code in redirect URL.'));
+        finish(new Error('No authorization code in redirect URL.'));
         return;
       }
 
       // Success page shown in the browser after authorization
-      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'",
+        'X-Content-Type-Options': 'nosniff',
+      });
       res.end(`
         <html><body style="font-family:sans-serif;padding:40px;max-width:500px;margin:0 auto">
           <h2 style="color:#2E7D32">Authorization Successful</h2>
           <p>You can close this tab and return to the terminal.</p>
-          <p style="color:#666;font-size:13px">Tokens have been saved to tokens.json.</p>
+          <p style="color:#666;font-size:13px">Authorization was received. The terminal will confirm after the token exchange is saved safely.</p>
         </body></html>
       `);
 
-      server.close();
-      resolve(code);
+      finish(null, code);
     });
 
-    server.listen(CALLBACK_PORT, () => {
+    function finish(err, code) {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      try {
+        if (server.listening) server.close();
+      } catch {
+        /* listen failures may leave no open server to close */
+      }
+      if (err) reject(err);
+      else resolve(code);
+    }
+
+    server.once('error', finish);
+    server.listen(CALLBACK_PORT, '127.0.0.1', () => {
       console.log(`\n  Callback server listening at http://localhost:${CALLBACK_PORT}/oauth/redirect`);
     });
 
     // Timeout after 5 minutes
-    setTimeout(() => {
-      server.close();
-      reject(new Error('OAuth timeout — no redirect received within 5 minutes.'));
+    timer = setTimeout(() => {
+      finish(new Error('OAuth timeout — no redirect received within 5 minutes.'));
     }, 5 * 60 * 1000);
   });
 }
@@ -260,9 +295,8 @@ async function exchangeCodeForTokens(keystring, authCode, codeVerifier, proxyCli
     code_verifier: codeVerifier,
   });
 
-  // Route through the group proxy (when supplied) so the token grant is bound to
-  // the SAME residential IP as the browser authorization and all future refreshes
-  // — never the operator's home IP.
+  // Route through the configured group transport when supplied. This keeps
+  // runtime networking deterministic; it does not alter Etsy authorization.
   const client = proxyClient ?? axios;
   const { data } = await client.post(ETSY_TOKEN_URL, body.toString(), {
     baseURL: '', // full URL — don't prepend the proxy client's /v3 baseURL
@@ -279,13 +313,14 @@ async function main() {
   console.log('═'.repeat(65));
 
   console.log(`
-  OpSec — proxied groups (socks5:// in config.json):
+  Network check — proxied groups (socks5:// in config.json):
   ─────────────────────────────────────────────────────────────
-  When the OAuth URL opens, visit it from the AdsPower profile
-  for that shop's group, with that group's IPFoxy proxy active.
+  Complete OAuth manually as the authorized shop owner. If this
+  application's approved deployment uses a proxy, keep that route
+  available for the API-key check and token exchange.
 
-  Direct groups (proxy: "direct"): use a normal browser logged in
-  as the shop owner. No VPN or IPFoxy required for those shops.
+  A proxy does not authorize extra shops/keys and must never be
+  used to conceal ownership or evade Etsy platform controls.
   ─────────────────────────────────────────────────────────────
 `);
 
@@ -297,7 +332,9 @@ async function main() {
     process.exit(1);
   }
 
-  const tokensPath = path.resolve(__dirname, '../tokens.json');
+  const tokensPath = process.env.DASHBOARD_TOKENS_PATH
+    ? path.resolve(process.env.DASHBOARD_TOKENS_PATH)
+    : path.resolve(__dirname, '../tokens.json');
   const tokenManager = new TokenManager(tokensPath);
   const shop = await selectShop(config, tokenManager);
   if (!shop) process.exit(0);
@@ -312,12 +349,8 @@ async function main() {
   console.log(`  API key:      ${shop.api_key.slice(0, 8)}...`);
 
   // Build the SAME network path the runtime uses for this shop. Proxied groups
-  // route the ping + token exchange through the group's VPN→IPFoxy chain so Etsy
-  // only ever sees the group's static residential IP — identical to token refresh
-  // and every API call. Doing the exchange over the operator's home IP instead
-  // would bind the initial grant to a different IP than every later call (and, if
-  // all shops are set up from one machine, link them to a shared IP). Fail closed
-  // if the chain is unreachable rather than silently falling back to the home IP.
+  // route the ping + token exchange through the configured group transport.
+  // Fail closed if it is unavailable rather than silently changing egress.
   let proxyClient = null;
   if (!isDirect) {
     console.log('\n  Verifying the group proxy chain (VPN → IPFoxy)...');
@@ -325,13 +358,13 @@ async function main() {
       const egressIp = await verifyGroupProxy(shopCtx.group, config.vpn_local_port);
       proxyClient = createGroupProxyClient(shopCtx.group, config.vpn_local_port);
       console.log(`  ✓ Proxy verified — Etsy will see exit IP ${egressIp}`);
-      console.log('  ► Confirm this IP matches the AdsPower profile you authorize in.');
+      console.log('  ► Confirm this is the network route approved for this application.');
     } catch (err) {
       console.error(
         `\n  ✗ Could not reach this group's proxy chain: ${err.message}\n\n` +
           `  Start the VPN (localhost:${config.vpn_local_port}) and make sure the group's\n` +
-          `  IPFoxy proxy is active, then re-run oauth:setup. Refusing to continue so the\n` +
-          `  token is never exchanged over the wrong IP.\n`
+          `  configured proxy is active, then re-run oauth:setup. Refusing to continue\n` +
+          `  rather than silently changing the application's network route.\n`
       );
       process.exit(1);
     }
@@ -346,10 +379,10 @@ async function main() {
     process.exit(1);
   }
   console.log('');
-  console.log('  ► Open a NEW INCOGNITO browser window NOW.');
+  console.log('  ► Open a browser window controlled by the authorized shop owner.');
   console.log(`  ► Log into Etsy.com as: ${shop.owner_email || 'the shop owner'}`);
   if (!isDirect) {
-    console.log('  ► Use the AdsPower profile + IPFoxy IP for this group (see OpSec note above).');
+    console.log('  ► Keep the application’s approved proxy route active (see network note above).');
   }
   console.log('  ► Then open the OAuth URL below in that same incognito window.');
 
@@ -371,7 +404,7 @@ async function main() {
   console.log('\n  ─────────────────────────────────────────────────────────');
   console.log('  Requested scopes:');
   REQUIRED_SCOPES.split(' ').forEach((s) => console.log(`    • ${s}`));
-  console.log('\n  OAuth URL (open this in the AdsPower profile for this group):');
+  console.log('\n  OAuth URL (open manually as the authorized shop owner):');
   console.log('\n  ' + oauthUrl);
   console.log('\n  ─────────────────────────────────────────────────────────');
   console.log('\n  Waiting for authorization...');

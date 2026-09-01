@@ -15,6 +15,7 @@
 		     the app script so ShopSync is available at boot; cached in the SW shell
 		     so it works offline after first load. -->
 		<script src="/shop-sync.js"></script>
+		<script src="/shop-supplier-prep.js"></script>
 		<style>
 			*,
 			*::before,
@@ -44,9 +45,16 @@
 				--purple-bg: #291f3d;
 				--rose: #fb7185;
 				--rose-bg: #3a1522;
+				/* Wrong Stall — cyan (location / re-route). Must NOT share amber
+				   with pending grips, or the two read as the same signal. */
+				--cyan: #22d3ee;
+				--cyan-bg: #0c2f38;
 				--font: 'Inter', system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
 				--safe-top: env(safe-area-inset-top, 0px);
 				--safe-bottom: env(safe-area-inset-bottom, 0px);
+				/* Logical width of a modern handset — Shopping Mode is always this
+				   density, including when opened from a desktop dashboard. */
+				--shop-phone-max: 430px;
 			}
 			html,
 			body {
@@ -57,14 +65,24 @@
 			}
 			body {
 				min-height: 100vh;
+				min-height: 100dvh;
+			}
+			/* App root: full-bleed on a real phone; becomes the phone column +
+			   scrollport on wider viewports (see media query below). */
+			.shop-app {
+				min-height: 100vh;
+				min-height: 100dvh;
 				padding-bottom: calc(24px + var(--safe-bottom));
+				background: var(--bg);
 			}
 			/* Lock the page behind a modal overlay so the list can't scroll under a
 			   sheet / map / drawer. No position:fixed — that would shift the page
 			   visibly behind the translucent sheet backdrop; overflow:hidden holds
-			   position with no jump. Overlays are position:fixed so they're unaffected. */
+			   position with no jump. Overlays are position:fixed so they're unaffected.
+			   On desktop the scrollport is .shop-app, so lock that too. */
 			html.scroll-lock,
-			html.scroll-lock body {
+			html.scroll-lock body,
+			html.scroll-lock .shop-app {
 				overflow: hidden;
 			}
 			button {
@@ -87,6 +105,13 @@
 				backdrop-filter: blur(12px);
 				border-bottom: 1px solid var(--border);
 				padding: calc(10px + var(--safe-top)) 14px 10px;
+			}
+			.api-disclaimer {
+				padding: 5px 14px;
+				border-bottom: 1px solid var(--border);
+				color: var(--muted);
+				font-size: 9.5px;
+				text-align: center;
 			}
 			.hrow {
 				display: flex;
@@ -212,7 +237,9 @@
 				top: 0;
 				left: 0;
 				bottom: 0;
-				width: min(86vw, 350px);
+				/* % of the overlay (phone column on desktop), not the desktop vw —
+				   otherwise the drawer would size against a 1440px monitor. */
+				width: min(86%, 350px);
 				background: var(--surface);
 				border-right: 1px solid var(--border);
 				display: flex;
@@ -287,6 +314,18 @@
 			.trow.section .tlabel {
 				font-weight: 800;
 				font-size: 15px;
+			}
+			/* A market. Weighted between the section and the floors under it, with a
+			   rule down its children so one building's stalls read as one block.
+			   Carries the same place colour as the market dividers in the list, so a
+			   building looks like a building wherever the shopper meets it. */
+			.trow.building .tlabel {
+				font-weight: 800;
+				font-size: 14.5px;
+				color: var(--blue);
+			}
+			.tnode.bld > .tchildren {
+				border-left-color: rgba(108, 143, 255, 0.35);
 			}
 			.trow.floor .tlabel {
 				font-weight: 700;
@@ -500,9 +539,76 @@
 			.group {
 				margin-top: 10px;
 			}
-			.ghead .floor.charmpin {
-				background: var(--purple-bg);
-				color: var(--purple);
+			/* ── Market milestone ────────────────────────────────────────────────
+			   Stops are sorted market-first, so one of these opens each leg of the
+			   trip. It is what tells a shopper scrolling the route which building
+			   they are standing in, and how much is left before they can leave it.
+			   It lives inside its first group so the two are removed together.
+
+			   Every market gets the identical treatment — the home one is not
+			   privileged. A shopper reading the route should be able to tell the
+			   legs apart by NAME, never by having to learn that one building is
+			   drawn in a different colour than the rest.
+
+			   Blue is the place colour throughout Shopping Mode: this rule, the
+			   location chip on each stall header, and the market rows in the
+			   Overview drawer. Orange stays reserved for work outstanding. */
+			.bdiv {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				margin: 18px 2px 8px;
+				padding-bottom: 6px;
+				border-bottom: 2px solid var(--blue);
+			}
+			/* The first milestone of a section sits right under its heading, so it
+			   doesn't need the gap that separates one leg of the trip from the next. */
+			.section-head + .group .bdiv {
+				margin-top: 4px;
+			}
+			.bdiv .bname {
+				font-size: 14px;
+				font-weight: 800;
+				letter-spacing: 0.3px;
+				color: var(--blue);
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+			/* How much is still owed in this market. Same shape and colour as the
+			   section badge above it and the stall badges below, because it counts
+			   the same thing — only the scope changes. */
+			.bdiv .bcount {
+				margin-left: auto;
+				font-size: 11px;
+				font-weight: 800;
+				color: #fff;
+				background: var(--accent);
+				border-radius: 11px;
+				min-width: 22px;
+				height: 22px;
+				padding: 0 8px;
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				flex-shrink: 0;
+			}
+			.bdiv .bcount.done {
+				background: var(--green-bg);
+				color: var(--green);
+			}
+			/* Not a market: no stall code was recorded, so there is nowhere to walk
+			   to. Stated in the muted palette rather than the place colour. */
+			.bdiv.none {
+				border-bottom-style: dashed;
+				border-bottom-color: var(--border);
+			}
+			.bdiv.none .bname,
+			.bdiv.none .bcount {
+				color: var(--muted);
+			}
+			.bdiv.none .bcount {
+				background: var(--surface2);
 			}
 			.ghead {
 				position: sticky;
@@ -522,15 +628,9 @@
 				/* Soft depth so a pinned header lifts off the cards scrolling beneath it. */
 				box-shadow: 0 4px 12px rgba(0, 0, 0, 0.28);
 			}
-			.ghead .floor {
-				font-size: 11px;
-				font-weight: 800;
-				color: var(--accent);
-				background: rgba(245, 100, 0, 0.14);
-				padding: 2px 8px;
-				border-radius: 20px;
-				white-space: nowrap;
-			}
+			/* A header carries the shop name and the code painted on the booth, and
+			   nothing else about WHERE it is: the market divider that opens each leg
+			   of the trip has already said that, once, for every stall beneath it. */
 			.ghead .shop {
 				font-weight: 800;
 				font-size: 15.5px;
@@ -542,15 +642,8 @@
 			}
 			.ghead .stall {
 				font-size: 13.5px;
-				color: var(--muted);
-				white-space: nowrap;
-			}
-			.ghead .stall {
 				color: #b9c0d6;
-			}
-			.ghead .floor.unknown {
-				color: var(--muted);
-				background: var(--surface2);
+				white-space: nowrap;
 			}
 			.ghead .gcount {
 				font-size: 12px;
@@ -580,7 +673,8 @@
 				letter-spacing: 0.2px;
 			}
 			/* "Locate on map" pin in a supplier header. */
-			.ghead .glocate {
+			.ghead .glocate,
+			.ghead .gshare {
 				align-self: center;
 				flex: none;
 				width: 30px;
@@ -593,7 +687,11 @@
 				background: var(--surface2);
 				color: var(--blue);
 			}
-			.ghead .glocate svg {
+			.ghead .gshare {
+				color: var(--accent);
+			}
+			.ghead .glocate svg,
+			.ghead .gshare svg {
 				width: 16px;
 				height: 16px;
 				fill: none;
@@ -602,9 +700,14 @@
 				stroke-linecap: round;
 				stroke-linejoin: round;
 			}
-			.ghead .glocate:active {
+			.ghead .glocate:active,
+			.ghead .gshare:active {
 				background: var(--surface);
 				transform: scale(0.94);
+			}
+			.ghead .gshare:disabled {
+				opacity: 0.45;
+				transform: none;
 			}
 			.ghead.gdone {
 				opacity: 0.5;
@@ -797,6 +900,9 @@
 				max-height: 100%;
 				object-fit: contain;
 				border-radius: 10px;
+				-webkit-touch-callout: default;
+				-webkit-user-select: auto;
+				user-select: auto;
 			}
 			.cinfo {
 				flex: 1;
@@ -1040,7 +1146,9 @@
 			.comp.purchased .cs {
 				color: var(--green);
 			}
-			/* Problem states. */
+			/* Problem states — each hue is unique vs component-type colours
+			   (case blue / grip amber / charm purple) so status never collides
+			   with "what to buy". Wrong Stall uses cyan (location / re-route). */
 			.comp.stock {
 				border-color: var(--red);
 				background: var(--red-bg);
@@ -1060,13 +1168,13 @@
 				color: var(--purple);
 			}
 			.comp.wrong {
-				border-color: var(--amber);
-				background: var(--amber-bg);
+				border-color: var(--cyan);
+				background: var(--cyan-bg);
 			}
 			.comp.wrong .cicon,
 			.comp.wrong .cl,
 			.comp.wrong .cs {
-				color: var(--amber);
+				color: var(--cyan);
 			}
 			.comp.nomodel {
 				border-color: var(--rose);
@@ -1497,6 +1605,90 @@
 				color: var(--red);
 				cursor: pointer;
 			}
+			/* Supplier prep sheet — WeChat-ready 备货清单 preview + share. */
+			#prepSheet {
+				max-height: min(92vh, 920px);
+				display: flex;
+				flex-direction: column;
+			}
+			.prep-note {
+				font-size: 12.5px;
+				color: var(--muted);
+				line-height: 1.45;
+				margin: 0 0 10px;
+			}
+			.prep-preview {
+				flex: 1;
+				min-height: 160px;
+				max-height: 48vh;
+				overflow: auto;
+				border: 1px solid var(--border);
+				border-radius: 12px;
+				background: #f4f5f7;
+				color: #1a1d26;
+				-webkit-overflow-scrolling: touch;
+			}
+			.prep-preview img {
+				width: 100%;
+				height: auto;
+				display: block;
+				-webkit-touch-callout: default;
+				-webkit-user-select: auto;
+				user-select: auto;
+			}
+			.prep-preview .prep-busy,
+			.prep-preview .prep-err {
+				padding: 28px 16px;
+				text-align: center;
+				color: #6b7280;
+				font-size: 14px;
+				font-weight: 600;
+			}
+			.prep-preview .prep-err {
+				color: #b91c1c;
+			}
+			.prep-actions {
+				display: flex;
+				flex-direction: column;
+				gap: 8px;
+				margin-top: 12px;
+			}
+			.prep-actions .prep-row {
+				display: flex;
+				gap: 8px;
+			}
+			.prep-actions button {
+				font: inherit;
+				font-size: 15px;
+				font-weight: 800;
+				border-radius: 12px;
+				padding: 14px 12px;
+				border: 1px solid var(--border);
+				cursor: pointer;
+			}
+			.prep-actions .prep-save {
+				flex: 1;
+				background: var(--accent);
+				color: #130800;
+				border-color: transparent;
+			}
+			.prep-actions .prep-share {
+				flex: 1;
+				background: var(--surface2);
+				color: var(--text);
+			}
+			.prep-actions .prep-copy {
+				width: 100%;
+				background: var(--surface2);
+				color: var(--muted);
+				font-size: 13.5px;
+			}
+			.prep-actions button:disabled {
+				opacity: 0.45;
+			}
+			.prep-actions button:active:not(:disabled) {
+				transform: scale(0.98);
+			}
 			.merge-split:active {
 				transform: scale(0.98);
 			}
@@ -1584,7 +1776,8 @@
 				opacity: 0;
 				pointer-events: none;
 				transition: opacity 0.22s ease, transform 0.22s ease;
-				max-width: 92vw;
+				/* Cap against the phone column on desktop; 92% covers narrow phones. */
+				max-width: min(92%, calc(var(--shop-phone-max) - 24px));
 				overflow: hidden;
 			}
 			#toast.show {
@@ -2020,6 +2213,49 @@
 				box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
 			}
 			/* Zoom / 3-D controls overlaid on the stage. */
+			/* ── Desktop / wide viewport: force the phone layout ─────────
+			   Shopping Mode is purpose-built for in-person shopping on a
+			   handset. Opening it from a desktop dashboard must still show
+			   the same phone density — not a stretched full-width desktop
+			   layout. Pattern: centered phone column + scrollport inside
+			   .shop-app; transform creates a containing block so every
+			   position:fixed overlay (drawer, sheets, map, zoom, toast)
+			   stays inside the column instead of spanning the monitor. */
+			@media (min-width: 480px) {
+				html,
+				body {
+					height: 100%;
+					height: 100dvh;
+					overflow: hidden;
+					background: #08090d;
+				}
+				body {
+					display: flex;
+					justify-content: center;
+					align-items: stretch;
+					background:
+						radial-gradient(ellipse 70% 45% at 50% -8%, rgba(245, 100, 0, 0.07), transparent 55%),
+						#08090d;
+				}
+				.shop-app {
+					width: 100%;
+					max-width: var(--shop-phone-max);
+					height: 100%;
+					max-height: 100%;
+					min-height: 0;
+					overflow-x: hidden;
+					overflow-y: auto;
+					overscroll-behavior-y: contain;
+					-webkit-overflow-scrolling: touch;
+					/* Containing block for position:fixed descendants. */
+					transform: translateZ(0);
+					isolation: isolate;
+					box-shadow:
+						0 0 0 1px var(--border),
+						0 28px 90px rgba(0, 0, 0, 0.55);
+				}
+			}
+
 			/* Respect users who ask for less motion: drop non-essential animation and
 			   press-scale effects (the undo window still works, just without the
 			   animated line). */
@@ -2042,6 +2278,7 @@
 		</style>
 	</head>
 	<body>
+		<div class="shop-app" id="shopApp">
 		<header>
 			<div class="hrow">
 				<button class="iconbtn menubtn" id="menuBtn" title="Menu / 目录" aria-label="Open navigation"><svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
@@ -2058,6 +2295,7 @@
 			<div class="component-totals summary-comps" id="summaryComps" aria-live="polite"></div>
 			<div class="progress"><i id="progressBar"></i></div>
 		</header>
+		<div class="api-disclaimer">The term “Etsy” is a trademark of Etsy, Inc. This Application uses Etsy’s API, but is not endorsed or certified by Etsy.</div>
 
 		<div id="list">
 			<div class="state" id="stateBox"><div class="spinner"></div>Loading route…</div>
@@ -2132,7 +2370,24 @@
 			</div>
 		</div>
 
+		<div class="sheet-bg" id="prepBg">
+			<div class="sheet" id="prepSheet" role="dialog" aria-modal="true" aria-labelledby="prepTitle">
+				<div class="grip"></div>
+				<h4 id="prepTitle"></h4>
+				<p class="prep-note" id="prepHint"></p>
+				<div class="prep-preview" id="prepPreview"></div>
+				<div class="prep-actions">
+					<div class="prep-row">
+						<button type="button" class="prep-save" id="prepSave"></button>
+						<button type="button" class="prep-share" id="prepShare"></button>
+					</div>
+					<button type="button" class="prep-copy" id="prepCopy"></button>
+				</div>
+			</div>
+		</div>
+
 		<div id="toast" role="status" aria-live="polite"></div>
+		</div><!-- /.shop-app -->
 
 		<script>
 			'use strict'
@@ -2178,7 +2433,7 @@
 				Purchased: { cls: 'purchased', color: '#22c55e', en: 'Bought', zh: '已购' },
 				'Out of Stock': { cls: 'stock', color: '#ef4444', en: 'No stock', zh: '缺货' },
 				'Out of Production': { cls: 'prod', color: '#a78bfa', en: 'Discontinued', zh: '停产' },
-				'Wrong Stall': { cls: 'wrong', color: '#f5a524', en: 'Wrong stall', zh: '错档口位' },
+				'Wrong Stall': { cls: 'wrong', color: '#22d3ee', en: 'Wrong stall', zh: '错档口位' },
 				'Model Unavailable': { cls: 'nomodel', color: '#fb7185', en: 'No model', zh: '没有此型号' },
 				// Display-only pseudo-status: several orders of one model sit on
 				// DIFFERENT statuses. Never sent to the server, never in the picker.
@@ -2263,6 +2518,32 @@
 				mergeFail: { en: "Couldn't merge — try again", zh: '合并失败，请重试' },
 				mergeOffline: { en: 'Needs a connection to merge', zh: '合并需要联网' },
 				cancel: { en: 'Cancel', zh: '取消' },
+				prepShare: { en: 'Share with supplier', zh: '发给供应商' },
+				prepTitle: { en: 'Supplier prep list', zh: '发给供应商' },
+				prepHint: {
+					en: 'Clean list for WeChat — product photos and models only. No shopping UI.',
+					zh: '生成干净的备货图，方便微信发给档口。只含商品图和型号，不含采购页面。',
+				},
+				prepShareBtn: { en: 'Share', zh: '分享' },
+				prepSaveBtn: { en: 'Save to Photos', zh: '保存到相册' },
+				prepCopyBtn: { en: 'Copy text list', zh: '复制文字清单' },
+				prepBuilding: { en: 'Building image…', zh: '正在生成图片…' },
+				prepEmpty: { en: 'Nothing left to prepare at this stall.', zh: '这个摊位没有待备的商品。' },
+				prepFail: { en: "Couldn't build the image.", zh: '图片生成失败。' },
+				prepSaved: { en: 'Image saved — send it in WeChat.', zh: '图片已保存，请在微信中发送。' },
+				prepPhotosSaved: { en: 'Saved to Photos.', zh: '已保存到相册。' },
+				prepSavePhotosHint: {
+					en: 'Choose Save Image in the share sheet.',
+					zh: '在分享菜单中选择「存储图像」保存到相册。',
+				},
+				prepLongPressSave: {
+					en: 'Long-press the image → Save to Photos.',
+					zh: '长按图片 → 存储到照片。',
+				},
+				prepShared: { en: 'Shared.', zh: '已分享。' },
+				prepCopied: { en: 'Text list copied.', zh: '文字清单已复制。' },
+				prepCopyFail: { en: "Couldn't copy — long-press the image instead.", zh: '复制失败，请长按图片保存。' },
+				prepNoModule: { en: 'Share feature unavailable.', zh: '分享功能不可用。' },
 			}
 			const t = (k) => (T[k] ? T[k][LANG] : k)
 			const compLabel = (c) => (LANG === 'zh' ? c.labelZh : c.label)
@@ -2324,6 +2605,7 @@
 			// ── State ───────────────────────────────────────────────────────────
 			let ROWS = [] // full row set from server
 			let EXCHANGES = [] // open wrong-model swaps to carry back to the stalls
+			let hasRouteSnapshot = false // distinguishes a valid empty route from first boot
 			let ME = null // my username (to skip my own SSE echoes)
 			let showDone = false
 			let searchQ = ''
@@ -2333,6 +2615,60 @@
 			// reboot; rehydrated on boot and drained by flush() + Background Sync.
 			const pending = new Map()
 			let flushing = false
+			// Serialize IndexedDB writes so a slower, older put can never land after a
+			// newer coalesced value and resurrect stale work after the server ACK.
+			let queuePersistChain = Promise.resolve()
+			let queuePersistVersion = 0
+			let queuePersistedVersion = 0
+
+			// ══ SHOP ROUTE SNAPSHOT COORDINATOR ══
+			/* Route GETs come from manual refresh, SSE reconnect, polling, visibility
+			   changes and the periodic healer. On mobile those requests can overlap a
+			   burst of optimistic purchase taps. A response that started before a tap
+			   must never replace the newer local state after the write queue drains.
+
+			   Every fetch therefore owns a generation + mutation revision and an
+			   AbortController. A newer fetch, a local mutation, or a successful write
+			   ACK invalidates/aborts older snapshots before they can render. */
+			let routeFetchEpoch = 0
+			let routeMutationEpoch = 0
+			let activeRouteFetch = null
+			let foregroundRouteFetch = null
+
+			function beginRouteFetch(kind) {
+				if (activeRouteFetch) activeRouteFetch.controller.abort()
+				const token = {
+					epoch: ++routeFetchEpoch,
+					mutationEpoch: routeMutationEpoch,
+					controller: new AbortController(),
+					kind: kind || 'reconcile',
+				}
+				activeRouteFetch = token
+				if (token.kind === 'load') foregroundRouteFetch = token
+				return token
+			}
+
+			function routeFetchIsCurrent(token) {
+				return !!token && activeRouteFetch === token && token.epoch === routeFetchEpoch && token.mutationEpoch === routeMutationEpoch && !token.controller.signal.aborted
+			}
+
+			function finishRouteFetch(token) {
+				if (activeRouteFetch === token) activeRouteFetch = null
+				if (foregroundRouteFetch === token) foregroundRouteFetch = null
+			}
+
+			function invalidateRouteFetches() {
+				routeFetchEpoch++
+				if (activeRouteFetch) activeRouteFetch.controller.abort()
+				activeRouteFetch = null
+			}
+
+			function recordLocalMutation() {
+				routeMutationEpoch++
+				invalidateRouteFetches()
+			}
+			// ══ END SHOP ROUTE SNAPSHOT COORDINATOR ══
+
 			// Every deliberate in-app navigation goes through leaveTo(), which marks the
 			// departure as ours so the beforeunload guard stays silent. That guard exists to
 			// catch a shopper CLOSING the tab with unsynced work; firing it on our own
@@ -2359,6 +2695,44 @@
 			let MANUAL_MERGE = new Set()
 
 			const $ = (id) => document.getElementById(id)
+			// Scrollport abstraction: on phones the window scrolls; on desktop the
+			// phone-column `.shop-app` is the scrollport (see CSS @media min-width:480px).
+			// All scroll read/write goes through these so drawer jumps + re-render
+			// position restore keep working in both layouts.
+			const shopScrollRoot = () => {
+				const app = $('shopApp')
+				if (app && window.matchMedia && window.matchMedia('(min-width: 480px)').matches) return app
+				return document.scrollingElement || document.documentElement
+			}
+			const shopScrollY = () => {
+				const root = shopScrollRoot()
+				return root === document.scrollingElement || root === document.documentElement || root === document.body
+					? window.scrollY || window.pageYOffset || 0
+					: root.scrollTop
+			}
+			const shopScrollTo = (top, behavior) => {
+				const y = Math.max(0, top)
+				const root = shopScrollRoot()
+				if (root === document.scrollingElement || root === document.documentElement || root === document.body) {
+					if (behavior) window.scrollTo({ top: y, behavior })
+					else window.scrollTo(0, y)
+					return
+				}
+				if (behavior && typeof root.scrollTo === 'function') root.scrollTo({ top: y, behavior })
+				else root.scrollTop = y
+			}
+			/** Scroll so `el` sits just below the sticky header inside the active scrollport. */
+			const shopScrollElIntoView = (el, gap) => {
+				if (!el) return
+				const root = shopScrollRoot()
+				const headerH = (document.querySelector('header') || {}).offsetHeight || 0
+				const pad = gap == null ? 8 : gap
+				const isWindow =
+					root === document.scrollingElement || root === document.documentElement || root === document.body
+				const rootTop = isWindow ? 0 : root.getBoundingClientRect().top
+				const top = el.getBoundingClientRect().top - rootTop + shopScrollY() - headerH - pad
+				shopScrollTo(top, 'smooth')
+			}
 			const keyOf = (r) => r.receipt_id + '\x00' + r.item_key
 			// Subtle haptic feedback for confirmations — a shopper often taps without
 			// looking in a busy market. No-op where unsupported (iOS Safari ignores it).
@@ -2467,23 +2841,136 @@
 				}
 			}
 
-			// ── Grouping by supplier location ────────────────────────────────────
-			// Order MUST match the desktop Orders Sorting Dashboard's default sort
-			// (Supplier / Location, ascending): floor → stall → shop. Floor 999 /
-			// missing is treated as "unknown" and sorts last, exactly like desktop.
-			function floorNorm(floor) {
-				return floor != null && floor !== 999 && floor !== '' ? Number(floor) : 9999
+			// ── Where a stall is: building → floor → code ────────────────────────
+			// ══ STALL LOCATION ══
+			// Mirror of src/route/stall-location.js — kept honest by
+			// scripts/test-stall-location.js, which fails the build if the two ever
+			// disagree. See that file for the full rationale; in short: we shop several
+			// markets now, and a stall outside the home market carries its market as a
+			// prefix ("康乐北区5A40-42"). Reading that prefix is what lets the route be
+			// walked one BUILDING at a time instead of bouncing between markets that
+			// happen to share a floor number.
+			const HOME_BUILDING_ID = 'tongxin'
+			const BUILDINGS = [
+				{ id: 'jingji',       order: 10, label: { en: 'Jingji',       zh: '经济'     }, aliases: ['经济'] },
+				{ id: 'tongxin',      order: 20, label: { en: 'Tongxin',      zh: '通信'     }, aliases: ['通信', '通信城', '通信市场'] },
+				{ id: 'kangle-north', order: 30, label: { en: 'Kangle North', zh: '康乐北区' }, aliases: ['康乐北区', '康乐北'] },
+				// 康乐 is the same complex as 康乐北区, so it stays pinned beside it.
+				{ id: 'kangle',       order: 31, label: { en: 'Kangle',       zh: '康乐'     }, aliases: ['康乐'] },
+				{ id: 'taipingyang',  order: 40, label: { en: 'Taipingyang',  zh: '太平洋'   }, aliases: ['太平洋'] },
+				{ id: 'huitong',      order: 50, label: { en: 'Huitong',      zh: '汇通'     }, aliases: ['汇通'] },
+				// The charm market — bare codes, no prefix to parse; reached only via
+				// the charm re-home below (charmLoc), which is why it has no aliases.
+				// Last, because the charm leg is walked after the cases and grips.
+				{ id: 'longsheng',    order: 60, label: { en: 'Longsheng',    zh: '龙胜'     }, aliases: [] },
+			]
+			const UNREGISTERED_ORDER = 9000
+			const UNLOCATED_ORDER = 9999
+			const UNKNOWN_FLOOR = 999
+			const PLACEHOLDER_CODES = new Set(['-', '???'])
+			const ALIAS_INDEX = BUILDINGS.flatMap((b) => b.aliases.map((alias) => ({ alias, upper: alias.toUpperCase(), building: b }))).sort(
+				(a, b) => b.alias.length - a.alias.length,
+			)
+			const BUILDING_BY_ID = new Map(BUILDINGS.map((b) => [b.id, b]))
+			const normalizeStall = (stall) =>
+				String(stall == null ? '' : stall)
+					.normalize('NFKC')
+					.replace(/[–—―]/g, '-')
+					.trim()
+			function floorFromCode(code) {
+				if (!code) return UNKNOWN_FLOOR
+				if (/^A2/i.test(code)) return 2
+				let m = /^(\d)/.exec(code)
+				if (m) return Number(m[1])
+				m = /(\d)[A-Za-z]/.exec(code)
+				if (m) return Number(m[1])
+				return UNKNOWN_FLOOR
 			}
-			function supplierSortKey(floor, stall, shop) {
-				return `${String(floorNorm(floor)).padStart(4, '0')}\x00${(stall || '').toLowerCase()}\x00${(shop || '').toLowerCase()}`
+			function locatedAt(building, order, code, raw, registered) {
+				return {
+					buildingId: building.id,
+					buildingOrder: order,
+					buildingLabel: building.label,
+					isHome: building.id === HOME_BUILDING_ID,
+					registered,
+					located: true,
+					code,
+					floor: floorFromCode(code),
+					raw,
+				}
 			}
+			function parseStall(stall) {
+				const raw = normalizeStall(stall)
+				if (!raw || PLACEHOLDER_CODES.has(raw)) {
+					return {
+						buildingId: '',
+						buildingOrder: UNLOCATED_ORDER,
+						buildingLabel: { en: '', zh: '' },
+						isHome: false,
+						registered: false,
+						located: false,
+						code: '',
+						floor: UNKNOWN_FLOOR,
+						raw,
+					}
+				}
+				const hit = ALIAS_INDEX.find((a) => raw.slice(0, a.alias.length).toUpperCase() === a.upper)
+				if (hit) return locatedAt(hit.building, hit.building.order, raw.slice(hit.alias.length).trim(), raw, true)
+				// A leading run of non-ASCII is a market we haven't registered yet: give
+				// it a stop of its own rather than filing it under the home market.
+				const foreign = /^([^\x00-\x7F]+)/.exec(raw)
+				if (foreign) {
+					const name = foreign[1].trim()
+					return locatedAt({ id: 'x:' + name, label: { en: name, zh: name } }, UNREGISTERED_ORDER, raw.slice(foreign[1].length).trim(), raw, false)
+				}
+				const home = BUILDING_BY_ID.get(HOME_BUILDING_ID)
+				return locatedAt(home, home.order, raw, raw, true)
+			}
+			const stallFloor = (stall) => parseStall(stall).floor
+			const floorSortValue = (floor) => (floor != null && floor !== UNKNOWN_FLOOR && floor !== '' ? Number(floor) : 9999)
+			// The order the route is walked: building → floor → stall → shop. Compared
+			// with plain < / > (code-unit order) so Chinese shop names sequence the same
+			// here, on the desktop table and in the Excel export.
+			function locationSortKey(stall, shop) {
+				const loc = parseStall(stall)
+				return [
+					String(loc.buildingOrder).padStart(4, '0'),
+					loc.buildingId,
+					String(floorSortValue(loc.floor)).padStart(4, '0'),
+					loc.code.toLowerCase(),
+					String(shop == null ? '' : shop).trim().toLowerCase(),
+				].join('\x00')
+			}
+			// ══ END STALL LOCATION ══
+
+			// Market name in the shopper's language. An unlocated stop has no market,
+			// so it reads as "other" rather than as an empty chip.
+			const buildingLabel = (loc) => (LANG === 'zh' ? loc.buildingLabel.zh : loc.buildingLabel.en) || t('otherFloor')
+
+			// Where a CHARM is shopped. Charms are bought in their own market (龙胜),
+			// whose stalls are recorded with bare codes exactly like the home
+			// case/grip market — so a bare charm code, which parses as the home
+			// market, is re-homed to 龙胜 (floor and code untouched). A charm stall
+			// that explicitly names another market keeps it. A charm sold at a stall
+			// already on the case/grip route is merged into that supplier's stop
+			// upstream and never reaches here, so it correctly keeps the supplier's
+			// market — the one exception the shopper asked for.
+			// ══ CHARM LOCATION ══
+			const CHARM_HOME_BUILDING_ID = 'longsheng'
+			function charmLoc(stall) {
+				const loc = parseStall(stall)
+				if (!loc.isHome) return loc
+				const b = BUILDING_BY_ID.get(CHARM_HOME_BUILDING_ID)
+				return { ...loc, buildingId: b.id, buildingOrder: b.order, buildingLabel: b.label, isHome: false }
+			}
+			// ══ END CHARM LOCATION ══
 			// Stop identity for a line, matching the list's grouping exactly so counts
 			// line up with what the shopper sees. Case/grip stops key by supplier
 			// location; charm stops key by charm stall. Unmatched → a single bucket.
 			const supKeyOf = (r) => {
 				const shop = (r.supplier_shop || '').trim()
 				const stall = (r.supplier_stall || '').trim()
-				return shop || stall ? supplierSortKey(r.supplier_floor, stall, shop) : '\uffff'
+				return shop || stall ? locationSortKey(stall, shop) : '\uffff'
 			}
 			const charmKeyOf = (r) => {
 				const shop = (r.charm_shop || '').trim()
@@ -2543,27 +3030,13 @@
 				}
 				return stops.length === 1 ? stops[0].key : null
 			}
-			function groupRows(rows) {
-				const groups = new Map()
-				for (const r of rows) {
-					const shop = (r.supplier_shop || '').trim()
-					const stall = (r.supplier_stall || '').trim()
-					const floor = r.supplier_floor
-					const matched = !!(shop || stall)
-					// Group identity + sort key both use the desktop's floor→stall→shop
-					// ordering so grouped cards appear in the exact same sequence.
-					const key = matched ? supplierSortKey(floor, stall, shop) : '\uffff'
-					if (!groups.has(key)) groups.set(key, { floor, shop, stall, matched, sortKey: key, rows: [] })
-					groups.get(key).rows.push(r)
-				}
-				// Same comparison the desktop uses (code-unit, not locale) so the
-				// sequence is byte-for-byte identical, including Chinese shop names.
-				return [...groups.values()].sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0))
-			}
-
 			// ── Summary + progress ───────────────────────────────────────────────
 			function renderSummary() {
-				const actionable = ROWS.filter((r) => !r.excluded && !r.needs_exchange)
+				// Swaps never reach ROWS (the server projects them out of the buy list
+				// and sends them separately as EXCHANGES), so everything here is real
+				// buying work — including buy-shaped model fixes, which arrive already
+				// naming the corrected model and look identical to any other purchase.
+				const actionable = ROWS.filter((r) => !r.excluded)
 				const remaining = actionable.filter((r) => !fullyPurchased(r))
 				const done = actionable.length - remaining.length
 				const pct = actionable.length ? Math.round((done / actionable.length) * 100) : 0
@@ -2636,7 +3109,7 @@
 			// Product photo thumbnail for a Case/Grip product header.
 			function imgHtml(r) {
 				return r.image_url
-					? `<img class="thumb" loading="lazy" decoding="async" src="${esc(r.image_url)}" onerror="this.classList.add('ph');this.removeAttribute('src')" />`
+					? `<img class="thumb" loading="lazy" decoding="async" referrerpolicy="no-referrer" src="${esc(r.image_url)}" onerror="this.classList.add('ph');this.removeAttribute('src')" />`
 					: `<div class="thumb ph"></div>`
 			}
 
@@ -2651,6 +3124,9 @@
 			function cgComponentCardHtml(rows, comp, aggId) {
 				const done = rows.every((r) => (r[comp.status] || 'Pending') === 'Purchased')
 				const qty = rows.filter((r) => r[comp.flag]).reduce((n, r) => n + (r.quantity || 1), 0)
+				// Shoppers only need the model to buy. Buy-shaped model fixes already
+				// rename `phone_model` server-side; the ordered/wrong model is never
+				// shown here (exchange UI is for swaps with something in hand only).
 				const identity = comp.key === 'case'
 					? `<span class="cmodel">${esc(rows[0].phone_model || '—')}</span>`
 					: `<span class="cmodel">${esc(compLabel(comp))}</span>`
@@ -2867,22 +3343,30 @@
 				return 'mixed'
 			}
 
-			// Correction card — a model to fix on this trip. Two shapes:
-			//   • Swap  (we hold a wrong model): shows HAVE → NEED, carry & swap it.
-			//   • Buy   (no stock — buyer changed model): shows 🛒 BUY NEED, purchase it.
-			// The distinction is simply whether have_model is set.
+			// Swap card — a wrong-model item to carry back and exchange on this trip.
+			// The server only sends SWAPs here: a model fix with nothing in hand is an
+			// ordinary purchase and arrives in ROWS instead, on a normal product card
+			// showing the corrected model. The buy branch below is kept only so a card
+			// cached from an older server build still renders sensibly.
 			function exCardHtml(x) {
 				const img = x.image_url
-					? `<img class="thumb" loading="lazy" decoding="async" src="${esc(x.image_url)}" onerror="this.classList.add('ph');this.removeAttribute('src')" />`
+					? `<img class="thumb" loading="lazy" decoding="async" referrerpolicy="no-referrer" src="${esc(x.image_url)}" onerror="this.classList.add('ph');this.removeAttribute('src')" />`
 					: `<div class="thumb ph"></div>`
-				// A wrong-model fix is ALWAYS a case-only action: the case is the only
-				// model-specific piece, so it's the one thing swapped (or bought) at the
-				// stall. Any grip/charm on the same line are universal and stay in hand —
-				// they're never swapped or re-bought. Older exchanges stored the full
-				// component set (e.g. "case,grip,charm"), which showed on the swap card as
-				// "壳 + 支架 + 挂件" and misled shoppers into thinking they had to swap all
-				// three. The swap card therefore always shows just the Case.
-				const comps = compLabel(COMP_CASE)
+				// Name the pieces this swap actually covers. iPhone is case-only
+				// (grip/charm stay in hand). AirPods include the attached charm —
+				// they ship as one object, so the card must not read as "Case" alone.
+				const parts = String(x.components || '')
+					.split(',')
+					.map((s) => s.trim().toLowerCase())
+					.filter(Boolean)
+				const showCharm = parts.includes('charm') || (!parts.length && x.charm_integral)
+				const showCase = parts.includes('case') || (!parts.length && (x.has_case !== false))
+				const showGrip = parts.includes('grip')
+				const labels = []
+				if (showCase) labels.push(compLabel(COMP_CASE))
+				if (showGrip) labels.push(compLabel(COMP_GRIP))
+				if (showCharm) labels.push(x.charm_integral ? (LANG === 'zh' ? '挂件（随壳）' : 'attached charm') : compLabel(COMP_CHARM))
+				const comps = labels.join(' + ') || compLabel(COMP_CASE)
 				const have = (x.have_model || '').trim()
 				const swapHtml = have
 					? `<div class="exswap">
@@ -2891,7 +3375,7 @@
 								<span class="exneed">${esc(x.need_model || '?')}</span>
 							</div>`
 					: `<div class="exswap exbuy">
-								<span class="exbuytag">🛒</span>
+								
 								<span class="exneed">${esc(x.need_model || '?')}</span>
 							</div>`
 				return `<div class="card ex" data-exid="${x.exchange_id}">
@@ -2930,15 +3414,26 @@
 			}
 
 			// Charms are shopped at charm stalls, so they group by charm shop/stall.
+			// A merchant is still ONE stop (identity stays the shop name, which the
+			// completion / celebration paths key off), but the stops are laid out in
+			// walking order — market, then floor, then stall — so the charm leg of the
+			// trip reads like a route instead of an alphabetical list.
 			function groupCharmRows(rows) {
 				const groups = new Map()
 				for (const r of rows) {
 					const shop = (r.charm_shop || '').trim()
 					const key = shop ? shop.toLowerCase() : '\uffff'
-					if (!groups.has(key)) groups.set(key, { shop, stall: (r.charm_stall || '').trim(), floor: r.charm_floor, sortKey: key, rows: [] })
+					if (!groups.has(key)) {
+						const stall = (r.charm_stall || '').trim()
+						const loc = charmLoc(stall)
+						// Sort on the re-homed market so 龙胜 stops group together and any
+						// charm at another named market sorts after them, matching the tree.
+						const orderKey = shop || stall ? [String(loc.buildingOrder).padStart(4, '0'), loc.buildingId, String(floorSortValue(loc.floor)).padStart(4, '0'), loc.code.toLowerCase(), shop.toLowerCase()].join('\x00') : '\uffff'
+						groups.set(key, { loc, shop, stall, sortKey: key, orderKey, rows: [] })
+					}
 					groups.get(key).rows.push(r)
 				}
-				return [...groups.values()].sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0))
+				return [...groups.values()].sort((a, b) => (a.orderKey < b.orderKey ? -1 : a.orderKey > b.orderKey ? 1 : a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0))
 			}
 
 			function applySearch(rows) {
@@ -2966,10 +3461,13 @@
 				// standing at a supplier sees, in one place, everything to BUY and SWAP
 				// there — no backtracking to a second section later.
 				const merged = new Map()
-				const newGroup = (floor, shop, stall) => ({ floor, shop, stall, matched: !!(shop || stall), rows: [], exRows: [], charmRows: [] })
+				// `loc` (market, floor, prefix-free code) is resolved once per stop and
+				// read by the header, the building dividers and the drawer tree, so all
+				// three can never disagree about where a shopper is being sent.
+				const newGroup = (shop, stall) => ({ loc: parseStall(stall), shop, stall, matched: !!(shop || stall), rows: [], exRows: [], charmRows: [] })
 				const ensureGroup = (r) => {
 					const k = supKeyOf(r)
-					if (!merged.has(k)) merged.set(k, newGroup(r.supplier_floor, (r.supplier_shop || '').trim(), (r.supplier_stall || '').trim()))
+					if (!merged.has(k)) merged.set(k, newGroup((r.supplier_shop || '').trim(), (r.supplier_stall || '').trim()))
 					return merged.get(k)
 				}
 				let cg = ROWS.filter(inCgSection)
@@ -2999,7 +3497,7 @@
 						// section mid-trip. Display fields come from the SUPPLIER side so the
 						// header reads identically however the stop was created.
 						const stop = cgStopIndex().byKey.get(stopKey)
-						g = newGroup(stop ? stop.floor : r.charm_floor, stop ? stop.shop : (r.charm_shop || '').trim(), stop ? stop.stall : (r.charm_stall || '').trim())
+						g = newGroup(stop ? stop.shop : (r.charm_shop || '').trim(), stop ? stop.stall : (r.charm_stall || '').trim())
 						merged.set(stopKey, g)
 					}
 					g.charmRows.push(r)
@@ -3031,12 +3529,12 @@
 					return
 				}
 
-				const prevScroll = window.scrollY
+				const prevScroll = shopScrollY()
 				box.innerHTML = renderSection(t('secCG'), cgGroups, 0, 'cg') + renderSection(t('secCharm'), chGroups, cgGroups.length, 'charm')
 				maybeRenderTree()
 				// Keep the shopper's place across a re-render (search/collapse/undo) —
 				// no jarring jump.
-				if (prevScroll > 0) requestAnimationFrame(() => window.scrollTo(0, prevScroll))
+				if (prevScroll > 0) requestAnimationFrame(() => shopScrollTo(prevScroll))
 			}
 
 			// Items still needing action in a group = unbought lines + charms sourced at
@@ -3084,15 +3582,67 @@
 				return `<span class="gtotal">${money(st.sum)}${st.anyUnpriced ? '+' : ''}</span>`
 			}
 
+			// ══ ROUTE LIST ══
+			// How a market is announced in the route, and how each stall under it
+			// says where it is. Both are deliberately uniform: the home market gets
+			// no privileged styling and no shorter phrasing, because a shopper should
+			// tell one leg from the next by reading its NAME, never by having learnt
+			// that one building happens to be drawn differently from the rest.
+
+			// How many items are still owed in the run of consecutive stops that
+			// starts at `from` and stays in the same market — i.e. one leg of the trip.
+			function buildingLegRemaining(from) {
+				const head = LAST_GROUPS[from]
+				let items = 0
+				for (let i = from; i < LAST_GROUPS.length; i++) {
+					const g = LAST_GROUPS[i]
+					if (g.section !== head.section || g.loc.buildingId !== head.loc.buildingId) break
+					items += groupRemaining(g)
+				}
+				return items
+			}
+
+			// A milestone announcing the market the route has just walked into. Stops
+			// are already sorted market-first, so one divider per market is all it
+			// takes for a shopper scrolling the list to know which building they are
+			// standing in — and how much is left before they can leave it.
+			//
+			// The name and the count are all it carries. A tally of stalls was noise:
+			// it competes with the number that actually decides whether the shopper
+			// can leave the building, and it is not a number anyone acts on.
+			function buildingDividerHtml(g, from) {
+				const items = buildingLegRemaining(from)
+				return `<div class="bdiv${g.loc.located ? '' : ' none'}" data-bfrom="${from}">
+					<span class="bname">${esc(g.loc.located ? buildingLabel(g.loc) : t('otherFloor'))}</span>
+					<span class="bcount${items ? '' : ' done'}">${items || '✓'}</span>
+				</div>`
+			}
+
+			// A stall header deliberately carries NO market or floor chip. The market
+			// is stated once, by the divider that opens its leg of the trip, and the
+			// route is walked one market at a time — so on the floor the shopper is
+			// already standing in the building the chip would have named. Repeating
+			// it above every shop was noise competing with the two things actually
+			// used to find the booth: the shop name and the code painted on it.
+			// ══ END ROUTE LIST ══
+
 			function renderSection(title, groups, baseIdx, kind) {
 				if (!groups.length) return ''
 				const remaining = groups.reduce((n, g) => n + groupRemaining(g), 0)
 				const badge = remaining ? `<span class="section-count">${remaining}</span>` : `<span class="section-count sdone">✓</span>`
-				const body = groups.map((g, j) => renderGroup(g, baseIdx + j)).join('')
+				let prevBuilding = null
+				const body = groups
+					.map((g, j) => {
+						const gidx = baseIdx + j
+						const crossed = g.loc.buildingId !== prevBuilding
+						prevBuilding = g.loc.buildingId
+						return renderGroup(g, gidx, crossed ? buildingDividerHtml(g, gidx) : '')
+					})
+					.join('')
 				return `<div class="section ${kind || ''}"><div class="section-head">${title}${badge}</div>${body}</div>`
 			}
 
-			function renderGroup(g, gidx) {
+			function renderGroup(g, gidx, dividerHtml) {
 				const remaining = groupRemaining(g)
 				const allDone = remaining === 0
 				const collapsed = isCollapsed(g)
@@ -3104,27 +3654,29 @@
 					g.section !== 'charm' && g.matched && g.stall && mapHasStall(g.stall)
 						? `<button class="glocate" data-stall="${esc(g.stall)}" title="${t('locate')}" aria-label="${t('locate')}"><svg viewBox="0 0 24 24"><path d="M12 21s7-5.6 7-11a7 7 0 1 0-14 0c0 5.4 7 11 7 11z"/><circle cx="12" cy="10" r="2.6"/></svg></button>`
 						: ''
+				// WeChat prep list — one clean long image per stall for supplier staff.
+				const shareBtn = `<button type="button" class="gshare" data-gidx="${gidx}" title="${t('prepShare')}" aria-label="${t('prepShare')}"><svg viewBox="0 0 24 24"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7"/><path d="M16 6l-4-4-4 4"/><path d="M12 2v14"/></svg></button>`
+				// The market prefix is dropped from the code — the divider already says
+				// which market this is, and "5A40-42" is what's painted on the booth
+				// the shopper is looking for.
+				const stallText = g.loc.code || g.stall
 				let head
 				if (g.section === 'charm') {
-					const hasFloor = g.floor != null && g.floor !== '' && g.floor !== 999
 					head = `<div class="ghead${allDone ? ' gdone' : ''}">
-						${hasFloor ? `<span class="floor">${esc(floorLabel(g.floor))}</span>` : ''}
 						<span class="shop">${esc(g.shop || t('charmNotSet'))}</span>
-						${g.stall ? `<span class="stall">${esc(g.stall)}</span>` : ''}
-						${gtotal}${count}${chev}
+						${stallText ? `<span class="stall">${esc(stallText)}</span>` : ''}
+						${shareBtn}${gtotal}${count}${chev}
 					</div>`
 				} else {
-					const hasFloor = g.floor != null && g.floor !== '' && g.floor !== 999
 					head = g.matched
 						? `<div class="ghead${allDone ? ' gdone' : ''}">
-							${hasFloor ? `<span class="floor">${esc(floorLabel(g.floor))}</span>` : ''}
 							<span class="shop">${esc(g.shop || '—')}</span>
-							${g.stall ? `<span class="stall">${esc(g.stall)}</span>` : ''}
-							${locBtn}${gtotal}${count}${chev}
+							${stallText ? `<span class="stall">${esc(stallText)}</span>` : ''}
+							${locBtn}${shareBtn}${gtotal}${count}${chev}
 						</div>`
 						: `<div class="ghead${allDone ? ' gdone' : ''}">
 							<span class="shop">${t('supplierNotSet')}</span>
-							${gtotal}${count}${chev}
+							${shareBtn}${gtotal}${count}${chev}
 						</div>`
 				}
 				let body = ''
@@ -3152,7 +3704,10 @@
 					}
 					body = `<div class="gbody">${cards}</div>`
 				}
-				return `<div class="group${collapsed ? ' collapsed' : ''}" data-gidx="${gidx}">${head}${body}</div>`
+				// The divider lives INSIDE the first group of its run, so the two share a
+				// lifetime: when that group is emptied out and removed, its divider goes
+				// with it instead of being left behind labelling nothing.
+				return `<div class="group${collapsed ? ' collapsed' : ''}" data-gidx="${gidx}">${dividerHtml || ''}${head}${body}</div>`
 			}
 
 			// A group is collapsed if the user explicitly collapsed it, else it
@@ -3167,7 +3722,7 @@
 			function cgGroupKey(r) {
 				const shop = (r.supplier_shop || '').trim()
 				const stall = (r.supplier_stall || '').trim()
-				return 'cg\x01' + (shop || stall ? supplierSortKey(r.supplier_floor, stall, shop) : '\uffff')
+				return 'cg\x01' + (shop || stall ? locationSortKey(stall, shop) : '\uffff')
 			}
 			// Exchange → same supplier-location key as the buy list (they're merged).
 			const exCgKey = (x) => cgGroupKey(x)
@@ -3200,39 +3755,76 @@
 			// carries the supplier's key, so it must be judged by the whole stop.
 			const stopDone = (key) => (String(key).startsWith('ch\x01') ? charmGroupDone(key) : cgGroupDone(key))
 
-			// ── Navigation drawer (route tree: Section → Floor → Supplier) ───────
-			const treeCollapsed = new Set() // tree node ids the user has collapsed
+			// ── Navigation drawer (route tree: Section → Building → Floor → Stall) ──
+			// The building level is what makes the drawer usable now that the route
+			// spans several markets: "5楼" on its own used to file the home market's
+			// 5C26 next to 康乐北区5A40-42 and 经济5D91, which are a taxi ride apart.
 			const drawerOpen = () => $('drawerBg').classList.contains('open')
+
+			// ══ ROUTE TREE ══
+			const treeCollapsed = new Set() // node ids the shopper explicitly folded away
+			const treeExpanded = new Set() // …and ones they explicitly re-opened
+			// The drawer opens as a map of the trip: every market on one screen, nothing
+			// below it. A shopper picks where to walk first, then opens that market. Its
+			// floors and stalls stay open from there — a finished branch folds itself
+			// away so the drawer shrinks as the trip progresses, the same rule the list
+			// uses for a finished stall. Either way an explicit tap wins.
+			const treeNodeCollapsed = (node) =>
+				treeCollapsed.has(node.id) ? true
+				: treeExpanded.has(node.id) ? false
+				: node.type === 'building' ? true
+				: node.remaining === 0
 
 			// Build the tree from the CURRENTLY rendered groups so leaf → card jumps
 			// line up with the DOM (via each group's data-gidx index).
 			function buildTree() {
-				const cg = { id: 'sec:cg', type: 'section', label: t('secCG'), remaining: 0, floorMap: new Map(), children: [] }
-				const charm = { id: 'sec:charm', type: 'section', label: t('secCharm'), remaining: 0, children: [] }
+				const cg = { id: 'sec:cg', type: 'section', label: t('secCG'), remaining: 0, children: [], buildings: new Map() }
+				const charm = { id: 'sec:charm', type: 'section', label: t('secCharm'), remaining: 0, children: [], buildings: new Map() }
 				LAST_GROUPS.forEach((g, gidx) => {
 					// Count includes exchanges owed at the stall (they're merged into cg).
 					const remaining = groupRemaining(g)
-					if (g.section === 'charm') {
-						charm.children.push({ type: 'leaf', gidx, label: g.shop || t('charmNotSet'), sub: g.stall || '', remaining })
-						charm.remaining += remaining
-					} else {
-						const hasFloor = g.floor != null && g.floor !== '' && g.floor !== 999
-						const fid = cg.id + ':flr:' + (hasFloor ? g.floor : '_')
-						let fl = cg.floorMap.get(fid)
-						if (!fl) {
-							fl = { id: fid, type: 'floor', label: hasFloor ? floorLabel(g.floor) : t('otherFloor'), remaining: 0, children: [] }
-							cg.floorMap.set(fid, fl)
-							cg.children.push(fl)
-						}
-						fl.children.push({ type: 'leaf', gidx, label: g.shop || t('supplierNotSet'), sub: g.stall || '', remaining })
-						fl.remaining += remaining
-						cg.remaining += remaining
-					}
+					const sec = g.section === 'charm' ? charm : cg
+					addTreeLeaf(sec, g.loc, {
+						type: 'leaf',
+						gidx,
+						label: g.shop || (g.section === 'charm' ? t('charmNotSet') : t('supplierNotSet')),
+						sub: g.loc.code,
+						remaining,
+					})
+					sec.remaining += remaining
 				})
 				const out = []
 				if (cg.children.length) out.push(cg)
 				if (charm.children.length) out.push(charm)
 				return out
+			}
+
+			// File one stop under its market, then its floor. Stalls whose floor can't
+			// be read hang straight off the market rather than under an "Other" floor
+			// that would tell the shopper nothing — and because they already sort last
+			// within the market, they land after the real floors on their own.
+			function addTreeLeaf(sec, loc, leaf) {
+				const bid = sec.id + ':bld:' + (loc.located ? loc.buildingId : '_')
+				let b = sec.buildings.get(bid)
+				if (!b) {
+					b = { id: bid, type: 'building', label: loc.located ? buildingLabel(loc) : t('otherFloor'), remaining: 0, children: [], floors: new Map() }
+					sec.buildings.set(bid, b)
+					sec.children.push(b)
+				}
+				b.remaining += leaf.remaining
+				if (loc.floor === UNKNOWN_FLOOR) {
+					b.children.push(leaf)
+					return
+				}
+				const fid = b.id + ':flr:' + loc.floor
+				let fl = b.floors.get(fid)
+				if (!fl) {
+					fl = { id: fid, type: 'floor', label: floorLabel(loc.floor), remaining: 0, children: [] }
+					b.floors.set(fid, fl)
+					b.children.push(fl)
+				}
+				fl.children.push(leaf)
+				fl.remaining += leaf.remaining
 			}
 
 			function treeNodeHtml(node) {
@@ -3245,9 +3837,9 @@
 						${badge(node.remaining)}
 					</div></div>`
 				}
-				const collapsed = treeCollapsed.has(node.id)
-				return `<div class="tnode ${collapsed ? 'collapsed' : ''}">
-					<div class="trow ${node.type}" data-toggle="${node.id}">
+				const collapsed = treeNodeCollapsed(node)
+				return `<div class="tnode ${node.type === 'building' ? 'bld ' : ''}${collapsed ? 'collapsed' : ''}">
+					<div class="trow ${node.type}" data-toggle="${esc(node.id)}">
 						<span class="tcaret">▾</span>
 						<span class="tlabel">${esc(node.label)}</span>
 						${badge(node.remaining)}
@@ -3255,6 +3847,7 @@
 					<div class="tchildren">${node.children.map(treeNodeHtml).join('')}</div>
 				</div>`
 			}
+			// ══ END ROUTE TREE ══
 
 			function renderTree() {
 				const tree = buildTree()
@@ -3285,6 +3878,7 @@
 			// press so the manager knows the history entry is already consumed.
 			function closeTopOverlay(fromPop) {
 				if ($('zoomBg').classList.contains('open')) return closeZoom(fromPop), true
+				if ($('prepBg').classList.contains('open')) return closePrepSheet(fromPop), true
 				if ($('mergeBg').classList.contains('open')) return closeMergeSheet(fromPop), true
 				if ($('priceBg').classList.contains('open')) return closePriceSheet(fromPop), true
 				if ($('sheetBg').classList.contains('open')) return closeSheet(fromPop), true
@@ -3390,9 +3984,7 @@
 				requestAnimationFrame(() => {
 					const grp = document.querySelector(`.group[data-gidx="${gidx}"]`)
 					if (!grp) return
-					const hH = (document.querySelector('header') || {}).offsetHeight || 0
-					const top = grp.getBoundingClientRect().top + window.scrollY - hH - 8
-					window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+					shopScrollElIntoView(grp, 8)
 					grp.classList.add('ghl')
 					setTimeout(() => grp.classList.remove('ghl'), 1500)
 				})
@@ -3432,9 +4024,25 @@
 				return [...out]
 			}
 			const stallAliases = (stall) => (stall && stall.aliases && stall.aliases.length ? stall.aliases : mapCodeAliases(stall && (stall.code || stall.norm || stall)))
+			// Do two stall codes name the same physical booth? They must sit in the
+			// same MARKET first — 康乐5A17 and the home market's 5A17 are different
+			// shops in different buildings — and only then are their local codes
+			// compared, with merged-stall ranges expanded. Running the expansion on the
+			// prefix-free code is also what makes a range in another market
+			// (康乐北区5C34-39) resolve to its units at all.
 			const stallCodesOverlap = (a, b) => {
-				const right = new Set(mapCodeAliases(b))
-				return mapCodeAliases(a).some((code) => right.has(code))
+				const la = parseStall(a)
+				const lb = parseStall(b)
+				if (!la.located || !lb.located || la.buildingId !== lb.buildingId) return false
+				const right = new Set(mapCodeAliases(lb.code))
+				return mapCodeAliases(la.code).some((code) => right.has(code))
+			}
+			// The code to look for on the floor plans. The plans were surveyed in the
+			// home market only, so a stall anywhere else has no map code at all —
+			// without this, 康乐5A17 would light up the home market's 5A17.
+			const mapCodeOf = (stall) => {
+				const loc = parseStall(stall)
+				return loc.located && loc.isHome ? mapNorm(loc.code) : ''
 			}
 			// Localise a label that may be a plain string ('左a') or an {en,zh} pair.
 			const lz = (v) => (typeof v === 'string' ? v : v ? (LANG === 'zh' ? v.zh : v.en) : '')
@@ -3457,14 +4065,17 @@
 					}
 				} catch {}
 			}
-			const mapHasStall = (stall) => MAP_STALLS.has(mapNorm(stall))
+			const mapHasStall = (stall) => {
+				const code = mapCodeOf(stall)
+				return !!code && MAP_STALLS.has(code)
+			}
 
 			// Per-stall (normalised) shopping status from the live route: how many
 			// lines still to buy vs. total. Exchanges owed at a supplier count too.
 			function stallStatusMap() {
 				const m = new Map()
 				const bump = (code, remaining) => {
-					const c = mapNorm(code)
+					const c = mapCodeOf(code)
 					if (!c) return
 					let e = m.get(c)
 					if (!e) {
@@ -3658,7 +4269,7 @@
 			function openMapAt(code) {
 				if (!FLOOR_LAYOUT || !FLOOR_LAYOUT.length) return
 				const wasOpen = mapOpen()
-				const norm = mapNorm(code)
+				const norm = mapCodeOf(code)
 				mapLocateTarget = norm
 				const fi = floorIdxForStall(norm)
 				rememberFocus()
@@ -3914,6 +4525,18 @@
 						if (gb) gb.remove()
 					}
 				})
+				// Market milestones are patched from the same pass, so the "how much is
+				// left in this building" number can't drift from the stalls under it.
+				document.querySelectorAll('.bdiv[data-bfrom]').forEach((div) => {
+					const from = Number(div.dataset.bfrom)
+					if (!LAST_GROUPS[from]) return
+					const items = buildingLegRemaining(from)
+					const badge = div.querySelector('.bcount')
+					if (badge) {
+						badge.className = 'bcount' + (items ? '' : ' done')
+						badge.textContent = items || '✓'
+					}
+				})
 				const setSec = (sel, rem) => {
 					const b = document.querySelector(sel + ' .section-head .section-count')
 					if (b) {
@@ -3986,28 +4609,70 @@
 					.catch(() => {})
 			}
 
+			// Persist the latest coalesced value in strict sequence. Reading `pending`
+			// inside the chain skips superseded objects and ensures the durable store is
+			// never older than the in-memory desired state.
+			function persistQueuedEntry(entry) {
+				const version = ++queuePersistVersion
+				queuePersistChain = queuePersistChain
+					.catch(() => {})
+					.then(async () => {
+						const latest = pending.get(entry.id)
+						if (!latest) return
+						try {
+							await ShopSync.putEntry(latest)
+						} catch {
+							/* IndexedDB unavailable — the in-memory queue still drains */
+						}
+					})
+					.finally(() => {
+						queuePersistedVersion = version
+					})
+				return queuePersistChain
+			}
+
 			// Queue a status change for the server (optimistic; DURABLE + retried on
 			// failure). Coalesces repeated taps on the same line into one write.
 			function enqueueNetwork(r, patch) {
+				recordLocalMutation()
 				const prev = pending.get(ShopSync.assignOpId(r.receipt_id, r.item_key))
-				const entry = ShopSync.makeAssignEntry(prev, { receipt_id: r.receipt_id, item_key: r.item_key, title: r.title, patch }, Date.now())
+				const entry = ShopSync.makeAssignEntry(prev, {
+					receipt_id: r.receipt_id,
+					item_key: r.item_key,
+					title: r.title,
+					patch,
+					// Audit-only event context. It travels inside the same durable
+					// offline operation, so a replay records what the shopper actually
+					// saw at the stall rather than whatever the order looks like later.
+					context: {
+						phone_model: r.phone_model || '',
+						ordered_phone_model: r.ordered_phone_model || '',
+						style: r.style || '',
+						quantity: r.quantity || 1,
+						product_listing_id: r.product_listing_id,
+						product_image_url: r.image_url || '',
+					},
+				}, Date.now())
 				pending.set(entry.id, entry)
-				ShopSync.putEntry(entry).catch(() => {}) // persist before we rely on it
-				requestBgSync()
 				setConn(sse && sse.readyState === 1 ? 'live' : 'off')
-				flush()
+				persistQueuedEntry(entry).finally(() => {
+					requestBgSync()
+					flush()
+				})
 			}
 
 			// Queue a price change (same durability guarantees as a status change, so a
 			// price entered in a dead zone is never lost). Replaces any prior queued
 			// price for the same product-component / charm.
 			function enqueueCost(body) {
+				recordLocalMutation()
 				const entry = ShopSync.makeCostEntry(body, Date.now())
 				pending.set(entry.id, entry)
-				ShopSync.putEntry(entry).catch(() => {})
-				requestBgSync()
 				setConn(sse && sse.readyState === 1 ? 'live' : 'off')
-				flush()
+				persistQueuedEntry(entry).finally(() => {
+					requestBgSync()
+					flush()
+				})
 			}
 
 			// Apply one status change to one OR MANY lines (a merged charm hits every
@@ -4080,6 +4745,12 @@
 			let flushPromise = null
 			function flush() {
 				if (!pending.size) return Promise.resolve()
+				// External triggers (online, foreground, logout) can call flush before
+				// enqueueNetwork's persistence callback. Never let a fast HTTP ACK race
+				// ahead of the IndexedDB put and leave a resurrected stale queue entry.
+				if (queuePersistedVersion < queuePersistVersion) {
+					return queuePersistChain.catch(() => {}).then(() => flush())
+				}
 				if (flushing) return flushPromise || Promise.resolve()
 				flushing = true
 				// Never reject (most callers fire-and-forget, and the logout path awaits
@@ -4128,6 +4799,10 @@
 						// rejected (e.g. the order was deleted) — drop it so one bad op can
 						// never wedge the whole queue. 5xx / network → keep and retry.
 						if (resp.ok || (resp.status >= 400 && resp.status < 500)) {
+							// A successful write committed after any route GET that was
+							// already in flight. Abort that older snapshot before it can
+							// redraw the pre-tap state after `pending` becomes empty.
+							if (resp.ok) invalidateRouteFetches()
 							// Clear ONLY if nothing newer coalesced onto this line WHILE the
 							// request was in flight. enqueueNetwork REPLACES the entry with a
 							// freshly-merged object, so a changed reference means there's
@@ -4135,7 +4810,7 @@
 							// a rapid case-then-grip tap "relapse": the grip was applied
 							// locally + queued, then dropped after the case-only POST, and the
 							// server echo reverted it. Leave it queued; the re-flush sends it.
-							if (pending.get(id) === entry) {
+							if (ShopSync.canAcknowledgeEntry(pending.get(id), entry)) {
 								pending.delete(id)
 								ShopSync.deleteEntry(id).catch(() => {})
 							}
@@ -4230,11 +4905,7 @@
 					const g = LAST_GROUPS[i]
 					if (groupRemaining(g) > 0) {
 						const el = document.querySelector(`.group[data-gidx="${i}"] .ghead`)
-						if (el) {
-							const headerH = (document.querySelector('header') || {}).offsetHeight || 0
-							const top = el.getBoundingClientRect().top + window.scrollY - headerH - 6
-							window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
-						}
+						if (el) shopScrollElIntoView(el, 6)
 						return
 					}
 				}
@@ -4506,7 +5177,7 @@
 				const r0 = lines[0]
 				const models = cardModels(lines)
 				const thumb = r0.image_url
-					? `<img class="mthumb" loading="lazy" decoding="async" src="${esc(r0.image_url)}" alt="" />`
+					? `<img class="mthumb" loading="lazy" decoding="async" referrerpolicy="no-referrer" src="${esc(r0.image_url)}" alt="" />`
 					: `<div class="mthumb thumb ph"></div>`
 				const sub = models.length ? esc(models.join(' · ')) : esc(r0.style || '')
 				const cls = opts.anchor ? 'mcand anchor' : 'mcand' + (mergePicked.has(cardId) ? ' sel' : '')
@@ -4565,6 +5236,166 @@
 				restoreFocus()
 				Overlay.closed(fromPop)
 			}
+
+			// ── Supplier prep sheet (WeChat 备货清单) ────────────────────────────
+			let prepState = null // { prep, blob, objectUrl, busy }
+			function revokePrepUrl() {
+				if (prepState && prepState.objectUrl) {
+					try {
+						URL.revokeObjectURL(prepState.objectUrl)
+					} catch {}
+				}
+			}
+			function zhBuildingOf(g) {
+				const lab = g && g.loc && g.loc.buildingLabel
+				if (!lab) return ''
+				return String(lab.zh || lab.en || '').trim()
+			}
+			function buildPrepForGroup(g) {
+				const Prep = window.ShopSupplierPrep
+				if (!Prep || typeof Prep.buildSupplierPrep !== 'function') return null
+				return Prep.buildSupplierPrep(g, {
+					buildingLabel: zhBuildingOf(g),
+					stallCode: (g.loc && g.loc.code) || '',
+					date: new Date(),
+					charmImageUrl,
+				})
+			}
+			function setPrepButtons(enabled) {
+				$('prepShare').disabled = !enabled
+				$('prepSave').disabled = !enabled
+				$('prepCopy').disabled = !enabled
+			}
+			async function generatePrepImage() {
+				const Prep = window.ShopSupplierPrep
+				if (!prepState || !prepState.prep || prepState.prep.empty) return
+				if (!Prep || typeof Prep.renderPrepImage !== 'function') {
+					$('prepPreview').innerHTML = `<div class="prep-err">${esc(t('prepNoModule'))}</div>`
+					setPrepButtons(false)
+					return
+				}
+				prepState.busy = true
+				setPrepButtons(false)
+				$('prepPreview').innerHTML = `<div class="prep-busy">${esc(t('prepBuilding'))}</div>`
+				try {
+					const blob = await Prep.renderPrepImage(prepState.prep)
+					revokePrepUrl()
+					const objectUrl = URL.createObjectURL(blob)
+					prepState.blob = blob
+					prepState.objectUrl = objectUrl
+					prepState.busy = false
+					$('prepPreview').innerHTML = `<img alt="" src="${objectUrl}" />`
+					setPrepButtons(true)
+				} catch (err) {
+					console.warn('[shop] prep image:', err && err.message)
+					prepState.busy = false
+					$('prepPreview').innerHTML = `<div class="prep-err">${esc(t('prepFail'))}</div>`
+					// Text copy still works without the image.
+					$('prepShare').disabled = true
+					$('prepSave').disabled = true
+					$('prepCopy').disabled = false
+				}
+			}
+			function openPrepSheet(gidx) {
+				const g = LAST_GROUPS[gidx]
+				if (!g) return
+				const Prep = window.ShopSupplierPrep
+				if (!Prep) {
+					toast(t('prepNoModule'))
+					return
+				}
+				const prep = buildPrepForGroup(g)
+				if (!prep || prep.empty) {
+					toast(t('prepEmpty'))
+					return
+				}
+				rememberFocus()
+				revokePrepUrl()
+				prepState = { prep, blob: null, objectUrl: null, busy: false }
+				$('prepTitle').textContent = t('prepTitle')
+				$('prepHint').textContent = t('prepHint')
+				$('prepShare').textContent = t('prepShareBtn')
+				$('prepSave').textContent = t('prepSaveBtn')
+				$('prepCopy').textContent = t('prepCopyBtn')
+				$('prepBg').classList.add('open')
+				Overlay.opened($('prepSheet'))
+				haptic(8)
+				generatePrepImage()
+			}
+			function closePrepSheet(fromPop) {
+				if (!$('prepBg').classList.contains('open')) return
+				$('prepBg').classList.remove('open')
+				revokePrepUrl()
+				prepState = null
+				restoreFocus()
+				Overlay.closed(fromPop)
+			}
+			async function sharePrepImage() {
+				const Prep = window.ShopSupplierPrep
+				if (!prepState || !prepState.blob || !Prep) return
+				const text = Prep.prepToText(prepState.prep)
+				const result = await Prep.sharePrepBlob(prepState.blob, prepState.prep.filename, text)
+				if (result === 'shared') {
+					toast(t('prepShared'))
+					haptic(12)
+					return
+				}
+				if (result === 'aborted') return
+				// OS can't share files — fall back to save-to-photos flow.
+				await savePrepImage()
+			}
+			async function savePrepImage() {
+				const Prep = window.ShopSupplierPrep
+				if (!prepState || !prepState.blob || !Prep) return
+				if (Prep.isIOS && Prep.isIOS()) toast(t('prepSavePhotosHint'))
+				const result = await Prep.savePrepToPhotos(prepState.blob, prepState.prep.filename)
+				if (result === 'aborted') return
+				if (result === 'saved') {
+					toast(t('prepPhotosSaved'))
+					haptic(12)
+					return
+				}
+				if (result === 'longpress') {
+					if (prepState.objectUrl) openZoom(prepState.objectUrl)
+					toast(t('prepLongPressSave'))
+					haptic(8)
+					return
+				}
+				if (result === 'downloaded') {
+					toast(t('prepSaved'))
+					haptic(10)
+					return
+				}
+				if (prepState.objectUrl) {
+					openZoom(prepState.objectUrl)
+					toast(t('prepLongPressSave'))
+				}
+			}
+			async function copyPrepText() {
+				const Prep = window.ShopSupplierPrep
+				if (!prepState || !prepState.prep || !Prep) return
+				const text = Prep.prepToText(prepState.prep)
+				try {
+					if (navigator.clipboard && navigator.clipboard.writeText) {
+						await navigator.clipboard.writeText(text)
+					} else {
+						const ta = document.createElement('textarea')
+						ta.value = text
+						ta.setAttribute('readonly', '')
+						ta.style.position = 'fixed'
+						ta.style.opacity = '0'
+						document.body.appendChild(ta)
+						ta.select()
+						document.execCommand('copy')
+						ta.remove()
+					}
+					toast(t('prepCopied'))
+					haptic(8)
+				} catch {
+					toast(t('prepCopyFail'))
+				}
+			}
+
 			// Jaccard overlap of the two titles' distinctive words (phone models, format
 			// words and generic gift phrasing stripped) — mirrors the server's ordering
 			// helper closely enough to rank a short list.
@@ -4628,10 +5459,25 @@
 
 			// ── Full-screen image zoom ───────────────────────────────────────────
 			function openZoom(src) {
-				// Product thumbnails are served at 300px; load a sharper variant for the
-				// zoom. Charm photos are already full-res from our endpoint.
+				// Listing photos are proxied same-origin; ask for a sharper variant on zoom.
+				// Charm / substitution / style endpoints are already full-res from our server.
+				// Blob URLs (supplier prep export) pass through unchanged.
 				rememberFocus()
-				$('zoomImg').src = src.replace('il_300x300.', 'il_570xN.')
+				let zoomSrc = src
+				if (typeof src === 'string' && src.startsWith('blob:')) {
+					zoomSrc = src
+				} else if (src.includes('/api/route/listing-image/')) {
+					try {
+						const u = new URL(src, location.origin)
+						u.searchParams.set('w', '570')
+						zoomSrc = u.pathname + '?' + u.searchParams.toString()
+					} catch {
+						zoomSrc = src.replace(/([?&])w=\d+/, '$1w=570')
+					}
+				} else if (/il_300x300\./.test(src)) {
+					zoomSrc = src.replace('il_300x300.', 'il_570xN.')
+				}
+				$('zoomImg').src = zoomSrc
 				$('zoomBg').classList.add('open')
 				Overlay.opened($('zoomBg'))
 			}
@@ -4717,6 +5563,14 @@
 					}
 					return
 				}
+				// "Share with supplier" — open the WeChat prep sheet (must run before
+				// the header collapse handler below).
+				const share = e.target.closest('.gshare')
+				if (share) {
+					const gidx = Number(share.dataset.gidx)
+					openPrepSheet(gidx)
+					return
+				}
 				// "Locate on map" pin → open the map focused on this stall (must run
 				// before the header collapse handler below).
 				const loc = e.target.closest('.glocate')
@@ -4789,6 +5643,13 @@
 			$('mergeSave').addEventListener('click', () => saveMerge())
 			$('mergeSplit').addEventListener('click', () => splitMerge())
 
+			$('prepBg').addEventListener('click', (e) => {
+				if (e.target === $('prepBg')) closePrepSheet()
+			})
+			$('prepShare').addEventListener('click', () => sharePrepImage())
+			$('prepSave').addEventListener('click', () => savePrepImage())
+			$('prepCopy').addEventListener('click', () => copyPrepText())
+
 			$('zoomBg').addEventListener('click', () => closeZoom())
 
 			document.addEventListener('keydown', (e) => {
@@ -4810,8 +5671,15 @@
 				const tog = e.target.closest('.trow[data-toggle]')
 				if (tog) {
 					const id = tog.dataset.toggle
-					if (treeCollapsed.has(id)) treeCollapsed.delete(id)
-					else treeCollapsed.add(id)
+					// Flip whatever is on screen, and record the choice as explicit so it
+					// outlives the auto-fold rule for finished branches.
+					if (tog.parentElement.classList.contains('collapsed')) {
+						treeCollapsed.delete(id)
+						treeExpanded.add(id)
+					} else {
+						treeExpanded.delete(id)
+						treeCollapsed.add(id)
+					}
 					renderTree()
 				}
 			})
@@ -4998,11 +5866,12 @@
 			// Only assign (status) entries are replayed here: they are what drives the
 			// buy/don't-buy decision. Cost entries carry their own absolute price and are
 			// re-sent by the queue, but a stale price never causes a duplicate purchase.
-			function reapplyPending() {
+			function reapplyPending(rows = ROWS) {
 				if (!pending.size) return
+				const index = rows === ROWS ? rowIndex : new Map(rows.map((row) => [keyOf(row), row]))
 				for (const entry of pending.values()) {
 					if (!entry || entry.url !== ShopSync.ASSIGN_URL || !entry.body) continue
-					const row = rowIndex.get(entry.body.receipt_id + '\x00' + entry.body.item_key)
+					const row = index.get(entry.body.receipt_id + '\x00' + entry.body.item_key)
 					if (!row) continue
 					for (const f of ['status_case', 'status_grip', 'status_charm']) {
 						if (entry.body[f] != null) row[f] = entry.body[f]
@@ -5010,10 +5879,28 @@
 				}
 			}
 
+			function recoverInvalidatedLoad(showSpinner) {
+				if (!showSpinner) return
+				if (hasRouteSnapshot) {
+					render()
+					return
+				}
+				// On first boot, wait for the current queue pass to settle before one
+				// retry. This avoids one aborted GET per ACK when many offline taps replay.
+				Promise.resolve(flush()).finally(() => {
+					if (!foregroundRouteFetch) load(true)
+				})
+			}
+
 			async function load(showSpinner) {
 				if (showSpinner) $('list').innerHTML = `<div class="state"><div class="spinner"></div>${t('loading')}</div>`
+				const fetchToken = beginRouteFetch('load')
 				try {
-					const r = await fetch('/api/shop/route', { credentials: 'same-origin' })
+					const r = await fetch('/api/shop/route', {
+						credentials: 'same-origin',
+						cache: 'no-store',
+						signal: fetchToken.controller.signal,
+					})
 					if (r.status === 401) {
 						leaveTo('/login')
 						return
@@ -5024,8 +5911,15 @@
 					}
 					if (!r.ok) throw new Error('HTTP ' + r.status)
 					const data = await r.json()
+					// A tap, write ACK, or newer route request happened while this was
+					// in flight. Its payload predates that event and is unsafe to render.
+					if (!routeFetchIsCurrent(fetchToken)) {
+						recoverInvalidatedLoad(showSpinner)
+						return
+					}
 					ROWS = data.rows || []
 					EXCHANGES = data.exchanges || []
+					hasRouteSnapshot = true
 					MANUAL_MERGE = new Set((data.manual_merge_listings || []).map(Number))
 					rowIndex.clear()
 					for (const row of ROWS) rowIndex.set(keyOf(row), row)
@@ -5035,12 +5929,20 @@
 					// "connected" signal (SSE is only for instant push on top of this).
 					setConn('live')
 				} catch (e) {
+					if (e && e.name === 'AbortError') {
+						// A foreground spinner must never get stranded by a deliberate
+						// invalidation. Restore the optimistic list (or retry on first boot).
+						recoverInvalidatedLoad(showSpinner)
+						return
+					}
 					setConn('off')
 					// Only replace the list with an error screen if we have nothing to
 					// show; a failed background poll must not wipe the current list.
 					if (showSpinner || !ROWS.length) {
 						$('list').innerHTML = `<div class="state"><div class="state-title">${t('couldntLoad')}</div><button class="chipbtn on" onclick="location.reload()" style="margin-top:14px">${t('retry')}</button></div>`
 					}
+				} finally {
+					finishRouteFetch(fetchToken)
 				}
 			}
 
@@ -5087,6 +5989,7 @@
 					$('sheetBg').classList.contains('open') ||
 					$('priceBg').classList.contains('open') ||
 					$('mergeBg').classList.contains('open') ||
+					$('prepBg').classList.contains('open') ||
 					$('zoomBg').classList.contains('open') ||
 					mapOpen() ||
 					drawerOpen()
@@ -5095,26 +5998,42 @@
 			async function reconcile() {
 				// Safe-to-refresh guards: foreground only, no unsaved edits to clobber,
 				// and never yank the list out from under an open sheet/map/drawer.
-				if (document.hidden || pending.size || anyOverlayOpen()) return
+				if (document.hidden || pending.size || flushing || foregroundRouteFetch || anyOverlayOpen()) return
+				const fetchToken = beginRouteFetch('reconcile')
 				try {
-					const r = await fetch('/api/shop/route', { credentials: 'same-origin' })
+					const r = await fetch('/api/shop/route', {
+						credentials: 'same-origin',
+						cache: 'no-store',
+						signal: fetchToken.controller.signal,
+					})
 					if (r.status === 401) return leaveTo('/login')
 					if (!r.ok) return
 					const data = await r.json()
 					const rows = data.rows || []
 					const exchanges = data.exchanges || []
+					if (!routeFetchIsCurrent(fetchToken)) return
 					setConn('live') // a successful pull proves we're connected
 					// Re-check guards: an overlay/edit may have begun during the fetch.
-					if (pending.size || anyOverlayOpen()) return
+					if (pending.size || flushing || anyOverlayOpen()) return
+					// Defense in depth for a queue restored/changed without a DOM event:
+					// desired local statuses always outrank a fetched snapshot until ACK.
+					reapplyPending(rows)
 					// Already in sync (incl. our own saved edits)? Do nothing — no flicker.
 					if (routeSig(rows, exchanges) === routeSig(ROWS, EXCHANGES)) return
 					ROWS = rows
 					EXCHANGES = exchanges
+					hasRouteSnapshot = true
 					MANUAL_MERGE = new Set((data.manual_merge_listings || []).map(Number))
 					rowIndex.clear()
 					for (const row of ROWS) rowIndex.set(keyOf(row), row)
 					render()
-				} catch {}
+				} catch (e) {
+					if (!e || e.name !== 'AbortError') {
+						/* silent background heal — connection state is owned elsewhere */
+					}
+				} finally {
+					finishRouteFetch(fetchToken)
+				}
 			}
 
 			// ── Real-time updates: SSE with a polling fallback ───────────────────
@@ -5202,7 +6121,7 @@
 					if (msg.type === 'exchange') {
 						if (msg.status === 'open') {
 							// Reopened (someone undid a swap) — re-fetch so it reappears.
-							load(false)
+							scheduleRouteRefetch()
 							return
 						}
 						const i = EXCHANGES.findIndex((x) => x.exchange_id === msg.exchange_id)
@@ -5277,12 +6196,14 @@
 			document.addEventListener('visibilitychange', () => {
 				if (document.visibilityState === 'visible') {
 					if (!sse || sse.readyState === 2) connectSSE()
-					load(false)
-					flush()
+					// Drain first; reconcile is guard-aware and starts only after the
+					// current pass settles. One path replaces the former parallel
+					// load()+reconcile() pair that raced each other on every phone unlock.
+					Promise.resolve(flush()).finally(() => reconcile())
 				}
 			})
 			window.addEventListener('online', () => {
-				flush()
+				Promise.resolve(flush()).finally(() => reconcile())
 				if (!sse || sse.readyState === 2) connectSSE()
 			})
 			window.addEventListener('offline', () => setConn('off'))
@@ -5340,12 +6261,10 @@
 					navigator.serviceWorker.register('/shop-sw.js', { scope: '/shop' }).catch(() => {})
 				}
 				// Self-heal: periodically reconcile with the server even while SSE is
-				// live (SSE never adds new orders), and whenever the app returns to the
-				// foreground — so the counts can never silently drift from the truth.
+				// live (SSE never adds new orders), so the counts can never silently
+				// drift from the truth. Foreground reconciliation is registered once
+				// above, alongside the queue drain.
 				setInterval(reconcile, 45000)
-				document.addEventListener('visibilitychange', () => {
-					if (!document.hidden) reconcile()
-				})
 			}
 			boot()
 		</script>

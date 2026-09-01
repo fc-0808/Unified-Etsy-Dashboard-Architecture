@@ -1,67 +1,22 @@
-You're a professional, top-tier, world-level software engineer working in Silicon Valley. 
-You're becoming an entrepreneur and have 20 Etsy shops right now. To diversify risk, 
-you have opened these 20 shops with different types of identity, like HKID, passport, Canada Passport. 
-However, they all belong to one person, you. 
-You have applied for multiple etsy personal access API keys for few shops, and they all have been granted. 
+Unified Dashboard project context
 
-Let's say five shops as a group, 
-and I am also using adspower to assign different physical laptop characteristics 
-as well as with ipfoxy for different static residential high quality ip addresses each group of five shops. 
+This repository contains a private, single-tenant operations dashboard that
+integrates with Etsy's documented Open API and other configured services.
 
-I now have cursor subscripted and am also wanting to create an app to use these etsy personal access api keys 
-to show all my orders and such under one local website or program. 
+Compliance and privacy requirements:
 
-My concern is because each group has been assigned a different static adspower's physical laptop characteristics 
-and ipfoxy's residential Hong Kong IP address. 
+1. Do not commit real seller/customer names, email addresses, shop identities,
+   API credentials, OAuth tokens, proxy credentials, or order data.
+2. Keep config.json, tokens.json, databases, logs, and backups outside version
+   control and protect them with operating-system access controls.
+3. One application must use the API key/topology Etsy approved for its declared
+   purpose. Do not create duplicate applications or keys to bypass limits.
+4. Proxies and browser profiles are transport tools, not compliance controls.
+   Never use them to conceal ownership or evade platform enforcement.
+5. OAuth must be completed manually by the authorized shop owner using Etsy's
+   documented PKCE flow. Do not automate or scrape Etsy's website.
+6. Test Etsy writes only under Etsy's API Testing Policy; prefer offline mocks
+   and draft listings, and never run live mutating tests by default.
 
-Should I create multiple GitHub repositories with the same codes but only different etsy Personal Access API keys 
-to show my orders at once and such? 
-Like an 4 independent projects or dashboards to show all the orders from each group. 
-
-What is your professional suggestion? 
-Give me absolute detailed professional recommendations like the top companies in the world would do. 
-
-
-
-"Step 2 — For each of your 20 shops, 
-run npm run oauth:setup from inside the correct AdsPower browser profile with that group's IPFoxy IP active. 
-This is the OpSec requirement — the OAuth authorization must come from the correct IP."
-
-Your professional top-tier world-level software engineer as well as ETSY expert working in Silicon Valley.
-Explain how I can achieve it since I think we are not building with adspower now? 
-
-Let's say i have 3 ETSY personal access keys registered, 
-one with waltercheung1388@gmail.com, 
-one with walterfung19950808@gmail.com 
-and one with walterfung0808@gmail.com. 
-
-Since one etsy personal access api key can be connected up to 5 shops at the same time. 
-The first one registeredwith waltercheung1388@gmail.com will be used to connect with the 5 shops of 
-"20.	Email: waltercheung1388@gmail.com (Y2KASEofficial) 
-21.	Email: walterfung19950808@gmail.com (LUVKASEofficial) 
-22.	Email: barefootproject01@gmail.com (Y2KASEshop) 
-24.	Email: canadadigital01@gmail.com (Y2KiPhoneCases)" 
-and the second one registered with walterfung19950808@gmail.com will be used to connect with 
-"26.	Email: cheapcconline@gmail.com (KawaiiiPhoneCases)" 
-and the last one registered with walterfung0808@gmail.com will be used to connect with 
-"27.	Email: walterfung0808@gmail.com (IPhoneCasesDesignArt) 
-28.	Email: harlo9shutzpj@outlook.com (IPhoneCasesByTwily) 
-29.	Email: niscd4163@outlook.com (CuteiPhoneCasesGoods) 
-30.	Email: yulejwpk4@outlook.com (CuteiPhoneCasesFinds) 
-31.	Email: sliwaz966@hotmail.com  (iPhoneGoodsCustom)"
-
-Lets say the 7 accounts of 
-"20.	Email: waltercheung1388@gmail.com (Y2KASEofficial) 
-21.	Email: walterfung19950808@gmail.com (LUVKASEofficial) 
-22.	Email: barefootproject01@gmail.com (Y2KASEshop) 
-24.	Email: canadadigital01@gmail.com (Y2KiPhoneCases) 
-26.	Email: cheapcconline@gmail.com (KawaiiiPhoneCases)" 
-will be using one proxy and another of 
-"27.	Email: walterfung0808@gmail.com (IPhoneCasesDesignArt) 
-28.	Email: harlo9shutzpj@outlook.com (IPhoneCasesByTwily) 
-29.	Email: niscd4163@outlook.com (CuteiPhoneCasesGoods) 
-30.	Email: yulejwpk4@outlook.com (CuteiPhoneCasesFinds) 
-31.	Email: sliwaz966@hotmail.com  (iPhoneGoodsCustom)" 
-will be using another proxy.
-
-Give absolute professional suggestions and plan on implementing like the top companies in the world do. 
+Current official terms:
+https://www.etsy.com/legal/api/

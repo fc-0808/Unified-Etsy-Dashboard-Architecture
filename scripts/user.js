@@ -14,7 +14,7 @@
  * also available in the dashboard's owner-only "Team" panel.
  */
 
-require('dotenv').config()
+require('dotenv').config({ quiet: true })
 const crypto = require('crypto')
 const { loadConfig } = require('../src/config/schema')
 const { initDb } = require('../src/db/setup')
@@ -62,6 +62,9 @@ try {
 			const u = store.add({ username, password, role, createdBy: 'cli' })
 			console.log(`✓ Created ${u.role} account "${u.username}"`)
 			if (!pwArg) console.log(`  Password (save this now, it won't be shown again):  ${password}`)
+			if (!process.env.DASHBOARD_AUTH_SECRET) {
+				console.warn('  Before restarting the dashboard, set DASHBOARD_AUTH_SECRET (generate with npm run auth:generate-secret).')
+			}
 			break
 		}
 		case 'list': {

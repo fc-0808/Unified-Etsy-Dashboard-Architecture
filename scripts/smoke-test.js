@@ -12,10 +12,20 @@
  *   6. Receipts written to etsy_dashboard.db via upsertReceipt
  *   7. DB read-back confirms rows landed correctly
  *
- * Run: node scripts/smoke-test.js
+ * Run intentionally:
+ *   $env:ALLOW_LIVE_ETSY_READ_TEST='1'; node scripts/smoke-test.js
  *
  * Prerequisites: VPN + IPFoxy active, tokens.json populated for at least one shop.
  */
+
+if (process.env.ALLOW_LIVE_ETSY_READ_TEST !== '1') {
+  console.error(
+    'Refusing to run against live Etsy/shop data without explicit opt-in.\n' +
+    'Set ALLOW_LIVE_ETSY_READ_TEST=1 only when you intend to spend read quota ' +
+    'and write the returned receipts to the configured database.'
+  );
+  process.exit(2);
+}
 
 const path = require('path');
 const { loadConfig, getAllShops, findShopContext, usesGroupProxy } = require('../src/config/schema');
@@ -24,7 +34,9 @@ const { createGroupProxyClient, verifyGroupProxy } = require('../src/proxy/facto
 const { buildShopClient, ping, getShop, getReceipts } = require('../src/etsy/client');
 const { initDb, syncConfigToDb, upsertReceipt } = require('../src/db/setup');
 
-const TOKENS_PATH = path.resolve(__dirname, '../tokens.json');
+const TOKENS_PATH = process.env.DASHBOARD_TOKENS_PATH
+  ? path.resolve(process.env.DASHBOARD_TOKENS_PATH)
+  : path.resolve(__dirname, '../tokens.json');
 const RECEIPT_LIMIT  = 5; // fetch only 5 receipts per shop to stay well inside QPD budget
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

@@ -51,6 +51,18 @@
 	const ASSIGN_URL = '/api/shop/assign'
 	const COST_URL = '/api/shop/cost'
 	const SEP = '\u0000' // NUL — safe key separator (never appears in titles/keys)
+	// Descriptive audit fields only — the server never uses these to decide what
+	// gets purchased. Capturing them with the queued mutation preserves exactly
+	// which model/style/image the employee saw, including offline replays.
+	const ASSIGN_CONTEXT_FIELDS = [
+		'phone_model',
+		'ordered_phone_model',
+		'style',
+		'quantity',
+		'product_listing_id',
+		'product_image_url',
+	]
+	const ACTIVITY_CONTEXT_VERSION = 1
 
 	// ── Pure helpers (deterministic; unit-tested in Node) ───────────────────────
 
@@ -74,7 +86,7 @@
 	 * both, and the last value for any given component always wins.
 	 *
 	 * @param {object|null} prev   the existing queued entry for this line, if any.
-	 * @param {{receipt_id:(number|string), item_key:string, title:*, patch:object}} change
+	 * @param {{receipt_id:(number|string), item_key:string, title:*, patch:object, context?:object}} change
 	 * @param {number} now         Date.now() (injectable for tests).
 	 */
 	function makeAssignEntry(prev, change, now) {
@@ -83,12 +95,31 @@
 		body.receipt_id = change.receipt_id
 		body.item_key = change.item_key
 		if (change.title != null) body.title = change.title
+		const context = change.context && typeof change.context === 'object' ? change.context : {}
+		let capturedContext = false
+		for (const field of ASSIGN_CONTEXT_FIELDS) {
+			if (!Object.prototype.hasOwnProperty.call(context, field)) continue
+			capturedContext = true
+			const value = context[field]
+			if (value == null || value === '') delete body[field]
+			else body[field] = value
+		}
+		if (capturedContext) body.activity_context_version = ACTIVITY_CONTEXT_VERSION
 		return { id: assignOpId(change.receipt_id, change.item_key), url: ASSIGN_URL, body: body, ts: now }
 	}
 
 	/** Build a cost queue entry (replaces any prior queued price for the same target). */
 	function makeCostEntry(body, now) {
 		return { id: costOpId(body), url: COST_URL, body: Object.assign({}, body), ts: now }
+	}
+
+	/**
+	 * An ACK may delete a queued entry only when it acknowledges the exact object
+	 * that is still current. makeAssignEntry returns a new object when rapid taps
+	 * coalesce, so reference equality protects newer unsent desired state.
+	 */
+	function canAcknowledgeEntry(current, sent) {
+		return current === sent
 	}
 
 	// ── IndexedDB persistence (browser + service worker only) ────────────────────
@@ -178,11 +209,14 @@
 	 * retry later. Returns a small summary.
 	 *
 	 * @param {typeof fetch} [fetchImpl] injectable fetch (defaults to global fetch).
+	 * @param {{getAll:Function,deleteEntry:Function,count:Function}} [storage]
+	 *        injectable durable store for deterministic tests.
 	 */
-	async function replayAll(fetchImpl) {
+	async function replayAll(fetchImpl, storage) {
 		const doFetch = fetchImpl || (typeof fetch !== 'undefined' ? fetch : null)
 		if (!doFetch) throw new Error('fetch unavailable')
-		const entries = await getAll()
+		const io = storage || { getAll: getAll, deleteEntry: deleteEntry, count: count }
+		const entries = await io.getAll()
 		let sent = 0
 		let authFailed = false
 		for (const entry of entries) {
@@ -200,7 +234,7 @@
 				// 2xx = applied; other 4xx = permanently rejected (drop so it can't wedge
 				// the queue). 5xx throws below and is retried.
 				if (resp.ok || (resp.status >= 400 && resp.status < 500)) {
-					await deleteEntry(entry.id)
+					await io.deleteEntry(entry.id)
 					if (resp.ok) sent++
 				} else {
 					throw new Error('HTTP ' + resp.status)
@@ -209,7 +243,7 @@
 				// Network/5xx — leave queued for the next sync attempt.
 			}
 		}
-		const remaining = await count()
+		const remaining = await io.count()
 		return { sent: sent, remaining: remaining, authFailed: authFailed }
 	}
 
@@ -220,10 +254,12 @@
 		SYNC_TAG: SYNC_TAG,
 		ASSIGN_URL: ASSIGN_URL,
 		COST_URL: COST_URL,
+		ACTIVITY_CONTEXT_VERSION: ACTIVITY_CONTEXT_VERSION,
 		assignOpId: assignOpId,
 		costOpId: costOpId,
 		makeAssignEntry: makeAssignEntry,
 		makeCostEntry: makeCostEntry,
+		canAcknowledgeEntry: canAcknowledgeEntry,
 		hasIDB: hasIDB,
 		open: open,
 		putEntry: putEntry,

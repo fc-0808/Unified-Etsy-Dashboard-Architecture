@@ -118,6 +118,7 @@ import shutil
 import sqlite3
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1440,6 +1441,81 @@ def _load_ui_status_cache(
     except Exception as e:
         log.warning("Could not read UI status cache %s: %s", cache_path.name, e)
         return {}
+# ══ STALL LOCATION ══
+# Mirror of src/route/stall-location.js. We shop several markets, and a stall
+# outside the home one carries its market as a prefix ("康乐北区5A40-42").
+# Splitting that off is what lets the route be walked one BUILDING at a time
+# rather than bouncing between markets that share a floor number, and it is why
+# the floor is read from the code AFTER the prefix is removed.
+_HOME_BUILDING_ID = "tongxin"
+
+# (id, walking order, aliases as typed into the catalog). Longest alias wins, so
+# "康乐北区" can never be swallowed by "康乐".
+_BUILDINGS: list[tuple[str, int, tuple[str, ...]]] = [
+    ("jingji",       10, ("经济",)),
+    ("tongxin",      20, ("通信", "通信城", "通信市场")),
+    ("kangle-north", 30, ("康乐北区", "康乐北")),
+    # 康乐 is the same complex as 康乐北区, so it stays pinned beside it.
+    ("kangle",       31, ("康乐",)),
+    ("taipingyang",  40, ("太平洋",)),
+    ("huitong",      50, ("汇通",)),
+    # The charm market. Bare codes, no prefix to parse — only Shopping Mode
+    # re-homes charms to it, so it carries no alias here.
+    ("longsheng",    60, ()),
+]
+_UNREGISTERED_ORDER = 9000
+_UNLOCATED_ORDER = 9999
+_UNKNOWN_FLOOR = 999
+_PLACEHOLDER_CODES = {"-", "???"}
+_ALIAS_INDEX = sorted(
+    ((alias, bid, order) for bid, order, aliases in _BUILDINGS for alias in aliases),
+    key=lambda a: -len(a[0]),
+)
+
+
+def _normalize_stall(stall: str) -> str:
+    """Fold full-width forms and exotic dashes so one spelling reaches the rules."""
+    return re.sub(r"[–—―]", "-", unicodedata.normalize("NFKC", str(stall or ""))).strip()
+
+
+def _floor_from_code(code: str) -> int:
+    """Floor of a stall code whose building prefix has already been removed."""
+    if not code:
+        return _UNKNOWN_FLOOR
+    if re.match(r"^A2", code, re.IGNORECASE):
+        return 2
+    m = re.match(r"^(\d)", code)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(\d)[A-Za-z]", code)
+    if m:
+        return int(m.group(1))
+    return _UNKNOWN_FLOOR
+
+
+def _parse_stall(stall: str) -> tuple[str, int, str, int]:
+    """
+    Split a stall code into (building id, walking order, local code, floor).
+
+    A registered prefix wins; failing that, a leading run of non-ASCII is an
+    unregistered market and becomes a location of its own, so a newly typed
+    market never silently files itself under the home one.
+    """
+    raw = _normalize_stall(stall)
+    if not raw or raw in _PLACEHOLDER_CODES:
+        return "", _UNLOCATED_ORDER, "", _UNKNOWN_FLOOR
+    for alias, bid, order in _ALIAS_INDEX:
+        if raw[: len(alias)].upper() == alias.upper():
+            code = raw[len(alias):].strip()
+            return bid, order, code, _floor_from_code(code)
+    m = re.match(r"^([^\x00-\x7F]+)", raw)
+    if m:
+        code = raw[len(m.group(1)):].strip()
+        return "x:" + m.group(1).strip(), _UNREGISTERED_ORDER, code, _floor_from_code(code)
+    home_order = next(order for bid, order, _ in _BUILDINGS if bid == _HOME_BUILDING_ID)
+    return _HOME_BUILDING_ID, home_order, raw, _floor_from_code(raw)
+
+
 def _stall_floor(stall: str) -> int:
     """
     Parse the floor number from a stall code for ascending-floor sort order.
@@ -1448,21 +1524,28 @@ def _stall_floor(stall: str) -> int:
       A2xxx / A2-xx  -> 2nd floor (A-block)
       4Cxx  / 4Dxx   -> 4th floor
       5Xxx  / 5Cxx   -> 5th floor
-      Chinese text containing "4D" / "5C" etc. -> parse embedded digit
+      A market prefix ("康乐北区4D32") is stripped before these rules apply.
 
     Returns 999 for unknown stalls so they sort to the very end.
     """
-    if not stall or stall in ("\u2014", "???", ""):
-        return 999
-    if re.match(r"^A2", stall, re.IGNORECASE):
-        return 2
-    m = re.match(r"^(\d)", stall)
-    if m:
-        return int(m.group(1))
-    m = re.search(r"(\d)[A-Za-z]", stall)
-    if m:
-        return int(m.group(1))
-    return 999
+    return _parse_stall(stall)[3]
+
+
+def _stall_sort_key(stall: str, shop: str) -> tuple:
+    """
+    The order the route is walked: market, then floor, then stall, then shop.
+    Shared by every sheet so the workbook, the desktop table and Shopping Mode
+    all send the shopper round in the same sequence.
+    """
+    bid, order, code, floor = _parse_stall(stall)
+    return (
+        order,
+        bid,
+        floor if floor != _UNKNOWN_FLOOR else 9999,
+        code.lower() or "\uffff",
+        (shop or "").lower(),
+    )
+# ══ END STALL LOCATION ══
 def _style_has(style: str) -> tuple[bool, bool, bool]:
     """Return (has_case, has_grip, has_charm) booleans from a style string."""
     s = style.lower()
@@ -2201,7 +2284,7 @@ def _sheet_route(ws, items: list[ResolvedItem],
         ws.cell(HDR_ROW, COL_CHARM).fill = PatternFill("solid", fgColor="5B1A6B")
     ws.row_dimensions[HDR_ROW].height = 18
 
-    # -- Group by (supplier, stall), sorted floor-ascending  (routable only)
+    # -- Group by (supplier, stall), in walking order  (routable only)
     groups: dict[tuple[str, str], list[ResolvedItem]] = defaultdict(list)
     for r in routable:
         groups[(r.supplier.shop_name, r.supplier.stall)].append(r)
@@ -2210,7 +2293,7 @@ def _sheet_route(ws, items: list[ResolvedItem],
 
     sorted_keys = sorted(
         groups,
-        key=lambda k: (_stall_floor(k[1]), k[1] or "\uffff", k[0]),
+        key=lambda k: _stall_sort_key(k[1], k[0]),
     )
 
     # Track cells to add to the component-status dropdowns
@@ -3165,7 +3248,7 @@ def _sheet_summary(ws, items: list[ResolvedItem], lang: str = "en") -> None:
 
     for (shop, stall), grp in sorted(
         sup_groups.items(),
-        key=lambda x: (_stall_floor(x[0][1]), x[0][1] or "\uffff", x[0][0]),
+        key=lambda x: _stall_sort_key(x[0][1], x[0][0]),
     ):
         floor = _stall_floor(stall)
         ws.cell(row, 1, f"{floor}F" if floor != 999 else "--")
@@ -3404,7 +3487,7 @@ def _sheet_route_simple(
         groups[gk].sort(key=_route_item_sort_key)
     sorted_keys = sorted(
         groups,
-        key=lambda k: (_stall_floor(k[1]), k[1] or "\uffff", k[0]),
+        key=lambda k: _stall_sort_key(k[1], k[0]),
     )
 
     active_case_cells: list[str] = []
@@ -4103,6 +4186,9 @@ def main() -> None:
     )
     ap.add_argument("--project-dir", default="", metavar="DIR",
                     help="Project root (data/, output/, cache/ subdirs).")
+    ap.add_argument("--data-dir", default="", metavar="DIR",
+                    help="Mutable data directory override (catalog DB/workbook, "
+                         "charm manifest and images).")
     ap.add_argument("--catalog", default=CATALOG_FILE, help="Supplier catalog .xlsx")
     ap.add_argument("--output", default=OUTPUT_FILE, help="Output .xlsx path")
     ap.add_argument("--threshold", type=int, default=MATCH_THRESHOLD,
@@ -4128,9 +4214,15 @@ def main() -> None:
     args = ap.parse_args()
 
     # ── Path resolution (project-dir organized layout) ────────────────────────
+    data_dir_override = (
+        Path(args.data_dir).expanduser().resolve()
+        if (args.data_dir or "").strip()
+        else None
+    )
     if args.project_dir:
         proj = Path(args.project_dir).resolve()
-        catalog_path = proj / "data" / "supplier_catalog.xlsx"
+        data_dir = data_dir_override or (proj / "data")
+        catalog_path = data_dir / "supplier_catalog.xlsx"
         output_path = (
             Path(args.output).expanduser().resolve()
             if (args.output or "").strip() and args.output != OUTPUT_FILE
@@ -4139,10 +4231,15 @@ def main() -> None:
         charm_images_dir = (
             Path(args.charm_images_dir).resolve()
             if args.charm_images_dir.strip()
-            else proj / "data" / CHARM_IMAGES_DIR_NAME
+            else data_dir / CHARM_IMAGES_DIR_NAME
         )
     else:
-        catalog_path = Path(args.catalog)
+        data_dir = data_dir_override
+        catalog_path = (
+            data_dir / "supplier_catalog.xlsx"
+            if data_dir is not None
+            else Path(args.catalog)
+        )
         output_path = Path(args.output)
         charm_images_dir = (
             Path(args.charm_images_dir).resolve()
@@ -4154,8 +4251,9 @@ def main() -> None:
     except OSError as exc:
         log.warning("Could not create output directory %s: %s", output_path.parent, exc)
     charm_manifest_default_path = (
-        (Path(args.project_dir).resolve() / "data" / CHARM_MANIFEST_FILE)
-        if args.project_dir.strip()
+        ((data_dir_override or (Path(args.project_dir).resolve() / "data"))
+         / CHARM_MANIFEST_FILE)
+        if args.project_dir.strip() or data_dir_override is not None
         else (catalog_path.parent / CHARM_MANIFEST_FILE)
     ).resolve()
 

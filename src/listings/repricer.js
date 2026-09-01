@@ -17,7 +17,7 @@
  */
 
 const { getListingInventory, updateListingInventory } = require('../etsy/client');
-const { STYLE_KEYS } = require('./pricing');
+const productTypes = require('./product-types');
 const { styleKeyFromProps } = require('./shop-prices');
 
 // Treat two prices as identical when within half a cent — avoids needless PUTs.
@@ -37,10 +37,15 @@ class ShopRepricer {
     this._seq = 0;
   }
 
-  /** Keep only known styles with a finite, positive price (rounded to cents). */
-  _sanitizePrices(prices) {
+  /**
+   * Keep only values the product line offers, with a finite, positive price
+   * (rounded to cents). Scoping to the line is what lets the same tool reprice
+   * "Case + Charm" bundles and Apple Watch "Band Size" values without either
+   * vocabulary leaking into the other.
+   */
+  _sanitizePrices(prices, productType) {
     const clean = {};
-    for (const key of STYLE_KEYS) {
+    for (const key of productTypes.styleKeysFor(productType)) {
       const v = Number(prices?.[key]);
       if (Number.isFinite(v) && v > 0) clean[key] = Math.round(v * 100) / 100;
     }
@@ -82,10 +87,11 @@ class ShopRepricer {
    * @param {Record<string,number>} opts.prices       style key → new price
    * @param {string} [opts.state='active']            listing state filter
    * @param {number[]} [opts.listingIds=null]         optional explicit subset
+   * @param {string} [opts.productType]               product line being repriced
    * @returns {{ job_id:string, total:number, prices:Record<string,number> }}
    */
-  start(shopName, { prices, state = 'active', listingIds = null } = {}) {
-    const clean = this._sanitizePrices(prices);
+  start(shopName, { prices, state = 'active', listingIds = null, productType } = {}) {
+    const clean = this._sanitizePrices(prices, productType);
     if (!Object.keys(clean).length) { const e = new Error('No valid prices supplied.'); e.status = 400; throw e; }
 
     const shopId = this._resolveShopId(shopName);
@@ -107,7 +113,7 @@ class ShopRepricer {
 
     const jobId = `reprice-${Date.now()}-${++this._seq}`;
     const job = {
-      job_id: jobId, shop_name: shopName, shop_id: shopId, prices: clean,
+      job_id: jobId, shop_name: shopName, shop_id: shopId, prices: clean, product_type: productTypes.getProductType(productType).id,
       state: 'running', total: targets.length,
       processed: 0, repriced: 0, offerings: 0, failed: 0,
       started_at: Date.now(), finished_at: null, error: null,
@@ -120,7 +126,7 @@ class ShopRepricer {
       return { job_id: jobId, total: 0, prices: clean };
     }
 
-    setTimeout(() => { this._run(jobId, shopName, targets, clean).catch(() => {}); }, 250);
+    setTimeout(() => { this._run(jobId, shopName, targets, clean, productType).catch(() => {}); }, 250);
     return { job_id: jobId, total: targets.length, prices: clean };
   }
 
@@ -132,20 +138,21 @@ class ShopRepricer {
    * @param {string} shopName
    * @param {number} listingId
    * @param {Record<string,number>} prices  style key → new price
+   * @param {string} [productType]          product line being repriced
    */
-  async repriceListingSync(shopName, listingId, prices) {
-    const clean = this._sanitizePrices(prices);
+  async repriceListingSync(shopName, listingId, prices, productType) {
+    const clean = this._sanitizePrices(prices, productType);
     if (!Object.keys(clean).length) { const e = new Error('No valid prices supplied.'); e.status = 400; throw e; }
     const shopCtx = await this.resolveShopClient(shopName);
     if (Array.isArray(shopCtx.scopes) && !shopCtx.scopes.includes('listings_w')) {
       const e = new Error('listings_w scope required. Re-run OAuth setup for this shop to grant price-edit permission.');
       e.status = 403; e.needs_reauth = true; throw e;
     }
-    const r = await this._repriceOne(shopCtx, listingId, clean);
+    const r = await this._repriceOne(shopCtx, listingId, clean, productType);
     return { ...r, prices: clean };
   }
 
-  async _run(jobId, shopName, targets, prices) {
+  async _run(jobId, shopName, targets, prices, productType) {
     const job = this._jobs.get(jobId);
     this._emit(jobId, { type: 'start', total: targets.length, prices, shop_name: shopName });
 
@@ -172,7 +179,7 @@ class ShopRepricer {
 
     for (const listingId of targets) {
       try {
-        const r = await this._repriceOne(shopCtx, listingId, prices);
+        const r = await this._repriceOne(shopCtx, listingId, prices, productType);
         job.processed++;
         if (r.changed) { job.repriced++; job.offerings += r.offerings; }
         this._emit(jobId, {
@@ -205,7 +212,7 @@ class ShopRepricer {
    * Reprice a single listing: pull live inventory, set every offering of each
    * targeted style to the new price, PUT it back, then patch the local cache.
    */
-  async _repriceOne(shopCtx, listingId, prices) {
+  async _repriceOne(shopCtx, listingId, prices, productType) {
     const { shopClient } = shopCtx;
     const inv = await getListingInventory(shopClient, listingId);
 
@@ -215,7 +222,7 @@ class ShopRepricer {
     const productUpdates = []; // { product_id, price, currency }
 
     for (const product of (inv.products || [])) {
-      const styleKey = styleKeyFromProps(JSON.stringify(product.property_values || []));
+      const styleKey = styleKeyFromProps(JSON.stringify(product.property_values || []), productType);
       if (!styleKey || !(styleKey in prices)) continue;
       const newPrice = prices[styleKey];
 

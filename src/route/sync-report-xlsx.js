@@ -39,6 +39,9 @@ const COLORS = {
   pendingBg:  'FFF3F4F6',
   warnBg:     'FFFEF3C7',
   warn:       'FF92400E',
+  // Wrong Stall — cyan (location fix); kept apart from warn amber used for OOS
+  cyanBg:     'FFCFFAFE',
+  cyan:       'FF0E7490',
   dangerBg:   'FFFEE2E2',
   danger:     'FFB91C1C',
 };
@@ -48,7 +51,7 @@ const STATUS_FILL = {
   'Pending':           { bg: COLORS.pendingBg, fg: COLORS.muted },
   'Out of Stock':      { bg: COLORS.warnBg,    fg: COLORS.warn },
   'Out of Production': { bg: COLORS.dangerBg,  fg: COLORS.danger },
-  'Wrong Stall':       { bg: COLORS.warnBg,    fg: COLORS.warn },
+  'Wrong Stall':       { bg: COLORS.cyanBg,    fg: COLORS.cyan },
   'Model Unavailable': { bg: COLORS.dangerBg,  fg: COLORS.danger },
 };
 

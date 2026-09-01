@@ -31,13 +31,26 @@ const path = require('path');
 const Database = require('better-sqlite3');
 
 const {
-  getProductMapByNorm, getManualItems,
+  getProductMap, getProductMapByNorm, getManualItems,
+  getAllRouteAssignments, getAllProductAssignments,
   getCharmLibrary, getCharmShopDirectory,
   getOpenIssueMap, getOpenExchangeMap, getSubstitutionMap,
-  getListingStyleImageMap, normalizeStyleKey,
+  getListingStyleImageMap, getListingVariationImageMap,
   MANUAL_SHOP_ID,
 } = require('../db/setup');
+const {
+  lookupStyleKeyed,
+  lookupVariationImage,
+  parseStyleValueId,
+  resolveUnswitchedLineImage,
+  resolveSwitchedLineImage,
+  variationImageApiUrl,
+} = require('../listings/variation-images');
 const enginePaths = require('./engine-paths');
+const stallLocation = require('./stall-location');
+const charmNotes = require('./charm-notes');
+const sourcing = require('./sourcing');
+const productTypes = require('../listings/product-types');
 
 /** Valid component purchase statuses — mirror of OSP's STATUS_OPTIONS.
  *   Wrong Stall       (错档口位) — the recorded stall is wrong; must re-source.
@@ -55,6 +68,28 @@ const DEFAULT_STATUS = 'Pending';
  * for a product that has not been explicitly catalogued.
  */
 const MATCH_THRESHOLD = 100;
+const ROUTE_QUERY_SCOPE_CHUNK_SIZE = 500;
+
+/**
+ * Read a finite scope in bounded IN-list batches. Values must already be
+ * validated by the caller; this helper only de-duplicates and chunks them.
+ *
+ * @template T
+ * @param {import('better-sqlite3').Database} db
+ * @param {Iterable<T>} values
+ * @param {(placeholders:string) => string} sqlFor
+ * @returns {Array<object>}
+ */
+function queryScopeInChunks(db, values, sqlFor) {
+  const scoped = [...new Set(values)];
+  const rows = [];
+  for (let i = 0; i < scoped.length; i += ROUTE_QUERY_SCOPE_CHUNK_SIZE) {
+    const chunk = scoped.slice(i, i + ROUTE_QUERY_SCOPE_CHUNK_SIZE);
+    const placeholders = chunk.map(() => '?').join(',');
+    rows.push(...db.prepare(sqlFor(placeholders)).all(chunk));
+  }
+  return rows;
+}
 
 /**
  * Replicate OSP's `_normalize`: pipes→commas, collapse whitespace, trim, lower.
@@ -83,6 +118,8 @@ function itemKey(title) {
 
 /** Marker separating the title key from the listing id in a line-item key. */
 const LINE_KEY_MARKER = '#L';
+/** Marker separating the product identity from a per-line variant fingerprint. */
+const LINE_VARIANT_MARKER = '#V';
 
 /**
  * Per-line-item identity used to store charm / supplier / status assignments.
@@ -112,24 +149,86 @@ function lineItemKey(title, listingId) {
 }
 
 /**
+ * Coerce anything order data hands us into a usable Etsy listing id, or null.
+ * Transactions, manual sidecars and substitutions each store the id with a
+ * different type (number, numeric string, empty string, null).
+ *
+ * @param {string|number|null|undefined} value
+ * @returns {number|null}
+ */
+function toListingId(value) {
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+/**
+ * Compact fingerprint of a line's chosen phone model + style, used to keep two
+ * variants of the SAME listing as distinct route lines (independent purchase
+ * status / charm) without polluting the per-product defaults key.
+ *
+ * @param {string} [phoneModel]
+ * @param {string} [style]
+ * @returns {string}
+ */
+function variantFingerprint(phoneModel, style) {
+  const bits = [phoneModel, style]
+    .map((s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' '))
+    .filter(Boolean);
+  if (!bits.length) return '';
+  return bits.join('|').replace(/[^a-z0-9+|.-]+/g, '').slice(0, 48);
+}
+
+/**
+ * Per-line identity for a manual-order cart line. Same product + different
+ * model/style must not share a route_assignments row (marking one Purchased
+ * would otherwise settle the other). Product-level defaults still live under
+ * the unsuffixed `lineItemKey` — see stripLineVariantKey / productDefaultsKey.
+ *
+ * @param {string} title
+ * @param {string|number|null|undefined} listingId
+ * @param {string} [phoneModel]
+ * @param {string} [style]
+ * @returns {string}
+ */
+function lineItemKeyWithVariant(title, listingId, phoneModel, style) {
+  const base = lineItemKey(title, listingId);
+  const v = variantFingerprint(phoneModel, style);
+  return v ? `${base}${LINE_VARIANT_MARKER}${v}` : base;
+}
+
+/**
+ * Drop the `#V…` variant suffix so product_assignments still key by product,
+ * not by phone-model / style. Safe on unsuffixed (Etsy) keys — no-op.
+ *
+ * @param {string} lineKey
+ * @returns {string}
+ */
+function stripLineVariantKey(lineKey) {
+  const s = String(lineKey || '');
+  const i = s.indexOf(LINE_VARIANT_MARKER);
+  return i === -1 ? s : s.slice(0, i);
+}
+
+/**
  * Key under which a line's PER-PRODUCT saved defaults live in
  * `product_assignments` (the user-set supplier + charm that every order of the
  * same product should inherit).
  *
- * For a normal line this is just the line's own key. For a line the operator has
- * SWITCHED to a new design it MUST be the REPLACEMENT design's identity — the
- * product we will actually buy — NOT the original order line. The original
- * line's key still carries the ORIGINAL product's saved supplier/charm, so
- * reading (or writing) defaults under it on a switched line leaks stale data:
- * the switch would update the title + image yet keep the OLD supplier name /
- * stall. This mirrors how the image, canonical key and title-based supplier
- * matching already re-key onto the replacement on a switch.
+ * For a normal line this is the product identity (title + listing), with any
+ * manual-order variant suffix stripped. For a line the operator has SWITCHED
+ * to a new design it MUST be the REPLACEMENT design's identity — the product
+ * we will actually buy — NOT the original order line. The original line's key
+ * still carries the ORIGINAL product's saved supplier/charm, so reading (or
+ * writing) defaults under it on a switched line leaks stale data: the switch
+ * would update the title + image yet keep the OLD supplier name / stall. This
+ * mirrors how the image, canonical key and title-based supplier matching
+ * already re-key onto the replacement on a switch.
  *
  *   • catalog switch → replacement listing identity (new title + source listing)
  *   • custom switch  → null: a custom upload is NOT a catalog product, so it has
  *                      no per-product default to inherit or persist; only the
  *                      per-order override (route_assignments) applies to it.
- *   • no switch      → the line's own key.
+ *   • no switch      → the line's product identity (variant suffix stripped).
  *
  * Used on BOTH sides so reads and writes always agree:
  *   • read  — buildRouteRows/emitRow, resolving the supplier/charm to display,
@@ -141,7 +240,7 @@ function lineItemKey(title, listingId) {
  * @returns {string|null}   product-defaults key, or null when none applies
  */
 function productDefaultsKey(lineKey, sub) {
-  if (!sub) return lineKey;
+  if (!sub) return stripLineVariantKey(lineKey);
   if (sub.source === 'custom') return null;
   return lineItemKey(sub.new_title || '', sub.source_listing_id);
 }
@@ -175,41 +274,173 @@ function rowFullyPurchased(row) {
   return present.length > 0 && present.every(s => s === 'Purchased');
 }
 
-// ── Wrong-model exchange × shopping: the component boundary ──────────────────
+// ── Model fix × shopping: intent, and the component boundary ─────────────────
 //
-// A wrong-model "Fix model" ONLY ever applies to the CASE — a case is model-
-// specific (it must fit the phone), whereas a grip is universal and a charm has
-// no model at all, so neither has an "alternative model" to swap. The exchange
-// therefore holds ONLY the case out of the buy set (we already have it, just in
-// the wrong model, and will swap it in person). The grip and charm on the SAME
-// line still have to be sourced normally.
+// A "Fix model" record (order_exchanges) answers ONE question — this line must
+// be fulfilled with a DIFFERENT phone model than the order says — but it has TWO
+// operationally OPPOSITE shapes, told apart solely by whether we already hold a
+// physical wrong-model item:
 //
-// Historically the exchange was treated as an all-or-nothing LINE hold, so a
-// Case+Grip+Charm line with a case exchange dropped its grip AND charm from the
-// shopping route entirely — the operator never saw the pieces they still had to
-// buy. These helpers are the SINGLE SOURCE OF TRUTH for the component boundary
-// so every consumer (mobile shop route, Orders rollup, desktop route, Excel
-// generation) agrees on exactly which pieces an open exchange holds vs. which
-// remain shoppable.
+//   SWAP (have_model set)   — the item is IN HAND, just in the wrong model.
+//        Nothing is bought: the operator carries it back to the stall and swaps
+//        it. The case is therefore HELD OUT of the buy set and lives only in the
+//        "To exchange" bucket.
+//   BUY  (have_model blank) — we hold NOTHING. The buyer ordered/needs a model
+//        we never obtained, so the correct-model case must be PURCHASED exactly
+//        like any other case; only the MODEL to buy differs from the order line.
+//
+// Collapsing the two shapes is precisely the failure this boundary prevents:
+// treating a BUY as if the case were in hand silently drops the line from the
+// Orders Sorting dashboard, the mobile shopping route AND the generated Excel —
+// nobody ever buys the case, while the open record blocks the parcel from the
+// packing queue forever. The buy shape is not an exception to the buy list; it
+// IS a buy, carrying a model correction.
+//
+// Orthogonally, a model fix covers only the GENERATION-SPECIFIC physical unit
+// (see modelFixCoveredComponents). On an iPhone line that is the case: a grip
+// is universal and a separately-sourced charm has no model, so both stay in the
+// buy list. On an AirPods line the charm ships ATTACHED to the case — one
+// object — so a swap holds the charm with the case, and a charm-only AirPods
+// line holds the charm itself. A Case+Grip+Charm iPhone line must never lose
+// its grip and charm from the route.
+//
+// These helpers are the SINGLE SOURCE OF TRUTH for both rules, so every consumer
+// (mobile shop route, Orders rollup, desktop Route tab, Excel generation, the
+// packing queue) agrees on what an open model fix holds vs. what stays shoppable.
 const EXCHANGE_COMPONENTS = ['case', 'grip', 'charm'];
 
+/** We hold the wrong-model item and will swap it in person — nothing to buy. */
+const EXCHANGE_INTENT_SWAP = 'swap';
+/** We hold nothing — the correct model must still be bought. */
+const EXCHANGE_INTENT_BUY = 'buy';
+
 /**
- * The set of components an OPEN wrong-model exchange holds out of buying on a
- * row. Robust to legacy rows that stored multiple pieces, but treats a flagged
- * exchange with an empty/blank component list as case-only (the current rule).
- * Returns an empty set when the row has no open exchange.
- * @param {{needs_exchange?:boolean, exchange_components?:string}} row
+ * Which of the two shapes a model fix takes, derived from the ONE field that
+ * decides it: `have_model`. Deriving (rather than storing a second column) means
+ * the intent can never drift out of step with the model it is derived from.
+ *
+ * @param {string|null|undefined} haveModel - the exchange's have_model value.
+ * @returns {'swap'|'buy'}
+ */
+function modelFixIntentFrom(haveModel) {
+  return String(haveModel || '').trim() ? EXCHANGE_INTENT_SWAP : EXCHANGE_INTENT_BUY;
+}
+
+/**
+ * The intent of the OPEN model fix on a route row, or null when it has none.
+ * @param {{needs_exchange?:boolean, exchange_have_model?:string}} row
+ * @returns {'swap'|'buy'|null}
+ */
+function exchangeIntent(row) {
+  if (!row || !row.needs_exchange) return null;
+  return modelFixIntentFrom(row.exchange_have_model);
+}
+
+/**
+ * The intent of a raw `order_exchanges` record (as read from the DB), for
+ * callers that hold the record rather than a route row.
+ * @param {{have_model?:string}|null} exchange
+ * @returns {'swap'|'buy'|null}
+ */
+function exchangeRecordIntent(exchange) {
+  if (!exchange) return null;
+  return modelFixIntentFrom(exchange.have_model);
+}
+
+/**
+ * The generation-specific pieces a model fix covers on this line.
+ *
+ * A model fix corrects the DEVICE GENERATION the line must be fulfilled with.
+ * Only pieces that actually change with generation are swapped or re-bought:
+ *
+ *   iPhone  — the case (it must fit the phone). A grip is universal and a
+ *             separately-sourced charm has no model, so both stay in the
+ *             normal buy list.
+ *   AirPods — the generation-fit unit. An integral charm ships ATTACHED to
+ *             the case (one physical object), so it travels with the case.
+ *             Charm-only AirPods lines have no case: the charm itself is
+ *             the product.
+ *
+ * Never empty — a flagged fix with no recognised pieces defaults to the case
+ * so we never silently hold nothing.
+ *
+ * @param {{has_case?:boolean, has_charm?:boolean, charm_integral?:boolean,
+ *          phone_model?:string, title?:string}|null|undefined} line
+ * @returns {string[]} ordered subset of EXCHANGE_COMPONENTS
+ */
+function modelFixCoveredComponents(line) {
+  if (!line) return ['case'];
+  const airpods = !!(line.charm_integral) || isAirpodsProduct(line.phone_model, line.title);
+  if (airpods) {
+    const out = [];
+    if (line.has_case) out.push('case');
+    if (line.has_charm) out.push('charm');
+    return out.length ? out : ['case'];
+  }
+  return ['case'];
+}
+
+/**
+ * The set of components an OPEN model fix holds out of buying on a row. Robust
+ * to legacy rows that stored multiple pieces, but treats a flagged record with
+ * an empty/blank component list as the generation-specific unit for this line
+ * (case on iPhone; case+attached-charm — or charm alone — on AirPods). Returns
+ * an empty set when the row has no open model fix — or when the fix is a BUY,
+ * since a buy holds no physical item and therefore withholds nothing from the
+ * buy set.
+ *
+ * An AirPods integral charm is physically attached to its case. If a SWAP holds
+ * the case, the charm travels with it even on legacy records that only stored
+ * "case" — otherwise the shopper would be sent to buy a charm that is already
+ * dangling from the wrong-generation case they are carrying back to the stall.
+ *
+ * @param {{needs_exchange?:boolean, exchange_have_model?:string,
+ *          exchange_components?:string, has_case?:boolean, has_charm?:boolean,
+ *          charm_integral?:boolean, phone_model?:string, title?:string}} row
  * @returns {Set<string>}
  */
 function exchangeHeldComponents(row) {
   if (!row || !row.needs_exchange) return new Set();
+  // BUY: no wrong-model item is in hand, so nothing is held back — the case is
+  // bought like any other, just in the corrected model.
+  if (exchangeIntent(row) === EXCHANGE_INTENT_BUY) return new Set();
   const raw = String(row.exchange_components || '')
     .split(',')
     .map(c => c.trim().toLowerCase())
     .filter(c => EXCHANGE_COMPONENTS.includes(c));
-  // A flagged exchange with no explicit pieces defaults to the case (a model
-  // fix is always about the case), so we never fall back to "holds nothing".
-  return new Set(raw.length ? raw : ['case']);
+  // A flagged swap with no explicit pieces defaults to this line's generation-
+  // specific unit, so we never fall back to "holds nothing".
+  const held = new Set(raw.length ? raw : modelFixCoveredComponents(row));
+  const airpods = !!(row.charm_integral) || isAirpodsProduct(row.phone_model, row.title);
+  if (airpods && row.has_charm) {
+    if (held.has('case')) held.add('charm');
+    if (!row.has_case) {
+      held.delete('case');
+      held.add('charm');
+    }
+  }
+  return held;
+}
+
+/**
+ * The phone model this line must actually be FULFILLED with — bought at the
+ * stall and packed into the parcel. An open model fix makes `need_model`
+ * authoritative: the model on the order line is the one we already know to be
+ * wrong, so showing it to a shopper would have them buy the wrong case a second
+ * time. Every surface that tells a human WHICH model to obtain or pack (Route
+ * table, mobile route, generated Excel) must read this rather than `phone_model`.
+ *
+ * @param {{phone_model?:string, needs_exchange?:boolean,
+ *          exchange_need_model?:string}} row
+ * @returns {string}
+ */
+function effectiveShoppingModel(row) {
+  if (!row) return '';
+  if (row.needs_exchange) {
+    const need = String(row.exchange_need_model || '').trim();
+    if (need) return need;
+  }
+  return row.phone_model || '';
 }
 
 /**
@@ -230,8 +461,10 @@ function shoppableComponentFlags(row) {
 
 /**
  * True when the row STILL has pieces to buy once exchange-held components are
- * set aside — i.e. it belongs in the shopping route (as opposed to being a pure
- * swap that lives only in the "To exchange" bucket).
+ * set aside — i.e. it belongs in the shopping route. Only a SWAP whose entire
+ * generation-specific unit is held and that has nothing else on the line comes
+ * back false (it lives solely in the "To exchange" bucket); a BUY model fix
+ * always keeps its case here.
  * @param {object} row
  * @returns {boolean}
  */
@@ -246,10 +479,16 @@ function rowHasShoppingWork(row) {
 
 /**
  * The shopping-facing projection of a row: the shoppable component flags applied
- * over the original row, with `fully_purchased` recomputed against them. Returns
- * null when nothing remains to buy (a pure exchange handled entirely elsewhere).
- * Callers use this so the case being swapped disappears from the buy list while
- * the grip/charm on the same line stay put.
+ * over the original row, the CORRECTED model substituted into `phone_model`, and
+ * `fully_purchased` recomputed against them. Returns null when nothing remains
+ * to buy (a pure case swap, handled entirely in the "To exchange" bucket).
+ *
+ * Callers use this so a swapped case disappears from the buy list while the
+ * grip/charm on the same line stay put — and so a BUY model fix reaches the
+ * shopper as an ordinary purchase that names the model to actually get. The
+ * model the buyer originally ordered is preserved as `ordered_phone_model` for
+ * anyone who needs to show the correction rather than just its result.
+ *
  * @param {object} row
  * @returns {object|null}
  */
@@ -257,7 +496,12 @@ function rowShoppingProjection(row) {
   if (!row.needs_exchange) return row;
   const flags = shoppableComponentFlags(row);
   if (!flags.has_case && !flags.has_grip && !flags.has_charm) return null;
-  const view = { ...row, ...flags };
+  const view = {
+    ...row,
+    ...flags,
+    phone_model: effectiveShoppingModel(row),
+    ordered_phone_model: row.phone_model || '',
+  };
   view.fully_purchased = rowFullyPurchased(view);
   return view;
 }
@@ -316,16 +560,34 @@ function substitutionSupersedesIssue(sub, issue) {
 /**
  * Derive which components an order line needs from its Style string.
  * Mirrors OSP's `_style_has`: "stand"/"kickstand" counts as a grip.
+ *
+ * A SINGLE-AXIS line (an Apple Watch band, an iPad case) has no bundle string to
+ * read: its only variation is the fit, so the style is empty and nothing would
+ * be derived. Such a line still has exactly one physical unit to buy, and a line
+ * with zero components is invisible to the shopping route (rowHasShoppingWork)
+ * — the item would silently never be bought. So when the style says nothing,
+ * the line's device family decides: a single-unit line occupies the primary unit
+ * slot (`case`), which every downstream surface already knows how to shop,
+ * status and pack. `line` is optional; without it the historical behaviour is
+ * exact.
+ *
  * @param {string} style
+ * @param {{phoneModel?:string, phone_model?:string, title?:string}} [line]
  * @returns {{ hasCase: boolean, hasGrip: boolean, hasCharm: boolean }}
  */
-function styleComponents(style) {
+function styleComponents(style, line) {
   const s = String(style ?? '').toLowerCase();
-  return {
+  const comps = {
     hasCase:  s.includes('case'),
     hasGrip:  s.includes('grip') || s.includes('stand'),
     hasCharm: s.includes('charm'),
   };
+  if (comps.hasCase || comps.hasGrip || comps.hasCharm) return comps;
+  if (line) {
+    const family = productTypes.deviceFamilyOf(line.phoneModel ?? line.phone_model, line.title);
+    if (productTypes.familyIsSingleUnit(family)) return { hasCase: true, hasGrip: false, hasCharm: false };
+  }
+  return comps;
 }
 
 /**
@@ -348,14 +610,20 @@ function styleComponents(style) {
  * @returns {boolean}
  */
 function isAirpodsProduct(phoneModel, title) {
-  const model = String(phoneModel ?? '').trim();
-  if (model) return /air\s*pods?/i.test(model);
-  return /air\s*pods?/i.test(String(title ?? ''));
+  return productTypes.deviceFamilyOf(phoneModel, title) === productTypes.FAMILY_AIRPODS;
 }
 
 /**
- * Extract phone model + style from an Etsy variations array.
- * Etsy v3 transactions store: [{ formatted_name, formatted_value }, ...].
+ * Extract the fit (phone model / band size) + bundle style from an Etsy
+ * variations array. Etsy v3 transactions store:
+ * [{ formatted_name, formatted_value }, ...].
+ *
+ * Which property means what is decided by productTypes.variationPropertyRole —
+ * the same registry the Bulk Listing Creator writes those properties from — so
+ * a new product line's axis is understood here the moment it is declared. An
+ * Apple Watch band's "Band Size" is a FIT: it is what a shopper must match at
+ * the stall, and what a model fix corrects.
+ *
  * @param {any} variations
  * @returns {{ phoneModel: string, style: string }}
  */
@@ -371,13 +639,14 @@ function parseVariations(variations) {
       .toString()
       .trim();
 
-  const styleProp = vars.find(v => /style/i.test(v?.formatted_name || v?.property_name || ''));
-  const modelProp = vars.find(v => /model|iphone|phone/i.test(v?.formatted_name || v?.property_name || ''));
-
-  return {
-    style:      styleProp ? pick(styleProp) : '',
-    phoneModel: modelProp ? pick(modelProp) : '',
-  };
+  let style = '';
+  let phoneModel = '';
+  for (const v of vars) {
+    const role = productTypes.variationPropertyRole(v?.formatted_name || v?.property_name);
+    if (role === 'choice' && !style) style = pick(v);
+    else if (role === 'fit' && !phoneModel) phoneModel = pick(v);
+  }
+  return { style, phoneModel };
 }
 
 /**
@@ -406,6 +675,7 @@ function parseVariations(variations) {
 function buildRouteRows(db, config, filters = {}) {
   const params = {};
   let whereClause;
+  let explicitReceiptIds = null;
 
   // Single-receipt lookup (for "Add Order" feature — bypasses date filter).
   if (filters.receipt_id != null) {
@@ -422,9 +692,8 @@ function buildRouteRows(db, config, filters = {}) {
     // the WHOLE dashboard back. Pass `undefined` to mean "no receipt filter".
     const ids = filters.receipt_ids.map(Number).filter(Number.isInteger);
     if (ids.length) {
-      const ph = ids.map((_, i) => `@rid${i}`).join(',');
-      ids.forEach((id, i) => { params[`rid${i}`] = id; });
-      whereClause = `r.is_paid = 1 AND r.receipt_id IN (${ph})`;
+      explicitReceiptIds = [...new Set(ids)];
+      whereClause = 'r.is_paid = 1 AND r.receipt_id IN (__receipt_scope__)';
     } else {
       whereClause = '0';   // no valid ids → empty result
     }
@@ -432,14 +701,14 @@ function buildRouteRows(db, config, filters = {}) {
     // "Manual orders" scope. Every manual order lives in the synthetic
     // __manual__ shop, but comes in two shapes:
     //   • Orders-tab manual order  → a `receipts` row, NO sidecar.
-    //   • Route-tab manual order   → a `receipts` row PLUS a linked
-    //                                `route_manual_items` sidecar (which carries
-    //                                the product image + purchasing detail).
+    //   • Route-tab manual order   → a `receipts` row PLUS one or more linked
+    //                                `route_manual_items` sidecars (which carry
+    //                                each product's image + purchasing detail).
     // Show ALL of them regardless of date / ship state — the operator asked to
     // see manual orders specifically, so the date + pending scope (which is only
     // meaningful for time-bounded Etsy sync data) must not hide any. Sidecar-
-    // bearing receipts are de-duped out just below and re-emitted from the manual
-    // loop with their richer detail, so each order surfaces exactly once.
+    // bearing receipts are de-duped out just below and re-emitted from the
+    // manual loop with their richer detail (one dashboard row per product).
     whereClause = 'r.is_paid = 1 AND r.shop_id = @shop_id';
     params.shop_id = MANUAL_SHOP_ID;
   } else {
@@ -535,15 +804,16 @@ function buildRouteRows(db, config, filters = {}) {
   }
 
   // De-dupe linked manual orders. A manual order created from the Route tab has
-  // BOTH a `receipts` row (so it shows in the Orders tab) AND a linked
-  // `route_manual_items` sidecar (which carries its product image + purchasing
-  // detail and is merged in below). Excluding any receipt that has a sidecar
-  // ensures such an order is emitted exactly once here — via the sidecar merge,
-  // with its image — instead of twice. Manual orders WITHOUT a sidecar (created
-  // directly in the Orders tab) have no matching row and still flow through.
+  // BOTH a `receipts` row (so it shows in the Orders tab) AND one or more linked
+  // `route_manual_items` sidecars (which carry each product's image + purchasing
+  // detail and are merged in below). Excluding any receipt that has a sidecar
+  // ensures such an order is emitted here via the sidecar merge — one row per
+  // product — instead of once from receipts AND again from the sidecars.
+  // Manual orders WITHOUT a sidecar (created directly in the Orders tab) have
+  // no matching row and still flow through.
   whereClause = `(${whereClause}) AND r.receipt_id NOT IN (SELECT receipt_id FROM route_manual_items)`;
 
-  const rows = db.prepare(`
+  const receiptSql = (scopedWhere) => `
     SELECT r.receipt_id, r.shop_id, r.name AS buyer_name, r.buyer_email,
            r.buyer_user_id, r.message_from_buyer, r.team_note,
            r.shipping_country_iso, r.etsy_created_at, r.all_transactions,
@@ -552,91 +822,183 @@ function buildRouteRows(db, config, filters = {}) {
            s.shop_name
     FROM receipts r
     JOIN shops s ON s.shop_id = r.shop_id
-    WHERE ${whereClause}
+    WHERE ${scopedWhere}
     ORDER BY r.etsy_created_at ASC
-  `).all(params);
+  `;
+  const rows = explicitReceiptIds
+    ? queryScopeInChunks(
+        db,
+        explicitReceiptIds,
+        (ph) => receiptSql(whereClause.replace('__receipt_scope__', ph)),
+      ).sort((a, b) => Number(a.etsy_created_at || 0) - Number(b.etsy_created_at || 0))
+    : db.prepare(receiptSql(whereClause)).all(params);
 
-  // Batch-load thumbnail URLs for all referenced listings.
-  const listingIds = new Set();
-  for (const r of rows) {
+  // Parse each receipt's transaction JSON exactly once. The parsed lines are also
+  // the source of truth for every downstream receipt/item/listing query scope.
+  const parsedRows = rows.map((receipt) => {
+    let transactions = [];
     try {
-      JSON.parse(r.all_transactions || '[]').forEach(t => { if (t.listing_id) listingIds.add(t.listing_id); });
+      const parsed = JSON.parse(receipt.all_transactions || '[]');
+      if (Array.isArray(parsed)) transactions = parsed;
     } catch {}
-  }
-  const imageMap = {};
-  if (listingIds.size > 0) {
-    const ph = [...listingIds].map(() => '?').join(',');
-    db.prepare(`SELECT listing_id, url FROM listing_images WHERE listing_id IN (${ph})`)
-      .all([...listingIds])
-      .forEach(row => { imageMap[row.listing_id] = row.url; });
+    return { receipt, transactions };
+  });
+
+  // Manual sidecars are part of the working route and therefore part of the same
+  // scopes. Preserve the existing explicit-empty and shop-filter semantics while
+  // resolving them before any assignment/issue/image reads.
+  const manualOnlyScope = filters.shop_id === MANUAL_SHOP_ID;
+  const explicitReceiptScope =
+    filters.receipt_id != null
+      ? new Set([Number(filters.receipt_id)].filter(Number.isInteger))
+      : (Array.isArray(filters.receipt_ids)
+          ? new Set(filters.receipt_ids.map(Number).filter(Number.isInteger))
+          : null);
+  let manualItems = [];
+  if (filters.include_manual !== false &&
+      (!filters.shop_id || manualOnlyScope)) {
+    try { manualItems = getManualItems(db); } catch { manualItems = []; }
+    if (explicitReceiptScope) {
+      manualItems = manualItems.filter((m) => explicitReceiptScope.has(Number(m.receipt_id)));
+    }
   }
 
-  // Operator-supplied per-variant clarifying images, keyed by
-  // `${listing_id}\x00${style_key}`. These override the ambiguous listing hero
-  // shot for a specific style (e.g. show the grip for a "Grip 3 Only" line).
-  const styleImageMap = getListingStyleImageMap(db, listingIds);
+  // Pull linked manual-order receipt metadata in bounded batches. This keeps
+  // Route-created manual rows equivalent to Etsy rows (buyer/notes/seal state).
+  const manualOrderById = {};
+  const manualReceiptIds = manualItems
+    .map((m) => Number(m.receipt_id))
+    .filter(Number.isInteger);
+  try {
+    queryScopeInChunks(
+      db,
+      manualReceiptIds,
+      (ph) => `SELECT receipt_id, name, buyer_email, shipping_country_iso, etsy_created_at,
+                      message_from_buyer, team_note, packaged_at
+               FROM receipts WHERE receipt_id IN (${ph})`,
+    ).forEach((r) => { manualOrderById[r.receipt_id] = r; });
+  } catch { /* receipts may lack rows for legacy sidecars */ }
+
+  const currentLines = [];
+  for (const { receipt, transactions } of parsedRows) {
+    for (const tx of transactions) {
+      const title = String(tx?.title || '').trim();
+      if (!title) continue;
+      const listingId = toListingId(tx.listing_id);
+      currentLines.push({
+        receipt_id: Number(receipt.receipt_id),
+        item_key: lineItemKey(title, tx.listing_id || null),
+        title,
+        listing_id: listingId,
+      });
+    }
+  }
+  for (const item of manualItems) {
+    const title = String(item.title || '').trim();
+    if (!title) continue;
+    const listingId = toListingId(item.listing_id);
+    currentLines.push({
+      receipt_id: Number(item.receipt_id),
+      item_key: item.item_key || lineItemKey(title, item.listing_id || null),
+      title,
+      listing_id: listingId,
+    });
+  }
+  if (!currentLines.length) return [];
+
+  const receiptIds = new Set(
+    [...rows.map((r) => Number(r.receipt_id)), ...manualReceiptIds]
+      .filter(Number.isInteger),
+  );
+  const itemKeys = new Set(currentLines.map((line) => line.item_key));
 
   // Saved per-order assignments, keyed by `${receipt_id}\x00${item_key}`.
-  const assignMap = {};
+  let assignMap = {};
   try {
-    db.prepare('SELECT * FROM route_assignments').all().forEach(a => {
-      assignMap[`${a.receipt_id}\x00${a.item_key}`] = a;
-    });
+    assignMap = getAllRouteAssignments(db, receiptIds);
   } catch { /* table may not exist yet on first run */ }
 
-  // Per-product defaults (user-set overrides), keyed by item_key.
-  const productMap = {};
-  try {
-    db.prepare('SELECT * FROM product_assignments').all().forEach(a => {
-      productMap[a.item_key] = a;
-    });
-  } catch { /* table may not exist before first restart */ }
+  // Open workflow state is receipt-scoped. Omitting a scope from these helpers
+  // remains backward-compatible; the Route builder always supplies its finite set.
+  const issueMap = getOpenIssueMap(db, receiptIds);
+  const exchangeMap = getOpenExchangeMap(db, receiptIds);
+  const substitutionMap = getSubstitutionMap(db, receiptIds);
 
-  // Open fulfilment issues, keyed by `${receipt_id}\x00${item_key}`. Any line with
-  // an open issue is held out of the purchasing route (we must never buy a product
-  // the buyer may cancel or swap) — unless the caller explicitly opts in.
-  const issueMap = getOpenIssueMap(db);
-
-  // Open wrong-model exchanges, keyed by `${receipt_id}\x00${item_key}`. A line with
-  // an open exchange is one we ALREADY hold (in the wrong model): it must not be
-  // bought again, so it is dropped from the "to shop" buy set — but, unlike an issue,
-  // it stays VISIBLE and is surfaced in the dedicated "To exchange" bucket so staff
-  // carry it back to the stall to swap it for the model the order needs.
-  const exchangeMap = getOpenExchangeMap(db);
-
-  // Local design switches, keyed by `${receipt_id}\x00${item_key}`. When a line
-  // has a switch, we PURCHASE the replacement design: its title drives supplier
-  // matching, its style drives Case/Grip/Charm, and its image/model ride along.
-  // The Etsy receipt is never touched — this is a purely local override.
-  const substitutionMap = getSubstitutionMap(db);
-
-  // A CATALOG switch renders the REPLACEMENT listing's photo, which is usually a
-  // DIFFERENT listing than any ordered line — so its thumbnail isn't in imageMap
-  // (built from ordered listings only). Load those images too, so a switched line
-  // never falls back to the ORIGINAL design's photo. Best-effort + de-duped.
-  try {
-    const subListingIds = new Set();
-    substitutionMap.forEach((s) => {
-      if (s && s.source_listing_id != null && !(s.source_listing_id in imageMap)) subListingIds.add(Number(s.source_listing_id));
-    });
-    if (subListingIds.size > 0) {
-      const subPh = [...subListingIds].map(() => '?').join(',');
-      db.prepare(`SELECT listing_id, url FROM listing_images WHERE listing_id IN (${subPh}) AND url IS NOT NULL AND url <> ''`)
-        .all([...subListingIds])
-        .forEach(row => { if (!(row.listing_id in imageMap)) imageMap[row.listing_id] = row.url; });
-      const stillMissing = [...subListingIds].filter(id => !(id in imageMap));
-      if (stillMissing.length > 0) {
-        const mPh = stillMissing.map(() => '?').join(',');
-        db.prepare(`SELECT listing_id, primary_image_url FROM listings WHERE listing_id IN (${mPh}) AND primary_image_url IS NOT NULL AND primary_image_url <> ''`)
-          .all(stillMissing)
-          .forEach(row => { if (!(row.listing_id in imageMap)) imageMap[row.listing_id] = row.primary_image_url; });
-      }
+  // A substitution changes both the effective product key/title and the listing
+  // whose image/canonical identity must be loaded. Only substitutions attached to
+  // a current line are allowed to widen those scopes.
+  const listingIds = new Set();
+  const orderedListingIds = new Set();
+  const productDefaultKeys = new Set();
+  const effectiveTitleNorms = new Set();
+  const substitutionListingIds = new Set();
+  for (const line of currentLines) {
+    if (line.listing_id) {
+      listingIds.add(line.listing_id);
+      orderedListingIds.add(line.listing_id);
     }
-  } catch { /* best-effort: switched lines fall back to their stored image_url */ }
+    const sub = substitutionMap.get(`${line.receipt_id}\x00${line.item_key}`) || null;
+    const productKey = productDefaultsKey(line.item_key, sub);
+    if (productKey) productDefaultKeys.add(productKey);
+    const effectiveTitle = sub ? (sub.new_title || line.title) : line.title;
+    const titleNorm = normalizeTitle(effectiveTitle);
+    if (titleNorm) effectiveTitleNorms.add(titleNorm);
+    const subListingId = sub ? toListingId(sub.source_listing_id) : null;
+    if (subListingId) {
+      listingIds.add(subListingId);
+      substitutionListingIds.add(subListingId);
+    }
+  }
 
-  // Authoritative product map from Excel "Product Map" sheet, keyed by title_norm.
-  // Priority: route_assignments > product_assignments > excel_product_map > OSP catalog.
-  const excelProductMap = getProductMapByNorm(db);
+  // `itemKeys` is deliberately derived even though receipt-scoping is sufficient
+  // for per-order tables: it documents/guards the finite current-item collection
+  // from which product-default keys above are computed.
+  if (!itemKeys.size) return [];
+
+  // Batch-load ordered/manual thumbnails first. Replacement listings are loaded
+  // separately below to preserve the historical switch-image fallback: an empty
+  // replacement cache row must not block listings.primary_image_url.
+  const imageMap = {};
+  queryScopeInChunks(
+    db,
+    orderedListingIds,
+    (ph) => `SELECT listing_id, url FROM listing_images WHERE listing_id IN (${ph})`,
+  ).forEach((row) => { imageMap[row.listing_id] = row.url; });
+
+  // A switched listing may only exist in the canonical listings table. Never
+  // widen this fallback to unrelated listings, and never fall back to the old
+  // ordered design.
+  const uncachedSubstitutionImages = [...substitutionListingIds]
+    .filter((id) => !(id in imageMap));
+  try {
+    queryScopeInChunks(
+      db,
+      uncachedSubstitutionImages,
+      (ph) => `SELECT listing_id, url FROM listing_images
+               WHERE listing_id IN (${ph}) AND url IS NOT NULL AND url <> ''`,
+    ).forEach((row) => {
+      if (!(row.listing_id in imageMap)) imageMap[row.listing_id] = row.url;
+    });
+    const missingSubstitutionImages = [...substitutionListingIds]
+      .filter((id) => !(id in imageMap));
+    queryScopeInChunks(
+      db,
+      missingSubstitutionImages,
+      (ph) => `SELECT listing_id, primary_image_url FROM listings
+               WHERE listing_id IN (${ph})
+                 AND primary_image_url IS NOT NULL AND primary_image_url <> ''`,
+    ).forEach((row) => {
+      if (!(row.listing_id in imageMap)) imageMap[row.listing_id] = row.primary_image_url;
+    });
+  } catch { /* best-effort: switched lines use their stored image_url */ }
+
+  // Operator-supplied per-variant clarifying images.
+  const styleImageMap = getListingStyleImageMap(db, listingIds);
+  const variationImageMap = getListingVariationImageMap(db, listingIds);
+
+  // Per-product defaults and Excel product aliases are exact item/title scopes.
+  const productMap = getAllProductAssignments(db, productDefaultKeys);
+  const excelProductMap = getProductMapByNorm(db, effectiveTitleNorms);
 
   // Charm code → supplier shop, from the charm library (Manage charms). This is
   // the SINGLE SOURCE OF TRUTH for a charm's supplier: the shop is a pure function
@@ -654,10 +1016,31 @@ function buildRouteRows(db, config, filters = {}) {
   // Product Map carries the same key so Excel/catalog aliases remain linked.
   const canonicalByListing = new Map();
   try {
-    db.prepare('SELECT listing_id, canonical_key FROM listing_phash WHERE canonical_key IS NOT NULL')
-      .all()
+    queryScopeInChunks(
+      db,
+      listingIds,
+      (ph) => `SELECT listing_id, canonical_key FROM listing_phash
+               WHERE canonical_key IS NOT NULL AND listing_id IN (${ph})`,
+    )
       .forEach(r => canonicalByListing.set(Number(r.listing_id), r.canonical_key));
   } catch { /* migration may not have run yet */ }
+  // Listings an operator has explicitly declared "same product" via the 同款
+  // control. Only ever consulted as a last resort for a SWITCHED line (see the
+  // canonical-key chain below), where it is the sole trustworthy signal: nothing
+  // derivable from a hand-typed custom switch can tell us what it really is.
+  const operatorMergedListings = new Set();
+  try {
+    for (const column of ['listing_a', 'listing_b']) {
+      queryScopeInChunks(
+        db,
+        orderedListingIds,
+        (ph) => `SELECT listing_a, listing_b FROM product_merges WHERE ${column} IN (${ph})`,
+      ).forEach((r) => {
+        operatorMergedListings.add(Number(r.listing_a));
+        operatorMergedListings.add(Number(r.listing_b));
+      });
+    }
+  } catch { /* product_merges may not exist on an older install */ }
 
   // Optional supplier-catalog enrichment (read-only from the engine's
   // etsy_orders.db — vendored inside this dashboard, no external program).
@@ -675,7 +1058,7 @@ function buildRouteRows(db, config, filters = {}) {
    * @param {object} meta - { receipt_id, shop_id, shop_name, buyer_name,
    *   buyer_email, order_date, private_notes, team_note, country, packaged_at }
    * @param {object} line - { title, listing_id, quantity, phoneModel, style,
-   *   image_url, is_manual?, manual_id? }
+   *   styleValueId?, image_url, is_manual?, manual_id? }
    */
   function emitRow(meta, line) {
     const origTitle = (line.title || '').trim();
@@ -694,32 +1077,28 @@ function buildRouteRows(db, config, filters = {}) {
     const title       = sub ? (sub.new_title || origTitle).trim() : origTitle;
     const phoneModel  = sub && sub.new_phone_model ? sub.new_phone_model : (line.phoneModel || '');
     const style       = sub && sub.new_style ? sub.new_style : (line.style || '');
-    const comps       = styleComponents(style);
+    const comps       = styleComponents(style, { phoneModel, title });
     const titleNorm = normalizeTitle(title);
-    // Switched image, resolved so a switched line ALWAYS shows the REPLACEMENT
-    // design — never the original the buyer moved away from:
-    //   1. uploaded bytes served from our endpoint (custom switch), else
-    //   2. the switch's own stored CDN url (catalog switch), else
-    //   3. the replacement listing's cached thumbnail (via source_listing_id,
-    //      loaded into imageMap above) — fixes switches saved before the image
-    //      was resolved at write time, else
-    //   4. null → a neutral placeholder. We deliberately do NOT fall back to
-    //      line.image_url (the ORIGINAL design's photo), which made a switched
-    //      line look unchanged ("same old case").
-    if (sub) {
-      const subImg = sub.has_image_data
-        // Content-addressed: the `v` token changes whenever the operator
-        // re-uploads the switched-design photo (updated_at moves), so the URL
-        // changes too and the mobile service worker's cache-first image cache
-        // can never serve the previous/original photo. Without it, a re-uploaded
-        // switched image stays stale on the shopping floor (desktop, which has
-        // no service worker, showed the new one — the source of the mismatch).
-        ? `/api/route/substitution-image/${sub.id}?v=${sub.updated_at || 0}`
-        : (sub.image_url && String(sub.image_url).trim())
-          ? sub.image_url
-          : (sub.source_listing_id != null ? (imageMap[sub.source_listing_id] || null) : null);
-      line = { ...line, image_url: subImg };
-    }
+    // Photo of the REPLACEMENT design on a switched line — never the original the
+    // buyer moved away from. See resolveSwitchedLineImage for the full priority
+    // chain and why it has no fallback to the original.
+    const switchedImage = sub
+      ? resolveSwitchedLineImage(sub, (id) => imageMap[id] || null)
+      : null;
+
+    // The Etsy listing this line is actually BOUGHT as, which is NOT the same
+    // question as `listing_id` (the listing the buyer ORDERED). A catalog design
+    // switch buys the replacement listing; a custom switch buys something that has
+    // no listing at all. Conflating the two is what made the mobile shopping route
+    // show the ORIGINAL design for a switched line: it re-proxied the photo through
+    // /api/route/listing-image/<listing_id>, which is the design the buyer left.
+    //
+    // Every consumer that means "the PRODUCT" rather than "the ORDER" — its photo,
+    // its cached image bytes, its perceptual identity — must key off this. Only
+    // consumers that mean the order itself (the Etsy link, 同款 merge edges, the
+    // line's saved purchase status) may keep using `listing_id`.
+    const productListingId = sub ? toListingId(sub.source_listing_id) : toListingId(line.listing_id);
+
     const saved    = assignMap[`${meta.receipt_id}\x00${key}`] || {};
     // Per-product saved defaults (supplier / charm). On a SWITCHED line these
     // must describe the REPLACEMENT design we will actually buy — never the
@@ -733,6 +1112,12 @@ function buildRouteRows(db, config, filters = {}) {
     const productDefKey = productDefaultsKey(key, sub);
     const product  = (productDefKey && productMap[productDefKey]) || {};
     const excelPM  = excelProductMap.get(titleNorm) || {};
+    // A retired catalog row is a deliberate tombstone, not a missing mapping.
+    // It suppresses product defaults and the legacy OSP fallback so deleting a
+    // discontinued design cannot silently keep sending shoppers to the old
+    // supplier. Per-order overrides remain valid because they are an explicit
+    // decision for that one order.
+    const catalogRetired = excelPM.status === 'retired';
     // Canonical physical-product identity — the key the shopping view uses to MERGE
     // order lines into a single product card. It MUST describe the product we will
     // actually BUY.
@@ -748,9 +1133,22 @@ function buildRouteRows(db, config, filters = {}) {
     //     switched title, and finally '' so it merges by its switched title downstream.
     // `excelPM` is already keyed by the effective (switched) title, so it's correct
     // for both branches; only the listing-derived lookup must avoid the original.
+    //
+    // LAST RESORT for a switch, and ONLY once an operator has pressed 同款 on the
+    // card: adopt the original listing's canonical key. A custom switch is a
+    // hand-typed title over an uploaded photo, so it has no source listing and is
+    // deliberately never title-matched against the catalog — leaving it with no
+    // identity at all and stranding it on a card of its own even when the operator
+    // has just declared it the same product as the stall's other card. The merge
+    // is recorded against the listing id the line still carries, which is why that
+    // id is the right one to read. The gate is what keeps the original bug dead:
+    // WITHOUT an explicit merge a switched line must never inherit the identity of
+    // the design it was switched away FROM, or it lands on that product's card and
+    // the shopper buys the wrong thing.
     const canonicalProductKey = sub
       ? ((sub.source_listing_id != null && canonicalByListing.get(Number(sub.source_listing_id)))
           || excelPM.canonical_product_key
+          || (operatorMergedListings.has(Number(line.listing_id)) && canonicalByListing.get(Number(line.listing_id)))
           || '')
       : (canonicalByListing.get(Number(line.listing_id))
           || excelPM.canonical_product_key
@@ -793,7 +1191,7 @@ function buildRouteRows(db, config, filters = {}) {
     const isCustomSub = !!(sub && sub.source === 'custom');
 
     let supplier = null;
-    if (cat && !isCustomSub) {
+    if (cat && !isCustomSub && !catalogRetired) {
       // Supplier match is purely a function of the title — cache by title key.
       const catKey = titleNorm;
       if (!supplierCache.has(catKey)) supplierCache.set(catKey, matchSupplier(cat, title));
@@ -805,10 +1203,11 @@ function buildRouteRows(db, config, filters = {}) {
     //   2. Per-product user save      (product_assignments.supplier_*)   [skipped for custom]
     //   3. Excel Product Map          (product_map.shop_name / stall)    [skipped for custom]
     //   4. OSP catalog exact match    (etsy_orders.db catalog)           [skipped for custom]
-    const shopOvr  = saved.supplier_shop_override  || (isCustomSub ? '' : (product.supplier_shop  || excelPM.shop_name)) || '';
-    const stallOvr = saved.supplier_stall_override || (isCustomSub ? '' : (product.supplier_stall || excelPM.stall))     || '';
+    const useCatalogDefaults = !isCustomSub && !catalogRetired;
+    const shopOvr  = saved.supplier_shop_override  || (useCatalogDefaults ? (product.supplier_shop  || excelPM.shop_name) : '') || '';
+    const stallOvr = saved.supplier_stall_override || (useCatalogDefaults ? (product.supplier_stall || excelPM.stall) : '')     || '';
     const isOverride = !!(saved.supplier_shop_override || saved.supplier_stall_override ||
-                          (!isCustomSub && (product.supplier_shop || product.supplier_stall)));
+                          (useCatalogDefaults && (product.supplier_shop || product.supplier_stall)));
     if (shopOvr || stallOvr) {
       const effectiveStall = stallOvr || (supplier?.stall || '');
       supplier = {
@@ -816,8 +1215,8 @@ function buildRouteRows(db, config, filters = {}) {
         stall:       effectiveStall,
         floor:       stallFloor(effectiveStall),
         price:       supplier?.price      || '',
-        charm_shop:  (isCustomSub ? '' : excelPM.charm_shop) || supplier?.charm_shop || '',
-        charm_code:  (isCustomSub ? '' : excelPM.charm_code) || supplier?.charm_code || '',
+        charm_shop:  (useCatalogDefaults ? excelPM.charm_shop : '') || supplier?.charm_shop || '',
+        charm_code:  (useCatalogDefaults ? excelPM.charm_code : '') || supplier?.charm_code || '',
         match_score: 100,
         in_catalog:  true,
         is_override: isOverride,
@@ -839,7 +1238,7 @@ function buildRouteRows(db, config, filters = {}) {
     //
     // Keeping catalog data out of charm_code ensures "Needs charm" always surfaces
     // every item that still requires a conscious operator decision.
-    const effectiveCharmCode = saved.charm_code || (isCustomSub ? '' : product.charm_code) || '';
+    const effectiveCharmCode = saved.charm_code || (useCatalogDefaults ? product.charm_code : '') || '';
     // The charm's supplier SHOP follows its CODE via the charm library — the single
     // source of truth — NOT the per-order/per-product snapshot. Trusting the stored
     // snapshot was the bug: after editing a charm's supplier in Manage charms, the
@@ -850,7 +1249,7 @@ function buildRouteRows(db, config, filters = {}) {
     // (legacy / hand-typed) falls back to the stored snapshot.
     const effectiveCharmShop = (effectiveCharmCode && charmShopByCode.has(effectiveCharmCode))
       ? charmShopByCode.get(effectiveCharmCode)
-      : (saved.charm_shop || (isCustomSub ? '' : product.charm_shop) || '');
+      : (saved.charm_shop || (useCatalogDefaults ? product.charm_shop : '') || '');
 
     // ── Derived shopping-completion state ─────────────────────────────────────
     // A line is "fully purchased" once EVERY component it actually has (case /
@@ -868,11 +1267,31 @@ function buildRouteRows(db, config, filters = {}) {
       status_case: statusCase,   status_grip: statusGrip,   status_charm: statusCharm,
     });
 
-    // Per-variant clarifying image (operator upload for this listing + style).
-    // Skipped when the line was switched to another design — that product is a
-    // different item and carries its own image via line.image_url above.
+    // ── Derived sourcing state ────────────────────────────────────────────────
+    // Does this line still need someone to tell us WHERE to buy it? Either
+    // nothing is recorded (not in the catalog, no manual entry) or a shopper
+    // stood at the recorded stall and found it wrong. Both leave the same gap,
+    // so both feed the "unmatched" bucket and the Export-images request.
+    const sourcingRow = {
+      has_case:  comps.hasCase,  has_grip:  comps.hasGrip,  has_charm:  comps.hasCharm,
+      status_case: statusCase,   status_grip: statusGrip,   status_charm: statusCharm,
+      supplier_in_catalog:  supplier ? supplier.in_catalog : false,
+      supplier_is_override: supplier ? !!supplier.is_override : false,
+    };
+    const wrongStallComps = sourcing.wrongStallComponents(sourcingRow);
+    const sourcingReason = sourcing.sourcingReason(sourcingRow);
+
+    // Per-variant image: operator Fix Image, then Etsy Styles variation photo,
+    // then the listing hero. Skipped when the line was switched to another
+    // design — that product is a different item and carries its own image.
     const styleImg = (!sub && line.listing_id)
-      ? (styleImageMap[`${line.listing_id}\x00${normalizeStyleKey(style)}`] || null)
+      ? (lookupStyleKeyed(styleImageMap, line.listing_id, style) || null)
+      : null;
+    const variationImg = (!sub && line.listing_id)
+      ? lookupVariationImage(variationImageMap, line.listing_id, {
+          valueId: line.styleValueId != null ? line.styleValueId : null,
+          style,
+        })
       : null;
 
     out.push({
@@ -886,26 +1305,49 @@ function buildRouteRows(db, config, filters = {}) {
       private_notes: meta.private_notes || '',
       team_note:   meta.team_note || '',
       country:     meta.country || '',
+      // The listing the BUYER ORDERED. Stays put across a design switch so the
+      // line keeps its saved purchase status, its Etsy link and its 同款 merge
+      // edges. To address the product actually being BOUGHT, use
+      // `product_listing_id` — after a switch they are different listings.
       listing_id:  line.listing_id || null,
+      // The listing this line is BOUGHT as: the replacement after a catalog
+      // design switch, else the ordered listing, else null (a custom switch is
+      // not a catalog product at all). This is the id to use for the product's
+      // photo, its cached image bytes and its perceptual identity.
+      product_listing_id: productListingId,
       product_key: canonicalProductKey,
       title,
       quantity:    line.quantity || 1,
+      // The model the BUYER ordered — kept verbatim as the audit trail of what
+      // the order says, even once a model fix supersedes it.
       phone_model: phoneModel,
+      // The model to actually BUY and PACK. Identical to `phone_model` unless an
+      // open model fix corrects it, in which case every human-facing surface
+      // must use this one or the wrong case gets bought/packed all over again.
+      shopping_model: exchange
+        ? (String(exchange.need_model || '').trim() || phoneModel)
+        : phoneModel,
       style,
       // A SWITCHED line's image was fully resolved above (replacement upload /
       // CDN / source-listing thumbnail, or null for a neutral placeholder); it
       // must NEVER fall back to imageMap[line.listing_id] — that is the ORIGINAL
       // design the buyer moved away from ("same old case"). Only an UNSWITCHED
-      // line uses the per-variant override → listing thumbnail chain.
+      // line uses the per-variant override → Etsy style photo → listing hero chain.
       image_url:   sub
-        ? (line.image_url != null ? line.image_url : null)
-        : (line.image_url != null
-            ? line.image_url
-            : (styleImg
-                // Content-addressed (see substitution image): busts the mobile
-                // service-worker cache when the variant photo is replaced.
-                ? `/api/route/style-image/${styleImg.id}?v=${styleImg.updated_at || 0}`
-                : (line.listing_id ? (imageMap[line.listing_id] || null) : null))),
+        ? switchedImage
+        : resolveUnswitchedLineImage({
+            styleImg,
+            variationUrl: variationImg
+              ? variationImageApiUrl(
+                  line.listing_id,
+                  variationImg.style_value || style,
+                  variationImg.cached_at,
+                )
+              : null,
+            listingUrl: line.image_url != null
+              ? line.image_url
+              : (line.listing_id ? (imageMap[line.listing_id] || null) : null),
+          }),
       has_case:    comps.hasCase,
       has_grip:    comps.hasGrip,
       has_charm:   comps.hasCharm,
@@ -916,6 +1358,11 @@ function buildRouteRows(db, config, filters = {}) {
       // grip is for a phone case. Consumed by the Route tab (charm column) and
       // the mobile Shopping view; empty on every phone-case line.
       charm_integral: comps.hasCharm && isAirpodsProduct(phoneModel, title),
+      // Which device family this line belongs to. Lets the model-fix UI offer
+      // AirPods generations on an AirPods line (or band sizes on a watch line,
+      // and refuse an iPhone model on either) without every client re-deriving
+      // the classification.
+      device_family: productTypes.deviceFamilyOf(phoneModel, title),
       charm_code:  effectiveCharmCode,
       charm_shop:  effectiveCharmShop,
       status_case:  statusCase,
@@ -935,11 +1382,14 @@ function buildRouteRows(db, config, filters = {}) {
       // shopping. Used by the dashboard to drop it from the "to shop" counts and
       // the active queue without ever altering the underlying assignment.
       fully_purchased: fullyPurchased,
-      // Open wrong-model exchange — we hold this item but in the wrong model and
-      // must swap it in person at the supplier. Held out of the buy set (we have
-      // it) and surfaced in the dedicated "To exchange" bucket instead.
+      // Open model fix. Two shapes (see exchangeIntent): SWAP — we hold the item
+      // in the wrong model and carry it back to the stall, so it is held out of
+      // the buy set and surfaced in the "To exchange" bucket; BUY — we hold
+      // nothing and must purchase the corrected model, so the line stays in the
+      // normal buy set with `shopping_model` naming what to actually get.
       needs_exchange:        !!exchange,
       exchange_id:           exchange ? exchange.id : null,
+      exchange_intent:       exchangeRecordIntent(exchange),
       exchange_have_model:   exchange ? (exchange.have_model || '') : '',
       exchange_need_model:   exchange ? (exchange.need_model || phoneModel || '') : '',
       exchange_components:   exchange ? (exchange.components || '') : '',
@@ -969,10 +1419,19 @@ function buildRouteRows(db, config, filters = {}) {
       supplier_in_catalog:  supplier ? supplier.in_catalog : false,
       supplier_match_score: supplier ? supplier.match_score : 0,
       supplier_is_override: supplier ? !!supplier.is_override : false,
+      catalog_status: catalogRetired ? 'retired' : (excelPM.status || ''),
+      // Sourcing gap (see src/route/sourcing.js). `needs_sourcing` is what the
+      // "unmatched" filter, the summary pill and the Export-images ZIP all key
+      // on; `sourcing_reason` says whether nothing is recorded or the recorded
+      // stall was found wrong, and `wrong_stall_components` names the pieces the
+      // shopper flagged so a re-sourcing request can be specific.
+      needs_sourcing:       !!sourcingReason,
+      sourcing_reason:      sourcingReason || '',
+      wrong_stall_components: wrongStallComps.join(','),
       // Catalog's suggested charm — Excel Product Map first, then OSP catalog.
       // Suppressed for custom switches (no catalog record to suggest from).
-      suggested_charm_code: isCustomSub ? '' : (excelPM.charm_code || (supplier ? supplier.charm_code : '')),
-      suggested_charm_shop: isCustomSub ? '' : (excelPM.charm_shop || (supplier ? supplier.charm_shop : '')),
+      suggested_charm_code: useCatalogDefaults ? (excelPM.charm_code || (supplier ? supplier.charm_code : '')) : '',
+      suggested_charm_shop: useCatalogDefaults ? (excelPM.charm_shop || (supplier ? supplier.charm_shop : '')) : '',
     });
   }
 
@@ -983,11 +1442,7 @@ function buildRouteRows(db, config, filters = {}) {
   const routeNowSec    = Math.floor(Date.now() / 1000);
   const preTransitCutoff = routeNowSec - preTransitDays * 24 * 3600;
 
-  for (const r of rows) {
-    let txs = [];
-    try { txs = JSON.parse(r.all_transactions || '[]'); } catch {}
-    if (!Array.isArray(txs)) continue;
-
+  for (const { receipt: r, transactions: txs } of parsedRows) {
     const labelCreatedAt  = r.shipment_notified_at || 0;
     const isPreTransit    = !!(r.is_shipped && labelCreatedAt > preTransitCutoff && !r.carrier_confirmed_at);
     const labelDaysAgo    = labelCreatedAt ? (routeNowSec - labelCreatedAt) / 86400 : 0;
@@ -1017,6 +1472,7 @@ function buildRouteRows(db, config, filters = {}) {
         quantity:   t.quantity || 1,
         phoneModel,
         style,
+        styleValueId: parseStyleValueId(t.variations),
       });
     }
   }
@@ -1041,115 +1497,71 @@ function buildRouteRows(db, config, filters = {}) {
   //      "show manual orders only", so the sidecars must be emitted (this is what
   //      makes Route-created manual orders visible under the "Manual orders"
   //      filter — their receipt is de-duped out above and re-emitted here).
-  const manualOnlyScope = filters.shop_id === MANUAL_SHOP_ID;
-  // The set of receipts an explicit scope restricts manual items to (null = no
-  // explicit scope, so every manual item is in play, as on the full dashboard).
-  // An EMPTY receipt_ids array is a scope of "none" — matching the WHERE clause
-  // above — so manual items must be filtered out too, never treated as unscoped.
-  const explicitReceiptScope =
-    filters.receipt_id != null
-      ? new Set([Number(filters.receipt_id)].filter(Number.isInteger))
-      : (Array.isArray(filters.receipt_ids)
-          ? new Set(filters.receipt_ids.map(Number).filter(Number.isInteger))
-          : null);
-  if (filters.include_manual !== false &&
-      (!filters.shop_id || manualOnlyScope)) {
-    let manualItems = [];
-    try { manualItems = getManualItems(db); } catch { manualItems = []; }
-    // Narrow to the requested receipts when an explicit receipt scope is active.
-    if (explicitReceiptScope) {
-      manualItems = manualItems.filter((m) => explicitReceiptScope.has(Number(m.receipt_id)));
-    }
-    // Pull the linked manual ORDER (receipts row) for each sidecar so the Route
-    // shows the real buyer name / country / notes the operator filled in from the
-    // Orders tab, instead of a generic "Manual entry" placeholder.
-    const manualOrderById = {};
-    if (manualItems.length) {
-      const ids = manualItems.map((m) => Number(m.receipt_id)).filter(Number.isInteger);
-      if (ids.length) {
-        const ph = ids.map(() => '?').join(',');
-        try {
-          db.prepare(
-            `SELECT receipt_id, name, buyer_email, shipping_country_iso, etsy_created_at, message_from_buyer, team_note,
-                    packaged_at
-             FROM receipts WHERE receipt_id IN (${ph})`
-          ).all(ids).forEach((r) => { manualOrderById[r.receipt_id] = r; });
-        } catch { /* receipts may lack rows for legacy sidecars */ }
-      }
-    }
-    for (const m of manualItems) {
-      const linked = manualOrderById[m.receipt_id] || null;
-      const linkedName = (linked?.name && linked.name !== 'Manual order') ? linked.name : '';
-      emitRow({
-        receipt_id:    m.receipt_id,
-        shop_id:       '',
-        shop_name:     m.shop_name || 'Manual entry',
-        buyer_name:    linkedName || 'Manual entry',
-        buyer_email:   linked?.buyer_email || '',
-        order_date:    linked?.etsy_created_at || m.created_at || null,
-        private_notes: linked?.message_from_buyer || '',
-        team_note:     linked?.team_note || '',
-        country:       linked?.shipping_country_iso || '',
-        // Sidecars bypass the receipts query above, so the sealed stamp has to be
-        // carried over from the linked manual order explicitly. Without it every
-        // manual row reads "not packaged" and an already-boxed manual order keeps
-        // showing up as shopping work (notably on the "Charms to buy" list).
-        // Legacy sidecars with no linked receipt stay null, as before.
-        packaged_at:   linked?.packaged_at || null,
-      }, {
-        title:      m.title,
-        item_key:   m.item_key,
-        listing_id: m.listing_id || null,
-        quantity:   m.quantity || 1,
-        phoneModel: m.phone_model || '',
-        style:      m.style || '',
-        // Catalog picks store a CDN url; custom uploads are served from our
-        // own endpoint. Fall back to the cached listing image when neither set.
-        image_url:  m.image_url
-          ? m.image_url
-          // Content-addressed (see substitution image): busts the mobile
-          // service-worker cache when a manual order's photo is replaced.
-          : (m.has_image_data ? `/api/route/manual-image/${m.id}?v=${m.updated_at || m.created_at || 0}` : (m.listing_id ? (imageMap[m.listing_id] || null) : null)),
-        is_manual:  true,
-        manual_id:  m.id,
-      });
-    }
+  for (const m of manualItems) {
+    const linked = manualOrderById[m.receipt_id] || null;
+    const linkedName = (linked?.name && linked.name !== 'Manual order') ? linked.name : '';
+    emitRow({
+      receipt_id:    m.receipt_id,
+      shop_id:       '',
+      shop_name:     m.shop_name || 'Manual entry',
+      buyer_name:    linkedName || 'Manual entry',
+      buyer_email:   linked?.buyer_email || '',
+      order_date:    linked?.etsy_created_at || m.created_at || null,
+      private_notes: linked?.message_from_buyer || '',
+      team_note:     linked?.team_note || '',
+      country:       linked?.shipping_country_iso || '',
+      // Sidecars bypass the receipts query above, so the sealed stamp has to be
+      // carried over from the linked manual order explicitly. Without it every
+      // manual row reads "not packaged" and an already-boxed manual order keeps
+      // showing up as shopping work (notably on the "Charms to buy" list).
+      // Legacy sidecars with no linked receipt stay null, as before.
+      packaged_at:   linked?.packaged_at || null,
+    }, {
+      title:      m.title,
+      item_key:   m.item_key,
+      listing_id: m.listing_id || null,
+      quantity:   m.quantity || 1,
+      phoneModel: m.phone_model || '',
+      style:      m.style || '',
+      // Catalog picks store a CDN url; custom uploads are served from our
+      // own endpoint. Fall back to the cached listing image when neither set.
+      image_url:  m.image_url
+        ? m.image_url
+        // Content-addressed (see substitution image): busts the mobile
+        // service-worker cache when a manual order's photo is replaced.
+        : (m.has_image_data ? `/api/route/manual-image/${m.id}?v=${m.updated_at || m.created_at || 0}` : (m.listing_id ? (imageMap[m.listing_id] || null) : null)),
+      is_manual:  true,
+      manual_id:  m.id,
+    });
   }
 
   return out;
 }
 
 /**
- * Build the "product database" that powers the Route tab's Add-Order product
- * picker: every distinct product the dashboard has ever seen, with its cached
- * thumbnail and the set of phone-model / style variations observed across
- * orders. Products are keyed by listing_id (falling back to normalised title
- * when a line has no listing id).
+ * Build the active product picker shared by Add Order and Design Switch.
+ *
+ * `product_map` is the membership authority: adding/reactivating a catalog row
+ * makes it available and retiring it removes it from every active picker.
+ * Order history enriches those products with observed models/styles and order
+ * counts, but can never resurrect a discontinued design.
+ *
+ * Canonical aliases are collapsed into one physical-product card, matching the
+ * Route Product Catalog. Completed orders remain untouched in receipts.
  *
  * @param {import('better-sqlite3').Database} db
  * @returns {{ products: Array<object>, phone_models: string[], styles: string[] }}
  */
 function buildProductCatalog(db) {
-  // Cached thumbnail URLs by listing id. Source from the canonical listings
-  // table first (covers every live listing, sold or not) and fall back to the
-  // order-driven listing_images cache for delisted products.
-  const urlByListing = new Map();
-  try {
-    db.prepare("SELECT listing_id, primary_image_url FROM listings WHERE primary_image_url IS NOT NULL AND primary_image_url <> ''")
-      .all().forEach(r => urlByListing.set(Number(r.listing_id), r.primary_image_url));
-  } catch { /* listings table may not exist yet */ }
-  try {
-    db.prepare("SELECT listing_id, url FROM listing_images WHERE url IS NOT NULL AND url <> ''")
-      .all().forEach(r => { if (!urlByListing.has(Number(r.listing_id))) urlByListing.set(Number(r.listing_id), r.url); });
-  } catch { /* table may not exist yet */ }
-
-  // Shop display names.
   const shopName = new Map();
   try {
     db.prepare('SELECT shop_id, shop_name FROM shops').all()
-      .forEach(s => shopName.set(s.shop_id, s.shop_name || s.shop_id));
+      .forEach(s => shopName.set(String(s.shop_id), s.shop_name || s.shop_id));
   } catch {}
 
+  const historyByTitle = new Map();
+  const allModels = new Set();
+  const allStyles = new Set();
   let recs = [];
   try {
     recs = db.prepare(
@@ -1157,63 +1569,157 @@ function buildProductCatalog(db) {
     ).all();
   } catch { recs = []; }
 
-  const byKey = new Map();        // product key → product aggregate
-  const allModels = new Set();
-  const allStyles = new Set();
-
   for (const rec of recs) {
     let txs = [];
     try { txs = JSON.parse(rec.all_transactions || '[]'); } catch { continue; }
     if (!Array.isArray(txs)) continue;
-
-    for (const t of txs) {
-      const title = (t.title || '').trim();
-      if (!title) continue;
-      const listingId = t.listing_id ? Number(t.listing_id) : null;
-      const key = listingId ? `L${listingId}` : `T${normalizeTitle(title)}`;
-      const { phoneModel, style } = parseVariations(t.variations);
+    for (const tx of txs) {
+      const title = String(tx.title || '').trim();
+      const titleNorm = normalizeTitle(title);
+      if (!titleNorm) continue;
+      const { phoneModel, style } = parseVariations(tx.variations);
       if (phoneModel) allModels.add(phoneModel);
       if (style) allStyles.add(style);
 
-      let p = byKey.get(key);
-      if (!p) {
-        p = {
-          key,
-          listing_id: listingId,
-          title,
-          shop_id:    rec.shop_id || '',
-          shop_name:  shopName.get(rec.shop_id) || rec.shop_id || '',
-          image_url:  listingId ? (urlByListing.get(listingId) || null) : null,
+      let item = historyByTitle.get(titleNorm);
+      if (!item) {
+        item = {
           phone_models: new Set(),
-          styles:       new Set(),
-          order_count:  0,
+          styles: new Set(),
+          listing_counts: new Map(),
+          shop_counts: new Map(),
+          shop_id_counts: new Map(),
+          order_count: 0,
         };
-        byKey.set(key, p);
+        historyByTitle.set(titleNorm, item);
       }
-      if (phoneModel) p.phone_models.add(phoneModel);
-      if (style) p.styles.add(style);
-      p.order_count += 1;
+      if (phoneModel) item.phone_models.add(phoneModel);
+      if (style) item.styles.add(style);
+      const listingId = tx.listing_id != null && Number.isSafeInteger(Number(tx.listing_id))
+        ? Number(tx.listing_id)
+        : null;
+      if (listingId) item.listing_counts.set(listingId, (item.listing_counts.get(listingId) || 0) + 1);
+      const etsyShop = shopName.get(String(rec.shop_id)) || String(rec.shop_id || '');
+      if (etsyShop) item.shop_counts.set(etsyShop, (item.shop_counts.get(etsyShop) || 0) + 1);
+      if (rec.shop_id) item.shop_id_counts.set(String(rec.shop_id), (item.shop_id_counts.get(String(rec.shop_id)) || 0) + 1);
+      item.order_count += 1;
     }
   }
 
-  const products = [...byKey.values()]
-    .map(p => ({
-      key:          p.key,
-      listing_id:   p.listing_id,
-      title:        p.title,
-      shop_id:      p.shop_id,
-      shop_name:    p.shop_name,
-      image_url:    p.image_url,
-      phone_models: [...p.phone_models].sort(),
-      styles:       [...p.styles].sort(),
-      order_count:  p.order_count,
-    }))
-    .sort((a, b) => (b.order_count - a.order_count) || a.title.localeCompare(b.title));
+  const mostUsed = (counts) => {
+    let best = null, bestCount = -1;
+    for (const [value, count] of counts || []) {
+      if (count > bestCount) { best = value; bestCount = count; }
+    }
+    return best;
+  };
+
+  let resolver;
+  try { resolver = buildCatalogImageResolver(db); }
+  catch { resolver = { resolve: () => null }; }
+
+  const candidates = getProductMap(db)
+    .map(row => {
+      const observed = historyByTitle.get(row.title_norm);
+      const image = resolver.resolve(row.title_norm, row.title);
+      // All three visual catalog surfaces follow the same contract: a selectable
+      // product needs a photo. The row remains active in product_map and can be
+      // fixed without manufacturing a misleading placeholder design.
+      if (!image || !image.url) return null;
+      const exactListingId = !image.approx && image.listing_id ? Number(image.listing_id) : null;
+      const observedListingId = observed ? mostUsed(observed.listing_counts) : null;
+      const supplierIdentity = encodeURIComponent(stallLocation.supplierIdentityKey(row.shop_name, row.stall));
+      return {
+        // A canonical physical product can legitimately have more than one
+        // supplier offer. Keep each booth separate so the picker never displays
+        // one supplier while exact-title route resolution uses another.
+        key: row.canonical_product_key
+          ? `C:${row.canonical_product_key}:S:${supplierIdentity}`
+          : `P:${row.id}`,
+        catalog_id: Number(row.id),
+        canonical_product_key: row.canonical_product_key || '',
+        listing_id: exactListingId || observedListingId || null,
+        title: row.title || '',
+        title_norm: row.title_norm,
+        shop_name: row.shop_name || '',
+        stall: row.stall || '',
+        charm_shop: row.charm_shop || '',
+        charm_code: row.charm_code || '',
+        shop_id: observed ? (mostUsed(observed.shop_id_counts) || '') : '',
+        etsy_shop_name: observed ? (mostUsed(observed.shop_counts) || '') : '',
+        image_url: image.url,
+        image_approx: !!image.approx,
+        phone_models: observed ? new Set(observed.phone_models) : new Set(),
+        styles: observed ? new Set(observed.styles) : new Set(),
+        order_count: observed ? observed.order_count : 0,
+        sort_order: Number.isFinite(Number(row.sort_order)) ? Number(row.sort_order) : Number.MAX_SAFE_INTEGER,
+      };
+    })
+    .filter(Boolean);
+
+  const byPhysicalProduct = new Map();
+  for (const product of candidates) {
+    if (!byPhysicalProduct.has(product.key)) byPhysicalProduct.set(product.key, []);
+    byPhysicalProduct.get(product.key).push(product);
+  }
+
+  const products = [];
+  for (const aliases of byPhysicalProduct.values()) {
+    aliases.sort((a, b) =>
+      Number(a.image_approx) - Number(b.image_approx)
+      || Number(!a.listing_id) - Number(!b.listing_id)
+      || b.order_count - a.order_count
+      || a.sort_order - b.sort_order
+      || a.title.localeCompare(b.title));
+    const representative = aliases[0];
+    const models = new Set();
+    const styles = new Set();
+    for (const alias of aliases) {
+      alias.phone_models.forEach(value => models.add(value));
+      alias.styles.forEach(value => styles.add(value));
+    }
+    const loc = stallLocation.parseStall(representative.stall);
+    products.push({
+      key: representative.key,
+      catalog_id: representative.catalog_id,
+      catalog_ids: aliases.map(alias => alias.catalog_id),
+      canonical_product_key: representative.canonical_product_key,
+      listing_id: representative.listing_id,
+      title: representative.title,
+      alias_titles: aliases.map(alias => alias.title),
+      listing_count: aliases.length,
+      shop_name: representative.shop_name,
+      stall: representative.stall,
+      supplier_shop: representative.shop_name,
+      supplier_stall: representative.stall,
+      charm_shop: representative.charm_shop,
+      charm_code: representative.charm_code,
+      shop_id: representative.shop_id,
+      etsy_shop_name: representative.etsy_shop_name,
+      image_url: representative.image_url,
+      image_approx: representative.image_approx,
+      phone_models: [...models].sort(),
+      styles: [...styles].sort(),
+      order_count: aliases.reduce((sum, alias) => sum + alias.order_count, 0),
+      location: {
+        building_id: loc.buildingId,
+        building_label: loc.buildingLabel,
+        floor: loc.floor === 999 ? null : loc.floor,
+        located: loc.located,
+      },
+    });
+  }
+
+  products.sort((a, b) => {
+    const ak = stallLocation.locationSortKey(a.stall, a.shop_name);
+    const bk = stallLocation.locationSortKey(b.stall, b.shop_name);
+    return ak < bk ? -1 : ak > bk ? 1 : a.title.localeCompare(b.title);
+  });
 
   return {
     products,
     phone_models: [...allModels].sort(),
-    styles:       [...allStyles].sort(),
+    styles: [...allStyles].sort(),
   };
 }
 
@@ -1262,16 +1768,13 @@ function _tokenSortRatio(a, b) {
   return _ratio(sortToks(a), sortToks(b));
 }
 
-/** Parse the floor number from a stall code (mirror of OSP `_stall_floor`). */
-function stallFloor(stall) {
-  if (!stall || ['—', '???', ''].includes(stall)) return 999;
-  if (/^A2/i.test(stall)) return 2;
-  let m = /^(\d)/.exec(stall);
-  if (m) return Number(m[1]);
-  m = /(\d)[A-Za-z]/.exec(stall);
-  if (m) return Number(m[1]);
-  return 999;
-}
+/**
+ * Parse the floor number from a stall code. Delegates to the shared stall
+ * parser so the floor a route row carries is the same one Shopping Mode, the
+ * desktop catalog and the Excel export derive — including for stalls in the
+ * other markets we shop, whose code is prefixed with the building name.
+ */
+const stallFloor = stallLocation.stallFloor;
 
 // Cached read-only handle + in-memory catalog snapshot, keyed by db path+mtime.
 let _ospCatalog = null;  // { dbPath, mtimeMs, db, entries:[{id,norm,...}], byNorm:Map }
@@ -1366,8 +1869,8 @@ function closeOspCatalog() {
  * divergence for the reported code and every other drifted code.
  *
  * Upsert semantics (never destructive):
- *   • charm_library  — update default_charm_shop + sku for existing codes,
- *                      insert codes the engine is missing. The `photo` BLOB is
+ *   • charm_library  — update default_charm_shop for existing codes, insert
+ *                      codes the engine is missing. The `photo` BLOB is
  *                      left untouched (charm photos are sourced from the on-disk
  *                      data/charm_images/<code>.* override anyway), and engine
  *                      rows with no dashboard counterpart are preserved.
@@ -1383,7 +1886,7 @@ function syncCharmTablesToEngine(db, config) {
   try { fs.statSync(dbPath); }
   catch { return { ok: false, reason: 'engine database not found', charms: 0, shops: 0 }; }
 
-  const lib   = getCharmLibrary(db);          // [{code, sku, default_charm_shop, ...}]
+  const lib   = getCharmLibrary(db);          // [{code, default_charm_shop, ...}]
   const shops = getCharmShopDirectory(db);    // [{shop_name, stall, notes, ...}]
 
   let eng;
@@ -1393,6 +1896,10 @@ function syncCharmTablesToEngine(db, config) {
 
     // Older engine databases may predate these tables — create on demand so the
     // sync (and the subsequent generation) never crashes on a fresh install.
+    // `sku` is the engine's own column: the dashboard dropped the field, but the
+    // Python generator still SELECTs it for the Charm Library sheet, so the
+    // column must exist. We never write it — existing engine values are left
+    // untouched and new codes get the ''.
     eng.exec(`
       CREATE TABLE IF NOT EXISTS charm_library (
         code               TEXT PRIMARY KEY,
@@ -1410,10 +1917,9 @@ function syncCharmTablesToEngine(db, config) {
     `);
 
     const upLib = eng.prepare(`
-      INSERT INTO charm_library (code, sku, default_charm_shop)
-      VALUES (@code, @sku, @default_charm_shop)
+      INSERT INTO charm_library (code, default_charm_shop)
+      VALUES (@code, @default_charm_shop)
       ON CONFLICT(code) DO UPDATE SET
-        sku                = excluded.sku,
         default_charm_shop = excluded.default_charm_shop
     `);
     const upShop = eng.prepare(`
@@ -1430,7 +1936,6 @@ function syncCharmTablesToEngine(db, config) {
         if (!code) continue;
         upLib.run({
           code,
-          sku:                String(c.sku || '').trim(),
           default_charm_shop: String(c.default_charm_shop || '').trim(),
         });
         nC++;
@@ -1540,9 +2045,11 @@ function loadCharmCatalog(ospDir) {
 
   const charms = (manifest.charms || []).map(c => ({
     code:               c.code,
-    sku:                c.sku || '',
     default_charm_shop: c.default_charm_shop || '',
-    notes:              c.notes || '',
+    // The manifest seeds Notes with an instruction to fill in a SKU — a field
+    // the dashboard no longer has. Dropped here, at the boundary, so neither
+    // the first seed nor a later re-sync can put it back.
+    notes:              charmNotes.cleanCharmNote(c.notes),
     image_file:         c.image_file || c.image_relative || `${c.code}.png`,
     has_image:          !!(c.image_file || c.image_relative),
   }));
@@ -1642,11 +2149,13 @@ function rowsToImportOrders(rows) {
   const byReceipt = new Map();
   for (const original of rows) {
     if (original.excluded) continue;
-    // A line awaiting a wrong-model exchange holds ONLY the swapped piece (the
-    // case) out of buying — we already have it. Its grip/charm must still be
-    // sourced, so we keep the line but pass a style that drops the held pieces
-    // (the Python generator derives components from `style`). A pure case swap
-    // with nothing else to buy projects to null and is skipped entirely.
+    // A line under a model fix is projected down to what the shopper must
+    // actually buy. A SWAP holds only the swapped piece (the case) out of buying
+    // — we already have it — so we keep the line but pass a style that drops the
+    // held pieces (the Python generator derives components from `style`); a pure
+    // case swap with nothing else to buy projects to null and is skipped. A BUY
+    // keeps every piece, and the projection carries the CORRECTED phone_model so
+    // the printed route names the model to actually get.
     let row = original;
     if (original.needs_exchange) {
       const projected = rowShoppingProjection(original);
@@ -1672,7 +2181,10 @@ function rowsToImportOrders(rows) {
     byReceipt.get(row.receipt_id).items.push({
       title:       row.title,
       quantity:    row.quantity,
-      phone_model: row.phone_model,
+      // The CORRECTED model when a model fix applies — a printed shopping route
+      // that named the buyer's original (already known-wrong) model would send
+      // the shopper to buy the wrong case a second time.
+      phone_model: effectiveShoppingModel(row),
       style:       row.style,
       image_url:   row.image_url,
       // Etsy listing id — the ONLY stable per-line discriminator. Two genuinely
@@ -1765,27 +2277,47 @@ function buildCatalogImageResolver(db, opts = {}) {
       .all().forEach(r => urlByListing.set(String(r.listing_id), r.url));
   } catch { /* table may not exist yet */ }
 
+  // Exact-title image resolution can also carry the listing's durable physical
+  // product identity. This is essential when a freshly imported product_map row
+  // has not yet been backfilled with its already-known listing_phash key: the
+  // read model can still group duplicate cards without writing to product_map.
+  const canonicalByListing = new Map();
+  try {
+    db.prepare("SELECT listing_id, canonical_key FROM listing_phash WHERE canonical_key IS NOT NULL AND canonical_key <> ''")
+      .all().forEach(r => canonicalByListing.set(String(r.listing_id), String(r.canonical_key)));
+  } catch { /* listing_phash may not exist on a minimal/fresh database */ }
+
   // Exact resolution map: title_norm → url. Listings (canonical) win over orders.
   const exact = new Map();
+  const exactMeta = new Map();
   // Fuzzy corpus: deduped candidate titles that have an image.
-  const corpusByNorm = new Map(); // title_norm → { tokens, url }
+  const corpusByNorm = new Map(); // title_norm → { tokens, url, listing_id, canonical_product_key }
 
-  const addCandidate = (title, url) => {
+  const addCandidate = (title, url, listingId = null) => {
     if (!url) return;
     const tn = normalizeTitle(title);
     if (!tn) return;
-    if (!exact.has(tn)) exact.set(tn, url);
-    if (!corpusByNorm.has(tn)) corpusByNorm.set(tn, { tokens: _titleTokens(title), url });
+    const id = listingId == null ? null : Number(listingId);
+    const meta = {
+      url,
+      listing_id: Number.isSafeInteger(id) ? id : null,
+      canonical_product_key: listingId == null ? '' : canonicalByListing.get(String(listingId)) || '',
+    };
+    if (!exact.has(tn)) {
+      exact.set(tn, url);
+      exactMeta.set(tn, meta);
+    }
+    if (!corpusByNorm.has(tn)) corpusByNorm.set(tn, { tokens: _titleTokens(title), ...meta });
   };
 
   // 1) Canonical source: every live listing carries its own primary_image_url.
   try {
-    db.prepare("SELECT listing_id, title, primary_image_url FROM listings WHERE title IS NOT NULL AND title <> ''")
+    db.prepare("SELECT listing_id, title, primary_image_url FROM listings WHERE title IS NOT NULL AND title <> '' ORDER BY listing_id")
       .all()
       .forEach(l => {
         const url = (l.primary_image_url && String(l.primary_image_url).trim())
           || urlByListing.get(String(l.listing_id)) || null;
-        addCandidate(l.title, url);
+        addCandidate(l.title, url, l.listing_id);
       });
   } catch { /* listings table may not exist yet */ }
 
@@ -1799,7 +2331,7 @@ function buildCatalogImageResolver(db, opts = {}) {
         if (!Array.isArray(txs)) return;
         for (const t of txs) {
           const url = t.listing_id ? urlByListing.get(String(t.listing_id)) : null;
-          if (url) addCandidate(t.title || '', url);
+          if (url) addCandidate(t.title || '', url, t.listing_id);
         }
       });
   } catch { /* receipts table may not exist yet */ }
@@ -1820,7 +2352,7 @@ function buildCatalogImageResolver(db, opts = {}) {
   /** @param {string} titleNorm @param {string} title */
   function resolve(titleNorm, title) {
     const url = exact.get(titleNorm);
-    if (url) return { url, approx: false };
+    if (url) return { ...exactMeta.get(titleNorm), url, approx: false };
     if (!FUZZY || corpus.length === 0) return null;
 
     const qv = _tfidfVec(_titleTokens(title || titleNorm || ''), idf);
@@ -1833,7 +2365,10 @@ function buildCatalogImageResolver(db, opts = {}) {
       else if (s > second) { second = s; }
     }
     if (best && bestScore >= MIN_SCORE && (bestScore - second) >= MIN_MARGIN) {
-      return { url: best.url, approx: true, score: Number(bestScore.toFixed(3)) };
+      // A fuzzy title match is suitable for a labelled thumbnail fallback, but
+      // never authoritative enough to collapse products. Deliberately omit its
+      // canonical key.
+      return { url: best.url, approx: true, score: Number(bestScore.toFixed(3)), listing_id: best.listing_id };
     }
     return null;
   }
@@ -1895,7 +2430,7 @@ function reconcileProductMap(db, config) {
   const cat = openOspCatalog(enginePaths.engineDir(config));
   if (!cat) return { ok: false, supplier_filled: 0, charm_filled: 0, reason: 'route-engine catalog unavailable' };
 
-  const rows = db.prepare('SELECT id, title_norm, shop_name, stall, charm_shop, charm_code FROM product_map').all();
+  const rows = db.prepare("SELECT id, title_norm, shop_name, stall, charm_shop, charm_code FROM product_map WHERE status = 'active'").all();
   const now = Math.floor(Date.now() / 1000);
   const upd = db.prepare(`
     UPDATE product_map
@@ -1951,10 +2486,21 @@ module.exports = {
   normalizeTitle,
   itemKey,
   lineItemKey,
+  lineItemKeyWithVariant,
+  stripLineVariantKey,
+  variantFingerprint,
   productDefaultsKey,
   LINE_KEY_MARKER,
+  LINE_VARIANT_MARKER,
   rowFullyPurchased,
   EXCHANGE_COMPONENTS,
+  EXCHANGE_INTENT_SWAP,
+  EXCHANGE_INTENT_BUY,
+  modelFixIntentFrom,
+  exchangeIntent,
+  exchangeRecordIntent,
+  effectiveShoppingModel,
+  modelFixCoveredComponents,
   exchangeHeldComponents,
   shoppableComponentFlags,
   rowHasShoppingWork,

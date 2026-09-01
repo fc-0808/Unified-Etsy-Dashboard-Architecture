@@ -36,12 +36,15 @@
  *
  * ─── PERSONAL ACCESS LIMIT ───────────────────────────────────────────────────
  *
- * Each app (API key) is limited to 5 shops.
- * For 20 shops across 4 groups: 4 separate apps × 5 shops each.
+ * The Developer Portal's allocation is authoritative (this installation has
+ * historically shown five shops for Personal Access). Etsy API Terms permit one
+ * designated key per application and prohibit duplicate keys/apps used to
+ * circumvent limits. Never split shops across extra keys without Etsy's written
+ * approval for this exact application topology.
  *
  * ─── RATE BUDGET MATH ────────────────────────────────────────────────────────
  *
- * Shops per key varies: up to 5 on proxied keys, fewer on a direct (no-proxy) key.
+ * Shops per key varies only by Etsy's approved allocation, never by network path.
  * ~5 API calls per shop per sync (resolveShopId + 2 receipt passes + listing images).
  *
  * 5 shops/key, 60-min interval: 5 × 5 × 24 =  600 calls/day → 12% of 5K QPD
@@ -436,12 +439,13 @@ function classifyEtsyOp(method, url) {
   // Inventory & listings
   if (/\/listings\/[^/]+\/inventory/.test(u)) return m === 'PUT' ? 'Restock inventory' : 'Inventory check';
   if (/\/listings\/batch/.test(u)) return 'Order images';
+  if (/\/reviews/.test(u)) return 'Shop reviews';
   if (/\/listings\/active/.test(u)) return 'Active listings';
   if (/\/listings\/[^/]+\/images/.test(u)) return 'Upload listing image';
   if (/\/listings\/[^/]+\/videos/.test(u)) return 'Upload listing video';
-  if (/\/listings\/[^/]+\/variation-images/.test(u)) return 'Set variation images';
+  if (/\/listings\/[^/]+\/variation-images/.test(u)) return m === 'POST' ? 'Set variation images' : 'Variation images';
   if (/\/shops\/[^/]+\/listings\/[^/]+/.test(u)) return 'Update listing';
-  if (/\/shops\/[^/]+\/listings/.test(u)) return m === 'POST' ? 'Create listing' : 'Listing count';
+  if (/\/shops\/[^/]+\/listings/.test(u)) return m === 'POST' ? 'Create listing' : 'Shop listings';
   if (/\/listings\/[^/]+$/.test(u) && m === 'DELETE') return 'Delete listing';
 
   // Finance
@@ -604,12 +608,20 @@ async function withRetry(fn, maxRetries = 3, opts = {}) {
       if (reconcile) {
         let already;
         try {
-          already = await reconcile();
+          already = await reconcile({ error: lastError, attempt });
         } catch (probeErr) {
           console.warn(
             `[etsy/client] idempotency probe failed (${probeErr.message}) — ` +
-              `not re-sending to avoid a duplicate side effect. Surfacing original error.`
+              `not re-sending to avoid a duplicate side effect. Failing closed.`
           );
+          if (
+            probeErr?.failClosed
+            || probeErr?.code === 'ETSY_CREATE_STATE_UNKNOWN'
+            || isQpdExhaustedError(probeErr)
+          ) {
+            if (!probeErr.cause) probeErr.cause = lastError;
+            throw probeErr;
+          }
           throw lastError;
         }
         if (already != null && already !== false) {
@@ -774,6 +786,17 @@ async function getShop(shopClient, shopId) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * Etsy's wire values are `up` and `down`. Accept the conventional aliases used
+ * by older callers, but never send undocumented `asc` / `desc` values.
+ */
+function normalizeEtsySortOrder(value, fallback = 'down') {
+  const v = String(value ?? '').trim().toLowerCase();
+  if (v === 'up' || v === 'asc' || v === 'ascending') return 'up';
+  if (v === 'down' || v === 'desc' || v === 'descending') return 'down';
+  return fallback;
+}
+
+/**
  * GET /application/shops/{shop_id}/receipts
  * Scope: transactions_r
  *
@@ -786,7 +809,7 @@ async function getShop(shopClient, shopId) {
  * @param {boolean} [options.was_shipped]
  * @param {number} [options.min_created]        - Unix timestamp lower bound
  * @param {string} [options.sort_on='created']
- * @param {string} [options.sort_order='desc']
+ * @param {string} [options.sort_order='down']
  * @returns {Promise<{ count: number, results: object[] }>}
  */
 async function getReceipts(shopClient, shopId, options = {}) {
@@ -797,14 +820,14 @@ async function getReceipts(shopClient, shopId, options = {}) {
     limit: Math.min(options.limit ?? 100, 100),
     offset: options.offset ?? 0,
     sort_on: options.sort_on ?? 'created',
-    sort_order: options.sort_order ?? 'desc',
+    sort_order: normalizeEtsySortOrder(options.sort_order, 'down'),
   };
   if (options.was_paid     !== undefined) params.was_paid           = options.was_paid;
   if (options.was_shipped  !== undefined) params.was_shipped        = options.was_shipped;
   if (options.min_created)               params.min_created         = options.min_created;
   if (options.min_last_modified)         params.min_last_modified   = options.min_last_modified;
   if (options.sort_on)                   params.sort_on             = options.sort_on;
-  if (options.sort_order)                params.sort_order          = options.sort_order;
+  if (options.sort_order)                params.sort_order          = normalizeEtsySortOrder(options.sort_order, 'down');
 
   return withRetry(async () => {
     const { data } = await shopClient.get(`/application/shops/${numericId}/receipts`, { params });
@@ -933,6 +956,68 @@ async function updateListingInventory(shopClient, listingId, inventory) {
 // Listing endpoints
 // ─────────────────────────────────────────────────────────────────────────────
 
+function _moneyAsNumber(value) {
+  if (value && typeof value === 'object') {
+    const amount = Number(value.amount);
+    const divisor = Number(value.divisor);
+    return Number.isFinite(amount) && Number.isFinite(divisor) && divisor !== 0
+      ? amount / divisor
+      : NaN;
+  }
+  return Number(value);
+}
+
+/**
+ * Find a draft that matches a create request and was created during the current
+ * operation window. This is an idempotency reconciliation probe, not a general
+ * title search: exact copy + taxonomy + price matching and a recent timestamp
+ * prevent an older, legitimately similar draft from being adopted.
+ */
+async function findMatchingDraftListing(shopClient, shopId, body, {
+  createdAfter = null,
+  acceptListing = null,
+} = {}) {
+  const minCreated = Number.isFinite(Number(createdAfter))
+    ? Math.floor(Number(createdAfter)) - 5
+    : null;
+  const expectedPrice = _moneyAsNumber(body?.price);
+  const limit = 100;
+  // Ambiguous failures are rare, so spend a bounded number of read calls to
+  // search beyond the first page rather than risk a duplicate create.
+  for (let offset = 0; offset < 500; offset += limit) {
+    gateClient(shopClient);
+    const data = await withRetry(async () => {
+      const response = await shopClient.get(`/application/shops/${shopId}/listings`, {
+        params: { state: 'draft', limit, offset },
+      });
+      return response.data;
+    });
+    const listings = data?.results || [];
+    const match = listings.find((listing) => {
+      const created = Number(
+        listing.created_timestamp
+        ?? listing.creation_timestamp
+        ?? listing.original_creation_timestamp
+        ?? 0
+      );
+      if (minCreated !== null && (!created || created < minCreated)) return false;
+      if (String(listing.title ?? '') !== String(body?.title ?? '')) return false;
+      if (String(listing.description ?? '') !== String(body?.description ?? '')) return false;
+      if (body?.taxonomy_id != null && Number(listing.taxonomy_id) !== Number(body.taxonomy_id)) return false;
+      if (Number.isFinite(expectedPrice)) {
+        const actualPrice = _moneyAsNumber(listing.price);
+        if (!Number.isFinite(actualPrice) || Math.abs(actualPrice - expectedPrice) > 0.005) return false;
+      }
+      if (body?.shop_section_id != null && Number(listing.shop_section_id) !== Number(body.shop_section_id)) return false;
+      if (typeof acceptListing === 'function' && !acceptListing(listing)) return false;
+      return true;
+    });
+    if (match) return match;
+    if (listings.length < limit) break;
+  }
+  return null;
+}
+
 /**
  * GET /application/shops/{shop_id}/listings
  * Scope: listings_r
@@ -957,10 +1042,16 @@ async function* paginateListings(shopClient, shopId, opts = {}) {
   const limit = 100;
   while (true) {
     gateClient(shopClient);
+    const params = { limit, offset, state, includes };
+    // sort_on is documented as search-only; the listings tab still sends it and
+    // Etsy accepts it for this shop-scoped endpoint. Catalog-health walks omit
+    // it so a future spec tightening cannot 400 the daily snapshot.
+    if (opts.sort !== false) {
+      params.sort_on = 'updated';
+      params.sort_order = 'down';
+    }
     const { data } = await withRetry(() =>
-      shopClient.get(`/application/shops/${shopId}/listings`, {
-        params: { limit, offset, state, includes, sort_on: 'updated', sort_order: 'desc' },
-      })
+      shopClient.get(`/application/shops/${shopId}/listings`, { params })
     );
     const listings = data.results ?? data.listings ?? [];
     if (!listings.length) break;
@@ -968,6 +1059,74 @@ async function* paginateListings(shopClient, shopId, opts = {}) {
     if (listings.length < limit) break;
     offset += limit;
     await new Promise((r) => setTimeout(r, 250)); // polite pause between pages
+  }
+}
+
+/**
+ * GET /application/shops/{shop_id}/listings?limit=1
+ * Scope: listings_r
+ *
+ * Cheap count probe: Etsy returns `count` for the requested state without
+ * walking every page. Used by catalog health to know expired/sold_out/draft
+ * volume without spending a call per 100 listings.
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} shopId
+ * @param {string} state
+ * @returns {Promise<number>}
+ */
+async function getListingsCountByState(shopClient, shopId, state) {
+  gateClient(shopClient);
+  const { data } = await withRetry(() =>
+    shopClient.get(`/application/shops/${shopId}/listings`, {
+      params: { limit: 1, offset: 0, state },
+    })
+  );
+  const count = Number(data?.count);
+  if (Number.isFinite(count)) return count;
+  return Array.isArray(data?.results) ? data.results.length : 0;
+}
+
+/**
+ * GET /application/shops/{shop_id}/reviews
+ * Scope: none (API key still required)
+ *
+ * Newest-first pages of shop reviews. Caps pages so a first run cannot spend
+ * the daily QPD walking years of history; callers persist incrementally via
+ * min_created.
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} shopId
+ * @param {object} [opts]
+ * @param {number} [opts.limit=100]
+ * @param {number} [opts.offset=0]
+ * @param {number} [opts.min_created]
+ * @param {number} [opts.max_created]
+ * @param {number} [opts.maxPages=3]
+ * @yields {object[]} batches of TransactionReview objects
+ */
+async function* paginateReviewsByShop(shopClient, shopId, opts = {}) {
+  const limit = Math.min(100, Math.max(1, Number(opts.limit) || 100));
+  const maxPages = Math.min(20, Math.max(1, Number(opts.maxPages) || 3));
+  let offset = Math.max(0, Number(opts.offset) || 0);
+  let pages = 0;
+  while (pages < maxPages) {
+    gateClient(shopClient);
+    const params = { limit, offset };
+    if (opts.min_created != null && Number.isFinite(Number(opts.min_created))) {
+      params.min_created = Math.trunc(Number(opts.min_created));
+    }
+    if (opts.max_created != null && Number.isFinite(Number(opts.max_created))) {
+      params.max_created = Math.trunc(Number(opts.max_created));
+    }
+    const { data } = await withRetry(() =>
+      shopClient.get(`/application/shops/${shopId}/reviews`, { params })
+    );
+    const reviews = data.results ?? [];
+    if (!reviews.length) break;
+    yield reviews;
+    pages += 1;
+    if (reviews.length < limit) break;
+    offset += limit;
+    await new Promise((r) => setTimeout(r, 150));
   }
 }
 
@@ -984,9 +1143,11 @@ async function* paginateListings(shopClient, shopId, opts = {}) {
 async function updateListing(shopClient, shopId, listingId, fields) {
   gateClient(shopClient);
   return withRetry(async () => {
+    const params = _toFormUrlEncoded(fields);
     const { data } = await shopClient.patch(
       `/application/shops/${shopId}/listings/${listingId}`,
-      fields
+      params.toString(),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
     return data;
   });
@@ -1002,11 +1163,7 @@ async function updateListing(shopClient, shopId, listingId, fields) {
  * @param {object} body - { quantity, title, description, price, who_made, when_made, taxonomy_id, ... }
  */
 async function createDraftListing(shopClient, shopId, body) {
-  gateClient(shopClient);
-  return withRetry(async () => {
-    const { data } = await shopClient.post(`/application/shops/${shopId}/listings`, body);
-    return data;
-  });
+  return createDraftListingForm(shopClient, shopId, body);
 }
 
 /**
@@ -1035,7 +1192,8 @@ async function deleteListing(shopClient, listingId) {
  * @param {string}  opts.carrier_name   - required (e.g. "4PX")
  * @param {boolean} [opts.send_bcc]     - send a copy to the seller (default false)
  * @param {string}  [opts.note_to_buyer]
- * @param {number}  [opts.ship_date]    - Unix epoch seconds; defaults to today
+ * @param {number|string|Date} [opts.ship_date] - ISO-8601 date/time, or epoch
+ *        seconds/milliseconds which will be normalized to Etsy's ISO format.
  */
 async function createReceiptShipment(shopClient, shopId, receiptId, opts = {}) {
   gateClient(shopClient);
@@ -1044,27 +1202,57 @@ async function createReceiptShipment(shopClient, shopId, receiptId, opts = {}) {
   // shipment records per receipt, so it is NOT idempotent. On a retry (e.g. the
   // request landed but its response was lost on the proxy chain), probe the
   // receipt's existing shipments and adopt the one carrying this exact
-  // tracking_code instead of sending a second notification. Disabled when the
-  // caller passes idempotent:false — the edit-tracking flow is a deliberate
-  // operator re-notify that must always reach Etsy.
-  const idempotent = opts.idempotent !== false && !!opts.tracking_code;
+  // tracking_code instead of sending a second notification. For the deliberate
+  // edit-tracking flow (idempotent:false), snapshot existing shipment IDs first
+  // so only a NEW record from this attempt can satisfy reconciliation.
   const wantTracking = String(opts.tracking_code ?? '').trim();
-  const reconcile = idempotent
+  let baselineShipmentIds = null;
+  if (opts.idempotent === false && wantTracking) {
+    // An edit intentionally creates a new shipment notification even if the same
+    // code existed before. Snapshot existing IDs so reconciliation adopts only
+    // the shipment created by THIS attempt, never an older one.
+    const before = await getReceipt(shopClient, shopId, receiptId);
+    baselineShipmentIds = new Set(
+      (Array.isArray(before?.shipments) ? before.shipments : [])
+        .map((s) => String(s?.receipt_shipping_id ?? ''))
+        .filter(Boolean)
+    );
+  }
+  const reconcile = wantTracking
     ? async () => {
         const receipt = await getReceipt(shopClient, shopId, receiptId);
         const shipments = Array.isArray(receipt?.shipments) ? receipt.shipments : [];
-        return shipments.find((s) => String(s?.tracking_code ?? '').trim() === wantTracking) || null;
+        return shipments.find((s) => {
+          if (String(s?.tracking_code ?? '').trim() !== wantTracking) return false;
+          if (!baselineShipmentIds) return true;
+          return !baselineShipmentIds.has(String(s?.receipt_shipping_id ?? ''));
+        }) || null;
       }
     : null;
 
   return withRetry(async () => {
     const body = {
       tracking_code:  opts.tracking_code,
-      carrier_name:   opts.carrier_name || '4PX',
+      carrier_name:   /^4px$/i.test(String(opts.carrier_name || '4px')) ? '4px' : opts.carrier_name,
       send_bcc:       opts.send_bcc ?? false,
     };
     if (opts.note_to_buyer) body.note_to_buyer = opts.note_to_buyer;
-    if (opts.ship_date)     body.ship_date     = opts.ship_date;
+    if (opts.ship_date != null) {
+      const raw = opts.ship_date;
+      let date;
+      if (raw instanceof Date) date = new Date(raw.getTime());
+      else if (typeof raw === 'number' && Number.isFinite(raw)) {
+        date = new Date(raw < 1e12 ? raw * 1000 : raw);
+      } else {
+        date = new Date(String(raw));
+      }
+      if (!Number.isFinite(date.getTime())) {
+        const err = new TypeError('ship_date must be an ISO-8601 date/time or a finite epoch timestamp');
+        err.status = 400;
+        throw err;
+      }
+      body.ship_date = date.toISOString();
+    }
     const { data } = await shopClient.post(
       `/application/shops/${shopId}/receipts/${receiptId}/tracking`,
       body
@@ -1249,6 +1437,73 @@ async function getActiveListings(shopClient, shopId, options = {}) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * Pick the dashboard-sized CDN URL from an Etsy ListingImage resource.
+ * @param {object|null|undefined} img
+ * @returns {string|null}
+ */
+function pickListingImageUrl(img) {
+  if (!img) return null;
+  return img.url_570xN ?? img.url_fullxfull ?? img.url_170x135 ?? img.url_75x75 ?? null;
+}
+
+/**
+ * Fetch every listing image (all ranks, with listing_image_id) for up to 100
+ * IDs per request. Used to join Etsy variation-images (image_id) to a CDN URL.
+ *
+ * Returns Map<listingId, { heroUrl: string|null, byImageId: Map<number, string> }>.
+ * Missing/inactive listings are silently omitted.
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {number[]} listingIds
+ * @returns {Promise<Map<number, {heroUrl: string|null, byImageId: Map<number, string>}>>}
+ */
+async function getListingImageCatalogBatch(shopClient, listingIds) {
+  const unique = [...new Set(listingIds.map(Number))].filter(Boolean);
+  if (!unique.length) return new Map();
+
+  const chunks = [];
+  for (let i = 0; i < unique.length; i += 100) chunks.push(unique.slice(i, i + 100));
+
+  const result = new Map();
+
+  for (const chunk of chunks) {
+    gateClient(shopClient);
+    try {
+      await withRetry(async () => {
+        const params = new URLSearchParams();
+        // Etsy's batch endpoint declares its array query params as explode:false,
+        // i.e. a single COMMA-SEPARATED value (listing_ids=1,2,3). Repeated or
+        // bracketed keys (listing_ids[]=1) are NOT recognised — Etsy then treats
+        // listing_ids as missing (400) or silently returns just one row. See
+        // etsy/open-api discussion #1479 and the reference SDK, which both join on
+        // ",". This matches getPaymentReceiptMap's payment_ids serialisation.
+        params.append('listing_ids', chunk.join(','));
+        params.append('includes', 'Images');
+
+        const { data } = await shopClient.get('/application/listings/batch', { params });
+        for (const listing of (data.results ?? [])) {
+          const byImageId = new Map();
+          const images = Array.isArray(listing.images) ? listing.images : [];
+          let heroUrl = pickListingImageUrl(images[0]);
+          for (const img of images) {
+            const url = pickListingImageUrl(img);
+            const imageId = Number(img?.listing_image_id ?? img?.image_id);
+            if (url && Number.isInteger(imageId) && imageId > 0) byImageId.set(imageId, url);
+          }
+          result.set(listing.listing_id, { heroUrl: heroUrl || null, byImageId });
+        }
+      });
+    } catch (err) {
+      console.warn(`[etsy/client] getListingImageCatalogBatch failed for chunk: ${err.message}`);
+    }
+
+    if (chunks.length > 1) await new Promise((r) => setTimeout(r, 300));
+  }
+
+  return result;
+}
+
+/**
  * Fetch the primary thumbnail URL for up to 100 listing IDs in one API call.
  * Uses GET /application/listings/batch?listing_ids=…,…&includes=Images
  *
@@ -1260,47 +1515,34 @@ async function getActiveListings(shopClient, shopId, options = {}) {
  * @returns {Promise<Map<number, string>>}
  */
 async function getListingImagesBatch(shopClient, listingIds) {
-  const unique = [...new Set(listingIds.map(Number))].filter(Boolean);
-  if (!unique.length) return new Map();
-
-  // Etsy batch endpoint accepts up to 100 IDs per request
-  const chunks = [];
-  for (let i = 0; i < unique.length; i += 100) chunks.push(unique.slice(i, i + 100));
-
+  const catalog = await getListingImageCatalogBatch(shopClient, listingIds);
   const result = new Map();
-
-  for (const chunk of chunks) {
-    gateClient(shopClient);
-    try {
-      await withRetry(async () => {
-        // Etsy's batch endpoint declares its array query params as explode:false,
-        // i.e. a single COMMA-SEPARATED value (listing_ids=1,2,3). Repeated or
-        // bracketed keys (listing_ids[]=1) are NOT recognised — Etsy then treats
-        // listing_ids as missing (400) or silently returns just one row. See
-        // etsy/open-api discussion #1479 and the reference SDK, which both join on
-        // ",". This matches getPaymentReceiptMap's payment_ids serialisation below.
-        const params = new URLSearchParams();
-        params.append('listing_ids', chunk.join(','));
-        params.append('includes', 'Images');
-
-        const { data } = await shopClient.get('/application/listings/batch', { params });
-        for (const listing of (data.results ?? [])) {
-          const img = listing.images?.[0];
-          if (img) {
-            const url = img.url_570xN ?? img.url_fullxfull ?? img.url_170x135 ?? null;
-            if (url) result.set(listing.listing_id, url);
-          }
-        }
-      });
-    } catch (err) {
-      // Non-fatal — images are cosmetic; log and continue
-      console.warn(`[etsy/client] getListingImagesBatch failed for chunk: ${err.message}`);
-    }
-
-    if (chunks.length > 1) await new Promise((r) => setTimeout(r, 300));
+  for (const [listingId, entry] of catalog) {
+    if (entry?.heroUrl) result.set(listingId, entry.heroUrl);
   }
-
   return result;
+}
+
+/**
+ * GET /application/shops/{shop_id}/listings/{listing_id}/variation-images
+ * Scope: none
+ *
+ * Returns the listing's variation → image_id links. `value` is the Styles
+ * dropdown label (e.g. "Case 1 + Grip 1"); `image_id` joins to a ListingImage.
+ *
+ * @param {import('axios').AxiosInstance} shopClient
+ * @param {string|number} shopId
+ * @param {string|number} listingId
+ * @returns {Promise<Array<{property_id:number, value_id:number, value:string, image_id:number}>>}
+ */
+async function getListingVariationImages(shopClient, shopId, listingId) {
+  gateClient(shopClient);
+  return withRetry(async () => {
+    const { data } = await shopClient.get(
+      `/application/shops/${shopId}/listings/${listingId}/variation-images`
+    );
+    return Array.isArray(data?.results) ? data.results : [];
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1411,11 +1653,9 @@ async function updateShop(shopClient, shopId, fields) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Bulk listing creation — form-encoded create, media upload, variation images
 //
-// createDraftListing (above) posts JSON, which works for the simple single-
-// variation create used by the dashboard's manual form. The Etsy spec, however,
-// declares the create body as application/x-www-form-urlencoded and the image/
-// video uploads as multipart/form-data. The bulk pipeline uses the dedicated
-// helpers below to exactly match the spec (array fields, binary uploads).
+// Manual and bulk draft creation both delegate to the same documented
+// application/x-www-form-urlencoded serializer. Image/video uploads use
+// multipart/form-data; inventory remains JSON.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Listing fields that Etsy accepts as a single comma-separated string.
@@ -1450,27 +1690,52 @@ function _toFormUrlEncoded(body) {
  * POST /application/shops/{shop_id}/listings  (form-urlencoded)
  * Scope: listings_w
  *
- * Creates a physical draft listing using the spec-compliant encoding. Pass
- * { legacy: true } in opts to enable processing-profile related fields.
+ * Creates a physical draft listing using the spec-compliant encoding.
  *
  * @param {import('axios').AxiosInstance} shopClient
  * @param {string|number} shopId  numeric shop ID
  * @param {object} body           createDraftListing fields
  * @param {object} [opts]
- * @param {boolean} [opts.legacy]
+ * @param {number} [opts.createdAfter] Epoch seconds used by retry reconciliation.
+ * @param {Function|false} [opts.reconcile] Custom reconcile probe, or false to
+ *        disable automatic recent-draft reconciliation.
+ * @param {Function} [opts.acceptListing] Optional ownership predicate for
+ *        rejecting a matching draft already claimed by another local item.
  */
 async function createDraftListingForm(shopClient, shopId, body, opts = {}) {
   gateClient(shopClient);
   const params = _toFormUrlEncoded(body);
-  const query = opts.legacy ? '?legacy=true' : '';
+  const createdAfter = Number.isFinite(Number(opts.createdAfter))
+    ? Number(opts.createdAfter)
+    : Math.floor(Date.now() / 1000);
+  const reconcile = opts.reconcile === false
+    ? null
+    : (typeof opts.reconcile === 'function'
+        ? opts.reconcile
+        : async () => {
+            // Every retryable response is treated as potentially ambiguous,
+            // including 429. If the limiter blocks this read probe, withRetry
+            // fails closed rather than re-sending a create.
+            const match = await findMatchingDraftListing(shopClient, shopId, body, {
+              createdAfter,
+              acceptListing: opts.acceptListing,
+            });
+            if (match) return match;
+            const unknown = new Error(
+              'Draft-create outcome is still ambiguous; refusing to re-send a non-idempotent POST.'
+            );
+            unknown.code = 'ETSY_CREATE_STATE_UNKNOWN';
+            unknown.failClosed = true;
+            throw unknown;
+          });
   return withRetry(async () => {
     const { data } = await shopClient.post(
-      `/application/shops/${shopId}/listings${query}`,
+      `/application/shops/${shopId}/listings`,
       params.toString(),
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
     return data;
-  });
+  }, 3, { reconcile });
 }
 
 /**
@@ -1491,6 +1756,10 @@ async function createDraftListingForm(shopClient, shopId, body, opts = {}) {
  */
 async function uploadListingImage(shopClient, shopId, listingId, opts = {}) {
   gateClient(shopClient);
+  // A ranked overwrite is replay-safe: a retry replaces that exact slot. An
+  // append-style upload has no API idempotency key, so never re-send it after an
+  // ambiguous transport failure.
+  const maxRetries = opts.overwrite && opts.rank != null ? 3 : 1;
   return withRetry(async () => {
     const form = new FormData();
     form.append('image', opts.buffer, { filename: opts.filename || 'image.jpg' });
@@ -1508,7 +1777,7 @@ async function uploadListingImage(shopClient, shopId, listingId, opts = {}) {
       }
     );
     return data;
-  });
+  }, maxRetries);
 }
 
 /**
@@ -1524,6 +1793,28 @@ async function uploadListingImage(shopClient, shopId, listingId, opts = {}) {
  */
 async function uploadListingVideo(shopClient, shopId, listingId, opts = {}) {
   gateClient(shopClient);
+  const baselineVideoIds = Array.isArray(opts.baselineVideoIds)
+    ? new Set(opts.baselineVideoIds.map(String))
+    : new Set(
+        ((await getListingVideos(shopClient, listingId)).results || [])
+          .map((video) => String(video.video_id ?? ''))
+          .filter(Boolean)
+      );
+  const reconcile = async ({ error } = {}) => {
+    const existing = await getListingVideos(shopClient, listingId);
+    const uploaded = (existing.results || []).find((video) =>
+      video.video_state !== 'deleted'
+      && !baselineVideoIds.has(String(video.video_id ?? ''))
+    ) || null;
+    if (uploaded) return uploaded;
+    const unknown = new Error(
+      'Listing-video upload outcome is ambiguous; refusing to re-send the binary.'
+    );
+    unknown.code = 'ETSY_VIDEO_STATE_UNKNOWN';
+    unknown.failClosed = true;
+    unknown.responseStatus = error?.response?.status ?? null;
+    throw unknown;
+  };
   return withRetry(async () => {
     const form = new FormData();
     const filename = opts.filename || 'video.mp4';
@@ -1539,6 +1830,15 @@ async function uploadListingVideo(shopClient, shopId, listingId, opts = {}) {
         timeout: 300_000,
       }
     );
+    return data;
+  }, 3, { reconcile });
+}
+
+/** GET /application/listings/{listing_id}/videos — public read endpoint. */
+async function getListingVideos(shopClient, listingId) {
+  gateClient(shopClient);
+  return withRetry(async () => {
+    const { data } = await shopClient.get(`/application/listings/${listingId}/videos`);
     return data;
   });
 }
@@ -1655,11 +1955,27 @@ async function createShopSection(shopClient, shopId, { title } = {}) {
   // leaving a duplicate section on the public shop if the first POST landed but
   // its response was lost in transit.
   const wantTitle = String(title ?? '').trim();
+  const before = wantTitle ? await getShopSections(shopClient, numericId) : null;
+  const baselineIds = new Set(
+    (Array.isArray(before?.results) ? before.results : [])
+      .map((section) => String(section?.shop_section_id ?? ''))
+      .filter(Boolean)
+  );
   const reconcile = wantTitle
     ? async () => {
         const data = await getShopSections(shopClient, numericId);
         const results = Array.isArray(data?.results) ? data.results : [];
-        return results.find((s) => String(s?.title ?? '').trim() === wantTitle) || null;
+        const created = results.find((section) =>
+          String(section?.title ?? '').trim() === wantTitle
+          && !baselineIds.has(String(section?.shop_section_id ?? ''))
+        ) || null;
+        if (created) return created;
+        const unknown = new Error(
+          'Shop-section create outcome is ambiguous; refusing to create a duplicate.'
+        );
+        unknown.code = 'ETSY_SECTION_STATE_UNKNOWN';
+        unknown.failClosed = true;
+        throw unknown;
       }
     : null;
 
@@ -1734,6 +2050,29 @@ async function createShopReadinessStateDefinition(shopClient, shopId, {
 } = {}) {
   const numericId = await resolveShopId(shopClient, shopId);
   gateClient(shopClient);
+  const before = await getShopReadinessStateDefinitions(shopClient, numericId);
+  const baselineIds = new Set(
+    (Array.isArray(before?.results) ? before.results : [])
+      .map((profile) => String(profile?.readiness_state_id ?? ''))
+      .filter(Boolean)
+  );
+  const reconcile = async () => {
+    const current = await getShopReadinessStateDefinitions(shopClient, numericId);
+    const created = (Array.isArray(current?.results) ? current.results : [])
+      .find((profile) =>
+        !baselineIds.has(String(profile?.readiness_state_id ?? ''))
+        && profile?.readiness_state === readiness_state
+        && Number(profile?.min_processing_days) === Number(min_processing_time)
+        && Number(profile?.max_processing_days) === Number(max_processing_time)
+      ) || null;
+    if (created) return created;
+    const unknown = new Error(
+      'Processing-profile create outcome is ambiguous; refusing to create a duplicate.'
+    );
+    unknown.code = 'ETSY_READINESS_STATE_UNKNOWN';
+    unknown.failClosed = true;
+    throw unknown;
+  };
   return withRetry(async () => {
     const params = new URLSearchParams();
     params.append('readiness_state', readiness_state);
@@ -1746,7 +2085,7 @@ async function createShopReadinessStateDefinition(shopClient, shopId, {
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
     );
     return data;
-  });
+  }, 3, { reconcile });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1838,10 +2177,13 @@ module.exports = {
   getShop,
   updateShop,
   createDraftListingForm,
+  findMatchingDraftListing,
   uploadListingImage,
   uploadListingVideo,
+  getListingVideos,
   putListingInventory,
   updateVariationImages,
+  getListingVariationImages,
   getShopShippingProfiles,
   getShopReturnPolicies,
   getShopProductionPartners,
@@ -1864,8 +2206,11 @@ module.exports = {
   paginateLedgerEntries,
   getPaymentReceiptMap,
   getListingImagesBatch,
+  getListingImageCatalogBatch,
   getActiveListings,
   paginateListings,
+  getListingsCountByState,
+  paginateReviewsByShop,
   updateListing,
   createDraftListing,
   deleteListing,
@@ -1880,4 +2225,5 @@ module.exports = {
   isQpdExhaustedError,
   PERSONAL_ACCESS_QPD,
   withRetry,
+  normalizeEtsySortOrder,
 };

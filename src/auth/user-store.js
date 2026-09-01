@@ -19,6 +19,7 @@
 const crypto = require('crypto')
 
 const SCRYPT_KEYLEN = 64
+const MIN_PASSWORD_LENGTH = 12
 
 function hashPassword(password, salt) {
 	salt = salt || crypto.randomBytes(16).toString('hex')
@@ -32,6 +33,10 @@ function verifyPassword(password, salt, hash) {
 	if (derived.length !== stored.length) return false
 	return crypto.timingSafeEqual(derived, stored)
 }
+
+// Keep unknown/disabled-user login timing close to a real password check so the
+// endpoint does not become a username-enumeration oracle.
+const DUMMY_PASSWORD_RECORD = hashPassword(crypto.randomBytes(32).toString('base64url'))
 
 /**
  * @param {import('better-sqlite3').Database} db
@@ -109,7 +114,9 @@ function createUserStore(db) {
 			username = String(username || '').trim()
 			if (!username) throw new Error('Username is required')
 			if (!/^[a-zA-Z0-9._-]{2,40}$/.test(username)) throw new Error('Username must be 2–40 chars: letters, numbers, dot, dash, underscore')
-			if (!password || String(password).length < 4) throw new Error('Password must be at least 4 characters')
+			if (!password || String(password).length < MIN_PASSWORD_LENGTH) {
+				throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`)
+			}
 			if (!USER_ROLES.includes(role)) throw new Error("Role must be 'owner', 'packer' or 'shopper'")
 			if (store.getByName(username)) throw new Error(`User "${username}" already exists`)
 			const { salt, hash } = hashPassword(password)
@@ -121,7 +128,10 @@ function createUserStore(db) {
 		/** Verify a login. Returns { id, username, role, token_version } or null. */
 		verify(username, password) {
 			const u = store.getByName(username)
-			if (!u || !u.active) return null
+			if (!u || !u.active) {
+				verifyPassword(password, DUMMY_PASSWORD_RECORD.salt, DUMMY_PASSWORD_RECORD.hash)
+				return null
+			}
 			if (!verifyPassword(password, u.password_salt, u.password_hash)) return null
 			db.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').run(Date.now(), u.id)
 			return { id: u.id, username: u.username, role: u.role, token_version: u.token_version }
@@ -147,7 +157,9 @@ function createUserStore(db) {
 			return store.getById(id)
 		},
 		setPassword(id, password) {
-			if (!password || String(password).length < 4) throw new Error('Password must be at least 4 characters')
+			if (!password || String(password).length < MIN_PASSWORD_LENGTH) {
+				throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`)
+			}
 			const { salt, hash } = hashPassword(password)
 			db.prepare('UPDATE users SET password_salt = ?, password_hash = ?, token_version = token_version + 1 WHERE id = ?').run(salt, hash, id)
 			return store.getById(id)
@@ -156,4 +168,4 @@ function createUserStore(db) {
 	return store
 }
 
-module.exports = { createUserStore, hashPassword, verifyPassword, USER_ROLES }
+module.exports = { createUserStore, hashPassword, verifyPassword, USER_ROLES, MIN_PASSWORD_LENGTH }

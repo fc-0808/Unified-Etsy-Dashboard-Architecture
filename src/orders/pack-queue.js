@@ -20,7 +20,7 @@
  *   1. It still has to LEAVE the warehouse — Needs-shipping (unshipped) OR
  *      Pre-transit (a label was created early to beat the Etsy ship-by deadline
  *      but the parcel never actually entered the carrier network).   ← this file
- *   2. It owes NO wrong-model supplier swap (see order_exchanges).    ← this file
+ *   2. It owes NO wrong-model supplier SWAP (see order_exchanges).    ← this file
  *   3. Every product is fully purchased / in hand.        ← classifyPurchaseState
  *   4. It has not already been physically packaged.       ← the `packaged` filter
  * Halves 3 & 4 are queue-agnostic (reused by other views), so they stay in the
@@ -59,24 +59,37 @@ function readyToPackShipStateSql(config = {}, alias = 'r') {
 
 /**
  * SQL fragment — TRUE when the receipt aliased `alias` still owes at least one
- * OPEN wrong-model exchange: the item is physically in hand but in the WRONG
- * phone model and must be swapped at the supplier before the parcel can ship.
+ * OPEN wrong-model SWAP: the item is physically in hand but in the WRONG phone
+ * model and must be exchanged at the supplier before the parcel can ship.
+ *
+ * Scoped to SWAPs (`have_model` present) on purpose. The other shape of a model
+ * fix — BUY, where we hold nothing and must purchase the corrected model — is
+ * already gated by ordinary component statuses: its case sits at Pending until
+ * bought, so classifyPurchaseState keeps the order out of the queue on its own.
+ * Blocking on BUY records here as well would deadlock the order: the case can be
+ * bought and marked Purchased, yet the parcel stays unpackable until someone
+ * remembers to tick a second, redundant "mark bought" control.
  */
 function openExchangeExistsSql(alias = 'r') {
-	return `EXISTS (SELECT 1 FROM order_exchanges oe WHERE oe.receipt_id = ${alias}.receipt_id AND oe.status = 'open')`
+	return `EXISTS (
+      SELECT 1 FROM order_exchanges oe
+      WHERE oe.receipt_id = ${alias}.receipt_id
+        AND oe.status = 'open'
+        AND TRIM(COALESCE(oe.have_model, '')) <> ''
+    )`
 }
 
 /**
  * SQL fragment — the exchange-hold half of the Ready-to-pack scope: exclude any
- * order still owing a swap.
+ * order still owing a supplier swap.
  *
- * WHY THIS GUARD IS LOAD-BEARING (not cosmetic): a line awaiting exchange keeps
+ * WHY THIS GUARD IS LOAD-BEARING (not cosmetic): a line awaiting a swap keeps
  * its components marked "Purchased" by design (so it is never re-bought), which
  * means classifyPurchaseState correctly counts the order as fully purchased. With
  * NOTHING else stopping it, that order would surface in the packing queue and a
  * packer could seal + ship the WRONG model — the exact failure the order_exchanges
  * table exists to prevent (see src/db/setup.js). The order re-enters the queue the
- * moment the exchange is marked done (which flips the swapped pieces back to
+ * moment the swap is marked done (which flips the swapped pieces back to
  * Purchased); meanwhile it stays visible in the "To exchange" bucket, never lost.
  */
 function excludeOpenExchangeSql(alias = 'r') {
@@ -86,9 +99,9 @@ function excludeOpenExchangeSql(alias = 'r') {
 /**
  * How many orders are currently HELD OUT of the packing queue purely because they
  * owe a wrong-model swap: they are in the Ready-to-pack ship-state, not yet
- * packaged, and have an open exchange. Powers the reassurance chip on the packing
- * screen ("🔁 N awaiting a supplier swap") so held orders never feel like they
- * silently vanished. Defensive: returns 0 if the table is missing (fresh DB).
+ * packaged, and owe a swap. Used by tests and diagnostics; the packing UI no
+ * longer surfaces this count. Defensive: returns 0 if the table is missing
+ * (fresh DB).
  *
  * @param {import('better-sqlite3').Database} db
  * @param {object} config - dashboard config (for the pre_transit window).
@@ -157,6 +170,113 @@ function purchasedCohortSql(cohort, alias = 'r', nowMs = Date.now()) {
 }
 
 /**
+ * SQL fragment — restrict a receipts scope to a packaging COHORT, i.e. orders
+ * whose parcel was physically marked packaged (receipts.packaged_at) in a given
+ * local-day window. Powers the "Recently packaged" day chips so a packer can
+ * pull up exactly "what I sealed today / on Tuesday" instead of the whole
+ * rolling review window.
+ *
+ *   'today'       — packaged since local midnight today.
+ *   'yesterday'   — packaged during the whole of the previous local day.
+ *   'YYYY-MM-DD'  — packaged during that local calendar day.
+ *   anything else / '' / 'all' — no cohort restriction (returns TRUE).
+ *
+ * @param {string} cohort
+ * @param {string} alias    the `receipts` table alias used by the caller (e.g. 'r')
+ * @param {number} [nowMs]  injectable clock for tests (default Date.now())
+ */
+function packagedCohortSql(cohort, alias = 'r', nowMs = Date.now()) {
+	const a = alias
+	const col = `${a}.packaged_at`
+	const raw = String(cohort || '').trim()
+	if (!raw || raw === 'all') return '1 = 1'
+
+	const DAY = 24 * 3600
+	let start
+	let end
+	if (raw === 'today') {
+		start = startOfLocalDaySec(nowMs)
+		end = start + DAY
+	} else if (raw === 'yesterday') {
+		end = startOfLocalDaySec(nowMs)
+		start = end - DAY
+	} else if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+		const [y, m, d] = raw.split('-').map(Number)
+		const local = new Date(y, m - 1, d, 0, 0, 0, 0)
+		if (isNaN(local.getTime())) return '1 = 1'
+		start = Math.floor(local.getTime() / 1000)
+		end = start + DAY
+	} else {
+		return '1 = 1'
+	}
+	return `(${col} IS NOT NULL AND ${col} >= ${start} AND ${col} < ${end})`
+}
+
+/**
+ * Local-calendar-day bucket key (YYYY-MM-DD) for a unix-seconds timestamp.
+ * @param {number} epochSec
+ * @returns {string}
+ */
+function localDayKeyFromSec(epochSec) {
+	const d = new Date(Number(epochSec) * 1000)
+	const y = d.getFullYear()
+	const m = String(d.getMonth() + 1).padStart(2, '0')
+	const day = String(d.getDate()).padStart(2, '0')
+	return `${y}-${m}-${day}`
+}
+
+/**
+ * Day-by-day counts of parcels sealed inside the recently-packaged scope.
+ * Used to render the day chips above that queue. Days with zero packs are omitted
+ * so the strip stays short; callers add an "All" chip themselves.
+ *
+ * Bucketing is done in JS against local midnight (same clock as packagedCohortSql)
+ * rather than SQLite's `localtime`, so the chips and the filter can never
+ * disagree about which day a stamp belongs to.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {object}  [opts]
+ * @param {number}  [opts.windowDays=7]  rolling look-back in days; 0 or negative = full history
+ * @param {number}  [opts.nowMs]
+ * @param {string}  [opts.extraWhere='1=1']  additional SQL AND'd in (alias `r`)
+ * @param {object}  [opts.params={}]          bind params for extraWhere
+ * @returns {{ date: string, count: number }[]} newest day first
+ */
+function listPackagedDayCounts(db, opts = {}) {
+	const windowDays = Number(opts.windowDays)
+	const unlimited = !Number.isFinite(windowDays) || windowDays <= 0
+	const boundedDays = unlimited ? 0 : Math.max(1, Math.floor(windowDays))
+	const nowMs = opts.nowMs != null ? opts.nowMs : Date.now()
+	const cutoff = unlimited ? 0 : Math.floor(nowMs / 1000) - boundedDays * 24 * 3600
+	const extraWhere = opts.extraWhere || '1=1'
+	const params = opts.params || {}
+	const cutoffClause = unlimited ? '' : 'AND r.packaged_at >= @cutoff'
+	let rows
+	try {
+		rows = db
+			.prepare(
+				`SELECT r.packaged_at AS packaged_at
+				   FROM receipts r
+				  WHERE r.packaged_at IS NOT NULL
+				    ${cutoffClause}
+				    AND r.status NOT IN ('Canceled', 'Cancelled', 'Fully Refunded', 'Fully refunded')
+				    AND (${extraWhere})`,
+			)
+			.all(unlimited ? params : { ...params, cutoff })
+	} catch {
+		return []
+	}
+	const counts = new Map()
+	for (const row of rows) {
+		const key = localDayKeyFromSec(row.packaged_at)
+		counts.set(key, (counts.get(key) || 0) + 1)
+	}
+	return [...counts.entries()]
+		.sort((a, b) => (a[0] < b[0] ? 1 : a[0] > b[0] ? -1 : 0))
+		.map(([date, count]) => ({ date, count }))
+}
+
+/**
  * Whether the packing queue must require VERIFICATION (packer physically confirmed
  * the item in hand), not merely the shopper's "Purchased" assertion, before an
  * order is packable. Off by default so existing shops see no behavior change; turn
@@ -175,6 +295,9 @@ module.exports = {
 	excludeOpenExchangeSql,
 	openExchangeHoldCount,
 	purchasedCohortSql,
+	packagedCohortSql,
+	listPackagedDayCounts,
+	localDayKeyFromSec,
 	requireVerifyBeforePack,
 	startOfLocalDaySec,
 }

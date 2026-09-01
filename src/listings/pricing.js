@@ -19,29 +19,44 @@
 const fs   = require('fs');
 const XLSX  = require('xlsx');
 const { config } = require('./config');
+const productTypes = require('./product-types');
 
 // Canonical internal style keys used by the variation builder + AI mapping.
-const STYLE_KEYS = [
-  'Case+Grip+Charm',
-  'Case+Grip',
-  'Case+Charm',
-  'Case Only',
-  'Grip Only',
-  'Charm Only',
-];
+const STYLE_KEYS = productTypes.ALL_STYLE_KEYS.slice();
 
-// Normalise the spreadsheet's "Product Variation" labels to our style keys.
-function normaliseStyleLabel(label) {
-  const s = String(label || '').toLowerCase().replace(/\s+/g, '');
-  const map = {
-    'case+grip+charm': 'Case+Grip+Charm',
-    'case+grip': 'Case+Grip',
-    'case+charm': 'Case+Charm',
-    'caseonly': 'Case Only',
-    'griponly': 'Grip Only',
-    'charmonly': 'Charm Only',
-  };
-  return map[s] || null;
+// Normalise a variation label — from the spreadsheet's "Product Variation"
+// column or from a live Etsy offering — to the internal style key.
+//
+// `productType` scopes the match to that line's own vocabulary, so an Apple
+// Watch band's "42mm [Series 10/11]" can never be read as a case bundle and a
+// case's "Case + Charm" can never be read as a band size. Omitting it keeps the
+// historical behaviour (the six canonical case bundles).
+const CANONICAL_LABEL_MAP = {
+  'case+grip+charm': 'Case+Grip+Charm',
+  'case+grip': 'Case+Grip',
+  'case+charm': 'Case+Charm',
+  'caseonly': 'Case Only',
+  'griponly': 'Grip Only',
+  'charmonly': 'Charm Only',
+};
+
+function compactLabel(label) {
+  return String(label || '').toLowerCase().replace(/\s+/g, '');
+}
+
+function normaliseStyleLabel(label, productType) {
+  const s = compactLabel(label);
+  if (!s) return null;
+  if (productType != null) {
+    const styles = productTypes.stylesFor(productType);
+    for (const style of styles) {
+      if (compactLabel(style.label) === s || compactLabel(style.key) === s) return style.key;
+    }
+    // The spreadsheet's legacy spellings only ever name canonical case bundles.
+    const alias = CANONICAL_LABEL_MAP[s];
+    return alias && styles.some((x) => x.key === alias) ? alias : null;
+  }
+  return CANONICAL_LABEL_MAP[s] || null;
 }
 
 // Map an Etsy currency_code to the spreadsheet's table currency token.
@@ -115,15 +130,38 @@ function loadPricingTables(workbookPath) {
 
 /**
  * Get the style→price map for a given currency.
+ *
+ * Product lines the master workbook does not cover (e.g. Apple Watch bands)
+ * declare their own price book on the product-type descriptor; those are
+ * returned directly and the workbook is never opened. A currency the price book
+ * does not cover returns an empty map with every style listed as missing, so
+ * the operator is asked for a price instead of being given a guessed one.
+ *
  * @param {string} currencyCode  Etsy shop currency_code (USD/CAD/HKD/CNY...)
  * @param {object} [opts]
  * @param {'anchor'|'customer'} [opts.column='anchor']
  * @param {string} [opts.workbookPath]
- * @returns {{ currency:string, token:string, prices: Record<string,number>, missing: string[] }}
+ * @param {string|object} [opts.productType]  defaults to the iPhone case line
+ * @returns {{ currency:string, token:string, prices: Record<string,number>,
+ *             missing: string[], source: 'workbook'|'product_type' }}
  */
 function getPricesForCurrency(currencyCode, opts = {}) {
   const column = opts.column === 'customer' ? 'customer' : 'anchor';
   const token = currencyToTableToken(currencyCode);
+  const pt = productTypes.getProductType(opts.productType);
+  const styleKeys = productTypes.styleKeysFor(pt);
+
+  if (productTypes.hasOwnPriceBook(pt)) {
+    const prices = productTypes.defaultStylePricesFor(pt, currencyCode) || {};
+    return {
+      currency: String(currencyCode || '').toUpperCase(),
+      token,
+      prices,
+      missing: styleKeys.filter((k) => !Number.isFinite(prices[k])),
+      source: 'product_type',
+    };
+  }
+
   const tables = loadPricingTables(opts.workbookPath);
   const table = tables[token];
 
@@ -139,13 +177,13 @@ function getPricesForCurrency(currencyCode, opts = {}) {
 
   const prices = {};
   const missing = [];
-  for (const style of STYLE_KEYS) {
+  for (const style of styleKeys) {
     const entry = table[style];
     if (entry && Number.isFinite(entry[column])) prices[style] = entry[column];
     else missing.push(style);
   }
 
-  return { currency: String(currencyCode || '').toUpperCase(), token, prices, missing };
+  return { currency: String(currencyCode || '').toUpperCase(), token, prices, missing, source: 'workbook' };
 }
 
 /** List the currencies present in the workbook (tokens, e.g. ["USD","CAD"...]). */

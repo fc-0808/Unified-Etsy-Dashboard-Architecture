@@ -1,29 +1,33 @@
 'use strict';
 
 /**
- * Builds the Etsy listing inventory (variation matrix) for an iPhone case.
+ * Builds the Etsy listing inventory (variation matrix) for one product.
  *
- * Structure (matches the live Y2KASEshop listings + Listings_automation):
- *   option1 = "Phone Model"  → Etsy custom property 513 (12 models)
- *   option2 = "Styles"       → Etsy custom property 514 (6 bundles)
- *
- * Price and quantity vary on the Styles property only:
+ * Every listing has a PRICED axis — Etsy custom property 514 — whose values
+ * carry the price, the stock and the variation photo:
  *   price_on_property    = [514]
  *   quantity_on_property = [514]
  *
- * That yields 12 × 6 = 72 products. Styles that the product photos don't
- * support (e.g. no grip image → grip bundles) are emitted as disabled
- * offerings so the variation still appears in the dropdown structure but is
- * hidden from buyers.
+ * A product type MAY add a second, device-model axis (custom property 513):
+ *
+ *   iPhone case      12 models × 6 bundles  → "Phone Model"  + "Styles"
+ *   AirPods case      7 models × 3 bundles  → "AirPods Model"+ "Styles"
+ *   Apple Watch band  (no model axis) × 3   → "Band Size"
+ *   iPad case         (no model axis) × 19  → "iPad Model"
+ *
+ * Values that the product photos don't support (e.g. no grip image → grip
+ * bundles) are emitted as disabled offerings so the variation still appears in
+ * the dropdown structure but is hidden from buyers. Values the product type
+ * does not offer at all are never emitted.
  */
 
 const productTypes = require('./product-types');
 
-// Etsy custom variation property IDs (Custom Property 1 / 2). The Styles axis
-// (514) is shared by every product type; the device axis (513) is named per
-// product type ("Phone Model" for iPhone, "AirPods Model" for AirPods).
-const PROP_PHONE_MODEL = 513;
-const PROP_STYLES = 514;
+// Etsy custom variation property IDs (Custom Property 1 / 2). The priced axis
+// (514) exists on every product type but is NAMED per type ("Styles" for a
+// case, "Band Size" for a watch band); the device axis (513) is optional.
+const PROP_PHONE_MODEL = productTypes.PROP_DEVICE;
+const PROP_STYLES = productTypes.PROP_CHOICE;
 
 // Backward-compatible iPhone model exports (the default product type). New code
 // should read the model set from the product-type registry instead.
@@ -55,48 +59,42 @@ function compatibilityNamesFor(enabledModels, productType) {
 /** Every possible buyer-facing description model name for the iPhone default. */
 const ALL_DESCRIPTION_NAMES = productTypes.allDescriptionNames('iphone_case');
 
-// Internal style key → buyer-facing label (matches the pricing sheet variants).
-const STYLES = [
-  { key: 'Case+Grip+Charm', label: 'Case + Grip + Charm' },
-  { key: 'Case+Grip',       label: 'Case + Grip' },
-  { key: 'Case+Charm',      label: 'Case + Charm' },
-  { key: 'Case Only',       label: 'Case Only' },
-  { key: 'Grip Only',       label: 'Grip Only' },
-  { key: 'Charm Only',      label: 'Charm Only' },
-];
+// Internal style key → buyer-facing label for the DEFAULT (iPhone case) type.
+// Other product types carry their own vocabulary on their descriptor; use
+// productTypes.stylesFor(pt) rather than this constant in new code.
+const STYLES = productTypes.stylesFor('iphone_case').map(({ key, label }) => ({ key, label }));
 
 /**
- * Decide which styles are available based on Phase 1 image classification.
- * @param {object[]} imageAnalysis
+ * Decide which priced-axis values are available from the Phase 1 image facts.
+ * Accessory-driven types (cases) offer a bundle only when its accessory was
+ * actually photographed; types with nothing to detect (e.g. band sizes) offer
+ * every value.
+ *
+ * @param {boolean} hasGrip
+ * @param {boolean} hasCharm
+ * @param {string|object} [productType]
  * @returns {Record<string, boolean>} style key → enabled
  */
-function enabledStylesFor(hasGrip, hasCharm) {
-  const g = Boolean(hasGrip);
-  const c = Boolean(hasCharm);
-  return {
-    'Case Only': true,        // always offered
-    'Grip Only': g,
-    'Charm Only': c,
-    'Case+Grip': g,
-    'Case+Charm': c,
-    'Case+Grip+Charm': g && c,
-  };
+function enabledStylesFor(hasGrip, hasCharm, productType) {
+  return productTypes.defaultEnabledStyles(productType, { hasGrip, hasCharm });
 }
 
-function computeEnabledStyles(imageAnalysis = []) {
+function computeEnabledStyles(imageAnalysis = [], productType) {
   return enabledStylesFor(
     imageAnalysis.some((i) => i.has_grip),
     imageAnalysis.some((i) => i.has_charm),
+    productType,
   );
 }
 
-// Style keys, in display order. Case Only is always available.
-const STYLE_ORDER = ['Case+Grip+Charm', 'Case+Grip', 'Case+Charm', 'Case Only', 'Grip Only', 'Charm Only'];
+// Default-type style keys, in display order. Case Only is always available.
+const STYLE_ORDER = productTypes.styleKeysFor('iphone_case');
 
 /**
  * Coerce an arbitrary {styleKey: truthy} map into a clean boolean map over the
- * 6 known styles. This is a FAITHFUL, side-effect-free normaliser: it reflects
- * the operator's exact selection and never re-enables a style on its own.
+ * product type's known values. This is a FAITHFUL, side-effect-free normaliser:
+ * it reflects the operator's exact selection and never re-enables a value on
+ * its own.
  *
  * Historically this forced "Case Only" on so a listing could never be empty.
  * That invariant now lives with the layers that actually know about CUSTOM
@@ -106,10 +104,8 @@ const STYLE_ORDER = ['Case+Grip+Charm', 'Case+Grip', 'Case+Charm', 'Case Only', 
  * would resurrect "Case Only" for a valid custom-only listing — exactly the bug
  * we must avoid.
  */
-function normaliseEnabledStyles(input = {}) {
-  const out = {};
-  for (const key of STYLE_ORDER) out[key] = Boolean(input[key]);
-  return out;
+function normaliseEnabledStyles(input = {}, productType) {
+  return productTypes.normaliseEnabledStyles(productType, input);
 }
 
 // Etsy limits + guardrails for operator-defined custom variation values.
@@ -170,50 +166,49 @@ function buildInventory(args = {}) {
   const pt = productTypes.getProductType(args.productType);
   // Model availability: an explicit list override wins; otherwise honour the
   // enabledModels map (default = all). Disabled models are OMITTED entirely so
-  // buyers never see an unavailable model in the dropdown.
+  // buyers never see an unavailable model in the dropdown. Single-axis types
+  // (no device property) yield one pass with no model value at all.
   const models = args.models && args.models.length
     ? args.models
     : enabledModelList(args.enabledModels, pt);
+  const deviceProp = productTypes.hasDeviceAxis(pt) ? pt.deviceProperty : null;
+  const modelValues = deviceProp && models.length ? models : [null];
 
   // An explicit enabledStyles override (operator-adjusted) wins; otherwise derive
-  // from the AI image analysis. Always sanitised to the 6 known style keys, then
-  // restricted to the styles this product type actually offers (e.g. AirPods
-  // cases never offer a grip).
-  const rawStyles = args.enabledStyles && Object.keys(args.enabledStyles).length
-    ? normaliseEnabledStyles(args.enabledStyles)
-    : computeEnabledStyles(imageAnalysis);
-  const allowed = new Set(pt.allowedStyles || STYLE_ORDER);
-  const enabledStyles = {};
-  for (const key of STYLE_ORDER) enabledStyles[key] = allowed.has(key) && Boolean(rawStyles[key]);
-  // Only build offerings for styles the product type supports.
-  const offeredStyles = STYLES.filter((s) => allowed.has(s.key));
-  const deviceProp = pt.deviceProperty || { id: PROP_PHONE_MODEL, name: 'Phone Model' };
+  // from the AI image analysis. Always sanitised to the values this product type
+  // actually offers (e.g. AirPods cases never offer a grip).
+  const offeredStyles = productTypes.stylesFor(pt);
+  const enabledStyles = args.enabledStyles && Object.keys(args.enabledStyles).length
+    ? normaliseEnabledStyles(args.enabledStyles, pt)
+    : computeEnabledStyles(imageAnalysis, pt);
+  const styleProp = productTypes.stylePropertyFor(pt);
 
   const products = [];
   let minPrice = Infinity;
   let listingQuantity = 0;
 
-  // Canonical bundle offerings (Case/Grip/Charm…) and operator-defined CUSTOM
-  // offerings are merged into ONE ordered list of "Styles" values. Custom values
-  // are ADDED on top of the bundles; labels that collide with a canonical value
+  // Canonical offerings (Case/Grip/Charm… or the band sizes) and operator-defined
+  // CUSTOM offerings are merged into ONE ordered list of priced-axis values.
+  // Custom values are ADDED on top; labels that collide with a canonical value
   // are dropped (Etsy rejects duplicate values).
   const canonicalLabels = new Set(offeredStyles.filter((s) => Number(prices[s.key]) > 0).map((s) => s.label));
   const customStyles = normaliseCustomStyles(args.customStyles).filter((s) => !canonicalLabels.has(s.label));
 
   // Invariant: a listing must always offer at least one VISIBLE variation (Etsy
-  // rejects a listing with none). The operator may disable any single bundle —
-  // including "Case Only" — as long as another bundle or a custom value is
+  // rejects a listing with none). The operator may disable any single value —
+  // including "Case Only" — as long as another value or a custom value is
   // enabled. If they somehow disable everything and define no custom values, we
-  // re-enable a sensible default (Case Only, else the first priced bundle).
+  // re-enable a sensible default (the type's fallback, else the first priced one).
   const anyEnabledBundle = offeredStyles.some((s) => Number(prices[s.key]) > 0 && enabledStyles[s.key]);
   if (!anyEnabledBundle && !customStyles.length) {
-    const fallback = offeredStyles.find((s) => s.key === 'Case Only' && Number(prices[s.key]) > 0)
+    const fallbackKey = productTypes.fallbackStyleKey(pt);
+    const fallback = offeredStyles.find((s) => s.key === fallbackKey && Number(prices[s.key]) > 0)
       || offeredStyles.find((s) => Number(prices[s.key]) > 0);
     if (fallback) enabledStyles[fallback.key] = true;
   }
 
   // Build the display order: honour the operator's variationOrder (an array of the
-  // "Styles" value labels), then append anything not listed. Etsy renders the
+  // priced-axis value labels), then append anything not listed. Etsy renders the
   // dropdown options in the order the values first appear in the products array,
   // so this order IS the buyer-facing option order.
   const canonByLabel = new Map(offeredStyles.map((s) => [s.label, s]));
@@ -228,42 +223,46 @@ function buildInventory(args = {}) {
   for (const s of offeredStyles) if (!usedCanon.has(s.label)) ordered.push({ kind: 'canon', style: s });
   for (const s of customStyles) if (!usedCustom.has(s.label)) ordered.push({ kind: 'custom', style: s });
 
-  for (const model of models) {
-    for (const em of ordered) {
-      if (em.kind === 'canon') {
-        const style = em.style;
-        const price = Number(prices[style.key]);
-        if (!Number.isFinite(price) || price <= 0) continue; // no price → cannot offer
-        const enabled = Boolean(enabledStyles[style.key]);
-        const quantity = enabled ? restockQuantity : 0;
-        if (enabled) {
-          minPrice = Math.min(minPrice, price);
-          listingQuantity += quantity;
-        }
-        const offering = { price, quantity, is_enabled: enabled };
-        if (readinessStateId != null) offering.readiness_state_id = readinessStateId;
-        products.push({
-          property_values: [
-            { property_id: deviceProp.id, property_name: deviceProp.name, values: [model], value_ids: [] },
-            { property_id: PROP_STYLES,   property_name: 'Styles',        values: [style.label], value_ids: [] },
-          ],
-          offerings: [offering],
-        });
-      } else {
-        const style = em.style;
-        minPrice = Math.min(minPrice, style.price);
-        listingQuantity += restockQuantity;
-        const offering = { price: style.price, quantity: restockQuantity, is_enabled: true };
-        if (readinessStateId != null) offering.readiness_state_id = readinessStateId;
-        products.push({
-          property_values: [
-            { property_id: deviceProp.id, property_name: deviceProp.name, values: [model], value_ids: [] },
-            { property_id: PROP_STYLES,   property_name: 'Styles',        values: [style.label], value_ids: [] },
-          ],
-          offerings: [offering],
-        });
-      }
+  // One product row per (model × value); single-axis types carry the value alone.
+  const propertyValuesFor = (model, label) => {
+    const values = [];
+    if (deviceProp && model != null) {
+      values.push({ property_id: deviceProp.id, property_name: deviceProp.name, values: [model], value_ids: [] });
     }
+    values.push({ property_id: styleProp.id, property_name: styleProp.name, values: [label], value_ids: [] });
+    return values;
+  };
+
+  for (const model of modelValues) {
+    for (const em of ordered) {
+      const style = em.style;
+      const isCustom = em.kind === 'custom';
+      const price = isCustom ? Number(style.price) : Number(prices[style.key]);
+      if (!Number.isFinite(price) || price <= 0) continue; // no price → cannot offer
+      const enabled = isCustom ? true : Boolean(enabledStyles[style.key]);
+      const quantity = enabled ? restockQuantity : 0;
+      if (enabled) {
+        minPrice = Math.min(minPrice, price);
+        listingQuantity += quantity;
+      }
+      const offering = { price, quantity, is_enabled: enabled };
+      if (readinessStateId != null) offering.readiness_state_id = readinessStateId;
+      products.push({
+        property_values: propertyValuesFor(model, style.label),
+        offerings: [offering],
+      });
+    }
+  }
+
+  // A listing with no variation rows is rejected by Etsy with an opaque error.
+  // The only way to get here is a product type whose values have no price for
+  // this shop's currency, so say exactly that instead of failing at the API.
+  if (!products.length) {
+    const err = new Error(
+      `No priced variations for "${pt.label}" — set a price for at least one ${styleProp.name} value in the Variation Prices card before running.`,
+    );
+    err.status = 400;
+    throw err;
   }
 
   if (!Number.isFinite(minPrice)) minPrice = 0;
@@ -271,8 +270,8 @@ function buildInventory(args = {}) {
 
   const body = {
     products,
-    price_on_property: [PROP_STYLES],
-    quantity_on_property: [PROP_STYLES],
+    price_on_property: [styleProp.id],
+    quantity_on_property: [styleProp.id],
     sku_on_property: [],
   };
 
@@ -290,12 +289,14 @@ function buildInventory(args = {}) {
  * @param {Record<string, number[]>} args.styleImageMapping  style key → image ranks (1-based)
  * @param {Map<number, number>} args.rankToImageId            rank → uploaded image_id
  * @param {Map<string, number>} args.styleLabelToValueId      style label → value_id
+ * @param {string|object} [args.productType]
  * @returns {Array<{property_id:number,value_id:number,image_id:number}>}
  */
-function buildVariationImages({ styleImageMapping = {}, rankToImageId, styleLabelToValueId }) {
+function buildVariationImages({ styleImageMapping = {}, rankToImageId, styleLabelToValueId, productType }) {
   const out = [];
   const seen = new Set();
-  for (const style of STYLES) {
+  const propId = productTypes.stylePropertyFor(productType).id;
+  for (const style of productTypes.stylesFor(productType)) {
     const ranks = styleImageMapping[style.key];
     if (!ranks || !ranks.length) continue;
     const valueId = styleLabelToValueId.get(style.label);
@@ -305,7 +306,7 @@ function buildVariationImages({ styleImageMapping = {}, rankToImageId, styleLabe
     const dedupeKey = `${valueId}:${imageId}`;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
-    out.push({ property_id: PROP_STYLES, value_id: valueId, image_id: imageId });
+    out.push({ property_id: propId, value_id: valueId, image_id: imageId });
   }
   return out;
 }
@@ -318,10 +319,12 @@ function buildVariationImages({ styleImageMapping = {}, rankToImageId, styleLabe
  * @param {Array<{label:string,imageRank:number|null}>} args.customStyles
  * @param {Map<number,number>} args.rankToImageId        rank → uploaded image_id
  * @param {Map<string,number>} args.styleLabelToValueId  custom label → value_id
+ * @param {string|object} [args.productType]
  */
-function buildCustomVariationImages({ customStyles = [], rankToImageId, styleLabelToValueId }) {
+function buildCustomVariationImages({ customStyles = [], rankToImageId, styleLabelToValueId, productType }) {
   const out = [];
   const seen = new Set();
+  const propId = productTypes.stylePropertyFor(productType).id;
   for (const style of customStyles) {
     if (!style || style.imageRank == null) continue;
     const valueId = styleLabelToValueId.get(style.label);
@@ -331,7 +334,7 @@ function buildCustomVariationImages({ customStyles = [], rankToImageId, styleLab
     const dedupeKey = `${valueId}:${imageId}`;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
-    out.push({ property_id: PROP_STYLES, value_id: valueId, image_id: imageId });
+    out.push({ property_id: propId, value_id: valueId, image_id: imageId });
   }
   return out;
 }

@@ -23,6 +23,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const axios = require('axios');
 
 const ETSY_TOKEN_URL = 'https://api.etsy.com/v3/public/oauth/token';
@@ -46,15 +47,26 @@ class TokenManager {
     this._path = tokensFilePath;
     /** @type {Record<string, ShopTokens>} shop_id → tokens */
     this._store = {};
+    /** A malformed on-disk store blocks all saves until a valid reload. */
+    this._loadError = null;
+    /** Last transient persistence failure after a successful token refresh. */
+    this._persistenceError = null;
+    this._persistRetryTimer = null;
+    this._persistRetryDelayMs = 5000;
     /** @type {Map<string, Promise<string>>} shop_id → in-flight refresh (dedupe) */
     this._refreshing = new Map();
     this._load();
   }
 
   _load() {
+    this._loadError = null;
     if (fs.existsSync(this._path)) {
       try {
-        this._store = JSON.parse(fs.readFileSync(this._path, 'utf8'));
+        const parsed = JSON.parse(fs.readFileSync(this._path, 'utf8'));
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new TypeError('top-level value must be an object');
+        }
+        this._store = parsed;
       } catch (err) {
         // A corrupt/half-written tokens.json must NOT be silently reset — the next
         // _save() would overwrite it and permanently clobber every shop's refresh
@@ -63,17 +75,50 @@ class TokenManager {
         try { fs.copyFileSync(this._path, backup); } catch { /* best effort */ }
         console.error(
           `[token-manager] ${this._path} is not valid JSON (${err.message}). ` +
-          `Backed up to ${backup} before continuing so no tokens are silently lost.`
+          `Backed up to ${backup}. Token writes are disabled until the file is repaired and reloaded.`
         );
-        this._store = {};
+        // Keep any previously loaded in-memory tokens available to the running
+        // process, but fail closed on persistence. Otherwise the next successful
+        // refresh could overwrite every other shop with a partial store.
+        this._loadError = err;
       }
     }
   }
 
-  _save() {
+  _save(store = this._store) {
+    if (this._loadError) {
+      throw new TokenStoreError(
+        this._path,
+        `Refusing to overwrite invalid token store at ${this._path}. ` +
+          'Repair or restore the JSON file, then reload tokens.',
+        this._loadError
+      );
+    }
     const dir = path.dirname(this._path);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(this._path, JSON.stringify(this._store, null, 2), 'utf8');
+    const tempPath = path.join(
+      dir,
+      `.${path.basename(this._path)}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
+    );
+    let fd = null;
+    try {
+      fd = fs.openSync(tempPath, 'wx', 0o600);
+      fs.writeFileSync(fd, JSON.stringify(store, null, 2), 'utf8');
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      fd = null;
+      fs.renameSync(tempPath, this._path);
+      // POSIX only; harmless best-effort on Windows. Tokens must not be
+      // world-readable on systems that honor Unix mode bits.
+      try { fs.chmodSync(this._path, 0o600); } catch { /* platform/filesystem */ }
+    } finally {
+      if (fd !== null) {
+        try { fs.closeSync(fd); } catch { /* best effort */ }
+      }
+      try {
+        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+      } catch { /* best effort */ }
+    }
   }
 
   /**
@@ -85,6 +130,33 @@ class TokenManager {
     return !!(t && t.refresh_token);
   }
 
+  getStoreHealth() {
+    return {
+      valid: !this._loadError,
+      persisted: !this._loadError && !this._persistenceError,
+      path: this._path,
+      error: (this._loadError || this._persistenceError)?.message || null,
+    };
+  }
+
+  _schedulePersistenceRetry() {
+    if (this._persistRetryTimer || this._loadError || !this._persistenceError) return;
+    this._persistRetryTimer = setTimeout(() => {
+      this._persistRetryTimer = null;
+      try {
+        this._save(this._store);
+        this._persistenceError = null;
+        this._persistRetryDelayMs = 5000;
+        console.log('[token-manager] Recovered token-store persistence after a transient failure.');
+      } catch (err) {
+        this._persistenceError = err;
+        this._persistRetryDelayMs = Math.min(this._persistRetryDelayMs * 2, 5 * 60 * 1000);
+        this._schedulePersistenceRetry();
+      }
+    }, this._persistRetryDelayMs);
+    if (typeof this._persistRetryTimer.unref === 'function') this._persistRetryTimer.unref();
+  }
+
   /**
    * Store tokens for a shop after initial OAuth flow.
    * Called by scripts/oauth-setup.js after the authorization code grant.
@@ -92,25 +164,44 @@ class TokenManager {
    * @param {string} shopId
    * @param {{ access_token: string, refresh_token: string, expires_in?: number }} tokenData
    */
-  storeTokens(shopId, tokenData) {
+  storeTokens(shopId, tokenData, { allowMemoryFallback = false } = {}) {
     const now = Date.now();
     const prev = this._store[shopId] || {};
-    // Record the granted scopes when supplied (initial OAuth). Etsy's refresh
-    // response does NOT echo scope, so on refresh we PRESERVE the previously
-    // recorded scopes — this lets us pre-flight permission errors (e.g. a token
-    // authorised before listings_w was added) before a run instead of failing
-    // every listing one by one.
+    // Record granted scopes when supplied. Refresh responses may omit `scope`, so
+    // preserve the prior set in that case; this lets callers pre-flight a token
+    // authorized before a new permission was added.
     let scopes = prev.scopes || null;
     if (Array.isArray(tokenData.scopes)) scopes = tokenData.scopes;
     else if (typeof tokenData.scope === 'string' && tokenData.scope.trim()) scopes = tokenData.scope.trim().split(/\s+/);
-    this._store[shopId] = {
-      access_token: tokenData.access_token,
-      refresh_token: tokenData.refresh_token,
-      access_token_expires_at: now + ((tokenData.expires_in ?? 3600) * 1000),
-      refresh_token_obtained_at: now,
-      ...(scopes ? { scopes } : {}),
+    const nextStore = {
+      ...this._store,
+      [shopId]: {
+        access_token: tokenData.access_token,
+        refresh_token: tokenData.refresh_token,
+        access_token_expires_at: now + ((tokenData.expires_in ?? 3600) * 1000),
+        refresh_token_obtained_at: now,
+        ...(scopes ? { scopes } : {}),
+      },
     };
-    this._save();
+    try {
+      this._save(nextStore);
+      this._store = nextStore;
+      this._persistenceError = null;
+      return true;
+    } catch (err) {
+      if (!allowMemoryFallback || this._loadError) throw err;
+      // Etsy may rotate the refresh token on every successful refresh. Keep the
+      // new credential usable in memory and retry persistence; discarding it here
+      // could orphan the shop immediately.
+      this._store = nextStore;
+      this._persistenceError = err;
+      console.error(
+        `[token-manager] CRITICAL: refreshed tokens for ${shopId} are only in memory ` +
+        `because ${this._path} could not be saved (${err.message}). Retrying in background.`
+      );
+      this._schedulePersistenceRetry();
+      return false;
+    }
   }
 
   /** Recorded granted scopes for a shop (or null if unknown — legacy tokens). */
@@ -168,6 +259,18 @@ class TokenManager {
       return stored.access_token;
     }
 
+    // A refresh can rotate Etsy's refresh token. Never contact the token endpoint
+    // while persistence is disabled, or the newly-issued token could be lost and
+    // permanently invalidate the only recoverable credential.
+    if (this._loadError) {
+      throw new TokenStoreError(
+        this._path,
+        `Cannot refresh OAuth tokens while ${this._path} is invalid. ` +
+          'Repair or restore the token store, then reload it before retrying.',
+        this._loadError
+      );
+    }
+
     // Determine the refresh token to use
     const refreshToken = stored?.refresh_token ?? fallbackRefreshToken;
     if (!refreshToken) {
@@ -186,7 +289,7 @@ class TokenManager {
     }
     const p = (async () => {
       const newTokens = await this._doRefresh(keystring, refreshToken, proxyClient);
-      this.storeTokens(shopId, newTokens);
+      this.storeTokens(shopId, newTokens, { allowMemoryFallback: true });
       return newTokens.access_token;
     })();
     this._refreshing.set(shopId, p);
@@ -250,6 +353,24 @@ class TokenManager {
   getStatus(shopIds) {
     const now = Date.now();
     return shopIds.map((shopId) => {
+      if (this._loadError) {
+        return {
+          shop_id: shopId,
+          status: 'token_store_invalid',
+          access_token_valid: false,
+          refresh_token_days_remaining: null,
+          expires_in_hours: null,
+        };
+      }
+      if (this._persistenceError) {
+        return {
+          shop_id: shopId,
+          status: 'token_store_unpersisted',
+          access_token_valid: !!this._store[shopId]?.access_token,
+          refresh_token_days_remaining: null,
+          expires_in_hours: null,
+        };
+      }
       const stored = this._store[shopId];
       if (!stored) return { shop_id: shopId, status: 'not_authenticated', expires_in_hours: null };
 
@@ -280,8 +401,11 @@ class TokenManager {
   invalidate(shopId) {
     if (this._store[shopId]) {
       this._store[shopId].access_token_expires_at = 0;
+      if (this._loadError) return false;
       this._save();
+      return true;
     }
+    return false;
   }
 
   /**
@@ -290,6 +414,14 @@ class TokenManager {
    * immediately picks up the new tokens (including any new scopes).
    */
   reload() {
+    if (this._persistenceError) {
+      const err = new Error(
+        'Refusing to reload tokens while refreshed credentials are not yet persisted.'
+      );
+      err.code = 'TOKEN_STORE_UNPERSISTED';
+      err.status = 409;
+      throw err;
+    }
     this._load();
     // Force all in-memory tokens to appear expired so the next request
     // triggers a refresh using the newly-stored refresh token.
@@ -311,4 +443,14 @@ class TokenExpiredError extends Error {
   }
 }
 
-module.exports = { TokenManager, TokenExpiredError };
+class TokenStoreError extends Error {
+  constructor(tokensPath, message, cause = null) {
+    super(message);
+    this.name = 'TokenStoreError';
+    this.code = 'TOKEN_STORE_INVALID';
+    this.tokensPath = tokensPath;
+    if (cause) this.cause = cause;
+  }
+}
+
+module.exports = { TokenManager, TokenExpiredError, TokenStoreError };

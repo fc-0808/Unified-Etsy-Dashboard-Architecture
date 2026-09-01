@@ -21,12 +21,21 @@
  *   3. the REPLACEMENT listing's cached thumbnail (via source_listing_id),
  *   4. null → a neutral placeholder.
  *
+ * SECOND DEFECT, same feature, guarded from § SHOPPING MODE below: the route row
+ * carried the right photo, but the mobile /shop endpoint re-proxied it through
+ * /api/route/listing-image/<listing_id> — the listing the buyer ORDERED. On a
+ * switched line that is the design being replaced, so the shopping floor showed
+ * the OLD case while the Orders and Route tabs showed the new one. Rows now also
+ * publish `product_listing_id` (the listing the line is BOUGHT as) and the mobile
+ * proxy keys off that.
+ *
  * Run: `node scripts/test-switch-image.js`
  * Exit code 0 = all assertions pass, 1 = a regression was detected.
  */
 
 const Database = require('better-sqlite3');
 const routeDashboard = require('../src/route/dashboard');
+const { shopRouteImageUrl, SHOP_CARD_WIDTH } = require('../src/route/shop-images');
 
 let failures = 0;
 function assert(cond, msg) {
@@ -225,6 +234,65 @@ const byReceipt = (rid) => rows.find((r) => r.receipt_id === rid);
     `unresolvable switch image is null (a neutral placeholder), got "${r && r.image_url}"`);
   assert(r && r.image_url !== ORIG_IMAGE,
     'an unresolvable switch NEVER falls back to the original design image');
+}
+
+// ── § PRODUCT IDENTITY ──────────────────────────────────────────────────────
+// `listing_id` is the listing the buyer ORDERED and must survive a switch (it
+// carries the line's saved purchase status, its Etsy link and its 同款 merge
+// edges). `product_listing_id` is the listing the line is BOUGHT as.
+
+console.log('\nOrdered listing vs purchased listing');
+{
+  const switched = byReceipt(3001);
+  assert(switched && switched.listing_id === ORIG_LISTING,
+    `a switched line still reports the ORDERED listing (got ${switched && switched.listing_id})`);
+  assert(switched && switched.product_listing_id === NEW_LISTING,
+    `a catalog switch is BOUGHT as the replacement listing (got ${switched && switched.product_listing_id})`);
+
+  const control = byReceipt(3002);
+  assert(control && control.product_listing_id === ORIG_LISTING,
+    `an unswitched line is bought as the listing it was ordered as (got ${control && control.product_listing_id})`);
+
+  const custom = byReceipt(3005);
+  assert(custom && custom.product_listing_id === null,
+    `a CUSTOM switch has no catalog listing at all (got ${custom && custom.product_listing_id})`);
+}
+
+// ── § SHOPPING MODE ─────────────────────────────────────────────────────────
+// The mobile /shop endpoint rewrites every row's photo to a same-origin URL so
+// the service worker can cache it (CSP connect-src is 'self'). That rewrite is
+// where the switched design used to be lost.
+
+console.log('\nMobile shopping-route image (same-origin rewrite)');
+{
+  // The URL that would have been served by the defect — the ORIGINAL design.
+  const wrongProxy = `/api/route/listing-image/${ORIG_LISTING}?w=${SHOP_CARD_WIDTH}`;
+
+  const catalogSwitch = shopRouteImageUrl(byReceipt(3001));
+  assert(catalogSwitch === `/api/route/listing-image/${NEW_LISTING}?w=${SHOP_CARD_WIDTH}`,
+    `shopping mode proxies the REPLACEMENT listing (got "${catalogSwitch}")`);
+  assert(catalogSwitch !== wrongProxy,
+    'shopping mode NEVER proxies the design the buyer switched away from');
+
+  const viaListingsTable = shopRouteImageUrl(byReceipt(3003));
+  assert(viaListingsTable === `/api/route/listing-image/${NEW_LISTING_2}?w=${SHOP_CARD_WIDTH}`,
+    `a switch resolved via listings.primary_image_url proxies the replacement (got "${viaListingsTable}")`);
+
+  const explicitUrl = shopRouteImageUrl(byReceipt(3004));
+  assert(explicitUrl === `/api/route/listing-image/${NEW_LISTING_3}?w=${SHOP_CARD_WIDTH}`,
+    `a switch carrying its own CDN url still proxies the replacement (got "${explicitUrl}")`);
+
+  const control = shopRouteImageUrl(byReceipt(3002));
+  assert(control === wrongProxy,
+    `an UNSWITCHED line still proxies its own listing (got "${control}")`);
+
+  const customUpload = shopRouteImageUrl(byReceipt(3005));
+  assert(/^\/api\/route\/substitution-image\/\d+\?v=/.test(String(customUpload)),
+    `a custom switch serves its uploaded photo untouched (got "${customUpload}")`);
+
+  const noImage = shopRouteImageUrl(byReceipt(3006));
+  assert(noImage === null,
+    `an unresolvable switch stays a neutral placeholder on the floor (got "${noImage}")`);
 }
 
 db.close();

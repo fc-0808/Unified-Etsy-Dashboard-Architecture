@@ -53,8 +53,10 @@ assert(S.productTitleSimilarity('Kawaii Miffy Case', 'Kawaii Miffy Case') === 1,
 assert(S.productTitleSimilarity('Hello Kitty Case', 'Tamagotchi Case') === 0, 'no shared design words → similarity 0 (boilerplate stripped)')
 {
 	// The real screenshot pair — two re-lists of the "My Melody Liquid Glitter Case".
-	const a = 'My Melody Liquid Glitter Case iPhone 17 16 15 14 13 Pro Max, Pink Quicksand Star Cover & Charm, Kawaii Strawberry Coquette Gift for Her'
-	const b = 'Kawaii My Melody Liquid Glitter Case with Charm, Y2K Coquette Pink Bunny Phone Cover iPhone 17 16 15 14 13 Pro Max, Sparkle Anime Gift'
+	// After marketing-fluff stopwords are stripped, the distinctive design words
+	// still clear the CORROBORATED-band floor (the same titles the merge test uses).
+	const a = 'My Melody Liquid Glitter Case iPhone 17 16 15 14 13 Pro Max, Pink Quicksand Star Cover & Charm, Kawaii Coquette Gift'
+	const b = 'Kawaii My Melody Liquid Glitter Case with Charm, Y2K Coquette Pink Bunny Cover iPhone 17 16 15 14 13 Pro Max, Sparkle Gift'
 	assert(S.productTitleSimilarity(a, b) >= S.PRODUCT_MERGE_TITLE_SIM, 'the two My Melody re-list titles clear the corroboration threshold')
 }
 assert(S.productTitleSimilarity('', 'anything') === 0, 'an empty title never corroborates')
@@ -91,6 +93,61 @@ assert(
 	S.shouldMergeProducts({ phash: ZERO, title: 'x', stalls: new Set() }, { phash: D9, title: 'x', stalls: new Set() }) === false,
 	'a near-miss with unknown stalls does NOT merge (no corroborating stall signal)',
 )
+
+// ── shouldMergeProducts: DESIGN-TITLE band (the A285 Usahana bug: photos are
+// compositionally unrelated — a lifestyle hand-shot vs. a studio flat-lay — and
+// titles differ only by optional fluff/accessory words the seller toggles
+// between re-lists: "& Charm", "Now", "Aesthetic") ──
+{
+	const farA = hashWithTail('f'.repeat(40))
+	const farB = hashWithTail('f'.repeat(20) + '0'.repeat(20))
+	// Real titles from the live A285 shopping floor (listings 4545666488 / 4541247998).
+	const usahanaA = {
+		phash: farA,
+		designPhash: farA,
+		title: 'Usahana Pink MAGSAFE IPhone Case with Heart Grip & Charm, Kawaii Y2K Cute Cover for iPhone 17 16 15 Pro Max, Gift for Her Now',
+		stalls: stall('A285'),
+	}
+	const usahanaB = {
+		phash: farB,
+		designPhash: farB,
+		title: 'Usahana Pink MAGSAFE iPhone Case with Heart Grip, Kawaii Y2K Cute Cover for iPhone 17 16 15 Pro Max, Gift for Her Aesthetic',
+		stalls: stall('A285'),
+	}
+	const usahanaC = {
+		phash: ZERO,
+		designPhash: null,
+		title: 'Usahana Pink MAGSAFE iPhone Case with Heart Grip & Charm, Kawaii Y2K Cute Cover for iPhone 15 Pro, Gift for Her',
+		stalls: stall('A285'),
+	}
+	assert(S.phashDistance(usahanaA.phash, usahanaB.phash) > S.PRODUCT_MERGE_WIDE_DISTANCE, 'sanity: the two Usahana photos really are visually unrelated')
+	assert(S.shouldMergeProducts(usahanaA, usahanaB) === true, 'Usahana re-lists that differ only by & Charm / Now / Aesthetic merge — the A285 duplicate-card fix')
+	assert(S.shouldMergeProducts(usahanaA, usahanaC) === true, 'the third model re-list also merges on the design-title match')
+	assert(
+		S.shouldMergeProducts(usahanaA, { ...usahanaB, stalls: stall('B910') }) === false,
+		'a design-title match at a DIFFERENT stall does NOT merge (still supplier-guarded)',
+	)
+	assert(
+		S.shouldMergeProducts(usahanaA, { ...usahanaB, stalls: new Set() }) === false,
+		'a design-title match needs a KNOWN shared stall, not just an unknown one',
+	)
+	assert(
+		S.shouldMergeProducts(usahanaA, { ...usahanaB, title: 'Usahana Blue MAGSAFE iPhone Case with Heart Grip, Kawaii Y2K Cute Cover for iPhone 15 Pro' }) === false,
+		'a different colour word breaks the match — colour variants stay separate products',
+	)
+	assert(
+		S.shouldMergeProducts(usahanaA, {
+			phash: farB,
+			title: 'Cute Rainbow Bunny MAGSAFE iPhone Case with Grip & Charm, Kawaii Y2K Cute Cover for iPhone 17 16 15 Pro Max, Gift for Her Aesthetic!',
+			stalls: stall('A285'),
+		}) === false,
+		'an unrelated design at the same stall (Rainbow Bunny) is not swept in by fluff stripping',
+	)
+	assert(
+		S.shouldMergeProducts({ ...usahanaA, title: 'Clear Case' }, { ...usahanaB, title: 'Clear Case for iPhone 15 Pro' }) === false,
+		'a single shared generic word below the minimum token count does NOT merge on this signal alone',
+	)
+}
 
 // ── shouldMergeProducts: DESIGN-REGION band (same design, different phone model) ──
 // The real Chiikawa case: full-image hashes are far apart (dist 14, camera band

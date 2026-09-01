@@ -44,6 +44,8 @@ const NOW = Math.floor(Date.now() / 1000)
 // Line key of the in-hand product on the partially-blocked order (used by both the
 // seed and the per-line verify assertion).
 const boughtKey = routeDashboard.lineItemKey('Bought Item', 9010)
+const compTitle = 'Cute MagSafe Case with Grip & Charm'
+const compKey = routeDashboard.lineItemKey(compTitle, 9003)
 
 function seed() {
 	const db = initDb(dbPath)
@@ -61,10 +63,8 @@ function seed() {
 	// (in route_assignments) → also "ready" but unverified. Exercises the OTHER
 	// storage path of the verify gate (route_assignments.verified_at vs the
 	// receipt_item_purchase path above).
-	const compTitle = 'Cute MagSafe Case with Grip & Charm'
 	const compTx = [{ title: compTitle, listing_id: 9003, quantity: 1, variations: [{ formatted_name: 'Style', formatted_value: 'Case + Grip + Charm' }, { formatted_name: 'Phone Model', formatted_value: 'iPhone 15' }] }]
 	ins.run({ id: 5003, name: 'Carol', buyer: 333, created: NOW - 1800, tx: JSON.stringify(compTx) })
-	const compKey = routeDashboard.lineItemKey(compTitle, 9003)
 	db.prepare("INSERT INTO route_assignments (receipt_id, item_key, title, status_case, status_grip, status_charm) VALUES (5003, ?, ?, 'Purchased', 'Purchased', 'Purchased')").run(compKey, compTitle)
 
 	// A PARTIALLY-BLOCKED multi-product order (the feature under test): line A is
@@ -220,11 +220,23 @@ async function main() {
 		assert(rp.body.total === 2 && rpIds.includes(5001) && rpIds.includes(5003), `both verified orders (no-comp + component) move to "To pack & ship" (got ${rpIds.join(',')})`)
 		assert(!rpIds.includes(5002) && !tvIds.includes(5001) && !tvIds.includes(5003), `NO overlap between the two queues — clean partition`)
 
-		// Unverify the component order → it returns to the verify queue (reversible,
-		// and proves route_assignments verification clears correctly).
-		await api('/api/orders/5003/verify-all', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ verified: false }) })
+		// Regressing a component from the desktop Route invalidates the packer's
+		// earlier physical verification. Buying it again must therefore return the
+		// order to Verify purchases, not skip straight back to ready-to-pack.
+		const routePending = await api('/api/route/assign', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ receipt_id: 5003, item_key: compKey, title: compTitle, status_case: 'Pending' }),
+		})
+		assert(routePending.status === 200 && routePending.body.ok, `Route status regression succeeds atomically`)
+		const routePurchased = await api('/api/route/assign', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ receipt_id: 5003, item_key: compKey, title: compTitle, status_case: 'Purchased' }),
+		})
+		assert(routePurchased.status === 200 && routePurchased.body.ok, `Route can mark the component purchased again`)
 		tv = await api('/api/orders?shipped=to_verify&limit=100')
-		assert(tv.body.total === 2, `un-verifying 5003 returns it to "Verify purchases" (got ${tv.body.total})`)
+		assert(tv.body.total === 2, `status regression cleared verification; 5003 returns to "Verify purchases" (got ${tv.body.total})`)
 
 		// The verify actions were recorded in the shift summary (audit → rollup).
 		const shift = await api('/api/shift-summary')
@@ -281,6 +293,10 @@ async function main() {
 		const sealHold = await api('/api/orders/5010/mark-packaged', { method: 'POST' })
 		assert(sealHold.status === 409, `mark-packaged is REFUSED for an on-hold order (got ${sealHold.status})`)
 
+		const sealUnverified = await api('/api/orders/5002/mark-packaged', { method: 'POST' })
+		assert(sealUnverified.status === 409 && sealUnverified.body.code === 'NOT_SEALABLE', `mark-packaged is REFUSED until the in-hand order is verified`)
+		const verifyBeforeSeal = await api('/api/orders/5002/verify-all', { method: 'POST' })
+		assert(verifyBeforeSeal.status === 200, `in-hand order can be verified before sealing`)
 		const sealGood = await api('/api/orders/5002/mark-packaged', { method: 'POST' })
 		assert(sealGood.status === 200 && sealGood.body.success, `mark-packaged SUCCEEDS for an in-hand order`)
 

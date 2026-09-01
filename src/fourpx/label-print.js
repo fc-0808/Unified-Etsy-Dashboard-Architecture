@@ -24,6 +24,10 @@
  * to opening the PDF in the OS default app — this module only owns the
  * render + Windows direct-print path.
  *
+ * Also used for the 4PX pickup appointment form (打印预约单): 4PX issues it as a
+ * 95 × 95 mm square whose content is a barcode of the appointment number, i.e.
+ * the same artefact class as a shipping label, printed on the same stock.
+ *
  * @module src/fourpx/label-print
  */
 
@@ -33,6 +37,17 @@ const path = require('path');
 const { spawn } = require('child_process');
 const sharp = require('sharp');
 const { PDFiumLibrary } = require('@hyzyla/pdfium');
+
+/**
+ * Below this media-fit coverage the configured label stock does not match the
+ * label's shape, so the render is letterboxed and the barcode prints smaller
+ * than the media allows. 4PX labels are square, so square stock scores 100 and
+ * anything materially lower means the operator changed stock (or the config
+ * drifted) — e.g. 80x60 mm stock scores 75 and shrinks the barcode by a
+ * quarter. 95 leaves room for rounding on near-square stock without letting a
+ * genuine mismatch through.
+ */
+const MIN_HEALTHY_COVERAGE_PCT = 95;
 
 // pdfium is a WASM module; initialise it once and reuse across requests.
 let _pdfiumPromise = null;
@@ -124,6 +139,37 @@ async function renderLabelBitmap(pdfBuffer, opts = {}) {
 }
 
 /**
+ * @typedef {object} PrintDiagnostics
+ * @property {string}   [paper]       Driver stock the job was pinned to.
+ * @property {string}   [printable]   Printable area the driver reported for it.
+ * @property {string}   [resolution]  Device resolution the job ran at.
+ * @property {string}   [media]       Requested media size.
+ * @property {string[]}  warnings     Non-fatal geometry warnings (e.g. clipping).
+ */
+
+/**
+ * Parse the "KEY:value" diagnostic lines the print script emits before it
+ * reports PRINTED. They describe the geometry the driver actually resolved for
+ * the job, which is the only way to tell a correct print from one the driver
+ * silently re-paged or clipped.
+ *
+ * @param {string} stdout
+ * @returns {PrintDiagnostics}
+ */
+function parsePrintDiagnostics(stdout) {
+  /** @type {PrintDiagnostics} */
+  const diag = { warnings: [] };
+  for (const line of String(stdout).split(/\r?\n/)) {
+    const m = /^(PAPER|PRINTABLE|RESOLUTION|MEDIA|WARN):(.*)$/.exec(line.trim());
+    if (!m) continue;
+    const value = m[2].trim();
+    if (m[1] === 'WARN') diag.warnings.push(value);
+    else diag[m[1].toLowerCase()] = value;
+  }
+  return diag;
+}
+
+/**
  * Print a PNG bitmap 1:1 (no scaling, nearest-neighbour) to a named Windows
  * printer using GDI via PowerShell. The bitmap MUST already be sized to the
  * media's dot grid so the draw is pixel-perfect.
@@ -134,11 +180,13 @@ async function renderLabelBitmap(pdfBuffer, opts = {}) {
  * @param {number} opts.widthMm
  * @param {number} opts.heightMm
  * @param {number} [opts.copies=1]
+ * @param {number} [opts.dpi=0]     Pin the job to this device resolution when
+ *                                  the driver advertises it; 0 = driver default.
  * @param {string} opts.scriptPath  Absolute path to print-label-image.ps1.
- * @returns {Promise<void>}
+ * @returns {Promise<PrintDiagnostics>}
  */
 function printBitmapWindows(pngPath, opts) {
-  const { printerName, widthMm, heightMm, copies = 1, scriptPath } = opts;
+  const { printerName, widthMm, heightMm, copies = 1, dpi = 0, scriptPath } = opts;
   return new Promise((resolve, reject) => {
     const args = [
       '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
@@ -148,6 +196,7 @@ function printBitmapWindows(pngPath, opts) {
       '-WidthMm', String(widthMm),
       '-HeightMm', String(heightMm),
       '-Copies', String(copies),
+      '-Dpi', String(Math.max(0, Math.round(dpi) || 0)),
     ];
     const ps = spawn('powershell.exe', args, { windowsHide: true });
     let stdout = '';
@@ -157,7 +206,7 @@ function printBitmapWindows(pngPath, opts) {
     ps.on('error', reject);
     ps.on('close', (code) => {
       if (code === 0 && /PRINTED:/i.test(stdout)) {
-        resolve();
+        resolve(parsePrintDiagnostics(stdout));
       } else {
         const msg = (stderr || stdout || `powershell exited with code ${code}`).trim();
         const err = new Error(msg);
@@ -190,5 +239,7 @@ function writeTempLabelPng(png, baseName) {
 module.exports = {
   renderLabelBitmap,
   printBitmapWindows,
+  parsePrintDiagnostics,
   writeTempLabelPng,
+  MIN_HEALTHY_COVERAGE_PCT,
 };

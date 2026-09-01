@@ -42,8 +42,9 @@
  */
 
 const routeDashboard = require('../route/dashboard')
-const { getSubstitutionMap } = require('../db/setup')
+const { getSubstitutionsForReceipts } = require('../db/setup')
 const { actionableOrderSql } = require('./dedup')
+const lineIdentity = require('./line-identity')
 
 /** Receipts that are cancelled or fully refunded never belong in any work queue. */
 const NOT_CANCELLED = "status NOT IN ('Canceled', 'Cancelled', 'Fully Refunded', 'Fully refunded')"
@@ -139,19 +140,29 @@ function needsPurchaseScopeSql(config = {}, alias = 'r') {
  *          verified ⊆ ready — fully in hand AND every packable line packer-confirmed.
  *          onHold — has ≥1 open, non-superseded fulfilment issue (buy-queue split).
  */
+function _rowsForReceiptIds(db, selectSql, receiptIds, tailSql = '') {
+	const out = []
+	// Stay well below SQLite's host-parameter limit, even on older installations.
+	for (let i = 0; i < receiptIds.length; i += 500) {
+		const chunk = receiptIds.slice(i, i + 500)
+		const placeholders = chunk.map(() => '?').join(',')
+		out.push(...db.prepare(`${selectSql} WHERE receipt_id IN (${placeholders}) ${tailSql}`).all(chunk))
+	}
+	return out
+}
+
 function classifyPurchaseState(db, candidates) {
+	const receiptIds = [...new Set((candidates || []).map((c) => Number(c.receipt_id)).filter(Number.isInteger))]
 	const ra = new Map() // `${receipt_id}\x00${item_key}` → component statuses
 	const rip = new Map() // `${receipt_id}\x00${item_key}` → { needs_purchase }
 	try {
-		db.prepare('SELECT receipt_id, item_key, status_case, status_grip, status_charm, excluded, dismissed_at, verified_at FROM route_assignments')
-			.all()
+		_rowsForReceiptIds(db, 'SELECT receipt_id, item_key, status_case, status_grip, status_charm, excluded, dismissed_at, verified_at FROM route_assignments', receiptIds)
 			.forEach((x) => ra.set(`${x.receipt_id}\x00${x.item_key}`, x))
 	} catch {
 		/* table may be missing on first run */
 	}
 	try {
-		db.prepare('SELECT receipt_id, item_key, needs_purchase, verified_at FROM receipt_item_purchase')
-			.all()
+		_rowsForReceiptIds(db, 'SELECT receipt_id, item_key, needs_purchase, verified_at FROM receipt_item_purchase', receiptIds)
 			.forEach((x) => rip.set(`${x.receipt_id}\x00${x.item_key}`, x))
 	} catch {
 		/* table may be missing on first run */
@@ -160,7 +171,10 @@ function classifyPurchaseState(db, candidates) {
 	// design's style, so the buy/ready classification reflects what we actually buy.
 	let subMap = new Map()
 	try {
-		subMap = getSubstitutionMap(db)
+		const byReceipt = getSubstitutionsForReceipts(db, receiptIds)
+		for (const rows of Object.values(byReceipt)) {
+			for (const row of rows) subMap.set(`${row.receipt_id}\x00${row.item_key}`, row)
+		}
 	} catch {
 		/* table may be missing on first run */
 	}
@@ -170,8 +184,7 @@ function classifyPurchaseState(db, candidates) {
 	// sub-filters ("To buy" vs "On hold") agree with the on-hold chip shown on the row.
 	const issueMap = new Map() // `${receipt_id}\x00${item_key}` → open issue row
 	try {
-		db.prepare("SELECT receipt_id, item_key, status, updated_at FROM order_issues WHERE status = 'open'")
-			.all()
+		_rowsForReceiptIds(db, 'SELECT receipt_id, item_key, status, updated_at FROM order_issues', receiptIds, "AND status = 'open'")
 			.forEach((x) => issueMap.set(`${x.receipt_id}\x00${x.item_key}`, x))
 	} catch {
 		/* table may be missing on first run */
@@ -185,6 +198,11 @@ function classifyPurchaseState(db, candidates) {
 	// packable (non-excluded / non-dismissed) line has been physically confirmed by
 	// a packer (verified_at set). Drives the morning verification worklist and the
 	// optional require_verify_before_pack gate.
+	// Canonical line keys for every candidate receipt — one batched lookup so a
+	// Route-tab manual order's per-variant `#V…` keys resolve to the same rows
+	// Shopping Mode and the Route tab wrote (plain title+listing keys miss them).
+	const lineKeys = lineIdentity.lineKeyResolver(db, receiptIds)
+
 	const verified = new Set()
 	for (const c of candidates) {
 		let txs = []
@@ -195,6 +213,7 @@ function classifyPurchaseState(db, candidates) {
 		}
 		if (!Array.isArray(txs)) txs = []
 
+		const keys = lineKeys.keysFor(c.receipt_id, txs)
 		const seen = new Set()
 		// buyQueueOutstanding — any NON-excluded / NON-dismissed line still to buy
 		//                       (drives the Needs-purchase queue; mirrors the Route).
@@ -207,9 +226,9 @@ function classifyPurchaseState(db, candidates) {
 		// Starts true and is cleared the moment a required line is found unverified.
 		let allVerified = true
 		let orderOnHold = false
-		for (const t of txs) {
-			const key = routeDashboard.lineItemKey(t.title || '', t.listing_id)
-			if (seen.has(key)) continue
+		txs.forEach((t, i) => {
+			const key = keys[i]
+			if (seen.has(key)) return
 			seen.add(key)
 			const a = ra.get(`${c.receipt_id}\x00${key}`) || {}
 			const sub = subMap.get(`${c.receipt_id}\x00${key}`)
@@ -247,7 +266,7 @@ function classifyPurchaseState(db, candidates) {
 				const lineVerified = comps.length ? !!a.verified_at : !!(rip.get(`${c.receipt_id}\x00${key}`) || {}).verified_at
 				if (!lineVerified) allVerified = false
 			}
-		}
+		})
 		if (buyQueueOutstanding) outstanding.add(c.receipt_id)
 		if (orderOnHold) onHold.add(c.receipt_id)
 		// Ready ⇔ EVERY line is Purchased (physically in hand). Anything not in hand —
@@ -270,8 +289,14 @@ function classifyPurchaseState(db, candidates) {
  * @returns {Array<'case'|'grip'|'charm'>}
  */
 function lineComponents(tx, sub) {
-	const style = sub && sub.new_style ? sub.new_style : routeDashboard.parseVariations(tx.variations).style
-	const sc = routeDashboard.styleComponents(style)
+	const parsed = routeDashboard.parseVariations(tx.variations)
+	const style = sub && sub.new_style ? sub.new_style : parsed.style
+	// The effective identity of the line also tells styleComponents what a
+	// single-axis product (a watch band) physically is, since its size-only
+	// variation carries no bundle words to read.
+	const phoneModel = (sub && sub.new_phone_model) || parsed.phoneModel || ''
+	const title = (sub && sub.new_title) || tx.title || ''
+	const sc = routeDashboard.styleComponents(style, { phoneModel, title })
 	const out = []
 	if (sc.hasCase) out.push('case')
 	if (sc.hasGrip) out.push('grip')

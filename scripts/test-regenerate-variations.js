@@ -91,7 +91,8 @@ function makeManager() {
 			job_id TEXT NOT NULL, product_folder TEXT NOT NULL, product_name TEXT, seq INTEGER,
 			status TEXT DEFAULT 'done', listing_id INTEGER, listing_url TEXT, title TEXT, error TEXT,
 			ai_json TEXT, checkpoint_json TEXT, preview_json TEXT, published_at INTEGER,
-			reviewed_at INTEGER, excluded INTEGER DEFAULT 0, updated_at INTEGER,
+			reviewed_at INTEGER, policy_confirmed_at INTEGER, policy_confirmed_by TEXT,
+			policy_attestation TEXT, excluded INTEGER DEFAULT 0, updated_at INTEGER,
 			PRIMARY KEY (job_id, product_folder)
 		);
 	`)

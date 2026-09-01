@@ -1,7 +1,7 @@
 'use strict'
 
 /**
- * END-TO-END integration test — the Sourcing Library HTTP layer.
+ * END-TO-END integration test — the Sourcing page's HTTP layer.
  *
  * scripts/test-sourcing.js already covers the pure helpers and the DB accessors.
  * This test covers the layer between them: the /api/sourcing/* endpoints, which
@@ -19,6 +19,14 @@
  *      files would silently accumulate on a feature sized for 500 MB folders.
  *   3. Untrusted client input (filename, category, supplier id) can never escape
  *      the library root or land unsanitised on disk.
+ *
+ * Section [8] covers the page's other half — the product CATALOG. That one is
+ * READ from /api/sourcing/catalog and WRITTEN through /api/route/*, so the
+ * invariant it pins is the split itself: an edit posted to one endpoint must
+ * appear in the other's response, or the page's save-then-refresh cycle throws
+ * the operator's work away. The projection's own logic (classification, stall
+ * inference, gaps, rollups) is covered in depth against a direct database by
+ * scripts/test-sourcing-catalog.js.
  *
  * Run: `node scripts/test-sourcing-api.js`   (exit 0 = pass, 1 = regression)
  */
@@ -378,6 +386,174 @@ async function main() {
 		assert(walkStore().length === 0, `the on-disk store is empty — no orphaned files anywhere (found ${walkStore().join(', ') || 'none'})`)
 		const cascadeAgain = await api(`/api/sourcing/suppliers/${supId}`, { method: 'DELETE' })
 		assert(cascadeAgain.status === 404, `deleting the same supplier again is 404 (got ${cascadeAgain.status})`)
+
+		// ── The catalog projection ──────────────────────────────────────────────
+		// Everything below is the SECOND half of the Sourcing page: the product
+		// catalog. It is served by GET /api/sourcing/catalog but written through
+		// the /api/route/* endpoints, and the point of testing it over HTTP is
+		// precisely that split — an edit posted to one endpoint has to show up in
+		// the other's response, or the page's "save then refresh" cycle silently
+		// discards the operator's work. scripts/test-sourcing-catalog.js covers
+		// the projection's own logic in depth against a direct database.
+		console.log('\n[8] Catalog projection — write on /api/route/*, read on /api/sourcing/catalog')
+
+		const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+
+		// The server imports supplier_catalog.xlsx on boot. Without listing photos
+		// those product_map rows are excluded from this projection, so the baseline
+		// may be 0 on a throwaway DB — that is the filter under test, not a failure.
+		const baselineCat = await api('/api/sourcing/catalog')
+		const baseline = baselineCat.body.totals.products
+		assert(baselineCat.status === 200 && baselineCat.body.ok === true, `GET /api/sourcing/catalog returns the read model (got ${baselineCat.status})`)
+		assert(
+			baselineCat.body.products.every((p) => p.image_url),
+			'the baseline catalog contains only products with a photo',
+		)
+
+		const SHOP = 'QA Case Lab'
+		const GHOST = 'QA Unregistered Shop'
+		const supDir = await api('/api/route/suppliers', json('POST', { shop_name: SHOP, stall: 'A2-29', mall: '通信' }))
+		assert(supDir.status === 200, `POST /api/route/suppliers registers a stall supplier (got ${supDir.status})`)
+
+		const CASE_TITLE = 'QA Fixture Cherry "Sweet" Case, Pink for iPhone 16'
+		const AIRPODS_TITLE = 'QA Fixture Kawaii AirPods Pro 2 Case'
+		const mkCase = await api('/api/route/product-map', json('POST', { title: CASE_TITLE, shop_name: SHOP.toLowerCase(), cost_case: '4.505' }))
+		assert(mkCase.status === 201, `POST /api/route/product-map creates a catalog product (got ${mkCase.status})`)
+		const mkAirpods = await api('/api/route/product-map', json('POST', { title: AIRPODS_TITLE, shop_name: GHOST, stall: 'X1' }))
+		assert(mkAirpods.status === 201, `POST creates the AirPods fixture (got ${mkAirpods.status})`)
+
+		// No photo yet → the projection must refuse to list them. They stay in
+		// product_map for the Route tab; Sourcing only shows what a buyer can see.
+		let cat = await api('/api/sourcing/catalog')
+		assert(cat.body.totals.products === baseline, `imageless products are excluded from the catalog (${baseline} → ${cat.body.totals.products})`)
+		assert(!cat.body.products.some((p) => p.title === CASE_TITLE || p.title === AIRPODS_TITLE), 'neither fixture title appears without a photo')
+		assert(!(cat.body.gap_types || []).some((g) => g.id === 'no_image'), 'the "no image" gap chip is gone — those rows are filtered, not flagged')
+
+		// Attach listing photos the same way a live sync would, then both appear.
+		const Database = require('better-sqlite3')
+		const seedDb = new Database(dbPath)
+		try {
+			const ins = seedDb.prepare(
+				`INSERT INTO listings (listing_id, shop_id, title, primary_image_url, state)
+				 VALUES (?, 'S1', ?, ?, 'active')`,
+			)
+			ins.run(900001, CASE_TITLE, 'https://example.test/case.png')
+			ins.run(900002, AIRPODS_TITLE, 'https://example.test/airpods.png')
+		} finally {
+			seedDb.close()
+		}
+
+		cat = await api('/api/sourcing/catalog')
+		assert(cat.body.totals.products === baseline + 2, `both photographed products are projected (${baseline} → ${cat.body.totals.products})`)
+		assert(cat.body.totals.with_image === cat.body.totals.products, 'with_image always equals the product count')
+		assert(Array.isArray(cat.body.supplier_product_groups), 'the API ships the read-only physical-product groups used by the supplier drawer')
+
+		const caseRow = cat.body.products.find((p) => p.title === CASE_TITLE)
+		assert(caseRow && caseRow.image_url === 'https://example.test/case.png', `the case carries its photo (got ${caseRow && caseRow.image_url})`)
+		assert(caseRow && caseRow.product_type === 'iphone_case' && caseRow.product_type_source === 'derived', `the type is derived from the title (got ${caseRow && caseRow.product_type})`)
+		assert(caseRow && caseRow.cost_case === 4.51, `the price posted alongside the mapping is stored, rounded to money (got ${caseRow && caseRow.cost_case})`)
+		assert(caseRow && caseRow.stall_effective === 'A2-29' && caseRow.stall_source === 'directory', 'the stall is borrowed from the directory the other endpoint wrote')
+		assert(caseRow && caseRow.location.building_id === 'tongxin' && caseRow.location.floor === 2, `and resolved to a building and floor (got ${caseRow && caseRow.location.building_id})`)
+		assert(caseRow && caseRow.supplier_in_directory === true, 'the supplier is matched case-insensitively against the directory')
+		const caseGroup = cat.body.supplier_product_groups.find((g) => g.product_ids.includes(caseRow.id))
+		assert(caseGroup && caseGroup.representative_id === caseRow.id && caseGroup.listing_count === 1, 'the supplier drawer group addresses the underlying listing row by id')
+		const caseSupplier = cat.body.suppliers.find((s) => s.shop_name === SHOP)
+		assert(caseSupplier && caseSupplier.unique_product_count === 1, 'the supplier exposes a distinct physical-product count without changing product_count')
+		const activePicker = await api('/api/route/products')
+		const pickerCase = (activePicker.body.products || []).find((p) => p.title === CASE_TITLE)
+		assert(activePicker.status === 200 && pickerCase, 'the shared Design Switch/Add Order picker includes the active catalog product')
+		assert(
+			pickerCase && pickerCase.shop_name === SHOP.toLowerCase() && pickerCase.stall === '',
+			'the picker carries the same stored supplier identity as product_map (directory inference stays projection-only)',
+		)
+
+		const ghostRow = cat.body.products.find((p) => p.shop_name === GHOST)
+		assert(ghostRow && ghostRow.product_type === 'airpods_case', `an AirPods listing is not filed as a phone case (got ${ghostRow && ghostRow.product_type})`)
+		assert(ghostRow && ghostRow.gaps.includes('unlisted_supplier') && ghostRow.gaps.includes('no_price'), `its gaps name what is missing (got ${ghostRow && ghostRow.gaps.join(' ')})`)
+		assert(ghostRow && !ghostRow.gaps.includes('no_image'), 'a photographed product never carries a no_image gap')
+
+		const metaTypes = await api('/api/sourcing/meta')
+		assert(
+			(metaTypes.body.product_types || []).map((t) => t.id).join(',') === 'iphone_case,airpods_case,apple_watch_band,ipad_case,grip,charm,other',
+			'GET /meta serves the product taxonomy the page filters on',
+		)
+		assert((metaTypes.body.gap_types || []).some((g) => g.id === 'no_supplier'), 'and the gap taxonomy behind the filter chips')
+		assert(!(metaTypes.body.gap_types || []).some((g) => g.id === 'no_image'), 'meta no longer advertises a no_image chip')
+
+		// A typo must never become a permanent override rendering a dead badge.
+		const badType = await api('/api/route/product-map', json('POST', { title: 'QA Fixture Typo Product', product_type: 'iphone-case' }))
+		assert(badType.status === 400, `an unknown product_type is rejected with 400 (got ${badType.status})`)
+		assert((await api('/api/sourcing/catalog')).body.totals.products === baseline + 2, 'and the rejected write created nothing')
+
+		// The override + a price change, applied through the route endpoint and
+		// read back off the projection — the page's exact save/refresh cycle.
+		const edit = { id: caseRow.id, title: CASE_TITLE, shop_name: SHOP, stall: 'A2-29' }
+		const edited = await api('/api/route/product-map', json('PUT', { ...edit, product_type: 'airpods_case', cost_case: 9, cost_grip: 1.25 }))
+		assert(edited.status === 200, `PUT /api/route/product-map saves the edit (got ${edited.status})`)
+		const afterEdit = (await api('/api/sourcing/catalog')).body.products.find((p) => p.id === caseRow.id)
+		assert(afterEdit.product_type === 'airpods_case' && afterEdit.product_type_source === 'override', 'the operator override survives to the projection')
+		assert(afterEdit.cost_total === 10.25, `the unit cost sums the components that have a price (got ${afterEdit.cost_total})`)
+		const cleared = await api('/api/route/product-map', json('PUT', { ...edit, product_type: '' }))
+		assert(cleared.status === 200 && (await api('/api/sourcing/catalog')).body.products.find((p) => p.id === caseRow.id).product_type === 'iphone_case', 'clearing the override re-derives from the title')
+		const renameAttempt = await api(
+			'/api/route/product-map',
+			json('PUT', { ...edit, title: CASE_TITLE + ' renamed' }),
+		)
+		assert(renameAttempt.status === 409 && renameAttempt.body.code === 'IMMUTABLE', 'a product title cannot be renamed out from under historical orders')
+
+		// ── CSV export ──────────────────────────────────────────────────────────
+		const csvRes = await fetch(`${BASE}/api/sourcing/catalog/export.csv`)
+		// Read the BYTES: Response.text() strips a leading BOM as part of decoding,
+		// so the thing under test would be invisible through it.
+		const csvBytes = Buffer.from(await csvRes.arrayBuffer())
+		assert(csvRes.status === 200, `GET /catalog/export.csv returns 200 (got ${csvRes.status})`)
+		assert(String(csvRes.headers.get('content-type')).includes('text/csv'), 'served as CSV')
+		assert(String(csvRes.headers.get('content-disposition')).includes('attachment'), 'and as a download')
+		assert(csvBytes.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])), 'it opens with a UTF-8 BOM, so Excel does not mojibake the Chinese stall names')
+		const lines = csvBytes.toString('utf8').replace(/^\uFEFF/, '').split('\r\n')
+		const totalNow = (await api('/api/sourcing/catalog')).body.totals.products
+		assert(lines.length === totalNow + 1, `a header plus one line per product (${lines.length} lines for ${totalNow} products)`)
+		assert(lines[0].startsWith('"Product Title","Product Type"'), `the header names the columns (got ${lines[0].slice(0, 40)})`)
+		// The fixture title carries both CSV hazards. Getting either wrong shifts
+		// every following column, which an operator only notices once in Excel.
+		const caseLine = lines.find((l) => l.startsWith('"QA Fixture Cherry '))
+		assert(caseLine === undefined ? false : caseLine.startsWith('"QA Fixture Cherry ""Sweet"" Case, Pink for iPhone 16",'), 'quotes are doubled and a comma inside a cell does not split it')
+		assert(caseLine && caseLine.includes('"Tongxin","2"'), 'the resolved building and floor are exported')
+		const ghostLine = lines.find((l) => l.startsWith(`"${AIRPODS_TITLE}"`))
+		assert(ghostLine && ghostLine.includes('"Tongxin",""'), 'an unreadable floor exports as blank, never as the 999 sentinel')
+		assert(ghostLine && ghostLine.includes('"no"'), 'and a supplier missing from the directory is called out in the export')
+
+		// ── Delete ──────────────────────────────────────────────────────────────
+		const delProduct = await api('/api/route/product-map', json('DELETE', { id: caseRow.id }))
+		assert(delProduct.status === 200, `DELETE /api/route/product-map removes a product (got ${delProduct.status})`)
+		const shrunk = await api('/api/sourcing/catalog')
+		assert(shrunk.body.totals.products === baseline + 1, `the projection shrinks with it (${baseline + 2} → ${shrunk.body.totals.products})`)
+		assert(shrunk.body.suppliers.find((s) => s.shop_name === SHOP).product_count === 0, 'and the supplier rollup drops back to zero')
+		assert(
+			!(await api('/api/route/products')).body.products.some((p) => p.title === CASE_TITLE),
+			'the same retirement immediately removes the product from Design Switch/Add Order',
+		)
+		const staleEdit = await api('/api/route/product-map', json('PUT', edit))
+		assert(staleEdit.status === 409 && staleEdit.body.code === 'CONFLICT', 'a stale editor cannot resurrect the retired product')
+		const staleManualOrder = await api(
+			'/api/route/manual-order',
+			json('POST', {
+				items: [
+					{
+						source: 'catalog',
+						catalog_id: caseRow.id,
+						title: CASE_TITLE,
+						listing_id: 900001,
+						quantity: 1,
+					},
+				],
+			}),
+		)
+		assert(
+			staleManualOrder.status === 409 &&
+				staleManualOrder.body.code === 'CATALOG_PRODUCT_UNAVAILABLE',
+			'a stale Add Order card is rejected atomically by the server',
+		)
 	} catch (e) {
 		failures++
 		console.error(`  FAIL — ${e.message}`)
@@ -403,5 +579,5 @@ main()
 			console.error(`${failures} assertion(s) FAILED`)
 			process.exit(1)
 		}
-		console.log('All Sourcing Library API assertions passed.')
+		console.log('All Sourcing API assertions passed.')
 	})

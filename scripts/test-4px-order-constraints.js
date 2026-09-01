@@ -23,6 +23,10 @@ const {
   enforceSenderStreet,
   resolveRecipientState,
   generateRecipientPhone,
+  normalizeShipOrderResponse,
+  planShipOrderReference,
+  mintShipOrderFallbackRef,
+  isRefInProcessingRejection,
   DEFAULT_RECIPIENT_PHONE,
 } = require('../src/fourpx/orders');
 
@@ -196,6 +200,64 @@ console.log('4PX order field-constraint regression test\n');
   const de2 = generateRecipientPhone('DE', 'ETSY-2');
   assert(/^861[3-9]\d{9}$/.test(de1), `DE fallback -> valid CN mobile shape (got ${de1})`);
   assert(de1 !== de2, 'fallback numbers are unique per seed');
+}
+
+// 6. order.get/create response normalization — flat, nested list and camelCase.
+{
+  const flat = normalizeShipOrderResponse({
+    ds_consignment_no: 'C1',
+    '4px_tracking_no': '4PX1',
+    ref_no: 'ETSY-1',
+  }, 'ETSY-1');
+  assert(flat.dsConsignmentNo === 'C1' && flat.trackingNo === '4PX1', 'flat order response normalized');
+
+  const nested = normalizeShipOrderResponse({
+    order_list: [{
+      ds_consignment_no: 'C2',
+      '4px_tracking_no': '4PX2',
+      ref_no: 'ETSY-2',
+    }],
+  }, 'ETSY-2');
+  assert(nested.dsConsignmentNo === 'C2' && nested.refNo === 'ETSY-2', 'nested order-list response normalized');
+
+  const camel = normalizeShipOrderResponse({
+    data: { dsConsignmentNo: 'C3', trackingNo: '4PX3', refNo: 'ETSY-3' },
+  }, 'ETSY-3');
+  assert(camel.dsConsignmentNo === 'C3' && camel.trackingNo === '4PX3', 'camelCase order response normalized');
+
+  const replacement = planShipOrderReference({
+    source: 'etsy',
+    receiptId: 7,
+    previousRef: 'ETSY-7',
+    orderStatus: 'cancelled',
+    hasConsignment: true,
+    now: 123456,
+  });
+  assert(replacement.replacingCancelled && replacement.refNo.startsWith('ETSY-7-R'), 'cancelled shipment receives a new replacement reference');
+  const retry = planShipOrderReference({
+    source: 'etsy',
+    receiptId: 7,
+    previousRef: replacement.refNo,
+    orderStatus: 'cancelled',
+    hasConsignment: true,
+    now: 999999,
+  });
+  assert(retry.refNo === replacement.refNo && retry.retryingPendingRef, 'replacement retry reuses the persisted reference');
+
+  // US-island ZIP fallback must NOT reuse the rejected S5058 ref — that is the
+  // DS000007 ("Ref_no in processing") failure operators saw in bulk.
+  const islandRef = mintShipOrderFallbackRef('ETSY-4154676352', 'ISL', 123456);
+  assert(islandRef.startsWith('ETSY-4154676352-ISL'), `island fallback mints a tagged ref (got ${islandRef})`);
+  assert(islandRef !== 'ETSY-4154676352', '…distinct from the base ref so 4PX does not see a duplicate submit');
+  const again = mintShipOrderFallbackRef('ETSY-4154676352', 'ISL', 999999);
+  assert(again !== islandRef, '…and a later mint is unique (timestamp suffix)');
+
+  const proc = Object.assign(new Error('Ref_no is in processing'), { code: 'DS000007' });
+  assert(isRefInProcessingRejection(proc), 'detects DS000007 by code + message');
+  assert(isRefInProcessingRejection({ code: 'DS000007' }), '…and by code alone');
+  assert(isRefInProcessingRejection('Ref_no ETSY-1 in processing'), '…and by bare message');
+  assert(!isRefInProcessingRejection(new Error('remote ZIP codes, no service')), 'island ZIP errors are not DS000007');
+  assert(!isRefInProcessingRejection(null), 'null is not DS000007');
 }
 
 console.log('');

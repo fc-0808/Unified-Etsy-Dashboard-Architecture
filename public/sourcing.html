@@ -4,7 +4,7 @@
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 		<meta name="theme-color" content="#0f1117" />
-		<title>Sourcing Library · 货源库</title>
+		<title>Sourcing · 货源中心</title>
 		<link
 			rel="icon"
 			type="image/svg+xml"
@@ -31,7 +31,14 @@
 				--green: #22c55e;
 				--red: #ef4444;
 				--yellow: #f59e0b;
+				--purple: #a78bfa;
+				--teal: #2dd4bf;
+				--pink: #f472b6;
 				--radius: 10px;
+				/* Topbar (56) + trademark bar (22). The Library view sizes its two
+				   internally-scrolling columns against this, so it must stay in step
+				   with the real chrome height. */
+				--chrome: 78px;
 				--font: 'Inter', system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
 			}
 			body {
@@ -48,13 +55,17 @@
 			button {
 				font-family: var(--font);
 			}
+			[hidden] {
+				display: none !important;
+			}
 
 			/* ── Top bar ─────────────────────────────────────────────── */
 			.topbar {
 				display: flex;
 				align-items: center;
 				justify-content: space-between;
-				padding: 0 24px;
+				gap: 16px;
+				padding: 0 20px;
 				height: 56px;
 				background: var(--surface);
 				border-bottom: 1px solid var(--border);
@@ -68,6 +79,7 @@
 				gap: 10px;
 				font-weight: 700;
 				font-size: 16px;
+				flex-shrink: 0;
 			}
 			.brand .dot {
 				width: 10px;
@@ -75,19 +87,29 @@
 				border-radius: 50%;
 				background: var(--accent);
 			}
-			.brand small {
-				color: var(--muted);
-				font-weight: 500;
-				font-size: 12px;
-			}
 			.topbar-right {
 				display: flex;
 				align-items: center;
-				gap: 12px;
+				gap: 10px;
+				flex-shrink: 0;
+			}
+			/* Sticky, like the topbar above it, so the two form one solid 78px band —
+			   which is what the sticky table headers below offset themselves against. */
+			.api-disclaimer {
+				padding: 4px 24px;
+				border-bottom: 1px solid var(--border);
+				background: var(--surface);
+				color: var(--muted);
+				font-size: 10px;
+				text-align: center;
+				position: sticky;
+				top: 56px;
+				z-index: 19;
 			}
 			.whoami {
 				color: var(--muted);
 				font-size: 12px;
+				white-space: nowrap;
 			}
 			.tbtn {
 				appearance: none;
@@ -103,6 +125,7 @@
 				display: inline-flex;
 				align-items: center;
 				gap: 6px;
+				white-space: nowrap;
 				transition:
 					background 0.12s ease,
 					border-color 0.12s ease;
@@ -135,12 +158,782 @@
 				color: #fff;
 			}
 
-			/* ── Layout ──────────────────────────────────────────────── */
-			.layout {
+			/* View switcher — the page's three workspaces. */
+			.viewnav {
+				display: inline-flex;
+				gap: 2px;
+				background: rgba(255, 255, 255, 0.04);
+				border: 1px solid var(--border);
+				border-radius: 9px;
+				padding: 3px;
+				overflow-x: auto;
+			}
+			.viewnav button {
+				appearance: none;
+				border: none;
+				background: transparent;
+				color: var(--muted);
+				font-size: 13px;
+				font-weight: 600;
+				padding: 6px 13px;
+				border-radius: 6px;
+				cursor: pointer;
+				display: inline-flex;
+				align-items: center;
+				gap: 7px;
+				white-space: nowrap;
+			}
+			.viewnav button:hover {
+				color: var(--text);
+			}
+			.viewnav button.active {
+				background: var(--card2);
+				color: var(--text);
+				box-shadow: inset 0 0 0 1px var(--border);
+			}
+			.viewnav .n {
+				font-size: 11px;
+				font-weight: 700;
+				background: rgba(255, 255, 255, 0.07);
+				border-radius: 999px;
+				padding: 1px 7px;
+			}
+			.viewnav button.active .n {
+				background: var(--accent);
+				color: #fff;
+			}
+
+			/* ── Shared page furniture ───────────────────────────────── */
+			.page {
+				padding: 20px 24px 72px;
+				max-width: 1720px;
+				margin: 0 auto;
+			}
+			.page-head {
+				display: flex;
+				align-items: flex-start;
+				justify-content: space-between;
+				gap: 18px;
+				flex-wrap: wrap;
+				margin-bottom: 16px;
+			}
+			.page-head h1 {
+				font-size: 20px;
+				font-weight: 700;
+			}
+			.page-head .sub {
+				color: var(--muted);
+				font-size: 13px;
+				margin-top: 3px;
+				max-width: 76ch;
+			}
+			.head-actions {
+				display: flex;
+				gap: 8px;
+				flex-wrap: wrap;
+			}
+
+			.stats {
+				display: grid;
+				grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+				gap: 10px;
+				margin-bottom: 18px;
+			}
+			.stat {
+				background: var(--card);
+				border: 1px solid var(--border);
+				border-radius: var(--radius);
+				padding: 11px 13px;
+			}
+			.stat .v {
+				font-size: 20px;
+				font-weight: 700;
+				line-height: 1.2;
+			}
+			.stat .k {
+				color: var(--muted);
+				font-size: 11px;
+				text-transform: uppercase;
+				letter-spacing: 0.04em;
+				margin-top: 2px;
+			}
+			.stat .bar {
+				height: 3px;
+				border-radius: 999px;
+				background: rgba(255, 255, 255, 0.08);
+				margin-top: 8px;
+				overflow: hidden;
+			}
+			.stat .bar > i {
+				display: block;
+				height: 100%;
+				background: var(--green);
+			}
+
+			.toolbar {
+				display: flex;
+				gap: 9px;
+				align-items: center;
+				margin-bottom: 12px;
+				flex-wrap: wrap;
+			}
+			input[type='text'],
+			input[type='search'],
+			input[type='number'],
+			textarea,
+			select {
+				background: var(--bg);
+				border: 1px solid var(--border);
+				color: var(--text);
+				border-radius: 8px;
+				padding: 8px 11px;
+				font-size: 13px;
+				font-family: var(--font);
+				outline: none;
+			}
+			input:focus,
+			textarea:focus,
+			select:focus {
+				border-color: var(--accent);
+			}
+			.toolbar input[type='search'] {
+				flex: 1;
+				min-width: 200px;
+			}
+			.btn {
+				appearance: none;
+				border-radius: 8px;
+				padding: 8px 14px;
+				font-size: 13px;
+				font-weight: 600;
+				cursor: pointer;
+				display: inline-flex;
+				align-items: center;
+				gap: 6px;
+				background: var(--card2);
+				color: var(--text);
+				border: 1px solid var(--border);
+				white-space: nowrap;
+			}
+			.btn:hover {
+				background: #2a2e3a;
+			}
+			.btn.primary {
+				background: var(--accent);
+				border-color: var(--accent);
+				color: #fff;
+			}
+			.btn.primary:hover {
+				background: #e05a00;
+			}
+			.btn.danger {
+				color: var(--red);
+			}
+			.btn.danger:hover {
+				background: rgba(239, 68, 68, 0.12);
+			}
+			.btn.sm {
+				padding: 5px 10px;
+				font-size: 12px;
+			}
+			.btn:disabled {
+				opacity: 0.5;
+				cursor: not-allowed;
+			}
+
+			/* Filter chips — one row per facet, so the counts read as a summary. */
+			.chips {
+				display: flex;
+				gap: 6px;
+				flex-wrap: wrap;
+				align-items: center;
+				margin-bottom: 10px;
+			}
+			.chips .lbl {
+				color: var(--muted);
+				font-size: 11px;
+				text-transform: uppercase;
+				letter-spacing: 0.04em;
+				margin-right: 3px;
+			}
+			.chip {
+				appearance: none;
+				background: var(--card);
+				border: 1px solid var(--border);
+				color: var(--muted);
+				font-size: 12px;
+				font-weight: 600;
+				border-radius: 999px;
+				padding: 4px 11px;
+				cursor: pointer;
+				display: inline-flex;
+				align-items: center;
+				gap: 6px;
+			}
+			.chip:hover {
+				color: var(--text);
+				border-color: #39405a;
+			}
+			.chip.on {
+				color: var(--text);
+				border-color: var(--accent);
+				background: rgba(245, 100, 0, 0.12);
+			}
+			.chip .n {
+				font-size: 11px;
+				opacity: 0.75;
+			}
+			.chip.warn.on {
+				border-color: var(--yellow);
+				background: rgba(245, 159, 11, 0.12);
+			}
+
+			.badge {
+				display: inline-block;
+				font-size: 11px;
+				font-weight: 700;
+				padding: 2px 9px;
+				border-radius: 999px;
+				border: 1px solid transparent;
+				white-space: nowrap;
+			}
+			.badge.cat {
+				background: rgba(108, 143, 255, 0.13);
+				color: var(--blue);
+			}
+			.t-iphone_case {
+				background: rgba(108, 143, 255, 0.14);
+				color: var(--blue);
+			}
+			.t-airpods_case {
+				background: rgba(167, 139, 250, 0.14);
+				color: var(--purple);
+			}
+			.t-apple_watch_band {
+				background: rgba(245, 159, 11, 0.14);
+				color: var(--yellow);
+			}
+			.t-grip {
+				background: rgba(45, 212, 191, 0.14);
+				color: var(--teal);
+			}
+			.t-charm {
+				background: rgba(244, 114, 182, 0.14);
+				color: var(--pink);
+			}
+			.t-other {
+				background: rgba(255, 255, 255, 0.07);
+				color: var(--muted);
+			}
+			.auto-tag {
+				font-size: 10px;
+				font-weight: 700;
+				color: var(--muted);
+				border: 1px dashed var(--border);
+				border-radius: 999px;
+				padding: 1px 6px;
+				cursor: help;
+			}
+			.gap-chip {
+				font-size: 10px;
+				font-weight: 700;
+				border-radius: 999px;
+				padding: 1px 7px;
+				background: rgba(245, 159, 11, 0.13);
+				color: var(--yellow);
+				white-space: nowrap;
+			}
+
+			/* ── Catalog: card grid ──────────────────────────────────── */
+			.pgrid {
+				display: grid;
+				grid-template-columns: repeat(auto-fill, minmax(324px, 1fr));
+				gap: 12px;
+			}
+			.pcard {
+				display: flex;
+				gap: 12px;
+				background: var(--card);
+				border: 1px solid var(--border);
+				border-radius: var(--radius);
+				padding: 12px;
+				min-width: 0;
+			}
+			.pcard:hover {
+				border-color: #39405a;
+			}
+			.pthumb {
+				position: relative;
+				width: 84px;
+				height: 84px;
+				flex-shrink: 0;
+				border-radius: 8px;
+				overflow: hidden;
+				background: var(--card2);
+				display: flex;
+				align-items: center;
+				justify-content: center;
+			}
+			.pthumb img {
+				width: 100%;
+				height: 100%;
+				object-fit: cover;
+				display: block;
+			}
+			.pthumb .noimg {
+				color: var(--muted);
+				font-size: 20px;
+			}
+			.pthumb .approx {
+				position: absolute;
+				right: 3px;
+				bottom: 3px;
+				background: rgba(15, 17, 23, 0.85);
+				color: var(--yellow);
+				font-size: 10px;
+				font-weight: 700;
+				border-radius: 5px;
+				padding: 0 4px;
+				cursor: help;
+			}
+			.pbody {
+				flex: 1;
+				min-width: 0;
+			}
+			.pcard .toprow {
+				display: flex;
+				align-items: center;
+				gap: 6px;
+				justify-content: space-between;
+			}
+			.pcard .toprow .left {
+				display: flex;
+				align-items: center;
+				gap: 6px;
+				flex-wrap: wrap;
+				min-width: 0;
+			}
+			.ptitle {
+				font-size: 13px;
+				font-weight: 600;
+				line-height: 1.35;
+				margin: 6px 0 7px;
+				display: -webkit-box;
+				-webkit-line-clamp: 2;
+				line-clamp: 2;
+				-webkit-box-orient: vertical;
+				overflow: hidden;
+			}
+			.pmeta {
+				font-size: 12px;
+				color: var(--muted);
+				display: grid;
+				gap: 2px;
+			}
+			.pmeta .r {
+				display: flex;
+				gap: 6px;
+				min-width: 0;
+			}
+			.pmeta .r > i {
+				width: 14px;
+				flex-shrink: 0;
+				font-style: normal;
+				text-align: center;
+			}
+			.pmeta .r > span {
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+			.pmeta b {
+				color: var(--text);
+				font-weight: 600;
+			}
+			.pmeta em {
+				font-style: normal;
+				color: var(--muted);
+			}
+			.pmeta .missing {
+				color: var(--yellow);
+			}
+			.pprices {
+				display: flex;
+				gap: 12px;
+				margin-top: 8px;
+				flex-wrap: wrap;
+				align-items: baseline;
+			}
+			.pprices .p {
+				font-size: 13px;
+				font-weight: 700;
+			}
+			.pprices .p small {
+				display: block;
+				font-size: 10px;
+				font-weight: 600;
+				color: var(--muted);
+				text-transform: uppercase;
+				letter-spacing: 0.03em;
+			}
+			.pprices .p.none {
+				color: var(--muted);
+				font-weight: 600;
+			}
+			.pprices .p.total {
+				color: var(--green);
+				margin-left: auto;
+			}
+			.pgaps {
+				display: flex;
+				gap: 5px;
+				flex-wrap: wrap;
+				margin-top: 8px;
+			}
+			.pactions {
+				display: flex;
+				flex-direction: column;
+				gap: 6px;
+				flex-shrink: 0;
+			}
+			.iconbtn {
+				appearance: none;
+				background: none;
+				border: 1px solid var(--border);
+				color: var(--muted);
+				border-radius: 7px;
+				width: 30px;
+				height: 30px;
+				cursor: pointer;
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				flex-shrink: 0;
+				transition:
+					color 0.12s,
+					border-color 0.12s,
+					background 0.12s;
+			}
+			.iconbtn:hover {
+				color: var(--text);
+				border-color: #39405a;
+				background: rgba(255, 255, 255, 0.05);
+			}
+			.iconbtn.danger:hover {
+				color: var(--red);
+				border-color: rgba(239, 68, 68, 0.5);
+			}
+			.iconbtn svg {
+				width: 15px;
+				height: 15px;
+				fill: none;
+				stroke: currentColor;
+				stroke-width: 2;
+				stroke-linecap: round;
+				stroke-linejoin: round;
+			}
+
+			/* ── Tables (catalog table mode + suppliers) ─────────────── */
+			.dtable {
+				width: 100%;
+				border-collapse: collapse;
+			}
+			.dtable th {
+				text-align: left;
+				font-size: 11px;
+				text-transform: uppercase;
+				letter-spacing: 0.03em;
+				color: var(--muted);
+				padding: 8px 10px;
+				border-bottom: 1px solid var(--border);
+				white-space: nowrap;
+				position: sticky;
+				top: var(--chrome);
+				background: var(--bg);
+				z-index: 2;
+			}
+			.dtable td {
+				padding: 9px 10px;
+				border-bottom: 1px solid var(--border);
+				vertical-align: middle;
+			}
+			.dtable tr:hover td {
+				background: rgba(255, 255, 255, 0.02);
+			}
+			.dtable .num {
+				text-align: right;
+				font-variant-numeric: tabular-nums;
+				white-space: nowrap;
+			}
+			.dtable .act {
+				text-align: right;
+				white-space: nowrap;
+			}
+			.dtable .act > div {
+				display: inline-flex;
+				gap: 6px;
+			}
+			/* All supplier markets live in ONE table. The browser therefore
+			   computes the Products/Mall/Address/Notes columns once for the
+			   entire directory instead of independently for each market. */
+			.supplier-table {
+				table-layout: fixed;
+			}
+			.supplier-table col.shop {
+				width: 12%;
+			}
+			.supplier-table col.stall {
+				width: 12%;
+			}
+			.supplier-table col.location {
+				width: 28%;
+			}
+			.supplier-table col.products {
+				width: 14%;
+			}
+			.supplier-table col.mall {
+				width: 8%;
+			}
+			.supplier-table col.address {
+				width: 10%;
+			}
+			.supplier-table col.notes {
+				width: 6%;
+			}
+			.supplier-table col.actions {
+				width: 10%;
+			}
+			.supplier-table .market-row td {
+				padding: 22px 10px 6px;
+				border-bottom: 0;
+				background: var(--bg);
+			}
+			.supplier-table .market-row:first-child td {
+				padding-top: 12px;
+			}
+			.supplier-table .market-row:hover td {
+				background: var(--bg);
+			}
+			.market-label {
+				display: flex;
+				align-items: baseline;
+				gap: 10px;
+			}
+			.market-label h3 {
+				font-size: 14px;
+				font-weight: 700;
+			}
+			.market-label .n {
+				color: var(--muted);
+				font-size: 12px;
+			}
+			.supplier-table td {
+				overflow: hidden;
+			}
+			.supplier-table td.act {
+				padding-right: 4px;
+				padding-left: 4px;
+			}
+			.supplier-table .rowlink {
+				max-width: 100%;
+			}
+			.supplier-table .rowlink > span:first-child {
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+			/* The Products column is a number an operator scans DOWN the page. A
+			   count followed by a variable-width chip in one right-aligned cell
+			   puts every number at a different x-position, which is the one thing
+			   a numeric column must not do — so the count gets a fixed slot of its
+			   own and the priced-coverage meter gets another beside it. */
+			.countcell {
+				display: inline-grid;
+				grid-template-columns: 4ch 62px;
+				align-items: center;
+				gap: 10px;
+			}
+			.countcell .n {
+				text-align: right;
+				font-weight: 600;
+				font-variant-numeric: tabular-nums;
+			}
+			.countcell .n.zero {
+				color: var(--muted);
+				font-weight: 500;
+			}
+			/* Priced coverage: the fraction, over a bar of the same proportion. */
+			.cov {
+				position: relative;
+				overflow: hidden;
+				height: 18px;
+				line-height: 18px;
+				border-radius: 999px;
+				background: rgba(255, 255, 255, 0.06);
+				color: var(--muted);
+				font-size: 10px;
+				font-weight: 700;
+				font-variant-numeric: tabular-nums;
+				text-align: center;
+				cursor: help;
+			}
+			.cov > i {
+				position: absolute;
+				top: 0;
+				bottom: 0;
+				left: 0;
+				background: rgba(245, 159, 11, 0.22);
+			}
+			.cov > span {
+				position: relative;
+			}
+			.cov.full {
+				color: var(--green);
+			}
+			.cov.full > i {
+				background: rgba(34, 197, 94, 0.2);
+			}
+			.cov.empty {
+				visibility: hidden;
+			}
+			/* A supplier row opens its products, so it reads and behaves as one
+			   target. The shop name is a real button, which is what makes the row
+			   reachable by keyboard without a tabindex on a <tr>. */
+			.dtable tr.srow {
+				cursor: pointer;
+			}
+			.dtable tr.srow:hover td {
+				background: rgba(245, 100, 0, 0.07);
+			}
+			.rowlink {
+				appearance: none;
+				background: none;
+				border: 0;
+				padding: 0;
+				font: inherit;
+				font-weight: 700;
+				color: var(--text);
+				cursor: pointer;
+				display: inline-flex;
+				align-items: center;
+				gap: 6px;
+				text-align: left;
+			}
+			.rowlink:hover {
+				color: var(--accent);
+			}
+			.rowlink:focus-visible {
+				outline: 2px solid var(--accent);
+				outline-offset: 3px;
+				border-radius: 4px;
+			}
+			.rowlink .chev {
+				width: 13px;
+				height: 13px;
+				flex-shrink: 0;
+				color: var(--muted);
+				opacity: 0;
+				transition: opacity 0.12s ease;
+				fill: none;
+				stroke: currentColor;
+				stroke-width: 2.5;
+				stroke-linecap: round;
+				stroke-linejoin: round;
+			}
+			.dtable tr.srow:hover .chev,
+			.rowlink:focus-visible .chev {
+				opacity: 1;
+			}
+			.tthumb {
+				width: 40px;
+				height: 40px;
+				border-radius: 6px;
+				object-fit: cover;
+				display: block;
+				background: var(--card2);
+			}
+			.tthumb.ph {
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				color: var(--muted);
+				font-size: 14px;
+			}
+			.cellwrap {
+				max-width: 520px;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+
+			.group-head {
+				display: flex;
+				align-items: baseline;
+				gap: 10px;
+				margin: 22px 0 6px;
+			}
+			.group-head h3 {
+				font-size: 14px;
+				font-weight: 700;
+			}
+			.group-head .n {
+				color: var(--muted);
+				font-size: 12px;
+			}
+			.section-head {
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				gap: 14px;
+				margin: 30px 0 12px;
+				padding-bottom: 8px;
+				border-bottom: 1px solid var(--border);
+				flex-wrap: wrap;
+			}
+			.section-head h2 {
+				font-size: 15px;
+				font-weight: 700;
+			}
+			.section-head .sub {
+				color: var(--muted);
+				font-size: 12px;
+				margin-top: 2px;
+			}
+
+			.empty {
+				text-align: center;
+				color: var(--muted);
+				padding: 48px 20px;
+				font-size: 14px;
+			}
+			.empty .big {
+				font-size: 15px;
+				color: var(--text);
+				font-weight: 600;
+				margin-bottom: 6px;
+			}
+			.loading {
+				text-align: center;
+				color: var(--muted);
+				padding: 40px;
+			}
+			.more {
+				display: flex;
+				justify-content: center;
+				padding: 20px 0 4px;
+			}
+			.result-count {
+				color: var(--muted);
+				font-size: 12px;
+				margin-left: auto;
+				white-space: nowrap;
+			}
+
+			/* ── Library view (design suppliers + zip packages) ───────── */
+			.library-layout {
 				display: grid;
 				grid-template-columns: 320px 1fr;
-				gap: 0;
-				height: calc(100vh - 56px);
+				height: calc(100vh - var(--chrome));
 			}
 			.sidebar {
 				border-right: 1px solid var(--border);
@@ -213,8 +1006,6 @@
 				padding: 2px 8px;
 				white-space: nowrap;
 			}
-
-			/* ── Main pane ───────────────────────────────────────────── */
 			.main {
 				overflow-y: auto;
 				min-height: 0;
@@ -249,7 +1040,6 @@
 				gap: 8px;
 				flex-shrink: 0;
 			}
-
 			.cat-tabs {
 				display: flex;
 				gap: 6px;
@@ -290,78 +1080,6 @@
 				background: var(--accent);
 				color: #fff;
 			}
-
-			.toolbar {
-				display: flex;
-				gap: 10px;
-				align-items: center;
-				margin-bottom: 16px;
-				flex-wrap: wrap;
-			}
-			input[type='text'],
-			input[type='search'],
-			textarea,
-			select {
-				background: var(--bg);
-				border: 1px solid var(--border);
-				color: var(--text);
-				border-radius: 8px;
-				padding: 8px 11px;
-				font-size: 13px;
-				font-family: var(--font);
-				outline: none;
-			}
-			input:focus,
-			textarea:focus,
-			select:focus {
-				border-color: var(--accent);
-			}
-			.toolbar input[type='search'] {
-				flex: 1;
-				min-width: 160px;
-			}
-			.btn {
-				appearance: none;
-				border: none;
-				border-radius: 8px;
-				padding: 8px 14px;
-				font-size: 13px;
-				font-weight: 600;
-				cursor: pointer;
-				display: inline-flex;
-				align-items: center;
-				gap: 6px;
-				background: var(--card2);
-				color: var(--text);
-				border: 1px solid var(--border);
-			}
-			.btn:hover {
-				background: #2a2e3a;
-			}
-			.btn.primary {
-				background: var(--accent);
-				border-color: var(--accent);
-				color: #fff;
-			}
-			.btn.primary:hover {
-				background: #e05a00;
-			}
-			.btn.danger {
-				color: var(--red);
-			}
-			.btn.danger:hover {
-				background: rgba(239, 68, 68, 0.12);
-			}
-			.btn.sm {
-				padding: 5px 10px;
-				font-size: 12px;
-			}
-			.btn:disabled {
-				opacity: 0.5;
-				cursor: not-allowed;
-			}
-
-			/* ── Dropzone ────────────────────────────────────────────── */
 			.dropzone {
 				border: 1.5px dashed var(--border);
 				border-radius: var(--radius);
@@ -428,8 +1146,6 @@
 				width: 0;
 				transition: width 0.15s ease;
 			}
-
-			/* ── Package table ───────────────────────────────────────── */
 			.pkg-table {
 				width: 100%;
 				border-collapse: collapse;
@@ -459,19 +1175,6 @@
 				font-size: 12px;
 				margin-top: 2px;
 			}
-			.badge {
-				display: inline-block;
-				font-size: 11px;
-				font-weight: 700;
-				padding: 2px 9px;
-				border-radius: 999px;
-				border: 1px solid transparent;
-				white-space: nowrap;
-			}
-			.badge.cat {
-				background: rgba(108, 143, 255, 0.13);
-				color: var(--blue);
-			}
 			.status-select {
 				font-size: 12px;
 				font-weight: 600;
@@ -498,58 +1201,277 @@
 				gap: 6px;
 				justify-content: flex-end;
 			}
-			.iconbtn {
-				appearance: none;
-				background: none;
-				border: 1px solid var(--border);
-				color: var(--muted);
-				border-radius: 7px;
-				width: 30px;
-				height: 30px;
-				cursor: pointer;
-				display: inline-flex;
-				align-items: center;
-				justify-content: center;
-				transition:
-					color 0.12s,
-					border-color 0.12s,
-					background 0.12s;
-			}
-			.iconbtn:hover {
-				color: var(--text);
-				border-color: #39405a;
-				background: rgba(255, 255, 255, 0.05);
-			}
-			.iconbtn.danger:hover {
-				color: var(--red);
-				border-color: rgba(239, 68, 68, 0.5);
-			}
-			.iconbtn svg {
-				width: 15px;
-				height: 15px;
-				fill: none;
-				stroke: currentColor;
-				stroke-width: 2;
-				stroke-linecap: round;
-				stroke-linejoin: round;
-			}
 
-			.empty {
-				text-align: center;
-				color: var(--muted);
-				padding: 48px 20px;
-				font-size: 14px;
+			/* ── Supplier drawer (the products behind one stall) ──────── */
+			/* Sits UNDER the modals (z-index 100): editing a product from here
+			   opens the same editor the Catalog uses, on top of this panel, so
+			   there is one product form in the page and not two. */
+			.drawer-bg {
+				position: fixed;
+				inset: 0;
+				background: rgba(0, 0, 0, 0.5);
+				z-index: 90;
+				opacity: 0;
+				visibility: hidden;
+				transition:
+					opacity 0.18s ease,
+					visibility 0.18s ease;
 			}
-			.empty .big {
-				font-size: 15px;
-				color: var(--text);
+			.drawer-bg.open {
+				opacity: 1;
+				visibility: visible;
+			}
+			.drawer {
+				position: fixed;
+				top: 0;
+				right: 0;
+				bottom: 0;
+				width: min(760px, 100%);
+				z-index: 91;
+				background: var(--surface);
+				border-left: 1px solid var(--border);
+				box-shadow: -24px 0 60px rgba(0, 0, 0, 0.45);
+				display: flex;
+				flex-direction: column;
+				min-height: 0;
+				transform: translateX(100%);
+				visibility: hidden;
+				transition:
+					transform 0.2s ease,
+					visibility 0.2s ease;
+			}
+			.drawer.open {
+				transform: none;
+				visibility: visible;
+			}
+			@media (prefers-reduced-motion: reduce) {
+				.drawer,
+				.drawer-bg {
+					transition: none;
+				}
+			}
+			.drawer-head {
+				padding: 18px 20px 14px;
+				border-bottom: 1px solid var(--border);
+				flex-shrink: 0;
+			}
+			.drawer-head .top {
+				display: flex;
+				align-items: flex-start;
+				justify-content: space-between;
+				gap: 14px;
+			}
+			.drawer-head h2 {
+				font-size: 18px;
+				font-weight: 700;
+				overflow-wrap: anywhere;
+			}
+			.drawer-head .loc {
+				color: var(--muted);
+				font-size: 12px;
+				margin-top: 3px;
+				display: flex;
+				flex-wrap: wrap;
+				align-items: center;
+				gap: 8px;
+			}
+			.drawer-stats {
+				display: grid;
+				grid-template-columns: repeat(4, minmax(0, 1fr));
+				gap: 8px;
+				margin-top: 14px;
+			}
+			.drawer-stats .stat {
+				padding: 8px 10px;
+			}
+			.drawer-stats .stat .v {
+				font-size: 17px;
+			}
+			.drawer-stats .stat .detail {
+				color: var(--muted);
+				font-size: 10px;
+				margin-top: 3px;
+				white-space: nowrap;
+			}
+			.drawer-actions {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 8px;
+				margin-top: 12px;
+			}
+			.drawer-toolbar {
+				display: flex;
+				align-items: center;
+				gap: 10px;
+				padding: 12px 20px;
+				border-bottom: 1px solid var(--border);
+				flex-shrink: 0;
+			}
+			.drawer-toolbar input[type='search'] {
+				flex: 1;
+				min-width: 0;
+			}
+			.drawer-body {
+				overflow-y: auto;
+				min-height: 0;
+				flex: 1;
+				padding: 14px 20px 32px;
+			}
+			.prow {
+				display: grid;
+				grid-template-columns: 62px minmax(0, 1fr) 256px 66px;
+				gap: 12px;
+				align-items: center;
+				padding: 10px;
+				border: 1px solid var(--border);
+				border-radius: var(--radius);
+				background: var(--card);
+				margin-bottom: 8px;
+			}
+			.prow:hover {
+				border-color: #39405a;
+			}
+			.prow .pthumb {
+				width: 62px;
+				height: 62px;
+			}
+			.prow .top {
+				display: flex;
+				align-items: center;
+				gap: 6px;
+				flex-wrap: wrap;
+				margin-bottom: 3px;
+			}
+			.prow .title {
+				font-size: 13px;
 				font-weight: 600;
-				margin-bottom: 6px;
+				line-height: 1.35;
+				display: -webkit-box;
+				-webkit-line-clamp: 2;
+				-webkit-box-orient: vertical;
+				overflow: hidden;
 			}
-			.loading {
-				text-align: center;
+			.prow .meta {
 				color: var(--muted);
-				padding: 40px;
+				font-size: 11.5px;
+				margin-top: 3px;
+				display: flex;
+				flex-wrap: wrap;
+				gap: 6px;
+				align-items: center;
+			}
+			.prow .meta .missing {
+				color: var(--yellow);
+			}
+			.prow .costs {
+				display: grid;
+				grid-template-columns: repeat(4, 58px);
+				gap: 8px;
+				align-items: start;
+				text-align: right;
+			}
+			.prow .costs .p {
+				font-size: 13px;
+				font-weight: 700;
+				font-variant-numeric: tabular-nums;
+				white-space: nowrap;
+			}
+			.prow .costs .p small {
+				display: block;
+				font-size: 9.5px;
+				font-weight: 600;
+				color: var(--muted);
+				text-transform: uppercase;
+				letter-spacing: 0.03em;
+			}
+			.prow .costs .p.none {
+				color: var(--muted);
+				font-weight: 600;
+			}
+			.prow .costs .p.total {
+				color: var(--green);
+			}
+			.prow .costs .p.charm {
+				color: var(--purple);
+			}
+			.prow .acts {
+				display: inline-flex;
+				gap: 6px;
+				justify-content: flex-end;
+			}
+			.alias-details {
+				grid-column: 2 / -1;
+				border-top: 1px solid var(--border);
+				padding-top: 8px;
+			}
+			.alias-details summary {
+				color: var(--blue);
+				cursor: pointer;
+				font-size: 11px;
+				font-weight: 700;
+				list-style: none;
+				width: max-content;
+				max-width: 100%;
+			}
+			.alias-details summary::-webkit-details-marker {
+				display: none;
+			}
+			.alias-details summary::before {
+				content: '›';
+				display: inline-block;
+				margin-right: 5px;
+				transition: transform 0.12s ease;
+			}
+			.alias-details[open] summary::before {
+				transform: rotate(90deg);
+			}
+			.alias-list {
+				margin-top: 8px;
+				border: 1px solid var(--border);
+				border-radius: 8px;
+				overflow: hidden;
+			}
+			.alias-row {
+				display: grid;
+				grid-template-columns: minmax(0, 1fr) auto;
+				gap: 10px;
+				align-items: center;
+				padding: 8px 10px;
+				background: rgba(255, 255, 255, 0.015);
+			}
+			.alias-row + .alias-row {
+				border-top: 1px solid var(--border);
+			}
+			.alias-row .alias-title {
+				min-width: 0;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+				color: var(--muted);
+				font-size: 11px;
+			}
+			.alias-row .alias-actions {
+				display: inline-flex;
+				gap: 6px;
+			}
+			@media (max-width: 640px) {
+				.prow {
+					grid-template-columns: 52px minmax(0, 1fr) 66px;
+				}
+				.prow .costs {
+					grid-column: 2 / -1;
+					grid-row: 2;
+				}
+				.prow .acts {
+					grid-column: 3;
+					grid-row: 1;
+				}
+				.alias-details {
+					grid-column: 2 / -1;
+				}
+				.drawer-stats {
+					grid-template-columns: repeat(2, minmax(0, 1fr));
+				}
 			}
 
 			/* ── Modal ───────────────────────────────────────────────── */
@@ -574,6 +1496,11 @@
 				max-width: 440px;
 				padding: 22px;
 				box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+				max-height: calc(100vh - 40px);
+				overflow-y: auto;
+			}
+			.modal.wide {
+				max-width: 640px;
 			}
 			.modal h3 {
 				font-size: 17px;
@@ -598,11 +1525,36 @@
 				resize: vertical;
 				min-height: 64px;
 			}
+			.field .hint {
+				font-size: 11px;
+				color: var(--muted);
+				margin-top: 4px;
+				min-height: 14px;
+			}
+			.field .hint.ok {
+				color: var(--green);
+			}
+			.field .hint.warn {
+				color: var(--yellow);
+			}
+			.grid2 {
+				display: grid;
+				grid-template-columns: 1fr 1fr;
+				gap: 13px;
+			}
+			.grid3 {
+				display: grid;
+				grid-template-columns: 1fr 1fr 1fr;
+				gap: 13px;
+			}
 			.modal-actions {
 				display: flex;
 				justify-content: flex-end;
 				gap: 10px;
 				margin-top: 20px;
+			}
+			.modal-actions .spacer {
+				margin-right: auto;
 			}
 			.modal-err {
 				color: var(--red);
@@ -630,6 +1582,8 @@
 					transform 0.2s ease;
 				z-index: 200;
 				box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+				max-width: min(560px, calc(100vw - 32px));
+				text-align: center;
 			}
 			#toast.show {
 				opacity: 1;
@@ -642,15 +1596,34 @@
 				border-color: rgba(34, 197, 94, 0.6);
 			}
 
-			@media (max-width: 860px) {
-				.layout {
+			@media (max-width: 1000px) {
+				.topbar {
+					height: auto;
+					padding: 10px 14px;
+					flex-wrap: wrap;
+					position: static;
+				}
+				:root {
+					--chrome: 0px;
+				}
+				.dtable th {
+					position: static;
+				}
+				.library-layout {
 					grid-template-columns: 1fr;
 					height: auto;
 				}
 				.sidebar {
 					border-right: none;
 					border-bottom: 1px solid var(--border);
-					max-height: 40vh;
+					max-height: 44vh;
+				}
+				.page {
+					padding: 16px 14px 64px;
+				}
+				.grid3,
+				.grid2 {
+					grid-template-columns: 1fr;
 				}
 			}
 		</style>
@@ -659,136 +1632,382 @@
 		<div class="topbar">
 			<div class="brand">
 				<span class="dot"></span>
-				<span data-i18n="brand">Sourcing Library</span>
-				<small data-i18n="brandSub">Supplier design intake</small>
+				<span data-i18n="brand">Sourcing</span>
 			</div>
+			<nav class="viewnav" id="viewNav" aria-label="Workspace">
+				<button type="button" data-act="view" data-view="catalog">
+					<span data-i18n="navCatalog">Product Catalog</span> <span class="n" id="navNProducts">–</span>
+				</button>
+				<button type="button" data-act="view" data-view="suppliers">
+					<span data-i18n="navSuppliers">Suppliers</span> <span class="n" id="navNSuppliers">–</span>
+				</button>
+				<button type="button" data-act="view" data-view="library">
+					<span data-i18n="navLibrary">Design Library</span> <span class="n" id="navNDesign">–</span>
+				</button>
+			</nav>
 			<div class="topbar-right">
 				<span class="whoami" id="whoami"></span>
 				<a class="tbtn" id="backBtn" href="/" title="Back to dashboard">↩ <span data-i18n="dashboard">Dashboard</span></a>
 				<div class="lang-switch" role="group" aria-label="Language">
-					<button type="button" data-lang="en" onclick="setLang('en')">EN</button>
-					<button type="button" data-lang="zh" onclick="setLang('zh')">中文</button>
+					<button type="button" data-lang="en" data-act="lang">EN</button>
+					<button type="button" data-lang="zh" data-act="lang">中文</button>
 				</div>
-				<button class="tbtn" id="logoutBtn" title="Sign out">🚪 <span data-i18n="logout">Log out</span></button>
+				<button class="tbtn" id="logoutBtn" title="Sign out"><span data-i18n="logout">Log out</span></button>
+			</div>
+		</div>
+		<div class="api-disclaimer">The term “Etsy” is a trademark of Etsy, Inc. This Application uses Etsy’s API, but is not endorsed or certified by Etsy.</div>
+
+		<!-- ══ VIEW 1 · Product Catalog ═══════════════════════════════════════ -->
+		<section class="page" id="viewCatalog">
+			<div class="page-head">
+				<div>
+					<h1 data-i18n="catTitle">Product Catalog</h1>
+					<div class="sub" data-i18n="catSub">
+						Every product we sell, the supplier who sells it, where that supplier is, and what each component costs. This is the same catalog the shopping route is
+						built from — an edit here takes effect everywhere.
+					</div>
+				</div>
+				<div class="head-actions">
+					<button class="btn" data-act="cat-refresh" title="Reload"><span data-i18n="refresh">Refresh</span></button>
+					<a class="btn" href="/api/sourcing/catalog/export.csv" data-i18n="exportCsv">Export CSV</a>
+					<button class="btn primary can-edit" data-act="product-new">+ <span data-i18n="addProduct">Add product</span></button>
+				</div>
+			</div>
+
+			<div class="stats" id="catStats"></div>
+			<div class="chips" id="catTypeChips"></div>
+			<div class="chips" id="catGapChips"></div>
+
+			<div class="toolbar">
+				<input type="search" id="catSearch" placeholder="Search title, supplier, stall, charm code…" />
+				<select id="catSupplier" aria-label="Supplier"></select>
+				<select id="catSort" aria-label="Sort">
+					<option value="location" data-i18n="sortLocation">Sort: walking order</option>
+					<option value="title" data-i18n="sortTitle">Sort: name</option>
+					<option value="type" data-i18n="sortType">Sort: product type</option>
+					<option value="price_desc" data-i18n="sortPriceDesc">Sort: price (high → low)</option>
+					<option value="price_asc" data-i18n="sortPriceAsc">Sort: price (low → high)</option>
+					<option value="updated" data-i18n="sortUpdated">Sort: recently updated</option>
+				</select>
+				<button class="btn sm" data-act="cat-mode" id="catModeBtn">▦ <span data-i18n="modeTable">Table</span></button>
+				<span class="result-count" id="catCount"></span>
+			</div>
+
+			<div id="catArea">
+				<div class="loading" data-i18n="loading">Loading…</div>
+			</div>
+			<div class="more" id="catMore" hidden><button class="btn" data-act="cat-more"></button></div>
+		</section>
+
+		<!-- ══ VIEW 2 · Suppliers ════════════════════════════════════════════ -->
+		<section class="page" id="viewSuppliers" hidden>
+			<div class="page-head">
+				<div>
+					<h1 data-i18n="supTitle">Suppliers</h1>
+					<div class="sub" data-i18n="supSub">
+						The physical stalls we buy from, grouped in the order a buyer walks them. Stall codes drive the shopping route, so keeping them exact is what keeps a trip
+						efficient.
+					</div>
+				</div>
+				<div class="head-actions">
+					<button class="btn" data-act="cat-refresh" title="Reload"><span data-i18n="refresh">Refresh</span></button>
+					<button class="btn primary can-edit" data-act="stall-new">+ <span data-i18n="addSupplier2">Add supplier</span></button>
+				</div>
+			</div>
+
+			<div class="stats" id="supStats"></div>
+
+			<div class="toolbar">
+				<input type="search" id="supSearch" placeholder="Search shop, stall, address…" />
+				<select id="supBuilding" aria-label="Market"></select>
+				<span class="result-count" id="supCount"></span>
+			</div>
+
+			<div id="supArea">
+				<div class="loading" data-i18n="loading">Loading…</div>
+			</div>
+
+			<div class="section-head">
+				<div>
+					<h2 data-i18n="charmShops">Charm shops</h2>
+					<div class="sub" data-i18n="charmShopsSub">Where the charm codes are bought. Charm photos and codes themselves are managed on the dashboard’s Route tab.</div>
+				</div>
+				<button class="btn sm primary can-edit" data-act="cshop-new">+ <span data-i18n="addCharmShop">Add charm shop</span></button>
+			</div>
+			<div id="cshopArea"></div>
+		</section>
+
+		<!-- ══ Supplier detail · the products behind one stall ═══════════════ -->
+		<!-- Lives outside the views because it is an overlay, not a page. Its
+		     product rows carry the SAME data-act ids the Catalog's rows do, so
+		     editing here is the Catalog's editor, not a second implementation. -->
+		<div class="drawer-bg" id="supDrawerBg" data-act="sup-close"></div>
+		<aside class="drawer" id="supDrawer" role="dialog" aria-labelledby="sdShop" aria-hidden="true">
+			<header class="drawer-head">
+				<div class="top">
+					<div>
+						<h2 id="sdShop"></h2>
+						<div class="loc" id="sdLoc"></div>
+					</div>
+					<button class="iconbtn" id="sdClose" data-act="sup-close" title="Close" aria-label="Close">
+						<svg viewBox="0 0 24 24"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+					</button>
+				</div>
+				<div class="drawer-stats" id="sdStats"></div>
+				<div class="drawer-actions" id="sdActions"></div>
+			</header>
+			<div class="drawer-toolbar">
+				<input type="search" id="sdSearch" placeholder="Search this supplier’s products…" />
+				<span class="result-count" id="sdCount"></span>
+			</div>
+			<div class="drawer-body" id="sdBody"></div>
+		</aside>
+
+		<!-- ══ VIEW 3 · Design Library (WeChat/QQ suppliers + zip folders) ═══ -->
+		<section id="viewLibrary" hidden>
+			<div class="library-layout">
+				<aside class="sidebar">
+					<div class="sidebar-head">
+						<div class="row">
+							<h2 data-i18n="designSuppliers">Design suppliers</h2>
+							<button class="btn primary sm" data-act="design-new">+ <span data-i18n="add">Add</span></button>
+						</div>
+						<input type="search" id="designSearch" placeholder="Search suppliers…" style="width: 100%" />
+					</div>
+					<div class="supplier-list" id="designList">
+						<div class="loading" data-i18n="loading">Loading…</div>
+					</div>
+				</aside>
+
+				<main class="main">
+					<div class="empty" id="noDesign">
+						<div class="big" data-i18n="pickTitle">Select a supplier</div>
+						<div data-i18n="pickSub">Choose a supplier on the left, or add a new one, to manage its product folders.</div>
+					</div>
+
+					<div id="designView" hidden>
+						<div class="pane-head">
+							<div>
+								<h1 id="dvName">—</h1>
+								<div class="meta" id="dvMeta"></div>
+							</div>
+							<div class="pane-actions">
+								<button class="btn sm" data-act="design-edit"><span data-i18n="edit">Edit</span></button>
+								<button class="btn sm danger" data-act="design-del"><span data-i18n="delete">Delete</span></button>
+							</div>
+						</div>
+
+						<div class="cat-tabs" id="libCatTabs"></div>
+
+						<div class="dropzone" id="dropzone">
+							<div class="dz-title" data-i18n="dropTitle">Drop zipped product folders here</div>
+							<div class="dz-sub" data-i18n="dropSub">or click to choose .zip files downloaded from WeChat / QQ</div>
+							<div class="dz-controls" data-act="stop">
+								<label style="font-size: 12px; color: var(--muted)" data-i18n="uploadAs">Upload as:</label>
+								<select id="uploadCategory"></select>
+								<button class="btn sm" data-act="pick-files" data-i18n="chooseFiles">Choose files</button>
+							</div>
+							<input type="file" id="fileInput" accept=".zip,application/zip,application/x-zip-compressed" multiple hidden />
+						</div>
+						<div id="uploadQueue"></div>
+
+						<div class="toolbar">
+							<input type="search" id="pkgSearch" placeholder="Search product folders…" />
+							<select id="statusFilter">
+								<option value="" data-i18n="allStatuses">All statuses</option>
+							</select>
+						</div>
+
+						<div id="pkgArea"></div>
+					</div>
+				</main>
+			</div>
+		</section>
+
+		<!-- ══ Modals ═══════════════════════════════════════════════════════ -->
+
+		<!-- Product (product_map) -->
+		<div class="modal-bg" id="productModal" aria-hidden="true">
+			<div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="prTitleHead" tabindex="-1">
+				<h3 id="prTitleHead" data-i18n="addProduct">Add product</h3>
+				<div class="field">
+					<label data-i18n="fProductTitle">Product title *</label>
+					<textarea id="prTitle" rows="2" placeholder="The exact Etsy listing title"></textarea>
+					<div class="hint" data-i18n="fProductTitleHint">Matched to orders by title, so it must be the listing title character for character.</div>
+				</div>
+				<div class="grid2">
+					<div class="field">
+						<label data-i18n="fProductType">Product type</label>
+						<select id="prType"></select>
+						<div class="hint" id="prTypeHint"></div>
+					</div>
+					<div class="field">
+						<label data-i18n="fSupplier">Supplier (shop name)</label>
+						<input type="text" id="prShop" list="dlShops" autocomplete="off" placeholder="e.g. V8" />
+						<div class="hint" id="prShopHint"></div>
+					</div>
+				</div>
+				<div class="grid2">
+					<div class="field">
+						<label data-i18n="fStall">Stall</label>
+						<input type="text" id="prStall" list="dlStalls" autocomplete="off" placeholder="e.g. A2-21 or 经济5D100" />
+						<div class="hint" id="prStallHint"></div>
+					</div>
+					<div class="field">
+						<label data-i18n="fCharmShop">Charm shop</label>
+						<input type="text" id="prCharmShop" list="dlCharmShops" autocomplete="off" />
+						<div class="hint" id="prCharmShopHint"></div>
+					</div>
+				</div>
+				<div class="grid3">
+					<div class="field">
+						<label data-i18n="fCharmCode">Charm code</label>
+						<input type="text" id="prCharmCode" list="dlCharmCodes" autocomplete="off" placeholder="CH-00001" />
+						<div class="hint" id="prCharmCodeHint"></div>
+					</div>
+					<div class="field">
+						<label data-i18n="fCostCase">Case price (¥)</label>
+						<input type="number" id="prCostCase" min="0" step="0.01" inputmode="decimal" placeholder="—" />
+					</div>
+					<div class="field">
+						<label data-i18n="fCostGrip">Grip price (¥)</label>
+						<input type="number" id="prCostGrip" min="0" step="0.01" inputmode="decimal" placeholder="—" />
+					</div>
+				</div>
+				<div class="modal-err" id="prErr"></div>
+				<div class="modal-actions">
+					<button class="btn danger spacer" id="prDelete" data-act="product-del-modal" hidden data-i18n="delete">Delete</button>
+					<button class="btn" data-act="close" data-target="productModal" data-i18n="cancel">Cancel</button>
+					<button class="btn primary" id="prSave" data-act="product-save" data-i18n="save">Save</button>
+				</div>
+			</div>
+		</div>
+		<datalist id="dlShops"></datalist>
+		<datalist id="dlStalls"></datalist>
+		<datalist id="dlCharmShops"></datalist>
+		<datalist id="dlCharmCodes"></datalist>
+
+		<!-- Stall supplier (supplier_directory) -->
+		<div class="modal-bg" id="stallModal" aria-hidden="true">
+			<div class="modal" role="dialog" aria-modal="true" aria-labelledby="stTitleHead" tabindex="-1">
+				<h3 id="stTitleHead" data-i18n="addSupplier2">Add supplier</h3>
+				<div class="grid2">
+					<div class="field">
+						<label data-i18n="fShopName">Shop name *</label>
+						<input type="text" id="stShop" placeholder="e.g. V8" />
+					</div>
+					<div class="field">
+						<label data-i18n="fStall">Stall</label>
+						<input type="text" id="stStall" placeholder="e.g. A2-21" />
+						<div class="hint" data-i18n="fStallHint">Prefix the market for stalls outside the home market, e.g. 经济5D100.</div>
+					</div>
+				</div>
+				<div class="grid2">
+					<div class="field">
+						<label data-i18n="fMall">Mall</label>
+						<input type="text" id="stMall" />
+					</div>
+					<div class="field">
+						<label data-i18n="fFloor">Floor</label>
+						<input type="text" id="stFloor" />
+					</div>
+				</div>
+				<div class="field">
+					<label data-i18n="fAddress">Address</label>
+					<input type="text" id="stAddress" />
+				</div>
+				<div class="field">
+					<label data-i18n="fNotes">Notes</label>
+					<textarea id="stNotes"></textarea>
+				</div>
+				<div class="modal-err" id="stErr"></div>
+				<div class="modal-actions">
+					<button class="btn" data-act="close" data-target="stallModal" data-i18n="cancel">Cancel</button>
+					<button class="btn primary" id="stSave" data-act="stall-save" data-i18n="save">Save</button>
+				</div>
 			</div>
 		</div>
 
-		<div class="layout">
-			<!-- ── Supplier sidebar ─────────────────────────────────── -->
-			<aside class="sidebar">
-				<div class="sidebar-head">
-					<div class="row">
-						<h2 data-i18n="suppliers">Suppliers</h2>
-						<button class="btn primary sm" onclick="openSupplierModal()">+ <span data-i18n="add">Add</span></button>
+		<!-- Charm shop (charm_shop_directory) -->
+		<div class="modal-bg" id="cshopModal" aria-hidden="true">
+			<div class="modal" role="dialog" aria-modal="true" aria-labelledby="csTitleHead" tabindex="-1">
+				<h3 id="csTitleHead" data-i18n="addCharmShop">Add charm shop</h3>
+				<div class="grid2">
+					<div class="field">
+						<label data-i18n="fShopName">Shop name *</label>
+						<input type="text" id="csShop" />
 					</div>
-					<input type="search" id="supplierSearch" placeholder="Search suppliers…" style="width: 100%" oninput="renderSuppliers()" />
-				</div>
-				<div class="supplier-list" id="supplierList">
-					<div class="loading" data-i18n="loading">Loading…</div>
-				</div>
-			</aside>
-
-			<!-- ── Package pane ─────────────────────────────────────── -->
-			<main class="main" id="mainPane">
-				<div class="empty" id="noSupplier">
-					<div class="big" data-i18n="pickTitle">Select a supplier</div>
-					<div data-i18n="pickSub">Choose a supplier on the left, or add a new one, to manage its product folders.</div>
-				</div>
-
-				<div id="supplierView" style="display: none">
-					<div class="pane-head">
-						<div>
-							<h1 id="svName">—</h1>
-							<div class="meta" id="svMeta"></div>
-						</div>
-						<div class="pane-actions">
-							<button class="btn sm" onclick="openSupplierModal(true)">✎ <span data-i18n="edit">Edit</span></button>
-							<button class="btn sm danger" onclick="deleteSupplier()">🗑 <span data-i18n="delete">Delete</span></button>
-						</div>
+					<div class="field">
+						<label data-i18n="fStall">Stall</label>
+						<input type="text" id="csStall" />
 					</div>
-
-					<div class="cat-tabs" id="catTabs"></div>
-
-					<!-- Upload -->
-					<div
-						class="dropzone"
-						id="dropzone"
-						onclick="document.getElementById('fileInput').click()"
-					>
-						<div class="dz-title" data-i18n="dropTitle">Drop zipped product folders here</div>
-						<div class="dz-sub" data-i18n="dropSub">or click to choose .zip files downloaded from WeChat / QQ</div>
-						<div class="dz-controls" onclick="event.stopPropagation()">
-							<label style="font-size: 12px; color: var(--muted)" data-i18n="uploadAs">Upload as:</label>
-							<select id="uploadCategory"></select>
-							<button class="btn sm" onclick="document.getElementById('fileInput').click()" data-i18n="chooseFiles">Choose files</button>
-						</div>
-						<input type="file" id="fileInput" accept=".zip,application/zip,application/x-zip-compressed" multiple style="display: none" />
-					</div>
-					<div id="uploadQueue"></div>
-
-					<!-- Package toolbar -->
-					<div class="toolbar">
-						<input type="search" id="pkgSearch" placeholder="Search product folders…" oninput="scheduleRenderPackages()" />
-						<select id="statusFilter" onchange="renderPackages()">
-							<option value="" data-i18n="allStatuses">All statuses</option>
-						</select>
-					</div>
-
-					<div id="pkgArea"></div>
 				</div>
-			</main>
+				<div class="field">
+					<label data-i18n="fNotes">Notes</label>
+					<textarea id="csNotes"></textarea>
+				</div>
+				<div class="modal-err" id="csErr"></div>
+				<div class="modal-actions">
+					<button class="btn" data-act="close" data-target="cshopModal" data-i18n="cancel">Cancel</button>
+					<button class="btn primary" id="csSave" data-act="cshop-save" data-i18n="save">Save</button>
+				</div>
+			</div>
 		</div>
 
-		<!-- ── Supplier modal ───────────────────────────────────────── -->
-		<div class="modal-bg" id="supplierModal">
-			<div class="modal">
-				<h3 id="smTitle" data-i18n="addSupplier">Add supplier</h3>
+		<!-- Design supplier (sourcing_suppliers) -->
+		<div class="modal-bg" id="designModal" aria-hidden="true">
+			<div class="modal" role="dialog" aria-modal="true" aria-labelledby="dsTitleHead" tabindex="-1">
+				<h3 id="dsTitleHead" data-i18n="addDesignSupplier">Add design supplier</h3>
 				<div class="field">
 					<label data-i18n="fName">Supplier name *</label>
-					<input type="text" id="smName" placeholder="e.g. Shenzhen Case Studio" />
+					<input type="text" id="dsName" placeholder="e.g. Shenzhen Case Studio" />
 				</div>
 				<div class="field">
 					<label data-i18n="fLocation">Shop Location</label>
-					<input type="text" id="smLocation" placeholder="e.g. Huaqiangbei, Shenzhen" />
+					<input type="text" id="dsLocation" placeholder="e.g. Huaqiangbei, Shenzhen" />
 				</div>
 				<!-- The chat handles are the whole point of this registry: these suppliers
 				     publish their design folders on WeChat/QQ, so the handle is how the
 				     employee actually reaches them for a new drop. -->
-				<div class="field">
-					<label data-i18n="fWechat">WeChat ID</label>
-					<input type="text" id="smWechat" placeholder="e.g. case_studio_88" />
-				</div>
-				<div class="field">
-					<label data-i18n="fQq">QQ</label>
-					<input type="text" id="smQq" placeholder="e.g. 812345678" />
+				<div class="grid2">
+					<div class="field">
+						<label data-i18n="fWechat">WeChat ID</label>
+						<input type="text" id="dsWechat" placeholder="e.g. case_studio_88" />
+					</div>
+					<div class="field">
+						<label data-i18n="fQq">QQ</label>
+						<input type="text" id="dsQq" placeholder="e.g. 812345678" />
+					</div>
 				</div>
 				<div class="field">
 					<label data-i18n="fNotes">Notes</label>
-					<textarea id="smNotes" placeholder="What they specialise in, terms, etc."></textarea>
+					<textarea id="dsNotes" placeholder="What they specialise in, terms, etc."></textarea>
 				</div>
-				<div class="modal-err" id="smErr"></div>
+				<div class="modal-err" id="dsErr"></div>
 				<div class="modal-actions">
-					<button class="btn" onclick="closeModal('supplierModal')" data-i18n="cancel">Cancel</button>
-					<button class="btn primary" id="smSave" onclick="saveSupplier()" data-i18n="save">Save</button>
+					<button class="btn" data-act="close" data-target="designModal" data-i18n="cancel">Cancel</button>
+					<button class="btn primary" id="dsSave" data-act="design-save" data-i18n="save">Save</button>
 				</div>
 			</div>
 		</div>
 
-		<!-- ── Package edit modal ───────────────────────────────────── -->
-		<div class="modal-bg" id="pkgModal">
-			<div class="modal">
-				<h3 data-i18n="editPackage">Edit product folder</h3>
+		<!-- Package (sourcing_packages) -->
+		<div class="modal-bg" id="pkgModal" aria-hidden="true">
+			<div class="modal" role="dialog" aria-modal="true" aria-labelledby="pkgTitleHead" tabindex="-1">
+				<h3 id="pkgTitleHead" data-i18n="editPackage">Edit product folder</h3>
 				<div class="field">
 					<label data-i18n="fTitle">Title</label>
 					<input type="text" id="pmTitle" />
 				</div>
-				<div class="field">
-					<label data-i18n="fCategory">Category</label>
-					<select id="pmCategory"></select>
-				</div>
-				<div class="field">
-					<label data-i18n="fStatus">Status</label>
-					<select id="pmStatus"></select>
+				<div class="grid2">
+					<div class="field">
+						<label data-i18n="fCategory">Category</label>
+						<select id="pmCategory"></select>
+					</div>
+					<div class="field">
+						<label data-i18n="fStatus">Status</label>
+						<select id="pmStatus"></select>
+					</div>
 				</div>
 				<div class="field">
 					<label data-i18n="fNotes">Notes</label>
@@ -796,40 +2015,212 @@
 				</div>
 				<div class="modal-err" id="pmErr"></div>
 				<div class="modal-actions">
-					<button class="btn" onclick="closeModal('pkgModal')" data-i18n="cancel">Cancel</button>
-					<button class="btn primary" id="pmSave" onclick="savePackage()" data-i18n="save">Save</button>
+					<button class="btn" data-act="close" data-target="pkgModal" data-i18n="cancel">Cancel</button>
+					<button class="btn primary" id="pmSave" data-act="pkg-save" data-i18n="save">Save</button>
 				</div>
 			</div>
 		</div>
 
-		<div id="toast"></div>
+		<div id="toast" role="status" aria-live="polite"></div>
 
+		<!-- The server renders this page's own capability list from src/auth/policy.js,
+		     so the UI hides exactly what the server would refuse. Rendering hint only —
+		     every request is re-authorised from the signed session cookie. -->
+		<script src="/auth-session.js"></script>
 		<script>
 			'use strict'
 			// ── Same-origin API (cookies carry the session) ──────────────────────
 			const API = window.location.origin
 			const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
 
+			// ── Capabilities ─────────────────────────────────────────────────────
+			// The catalog and the supplier directory are the ROUTE master data, so
+			// editing them needs `route:catalog` — the same permission the Route tab
+			// requires. A role that may only read it still gets the whole page, minus
+			// the buttons that would 403.
+			const CAPS = (window.__AUTH && window.__AUTH.capabilities) || ['*']
+			const can = (c) => CAPS.includes('*') || CAPS.includes(c)
+			const CAN_EDIT_CATALOG = can('route:catalog')
+
+			// Sentinel from src/route/stall-location.js: "floor could not be read".
+			const UNKNOWN_FLOOR = 999
+			const CAT_PAGE_SIZE = 48
+			// Supplier-filter value meaning "rows with no supplier at all". Can't be ''
+			// (that's "any"), so it's a token no real shop name would ever be.
+			const NO_SUPPLIER = '##none##'
+
 			// ── i18n (lightweight; labels applied via [data-i18n]) ────────────────
 			const STR = {
-				brand: { en: 'Sourcing Library', zh: '货源库' },
-				brandSub: { en: 'Supplier design intake', zh: '供应商设计归档' },
+				brand: { en: 'Sourcing', zh: '货源中心' },
 				dashboard: { en: 'Dashboard', zh: '仪表盘' },
 				logout: { en: 'Log out', zh: '退出' },
-				suppliers: { en: 'Suppliers', zh: '供应商' },
-				add: { en: 'Add', zh: '新增' },
+				navCatalog: { en: 'Product Catalog', zh: '产品目录' },
+				navSuppliers: { en: 'Suppliers', zh: '供应商' },
+				navLibrary: { en: 'Design Library', zh: '设计库' },
+				refresh: { en: 'Refresh', zh: '刷新' },
+				exportCsv: { en: 'Export CSV', zh: '导出 CSV' },
 				loading: { en: 'Loading…', zh: '加载中…' },
-				pickTitle: { en: 'Select a supplier', zh: '选择一个供应商' },
-				pickSub: { en: 'Choose a supplier on the left, or add a new one, to manage its product folders.', zh: '在左侧选择供应商，或新增一个，以管理其产品文件夹。' },
 				edit: { en: 'Edit', zh: '编辑' },
 				delete: { en: 'Delete', zh: '删除' },
+				cancel: { en: 'Cancel', zh: '取消' },
+				save: { en: 'Save', zh: '保存' },
+				add: { en: 'Add', zh: '新增' },
+
+				// Catalog
+				catTitle: { en: 'Product Catalog', zh: '产品目录' },
+				catSub: {
+					en: 'Every product we sell, the supplier who sells it, where that supplier is, and what each component costs. This is the same catalog the shopping route is built from — an edit here takes effect everywhere.',
+					zh: '我们销售的每件产品、对应的供应商、供应商位置以及各部件的进货价。这与购物路线使用的是同一份目录 —— 在此修改会立即在各处生效。',
+				},
+				addProduct: { en: 'Add product', zh: '新增产品' },
+				editProduct: { en: 'Edit product', zh: '编辑产品' },
+				modeTable: { en: 'Table', zh: '表格' },
+				modeCards: { en: 'Cards', zh: '卡片' },
+				sortLocation: { en: 'Sort: walking order', zh: '排序：采购顺序' },
+				sortTitle: { en: 'Sort: name', zh: '排序：名称' },
+				sortType: { en: 'Sort: product type', zh: '排序：产品类型' },
+				sortPriceDesc: { en: 'Sort: price (high → low)', zh: '排序：价格（高→低）' },
+				sortPriceAsc: { en: 'Sort: price (low → high)', zh: '排序：价格（低→高）' },
+				sortUpdated: { en: 'Sort: recently updated', zh: '排序：最近更新' },
+				allSuppliers: { en: 'All suppliers', zh: '全部供应商' },
+				noSupplierSet: { en: '(no supplier set)', zh: '（未设供应商）' },
+				statProducts: { en: 'Products', zh: '产品' },
+				statSuppliers: { en: 'Suppliers', zh: '供应商' },
+				statMarkets: { en: 'Markets', zh: '市场' },
+				statPriced: { en: 'Priced', zh: '已定价' },
+				statWithImage: { en: 'With photo', zh: '有图片' },
+				statReady: { en: 'Ready to buy', zh: '资料齐全' },
+				statCharms: { en: 'Charm codes', zh: '挂件编号' },
+				statCharmShops: { en: 'Charm shops', zh: '挂件店' },
+				filterType: { en: 'Type', zh: '类型' },
+				filterAttention: { en: 'Needs attention', zh: '待补全' },
+				colProductName: { en: 'Product', zh: '产品' },
+				colType: { en: 'Type', zh: '类型' },
+				colSupplier: { en: 'Supplier · Location', zh: '供应商 · 位置' },
+				colCharm: { en: 'Charm', zh: '挂件' },
+				colCase: { en: 'Case ¥', zh: '壳 ¥' },
+				colGrip: { en: 'Grip ¥', zh: '支架 ¥' },
+				colUnit: { en: 'Unit ¥', zh: '单件 ¥' },
+				priceCase: { en: 'Case', zh: '壳' },
+				priceGrip: { en: 'Grip', zh: '支架' },
+				priceCharm: { en: 'Charm', zh: '挂件' },
+				priceTotal: { en: 'Total', zh: '合计' },
+				colAttention: { en: 'Attention', zh: '待补全' },
+				noProducts: { en: 'No products in the catalog yet', zh: '目录中暂无产品' },
+				noProductsSub: { en: 'Add one here, or import the Product Map sheet from the Route tab.', zh: '在此新增，或从「路线」标签导入产品对照表。' },
+				noMatchProducts: { en: 'No products match your filters.', zh: '没有符合筛选条件的产品。' },
+				showMore: { en: 'Show more', zh: '显示更多' },
+				showing: { en: 'Showing', zh: '显示' },
+				of: { en: 'of', zh: '/' },
+				autoTag: { en: 'auto', zh: '自动' },
+				autoTagHint: { en: 'Classified from the title. Set it explicitly to override.', zh: '根据标题自动判定。可手动指定以覆盖。' },
+				approxHint: { en: 'Representative photo — matched by title similarity, not an exact listing match.', zh: '近似图片 —— 按标题相似度匹配，非精确对应。' },
+				inferredStall: { en: 'from supplier directory', zh: '来自供应商目录' },
+
+				// Suppliers
+				supTitle: { en: 'Suppliers', zh: '供应商' },
+				supSub: {
+					en: 'The physical stalls we buy from, grouped in the order a buyer walks them. Stall codes drive the shopping route, so keeping them exact is what keeps a trip efficient.',
+					zh: '我们实际采购的档口，按采购动线顺序分组。摊位编号决定购物路线，因此保持准确才能提高采购效率。',
+				},
+				addSupplier2: { en: 'Add supplier', zh: '新增供应商' },
+				editSupplier2: { en: 'Edit supplier', zh: '编辑供应商' },
+				allMarkets: { en: 'All markets', zh: '全部市场' },
+				charmShops: { en: 'Charm shops', zh: '挂件店' },
+				charmShopsSub: {
+					en: 'Where the charm codes are bought. Charm photos and codes themselves are managed on the dashboard’s Route tab.',
+					zh: '挂件的采购地点。挂件图片与编号本身在仪表盘的「路线」标签管理。',
+				},
+				addCharmShop: { en: 'Add charm shop', zh: '新增挂件店' },
+				editCharmShop: { en: 'Edit charm shop', zh: '编辑挂件店' },
+				colShop: { en: 'Shop', zh: '店名' },
+				colStall: { en: 'Stall', zh: '摊位' },
+				colLocation: { en: 'Location', zh: '位置' },
+				colMall: { en: 'Mall', zh: '商场' },
+				colAddress: { en: 'Address', zh: '地址' },
+				colNotes: { en: 'Notes', zh: '备注' },
+				colProducts: { en: 'Products', zh: '产品数' },
+				colCharms: { en: 'Charms', zh: '挂件数' },
+				noSuppliers: { en: 'No suppliers recorded yet', zh: '暂无供应商记录' },
+				noSuppliersSub: { en: 'Add the stalls you buy from so the shopping route can order the trip.', zh: '新增你采购的档口，购物路线才能规划动线。' },
+				noMatchSuppliers: { en: 'No suppliers match your filters.', zh: '没有符合筛选条件的供应商。' },
+				noCharmShops: { en: 'No charm shops recorded yet.', zh: '暂无挂件店记录。' },
+				unlocated: { en: 'Stall not recorded', zh: '未记录摊位' },
+
+				// Supplier detail drawer
+				openSupplier: { en: 'Open supplier', zh: '查看供应商' },
+				sdSearch: { en: 'Search this supplier’s products…', zh: '搜索该供应商的产品…' },
+				sdProducts: { en: 'Products', zh: '产品数' },
+				sdListings: { en: 'listing records', zh: '条刊登记录' },
+				sdPriced: { en: 'Priced', zh: '已定价' },
+				sdReady: { en: 'Ready to buy', zh: '资料齐全' },
+				sdUnitCost: { en: 'Known cost total', zh: '已知成本合计' },
+				sdManageListings: { en: 'Manage listing records', zh: '管理刊登记录' },
+				sdViewListings: { en: 'View listing records', zh: '查看刊登记录' },
+				sdGroupedHint: {
+					en: 'These Etsy listings resolve to the same physical supplier product.',
+					zh: '这些 Etsy 刊登已被识别为同一个供应商实物产品。',
+				},
+				sdAddProduct: { en: 'Add product here', zh: '在此新增产品' },
+				sdEditSupplier: { en: 'Edit supplier', zh: '编辑供应商' },
+				sdDeleteSupplier: { en: 'Delete supplier', zh: '删除供应商' },
+				sdOtherStalls: { en: 'This shop also holds', zh: '该店还有' },
+				sdStallsSuffix: { en: 'other stall(s)', zh: '个其他摊位' },
+				sdNoProducts: { en: 'Nothing mapped to this supplier yet', zh: '尚未有产品指向该供应商' },
+				sdNoProductsSub: {
+					en: 'Add a product here, or set this shop as the supplier on an existing product. Only products with a photo appear in this catalog.',
+					zh: '可在此新增产品，或将现有产品的供应商设为该店。仅有图片的产品会出现在目录中。',
+				},
+				sdNoMatch: { en: 'No products here match your search.', zh: '该供应商下没有符合搜索的产品。' },
+				sdPricedTitle: { en: 'priced of', zh: '已定价 / 共' },
+				sdSavedNoPhoto: {
+					en: 'Saved. It will appear here once a photo is available — the catalog only lists products with one.',
+					zh: '已保存。待有产品图片后即会显示 —— 目录仅列出有图片的产品。',
+				},
+				sdStallDiffers: { en: 'stall on this product', zh: '该产品记录的摊位' },
+				sdCharmDetails: { en: 'Charm', zh: '挂件' },
+
+				// Design library
+				designSuppliers: { en: 'Design suppliers', zh: '设计供应商' },
+				addDesignSupplier: { en: 'Add design supplier', zh: '新增设计供应商' },
+				editDesignSupplier: { en: 'Edit design supplier', zh: '编辑设计供应商' },
+				pickTitle: { en: 'Select a supplier', zh: '选择一个供应商' },
+				pickSub: { en: 'Choose a supplier on the left, or add a new one, to manage its product folders.', zh: '在左侧选择供应商，或新增一个，以管理其产品文件夹。' },
 				dropTitle: { en: 'Drop zipped product folders here', zh: '将产品压缩包拖到此处' },
 				dropSub: { en: 'or click to choose .zip files downloaded from WeChat / QQ', zh: '或点击选择从微信 / QQ 下载的 .zip 文件' },
 				uploadAs: { en: 'Upload as:', zh: '上传为：' },
 				chooseFiles: { en: 'Choose files', zh: '选择文件' },
 				allStatuses: { en: 'All statuses', zh: '全部状态' },
-				addSupplier: { en: 'Add supplier', zh: '新增供应商' },
-				editSupplier: { en: 'Edit supplier', zh: '编辑供应商' },
+				editPackage: { en: 'Edit product folder', zh: '编辑产品文件夹' },
+				allCat: { en: 'All', zh: '全部' },
+				colProduct: { en: 'Product folder', zh: '产品文件夹' },
+				colCategory: { en: 'Category', zh: '类别' },
+				colSize: { en: 'Size', zh: '大小' },
+				colStatus: { en: 'Status', zh: '状态' },
+				colAdded: { en: 'Added', zh: '添加时间' },
+				noPackages: { en: 'No product folders yet', zh: '暂无产品文件夹' },
+				noPackagesSub: { en: 'Upload the zip folders you downloaded for this supplier.', zh: '上传你为该供应商下载的压缩包。' },
+				noMatch: { en: 'No folders match your filters.', zh: '没有符合筛选条件的文件夹。' },
+				download: { en: 'Download', zh: '下载' },
+
+				// Fields
+				fProductTitle: { en: 'Product title *', zh: '产品标题 *' },
+				fProductTitleHint: {
+					en: 'Matched to orders by title, so it must be the listing title character for character.',
+					zh: '订单按标题匹配，必须与上架标题完全一致。',
+				},
+				fProductType: { en: 'Product type', zh: '产品类型' },
+				fSupplier: { en: 'Supplier (shop name)', zh: '供应商（店名）' },
+				fStall: { en: 'Stall', zh: '摊位' },
+				fStallHint: { en: 'Prefix the market for stalls outside the home market, e.g. 经济5D100.', zh: '非本市场的摊位请加市场前缀，如 经济5D100。' },
+				fCharmShop: { en: 'Charm shop', zh: '挂件店' },
+				fCharmCode: { en: 'Charm code', zh: '挂件编号' },
+				fCostCase: { en: 'Case price (¥)', zh: '壳进价（¥）' },
+				fCostGrip: { en: 'Grip price (¥)', zh: '支架进价（¥）' },
+				fShopName: { en: 'Shop name *', zh: '店名 *' },
+				fMall: { en: 'Mall', zh: '商场' },
+				fFloor: { en: 'Floor', zh: '楼层' },
+				fAddress: { en: 'Address', zh: '地址' },
 				fName: { en: 'Supplier name *', zh: '供应商名称 *' },
 				fLocation: { en: 'Shop Location', zh: '店铺位置' },
 				fWechat: { en: 'WeChat ID', zh: '微信号' },
@@ -838,20 +2229,18 @@
 				fTitle: { en: 'Title', zh: '标题' },
 				fCategory: { en: 'Category', zh: '类别' },
 				fStatus: { en: 'Status', zh: '状态' },
-				cancel: { en: 'Cancel', zh: '取消' },
-				save: { en: 'Save', zh: '保存' },
-				editPackage: { en: 'Edit product folder', zh: '编辑产品文件夹' },
-				allCat: { en: 'All', zh: '全部' },
-				colProduct: { en: 'Product folder', zh: '产品文件夹' },
-				colCategory: { en: 'Category', zh: '类别' },
-				colSize: { en: 'Size', zh: '大小' },
-				colStatus: { en: 'Status', zh: '状态' },
-				colAdded: { en: 'Added', zh: '添加时间' },
-				colActions: { en: '', zh: '' },
-				noPackages: { en: 'No product folders yet', zh: '暂无产品文件夹' },
-				noPackagesSub: { en: 'Upload the zip folders you downloaded for this supplier.', zh: '上传你为该供应商下载的压缩包。' },
-				noMatch: { en: 'No folders match your filters.', zh: '没有符合筛选条件的文件夹。' },
-				download: { en: 'Download', zh: '下载' },
+
+				// Messages
+				saved: { en: 'Saved', zh: '已保存' },
+				deleted: { en: 'Deleted', zh: '已删除' },
+				typeAuto: { en: 'Auto from title', zh: '按标题自动' },
+				typeAutoIs: { en: 'Auto would classify this as', zh: '自动判定为' },
+				needTitle: { en: 'Please enter a product title.', zh: '请填写产品标题。' },
+				needShopName: { en: 'Please enter a shop name.', zh: '请填写店名。' },
+				readOnly: { en: 'Your account can view this catalog but not edit it.', zh: '你的账号可查看此目录，但无法编辑。' },
+				notInDirectory: { en: 'Not in the supplier directory — add it so the route can locate it.', zh: '未在供应商目录中 —— 请新增以便路线定位。' },
+				knownCharm: { en: 'Known charm code', zh: '已登记的挂件编号' },
+				unknownCharm: { en: 'Not in the charm library', zh: '不在挂件库中' },
 			}
 			let LANG = localStorage.getItem('sourcingLang') || 'en'
 			function t(key) {
@@ -863,6 +2252,8 @@
 					el.textContent = t(el.getAttribute('data-i18n'))
 				})
 				document.querySelectorAll('.lang-switch button').forEach((b) => b.classList.toggle('active', b.dataset.lang === LANG))
+				const sdSearch = document.getElementById('sdSearch')
+				if (sdSearch) sdSearch.placeholder = t('sdSearch')
 			}
 			function setLang(l) {
 				LANG = l
@@ -878,7 +2269,7 @@
 				el.textContent = msg
 				el.className = 'show' + (kind ? ' ' + kind : '')
 				clearTimeout(toastTimer)
-				toastTimer = setTimeout(() => (el.className = ''), 3200)
+				toastTimer = setTimeout(() => (el.className = ''), 3600)
 			}
 
 			// ── Fetch helper ────────────────────────────────────────────────────
@@ -890,10 +2281,64 @@
 				}
 				const ct = res.headers.get('content-type') || ''
 				const data = ct.includes('application/json') ? await res.json() : {}
-				if (!res.ok) throw new Error(data.error || `Request failed (HTTP ${res.status})`)
+				if (!res.ok) {
+					throw Object.assign(new Error(data.error || `Request failed (HTTP ${res.status})`), {
+						code: data.code || '',
+						product_count: Number(data.product_count) || 0,
+						status: res.status,
+					})
+				}
 				return data
 			}
+			const jsonBody = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
 
+			// Product/supplier writes can originate from this page, the Route tab,
+			// or another operator. The route SSE stream carries catalog-scoped
+			// invalidations so every open Sourcing page converges without polling.
+			let catalogEventSource = null
+			let catalogRefreshTimer = null
+			let catalogStreamOpened = false
+			function connectCatalogEvents() {
+				if (catalogEventSource) return
+				try {
+					catalogEventSource = new EventSource(API + '/api/shop/stream')
+					catalogEventSource.onopen = () => {
+						// SSE has no replay buffer. Revalidate after a reconnect so
+						// changes made while this browser was offline cannot stay stale.
+						if (catalogStreamOpened) {
+							clearTimeout(catalogRefreshTimer)
+							catalogRefreshTimer = setTimeout(() => void loadCatalog(), 100)
+						}
+						catalogStreamOpened = true
+					}
+					catalogEventSource.onmessage = (event) => {
+						let message
+						try {
+							message = JSON.parse(event.data)
+						} catch {
+							return
+						}
+						if (!message || message.type !== 'refresh' || message.scope !== 'catalog') return
+						clearTimeout(catalogRefreshTimer)
+						catalogRefreshTimer = setTimeout(() => {
+							void loadCatalog()
+						}, 180)
+					}
+					catalogEventSource.onerror = () => {
+						/* EventSource reconnects; manual Refresh remains available. */
+					}
+				} catch {
+					/* Live invalidation is an enhancement, never a boot dependency. */
+				}
+			}
+			window.addEventListener('focus', () => {
+				void loadCatalog()
+			})
+			document.addEventListener('visibilitychange', () => {
+				if (!document.hidden) void loadCatalog()
+			})
+
+			// ── Formatters ────────────────────────────────────────────────────
 			function fmtBytes(n) {
 				const b = Number(n) || 0
 				if (b < 1024) return b + ' B'
@@ -908,167 +2353,1362 @@
 			}
 			function fmtDate(sec) {
 				if (!sec) return '—'
-				const d = new Date(sec * 1000)
-				return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+				return new Date(sec * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
 			}
+			function fmtMoney(v) {
+				return v == null ? '' : '¥' + Number(v).toFixed(2)
+			}
+			/**
+			 * Format a location the server already resolved — "Tongxin · F2 · A2-21".
+			 * Pure formatting: the stall PARSING lives in src/route/stall-location.js
+			 * and is never re-implemented here, so a market prefix rule can only ever
+			 * be defined in one place.
+			 */
+			function locText(loc) {
+				if (!loc || !loc.located) return ''
+				const parts = []
+				const b = loc.building_label ? (LANG === 'zh' ? loc.building_label.zh : loc.building_label.en) : ''
+				if (b) parts.push(b)
+				if (loc.floor != null && loc.floor !== UNKNOWN_FLOOR) parts.push(LANG === 'zh' ? loc.floor + '楼' : 'F' + loc.floor)
+				if (loc.code) parts.push(loc.code)
+				return parts.join(' · ')
+			}
+			const norm = (s) => String(s == null ? '' : s).trim().replace(/\s+/g, ' ').toLowerCase()
 
 			// ── State ─────────────────────────────────────────────────────────
-			let META = { categories: [], statuses: [] }
-			let SUPPLIERS = []
+			let VIEW = ['catalog', 'suppliers', 'library'].includes(localStorage.getItem('sourcingView')) ? localStorage.getItem('sourcingView') : 'catalog'
+			let META = { categories: [], statuses: [], product_types: [], gap_types: [] }
+
+			// Catalog + supplier directory (one payload, GET /api/sourcing/catalog).
+			let CAT = null
+			let catalogLoadSeq = 0
+			const catFilters = { types: new Set(), gaps: new Set(), mode: localStorage.getItem('sourcingCatMode') === 'table' ? 'table' : 'grid' }
+			let catShown = CAT_PAGE_SIZE
+			let editingProductId = null
+
+			// Design library (sourcing_suppliers + sourcing_packages).
+			let DESIGN = []
+			let designLoaded = false
 			let PACKAGES = []
-			let selectedId = null
-			let catFilter = 'all'
-			let editingSupplier = false
+			let selectedDesignId = null
+			let libCatFilter = 'all'
+			let editingDesign = false
 			let editingPkgId = null
 
+			// Composite-key editors remember the row they opened, so a rename can send
+			// the original key alongside the new one (the directories are keyed on
+			// (shop_name, stall), so a rename is a delete + insert server-side).
+			let editingStall = null
+			let editingCshop = null
+
+			// The supplier whose products are open in the side drawer. Stored as the
+			// server's `supplier.key` (not an index) so a catalog reload after an edit
+			// can re-find the same stall even if the list was re-sorted.
+			let openSupplierKey = null
+			let supplierGroupsCatalog = null
+			let supplierGroupsByKey = new Map()
+
+			function typeMeta(id) {
+				return (META.product_types || []).find((x) => x.id === id) || { id, label: id, label_zh: id }
+			}
+			function typeLabel(id) {
+				const m = typeMeta(id)
+				return LANG === 'zh' ? m.label_zh : m.label
+			}
+			function gapLabel(id) {
+				const g = (META.gap_types || []).find((x) => x.id === id)
+				if (!g) return id
+				return LANG === 'zh' ? g.label_zh : g.label
+			}
 			function catLabel(id) {
-				const c = META.categories.find((x) => x.id === id)
+				const c = (META.categories || []).find((x) => x.id === id)
 				if (!c) return id
 				return LANG === 'zh' ? c.label_zh : c.label
 			}
 			function statusLabel(id) {
-				const s = META.statuses.find((x) => x.id === id)
+				const s = (META.statuses || []).find((x) => x.id === id)
 				if (!s) return id
 				return LANG === 'zh' ? s.label_zh : s.label
 			}
 
-			// ── Load ──────────────────────────────────────────────────────────
+			// ══════════════════════════════════════════════════════════════════
+			// Boot
+			// ══════════════════════════════════════════════════════════════════
 			async function boot() {
 				applyLang()
+				for (const el of document.querySelectorAll('.can-edit')) el.hidden = !CAN_EDIT_CATALOG
+
 				try {
 					const me = await api('/api/auth/me')
 					if (me.user) document.getElementById('whoami').textContent = (LANG === 'zh' ? '已登录：' : 'Signed in: ') + me.user
-					if (me.authEnabled === false) document.getElementById('logoutBtn').style.display = 'none'
-				} catch (e) {
-					/* handled by api() redirect */
+					if (me.authEnabled === false) document.getElementById('logoutBtn').hidden = true
+				} catch {
+					/* handled by api()'s 401 redirect */
 				}
 				try {
 					// Merge over the defaults rather than replacing: a 200 that isn't the
 					// expected shape (a proxy interstitial, say) would otherwise leave
-					// META.categories undefined and kill boot() in fillCategorySelects,
-					// before the supplier list ever loads.
-					META = Object.assign({ categories: [], statuses: [] }, await api('/api/sourcing/meta'))
+					// META.categories undefined and kill boot() before anything loads.
+					META = Object.assign({ categories: [], statuses: [], product_types: [], gap_types: [] }, await api('/api/sourcing/meta'))
 				} catch (e) {
 					toast(e.message, 'err')
 				}
-				fillCategorySelects()
-				fillStatusSelects()
-				await loadSuppliers()
+				fillLibrarySelects()
+				setView(VIEW, { skipLoad: true })
+				connectCatalogEvents()
+				// Both the Catalog and Suppliers views render from one payload, and the
+				// Library needs its own list, so load both up front: the view switch is
+				// then instant and the nav counts are correct from the first paint.
+				await Promise.all([loadCatalog(), loadDesignSuppliers()])
 			}
 
+			function setView(view, opts = {}) {
+				VIEW = view
+				localStorage.setItem('sourcingView', view)
+				document.getElementById('viewCatalog').hidden = view !== 'catalog'
+				document.getElementById('viewSuppliers').hidden = view !== 'suppliers'
+				document.getElementById('viewLibrary').hidden = view !== 'library'
+				for (const b of document.querySelectorAll('#viewNav button')) b.classList.toggle('active', b.dataset.view === view)
+				if (opts.skipLoad) return
+				if (view === 'catalog' || view === 'suppliers') {
+					if (!CAT) loadCatalog()
+				} else if (!designLoaded) {
+					loadDesignSuppliers()
+				}
+			}
+
+			function renderAll() {
+				fillLibrarySelects()
+				// The generated selects carry translated labels of their own, so they
+				// have to be rebuilt on a language switch — [data-i18n] can't reach them.
+				if (CAT) fillSupplierFilter()
+				renderCatalog()
+				renderSuppliers()
+				if (openSupplierKey) renderSupplierDrawer()
+				renderDesignList()
+				renderDesignView()
+				renderPackages()
+				renderNavCounts()
+			}
+
+			function renderNavCounts() {
+				document.getElementById('navNProducts').textContent = CAT ? CAT.totals.products : '–'
+				document.getElementById('navNSuppliers').textContent = CAT ? CAT.totals.suppliers : '–'
+				document.getElementById('navNDesign').textContent = DESIGN.length || '0'
+			}
+
+			// ══════════════════════════════════════════════════════════════════
+			// VIEW 1 · Product Catalog
+			// ══════════════════════════════════════════════════════════════════
+			async function loadCatalog() {
+				const requestSeq = ++catalogLoadSeq
+				try {
+					const nextCatalog = await api('/api/sourcing/catalog')
+					if (requestSeq !== catalogLoadSeq) return
+					CAT = nextCatalog
+					// Keep the server's taxonomy authoritative even if /meta was stale.
+					if (CAT.product_types) META.product_types = CAT.product_types
+					if (CAT.gap_types) META.gap_types = CAT.gap_types
+					// Drop filters for facets that no longer exist, so a stale selection
+					// can never hide the whole catalog with no visible reason.
+					const typeIds = new Set(META.product_types.map((x) => x.id))
+					const gapIds = new Set(META.gap_types.map((x) => x.id))
+					for (const v of [...catFilters.types]) if (!typeIds.has(v)) catFilters.types.delete(v)
+					for (const v of [...catFilters.gaps]) if (!gapIds.has(v)) catFilters.gaps.delete(v)
+					fillSupplierFilter()
+					fillProductDatalists()
+					renderCatalog()
+					renderSuppliers()
+					renderNavCounts()
+					// Keep the open drawer live: after a product/supplier edit the
+					// counts and the list behind the number must refresh in place.
+					if (openSupplierKey) renderSupplierDrawer()
+				} catch (e) {
+					if (requestSeq !== catalogLoadSeq) return
+					// Keep the last-good catalog visible during a transient outage;
+					// reconnect/focus handlers will retry even when boot had no data.
+					if (!CAT) {
+						document.getElementById('catArea').innerHTML = `<div class="empty">${esc(e.message)}</div>`
+						document.getElementById('supArea').innerHTML = `<div class="empty">${esc(e.message)}</div>`
+					}
+					toast(e.message, 'err')
+				}
+			}
+
+			function fillSupplierFilter() {
+				const sel = document.getElementById('catSupplier')
+				const prev = sel.value
+				const names = [...new Set(CAT.products.map((p) => p.shop_name).filter(Boolean))].sort((a, b) => a.localeCompare(b))
+				sel.innerHTML =
+					`<option value="">${esc(t('allSuppliers'))}</option>` +
+					`<option value="${NO_SUPPLIER}">${esc(t('noSupplierSet'))}</option>` +
+					names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join('')
+				if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev
+			}
+
+			function fillProductDatalists() {
+				const uniq = (arr) => [...new Set(arr.filter(Boolean))]
+				document.getElementById('dlShops').innerHTML = uniq(CAT.suppliers.map((s) => s.shop_name))
+					.sort((a, b) => a.localeCompare(b))
+					.map((n) => `<option value="${esc(n)}"></option>`)
+					.join('')
+				document.getElementById('dlCharmShops').innerHTML = uniq(CAT.charm_shops.map((s) => s.shop_name))
+					.map((n) => `<option value="${esc(n)}"></option>`)
+					.join('')
+				document.getElementById('dlCharmCodes').innerHTML = CAT.charms
+					.map((c) => `<option value="${esc(c.code)}">${esc([c.charm_shop, c.charm_stall].filter(Boolean).join(' · '))}</option>`)
+					.join('')
+			}
+
+			/** The products the current filters + search select, in the chosen order. */
+			function filteredProducts() {
+				if (!CAT) return []
+				const q = norm(document.getElementById('catSearch').value)
+				const supplier = document.getElementById('catSupplier').value
+				const sort = document.getElementById('catSort').value
+				// Belt-and-suspenders: the API already drops imageless rows, but a
+				// stale process or a broken URL must never paint a blank card.
+				let rows = CAT.products.filter((p) => p.image_url)
+
+				if (catFilters.types.size) rows = rows.filter((p) => catFilters.types.has(p.product_type))
+				// Gap chips are OR'd: "show me anything with a problem I picked".
+				if (catFilters.gaps.size) rows = rows.filter((p) => p.gaps.some((g) => catFilters.gaps.has(g)))
+				if (supplier === NO_SUPPLIER) rows = rows.filter((p) => !p.shop_name)
+				else if (supplier) rows = rows.filter((p) => p.shop_name === supplier)
+				if (q) {
+					rows = rows.filter((p) =>
+						[p.title, p.shop_name, p.stall_effective, p.charm_code, p.charm_shop, typeLabel(p.product_type)].some((v) => norm(v).includes(q)),
+					)
+				}
+
+				const byTitle = (a, b) => String(a.title).localeCompare(String(b.title))
+				rows = rows.slice()
+				if (sort === 'location') rows.sort((a, b) => (a.location.sort_key < b.location.sort_key ? -1 : a.location.sort_key > b.location.sort_key ? 1 : byTitle(a, b)))
+				else if (sort === 'title') rows.sort(byTitle)
+				else if (sort === 'type') rows.sort((a, b) => typeLabel(a.product_type).localeCompare(typeLabel(b.product_type)) || byTitle(a, b))
+				// Unpriced rows sort last in BOTH price directions: "cheapest" should
+				// never be a row with no price at all.
+				else if (sort === 'price_desc') rows.sort((a, b) => (b.cost_total ?? -Infinity) - (a.cost_total ?? -Infinity) || byTitle(a, b))
+				else if (sort === 'price_asc') rows.sort((a, b) => (a.cost_total ?? Infinity) - (b.cost_total ?? Infinity) || byTitle(a, b))
+				else if (sort === 'updated') rows.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0) || byTitle(a, b))
+				return rows
+			}
+
+			function renderCatalog() {
+				if (!CAT) return
+				renderCatStats()
+				renderCatChips()
+				document.getElementById('catModeBtn').innerHTML = catFilters.mode === 'grid' ? '▦ ' + esc(t('modeTable')) : '▤ ' + esc(t('modeCards'))
+
+				const rows = filteredProducts()
+				const area = document.getElementById('catArea')
+				const more = document.getElementById('catMore')
+
+				if (!CAT.products.length) {
+					area.innerHTML = `<div class="empty"><div class="big">${esc(t('noProducts'))}</div><div>${esc(t('noProductsSub'))}</div></div>`
+					more.hidden = true
+					document.getElementById('catCount').textContent = ''
+					return
+				}
+				if (!rows.length) {
+					area.innerHTML = `<div class="empty">${esc(t('noMatchProducts'))}</div>`
+					more.hidden = true
+					document.getElementById('catCount').textContent = `0 ${t('of')} ${CAT.products.length}`
+					return
+				}
+
+				// Windowed rendering: 700+ rows with photos is a lot of DOM, and every
+				// keystroke re-renders. A page of 48 keeps filtering instant.
+				const slice = rows.slice(0, catShown)
+				area.innerHTML = catFilters.mode === 'grid' ? productGridHtml(slice) : productTableHtml(slice)
+				document.getElementById('catCount').textContent = `${t('showing')} ${slice.length} ${t('of')} ${rows.length}`
+				more.hidden = slice.length >= rows.length
+				if (!more.hidden) more.querySelector('button').textContent = `${t('showMore')} (${rows.length - slice.length})`
+			}
+
+			function renderCatStats() {
+				const tt = CAT.totals
+				const pct = (n) => (tt.products ? Math.round((n / tt.products) * 100) : 0)
+				const cards = [
+					{ v: tt.products, k: t('statProducts') },
+					...META.product_types.filter((pt) => tt.by_type[pt.id]).map((pt) => ({ v: tt.by_type[pt.id], k: LANG === 'zh' ? pt.label_zh : pt.label })),
+					{ v: `${pct(tt.with_price)}%`, k: t('statPriced'), bar: pct(tt.with_price) },
+					{ v: `${pct(tt.ready)}%`, k: t('statReady'), bar: pct(tt.ready) },
+				]
+				document.getElementById('catStats').innerHTML = cards
+					.map(
+						(c) =>
+							`<div class="stat"><div class="v">${esc(c.v)}</div><div class="k">${esc(c.k)}</div>` +
+							(c.bar == null ? '' : `<div class="bar"><i style="width:${c.bar}%"></i></div>`) +
+							`</div>`,
+					)
+					.join('')
+			}
+
+			function renderCatChips() {
+				const tt = CAT.totals
+				document.getElementById('catTypeChips').innerHTML =
+					`<span class="lbl">${esc(t('filterType'))}</span>` +
+					META.product_types
+						.map((pt) => {
+							const n = tt.by_type[pt.id] || 0
+							if (!n && !catFilters.types.has(pt.id)) return ''
+							return `<button class="chip${catFilters.types.has(pt.id) ? ' on' : ''}" data-act="chip-type" data-val="${esc(pt.id)}">${esc(
+								LANG === 'zh' ? pt.label_zh : pt.label,
+							)} <span class="n">${n}</span></button>`
+						})
+						.join('')
+
+				const gapChips = META.gap_types
+					.map((g) => {
+						const n = tt.by_gap[g.id] || 0
+						if (!n && !catFilters.gaps.has(g.id)) return ''
+						return `<button class="chip warn${catFilters.gaps.has(g.id) ? ' on' : ''}" data-act="chip-gap" data-val="${esc(g.id)}">${esc(
+							LANG === 'zh' ? g.label_zh : g.label,
+						)} <span class="n">${n}</span></button>`
+					})
+					.filter(Boolean)
+				document.getElementById('catGapChips').innerHTML = gapChips.length ? `<span class="lbl">${esc(t('filterAttention'))}</span>` + gapChips.join('') : ''
+			}
+
+			function thumbHtml(p) {
+				// Callers already drop imageless rows; never paint a placeholder.
+				// Broken URLs are dropped by the delegated capture-phase error
+				// listener below — never by an inline onerror (which the page's
+				// "no inline handlers" contract forbids).
+				if (!p.image_url) return ''
+				return (
+					`<div class="pthumb"><img loading="lazy" decoding="async" src="${esc(p.image_url)}" alt="">` +
+					(p.image_approx ? `<span class="approx" title="${esc(t('approxHint'))}">≈</span>` : '') +
+					`</div>`
+				)
+			}
+
+			function supplierLineHtml(p) {
+				if (!p.shop_name) return `<span class="missing">${esc(gapLabel('no_supplier'))}</span>`
+				const loc = locText(p.location)
+				const bits = [`<b>${esc(p.shop_name)}</b>`]
+				if (loc) bits.push(`<em>${esc(loc)}</em>`)
+				else bits.push(`<span class="missing">${esc(gapLabel('no_stall'))}</span>`)
+				if (p.stall_source === 'directory') bits.push(`<em>(${esc(t('inferredStall'))})</em>`)
+				return bits.join(' · ')
+			}
+
+			function charmLineHtml(p) {
+				if (!p.charm_code && !p.charm_shop) return '—'
+				const bits = []
+				if (p.charm_code) bits.push(`<b>${esc(p.charm_code)}</b>`)
+				if (p.charm_shop) bits.push(esc(p.charm_shop))
+				if (p.charm_stall) bits.push(`<em>${esc(p.charm_stall)}</em>`)
+				if (p.charm_cost != null) bits.push(`<em>${esc(fmtMoney(p.charm_cost))}</em>`)
+				return bits.join(' · ')
+			}
+
+			function actionsHtml(id) {
+				if (!CAN_EDIT_CATALOG) return ''
+				return (
+					`<button class="iconbtn" data-act="product-edit" data-id="${id}" title="${esc(t('edit'))}" aria-label="${esc(t('edit'))}">` +
+					`<svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>` +
+					`<button class="iconbtn danger" data-act="product-del" data-id="${id}" title="${esc(t('delete'))}" aria-label="${esc(t('delete'))}">` +
+					`<svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg></button>`
+				)
+			}
+
+			function productGridHtml(rows) {
+				return (
+					'<div class="pgrid">' +
+					rows
+						.filter((p) => p.image_url)
+						.map((p) => {
+							const price = (v, label) => (v == null ? `<span class="p none">—<small>${esc(label)}</small></span>` : `<span class="p">${esc(fmtMoney(v))}<small>${esc(label)}</small></span>`)
+							const prices = [price(p.cost_case, t('colCase')), price(p.cost_grip, t('colGrip'))]
+							if (p.cost_total != null) prices.push(`<span class="p total">${esc(fmtMoney(p.cost_total))}<small>${esc(t('colUnit'))}</small></span>`)
+							return (
+								`<article class="pcard">${thumbHtml(p)}<div class="pbody">` +
+								`<div class="toprow"><div class="left">` +
+								`<span class="badge t-${esc(p.product_type)}">${esc(typeLabel(p.product_type))}</span>` +
+								(p.product_type_source === 'derived' ? `<span class="auto-tag" title="${esc(t('autoTagHint'))}">${esc(t('autoTag'))}</span>` : '') +
+								(p.alias_count > 1 ? `<span class="pill">×${p.alias_count}</span>` : '') +
+								`</div></div>` +
+								`<h3 class="ptitle" title="${esc(p.title)}">${esc(p.title)}</h3>` +
+								`<div class="pmeta">` +
+								`<div class="r"><span>${supplierLineHtml(p)}</span></div>` +
+								`<div class="r"><span>${charmLineHtml(p)}</span></div>` +
+								`</div>` +
+								`<div class="pprices">${prices.join('')}</div>` +
+								(p.gaps.length ? `<div class="pgaps">${p.gaps.map((g) => `<span class="gap-chip">${esc(gapLabel(g))}</span>`).join('')}</div>` : '') +
+								`</div><div class="pactions">${actionsHtml(p.id)}</div></article>`
+							)
+						})
+						.join('') +
+					'</div>'
+				)
+			}
+
+			function productTableHtml(rows) {
+				const head =
+					`<tr><th></th><th>${esc(t('colProductName'))}</th><th>${esc(t('colType'))}</th><th>${esc(t('colSupplier'))}</th><th>${esc(t('colCharm'))}</th>` +
+					`<th class="num">${esc(t('colCase'))}</th><th class="num">${esc(t('colGrip'))}</th><th class="num">${esc(t('colUnit'))}</th>` +
+					`<th>${esc(t('colAttention'))}</th><th></th></tr>`
+				const body = rows
+					.filter((p) => p.image_url)
+					.map((p) => {
+						const img = `<img class="tthumb" loading="lazy" decoding="async" src="${esc(p.image_url)}" alt="">`
+						return (
+							`<tr><td>${img}</td>` +
+							`<td><div class="cellwrap" title="${esc(p.title)}">${esc(p.title)}</div></td>` +
+							`<td><span class="badge t-${esc(p.product_type)}">${esc(typeLabel(p.product_type))}</span>` +
+							(p.product_type_source === 'derived' ? ` <span class="auto-tag" title="${esc(t('autoTagHint'))}">${esc(t('autoTag'))}</span>` : '') +
+							`</td>` +
+							`<td style="color:var(--muted)">${supplierLineHtml(p)}</td>` +
+							`<td style="color:var(--muted)">${charmLineHtml(p)}</td>` +
+							`<td class="num">${esc(fmtMoney(p.cost_case)) || '—'}</td>` +
+							`<td class="num">${esc(fmtMoney(p.cost_grip)) || '—'}</td>` +
+							`<td class="num" style="color:var(--green)">${esc(fmtMoney(p.cost_total)) || '—'}</td>` +
+							`<td>${p.gaps.map((g) => `<span class="gap-chip">${esc(gapLabel(g))}</span>`).join(' ')}</td>` +
+							`<td class="act"><div>${actionsHtml(p.id)}</div></td></tr>`
+						)
+					})
+					.join('')
+				return `<table class="dtable"><thead>${head}</thead><tbody>${body}</tbody></table>`
+			}
+
+			// ── Product CRUD ──────────────────────────────────────────────────
+			/**
+			 * Open the product editor. `seed` (optional) pre-fills shop/stall when
+			 * adding from a supplier's drawer so the new row lands on that stall
+			 * without the operator re-typing what they just clicked into.
+			 */
+			function openProductModal(id, seed) {
+				if (!CAN_EDIT_CATALOG) return toast(t('readOnly'), 'err')
+				const p = id == null ? null : CAT.products.find((x) => x.id === id)
+				editingProductId = p ? p.id : null
+				document.getElementById('prTitleHead').textContent = p ? t('editProduct') : t('addProduct')
+				const titleInput = document.getElementById('prTitle')
+				titleInput.value = p ? p.title : ''
+				titleInput.readOnly = !!p
+				titleInput.title = p
+					? LANG === 'zh'
+						? '产品标题是稳定标识。如需更正，请新增正确标题后停用此产品。'
+						: 'Product titles are stable identities. Add the corrected title, then discontinue this product.'
+					: ''
+				document.getElementById('prShop').value = p ? p.shop_name : seed && seed.shop_name ? seed.shop_name : ''
+				// The stored stall, never the inferred one — inferring is a display aid,
+				// and saving it back would silently copy the directory into 700 rows.
+				document.getElementById('prStall').value = p ? p.stall : seed && seed.stall ? seed.stall : ''
+				document.getElementById('prCharmShop').value = p && p.charm_shop_source === 'product' ? p.charm_shop : ''
+				document.getElementById('prCharmCode').value = p ? p.charm_code : ''
+				document.getElementById('prCostCase').value = p && p.cost_case != null ? p.cost_case : ''
+				document.getElementById('prCostGrip').value = p && p.cost_grip != null ? p.cost_grip : ''
+				document.getElementById('prErr').textContent = ''
+				document.getElementById('prDelete').hidden = !p
+				fillTypeSelect(p && p.product_type_source === 'override' ? p.product_type : '')
+				onProductFieldChange()
+				openModal('productModal')
+				setTimeout(() => document.getElementById(p ? 'prShop' : 'prTitle').focus(), 50)
+			}
+
+			function fillTypeSelect(selected) {
+				const sel = document.getElementById('prType')
+				sel.innerHTML =
+					`<option value="">${esc(t('typeAuto'))}</option>` +
+					META.product_types.map((pt) => `<option value="${esc(pt.id)}">${esc(LANG === 'zh' ? pt.label_zh : pt.label)}</option>`).join('')
+				sel.value = selected || ''
+			}
+
+			/**
+			 * Live feedback in the product editor. Everything shown here comes from the
+			 * payload the server already sent — no client-side stall parsing, no extra
+			 * request — so the hints cannot disagree with what the page will show after
+			 * the save.
+			 */
+			function onProductFieldChange() {
+				if (!CAT) return
+				const shop = document.getElementById('prShop').value.trim()
+				const stall = document.getElementById('prStall').value.trim()
+				const matches = shop ? CAT.suppliers.filter((s) => norm(s.shop_name) === norm(shop)) : []
+
+				// Stall suggestions are scoped to the supplier that was typed.
+				document.getElementById('dlStalls').innerHTML = matches
+					.map((s) => `<option value="${esc(s.stall)}">${esc(locText(s.location))}</option>`)
+					.join('')
+
+				const shopHint = document.getElementById('prShopHint')
+				if (!shop) {
+					shopHint.textContent = ''
+					shopHint.className = 'hint'
+				} else if (!matches.length) {
+					shopHint.textContent = t('notInDirectory')
+					shopHint.className = 'hint warn'
+				} else {
+					shopHint.textContent = matches.map((s) => [s.stall, locText(s.location)].filter(Boolean).join(' — ')).join('  ·  ')
+					shopHint.className = 'hint ok'
+				}
+
+				const stallHint = document.getElementById('prStallHint')
+				const exact = matches.find((s) => norm(s.stall) === norm(stall))
+				if (!stall && matches.length === 1 && matches[0].stall) {
+					stallHint.textContent = `${t('inferredStall')}: ${matches[0].stall} — ${locText(matches[0].location)}`
+					stallHint.className = 'hint'
+				} else if (exact) {
+					stallHint.textContent = locText(exact.location)
+					stallHint.className = 'hint ok'
+				} else {
+					stallHint.textContent = ''
+					stallHint.className = 'hint'
+				}
+
+				const code = document.getElementById('prCharmCode').value.trim().toUpperCase()
+				const charm = code ? CAT.charms.find((c) => c.code.toUpperCase() === code) : null
+				const codeHint = document.getElementById('prCharmCodeHint')
+				if (!code) {
+					codeHint.textContent = ''
+					codeHint.className = 'hint'
+				} else if (charm) {
+					codeHint.textContent = [t('knownCharm'), charm.charm_shop, charm.charm_stall, fmtMoney(charm.cost)].filter(Boolean).join(' · ')
+					codeHint.className = 'hint ok'
+				} else {
+					codeHint.textContent = t('unknownCharm')
+					codeHint.className = 'hint warn'
+				}
+
+				const cshop = document.getElementById('prCharmShop').value.trim()
+				const cs = cshop ? CAT.charm_shops.find((s) => norm(s.shop_name) === norm(cshop)) : null
+				const cshopHint = document.getElementById('prCharmShopHint')
+				cshopHint.textContent = cs ? [cs.stall, locText(cs.location)].filter(Boolean).join(' — ') : ''
+				cshopHint.className = cs ? 'hint ok' : 'hint'
+
+				// Show what the title alone would classify this as, so choosing "Auto"
+				// is an informed decision rather than a blind one.
+				const typeHint = document.getElementById('prTypeHint')
+				if (document.getElementById('prType').value) {
+					typeHint.textContent = ''
+				} else {
+					const p = editingProductId == null ? null : CAT.products.find((x) => x.id === editingProductId)
+					typeHint.textContent = p ? `${t('typeAutoIs')} ${typeLabel(p.product_type)}` : ''
+				}
+			}
+
+			/** Fill a blank stall from the directory when the supplier leaves no doubt. */
+			function autofillStallFromSupplier() {
+				if (!CAT) return
+				const shopEl = document.getElementById('prShop')
+				const stallEl = document.getElementById('prStall')
+				const matches = CAT.suppliers.filter((s) => norm(s.shop_name) === norm(shopEl.value))
+				if (matches.length === 1 && matches[0].stall && !stallEl.value.trim()) stallEl.value = matches[0].stall
+				onProductFieldChange()
+			}
+
+			async function saveProduct() {
+				const title = document.getElementById('prTitle').value.trim()
+				if (!title) {
+					document.getElementById('prErr').textContent = t('needTitle')
+					return
+				}
+				// Every optional key is sent explicitly, including '' — the endpoint reads
+				// a present-but-blank value as "clear this", which is how a price or a
+				// type override is removed.
+				const body = {
+					title,
+					shop_name: document.getElementById('prShop').value.trim(),
+					stall: document.getElementById('prStall').value.trim(),
+					charm_shop: document.getElementById('prCharmShop').value.trim(),
+					charm_code: document.getElementById('prCharmCode').value.trim(),
+					product_type: document.getElementById('prType').value,
+					cost_case: document.getElementById('prCostCase').value,
+					cost_grip: document.getElementById('prCostGrip').value,
+				}
+				const btn = document.getElementById('prSave')
+				const wasNew = editingProductId == null
+				const seededFor = openSupplierKey
+				btn.disabled = true
+				try {
+					if (editingProductId != null) await api('/api/route/product-map', jsonBody('PUT', { id: editingProductId, ...body }))
+					else await api('/api/route/product-map', jsonBody('POST', body))
+					closeModal('productModal')
+					await loadCatalog()
+					// A brand-new row without a photo is saved to product_map but
+					// excluded from this catalog. Tell the operator why it did not
+					// appear in the open drawer instead of looking like a silent miss.
+					if (wasNew && seededFor && CAT) {
+						const shown = CAT.products.some((p) => p.supplier_key === seededFor && norm(p.title) === norm(body.title))
+						toast(shown ? t('saved') : t('sdSavedNoPhoto'), shown ? 'ok' : '')
+					} else {
+						toast(t('saved'), 'ok')
+					}
+				} catch (e) {
+					document.getElementById('prErr').textContent = e.message
+				} finally {
+					btn.disabled = false
+				}
+			}
+
+			async function deleteProduct(id) {
+				const p = CAT.products.find((x) => x.id === id)
+				if (!p) return
+				const msg =
+					LANG === 'zh'
+						? `停用“${p.title}”？\n\n该产品将从产品目录和换款选择中移除。现有订单与历史记录会保留。`
+						: `Discontinue “${p.title}”?\n\nIt will be removed from the Product Catalog and design-switch choices. Existing orders and history will be preserved.`
+				if (!confirm(msg)) return
+				try {
+					await api(
+						'/api/route/product-map',
+						jsonBody('DELETE', {
+							id,
+							reason: LANG === 'zh' ? '供应商不再提供' : 'Supplier no longer provides this product',
+						}),
+					)
+					closeModal('productModal')
+					await loadCatalog()
+					toast(t('deleted'), 'ok')
+				} catch (e) {
+					toast(e.message, 'err')
+				}
+			}
+
+			// ══════════════════════════════════════════════════════════════════
+			// VIEW 2 · Suppliers
+			// ══════════════════════════════════════════════════════════════════
+			function renderSuppliers() {
+				if (!CAT) return
+				const tt = CAT.totals
+				document.getElementById('supStats').innerHTML = [
+					{ v: tt.suppliers, k: t('statSuppliers') },
+					{ v: tt.buildings, k: t('statMarkets') },
+					{ v: tt.products, k: t('statProducts') },
+					{ v: tt.charm_shops, k: t('statCharmShops') },
+					{ v: tt.charms, k: t('statCharms') },
+				]
+					.map((c) => `<div class="stat"><div class="v">${esc(c.v)}</div><div class="k">${esc(c.k)}</div></div>`)
+					.join('')
+
+				fillBuildingFilter()
+
+				const q = norm(document.getElementById('supSearch').value)
+				const building = document.getElementById('supBuilding').value
+				let rows = CAT.suppliers
+				if (building) rows = rows.filter((s) => (s.location.located ? s.location.building_id : '') === building)
+				if (q) rows = rows.filter((s) => [s.shop_name, s.stall, s.mall, s.address, s.notes].some((v) => norm(v).includes(q)))
+
+				const area = document.getElementById('supArea')
+				document.getElementById('supCount').textContent = `${rows.length} ${t('of')} ${CAT.suppliers.length}`
+
+				if (!CAT.suppliers.length) {
+					area.innerHTML = `<div class="empty"><div class="big">${esc(t('noSuppliers'))}</div><div>${esc(t('noSuppliersSub'))}</div></div>`
+				} else if (!rows.length) {
+					area.innerHTML = `<div class="empty">${esc(t('noMatchSuppliers'))}</div>`
+				} else {
+					// Grouped by market in walking order, then by floor, so the page reads
+					// like the trip itself.
+					const groups = new Map()
+					for (const s of rows) {
+						const key = s.location.located ? s.location.building_id : '\u0000none'
+						if (!groups.has(key)) groups.set(key, { order: s.location.located ? s.location.building_order : 99999, label: s.location.building_label, rows: [] })
+						groups.get(key).rows.push(s)
+					}
+					const ordered = [...groups.entries()].sort((a, b) => a[1].order - b[1].order)
+					const tableGroups = ordered.map(([key, g]) => {
+						g.rows.sort((a, b) => (a.location.sort_key < b.location.sort_key ? -1 : a.location.sort_key > b.location.sort_key ? 1 : 0))
+						return {
+							label: key === '\u0000none' ? t('unlocated') : LANG === 'zh' ? g.label.zh || g.label.en : g.label.en || g.label.zh,
+							rows: g.rows,
+						}
+					})
+					area.innerHTML = supplierTableHtml(tableGroups)
+				}
+
+				renderCharmShops()
+			}
+
+			function fillBuildingFilter() {
+				const sel = document.getElementById('supBuilding')
+				const prev = sel.value
+				const seen = new Map()
+				for (const s of CAT.suppliers) {
+					if (!s.location.located || seen.has(s.location.building_id)) continue
+					seen.set(s.location.building_id, s.location)
+				}
+				const opts = [...seen.entries()].sort((a, b) => a[1].building_order - b[1].building_order)
+				sel.innerHTML =
+					`<option value="">${esc(t('allMarkets'))}</option>` +
+					opts.map(([id, loc]) => `<option value="${esc(id)}">${esc(LANG === 'zh' ? loc.building_label.zh || loc.building_label.en : loc.building_label.en)}</option>`).join('')
+				if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev
+			}
+
+			/**
+			 * The count of unique physical products at a supplier (not cross-shop
+			 * listing aliases), and how many are priced, in a cell of FIXED
+			 * geometry: a 4ch slot for the number and a
+			 * 62px slot for the coverage meter. The count is what an operator scans
+			 * down the column, so it — not the meter beside it — is what has to line
+			 * up from row to row.
+			 */
+			function productCountCell(s) {
+				const summary = supplierProductSummary(s.key)
+				const n = summary.product_count
+				const priced = summary.priced_count
+				const listingNote =
+					summary.listing_count > n ? ` · ${summary.listing_count} ${t('sdListings')}` : ''
+				const cov = !n
+					? `<span class="cov empty"></span>`
+					: `<span class="cov${priced === n ? ' full' : ''}" title="${esc(`${priced} ${t('sdPricedTitle')} ${n}${listingNote}`)}">` +
+						`<i style="width:${Math.round((priced / n) * 100)}%"></i><span>${priced}/${n}</span></span>`
+				return `<span class="countcell" title="${esc(`${n} ${t('sdProducts')}${listingNote}`)}"><span class="n${n ? '' : ' zero'}">${n}</span>${cov}</span>`
+			}
+
+			/**
+			 * Render every market in one table. Separate tables let the browser choose
+			 * a different width for Products and every column after it in each market,
+			 * which made the directory visibly zig-zag. Market names are full-width
+			 * body rows, preserving the walking-order grouping while sharing one
+			 * column geometry.
+			 *
+			 * Row actions carry an INDEX into CAT.suppliers, so a composite key with
+			 * quotes or Chinese characters never has to survive an HTML round-trip.
+			 */
+			function supplierTableHtml(groups) {
+				const head =
+					`<tr><th>${esc(t('colShop'))}</th><th>${esc(t('colStall'))}</th><th>${esc(t('colLocation'))}</th><th class="num">${esc(t('colProducts'))}</th>` +
+					`<th>${esc(t('colMall'))}</th><th>${esc(t('colAddress'))}</th><th>${esc(t('colNotes'))}</th><th></th></tr>`
+				const body = groups
+					.map(
+						(group) =>
+							`<tr class="market-row"><td colspan="8"><div class="market-label"><h3>${esc(group.label)}</h3><span class="n">${group.rows.length}</span></div></td></tr>` +
+							group.rows
+								.map((s) => {
+						const idx = CAT.suppliers.indexOf(s)
+						const acts = CAN_EDIT_CATALOG
+							? `<button class="iconbtn" data-act="stall-edit" data-idx="${idx}" title="${esc(t('edit'))}"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>` +
+								`<button class="iconbtn danger" data-act="stall-del" data-idx="${idx}" title="${esc(t('delete'))}"><svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg></button>`
+							: ''
+						// The whole row opens the supplier; the shop name is a real button
+						// so the same target is reachable with the keyboard. Both carry the
+						// same data-act, and the action buttons above win `closest()`, so a
+						// click on Edit never also opens the drawer.
+						const name =
+							`<button class="rowlink" data-act="sup-open" data-idx="${idx}" aria-label="${esc(`${t('openSupplier')}: ${s.shop_name}`)}">` +
+							`<span>${esc(s.shop_name)}</span>` +
+							`<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>`
+						return (
+							`<tr class="srow" data-act="sup-open" data-idx="${idx}"><td>${name}</td>` +
+							`<td>${esc(s.stall) || `<span style="color:var(--yellow)">${esc(t('unlocated'))}</span>`}</td>` +
+							`<td style="color:var(--muted)">${esc(locText(s.location))}</td>` +
+							`<td class="num">${productCountCell(s)}</td>` +
+							`<td style="color:var(--muted)">${esc(s.mall)}</td>` +
+							`<td style="color:var(--muted)"><div class="cellwrap" style="max-width:240px">${esc(s.address)}</div></td>` +
+							`<td style="color:var(--muted)"><div class="cellwrap" style="max-width:240px" title="${esc(s.notes)}">${esc(s.notes)}</div></td>` +
+							`<td class="act"><div>${acts}</div></td></tr>`
+						)
+								})
+								.join(''),
+					)
+					.join('')
+				const cols =
+					'<colgroup><col class="shop"><col class="stall"><col class="location"><col class="products">' +
+					'<col class="mall"><col class="address"><col class="notes"><col class="actions"></colgroup>'
+				return `<table class="dtable supplier-table">${cols}<thead>${head}</thead><tbody>${body}</tbody></table>`
+			}
+
+			function renderCharmShops() {
+				const area = document.getElementById('cshopArea')
+				if (!CAT.charm_shops.length) {
+					area.innerHTML = `<div class="empty" style="padding:28px">${esc(t('noCharmShops'))}</div>`
+					return
+				}
+				const head = `<tr><th>${esc(t('colShop'))}</th><th>${esc(t('colStall'))}</th><th>${esc(t('colLocation'))}</th><th class="num">${esc(t('colCharms'))}</th><th>${esc(t('colNotes'))}</th><th></th></tr>`
+				const body = CAT.charm_shops
+					.map((s, idx) => {
+						const acts = CAN_EDIT_CATALOG
+							? `<button class="iconbtn" data-act="cshop-edit" data-idx="${idx}" title="${esc(t('edit'))}"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>` +
+								`<button class="iconbtn danger" data-act="cshop-del" data-idx="${idx}" title="${esc(t('delete'))}"><svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg></button>`
+							: ''
+						return (
+							`<tr><td><b>${esc(s.shop_name)}</b></td><td>${esc(s.stall)}</td>` +
+							`<td style="color:var(--muted)">${esc(locText(s.location))}</td>` +
+							`<td class="num">${s.charm_count}</td>` +
+							`<td style="color:var(--muted)"><div class="cellwrap" style="max-width:320px" title="${esc(s.notes)}">${esc(s.notes)}</div></td>` +
+							`<td class="act"><div>${acts}</div></td></tr>`
+						)
+					})
+					.join('')
+				area.innerHTML = `<table class="dtable"><thead>${head}</thead><tbody>${body}</tbody></table>`
+			}
+
+			// ── Supplier detail drawer ────────────────────────────────────────
+			function openSupplierDrawer(idx) {
+				if (!CAT) return
+				const s = CAT.suppliers[idx]
+				if (!s) return
+				openSupplierKey = s.key
+				document.getElementById('sdSearch').value = ''
+				renderSupplierDrawer()
+				document.getElementById('supDrawerBg').classList.add('open')
+				const drawer = document.getElementById('supDrawer')
+				drawer.classList.add('open')
+				drawer.setAttribute('aria-hidden', 'false')
+				setTimeout(() => document.getElementById('sdSearch').focus(), 60)
+			}
+
+			function closeSupplierDrawer() {
+				openSupplierKey = null
+				document.getElementById('supDrawerBg').classList.remove('open')
+				const drawer = document.getElementById('supDrawer')
+				drawer.classList.remove('open')
+				drawer.setAttribute('aria-hidden', 'true')
+			}
+
+			/**
+			 * Hydrate the server's id-only physical-product groups with their source
+			 * catalog rows. The cache is tied to the CAT object reference, so every
+			 * successful reload invalidates it automatically.
+			 *
+			 * The fallback supports a rolling deployment where the new page reaches
+			 * an older process briefly. It uses the same precision rule: canonical
+			 * key when available, otherwise row id — never fuzzy client-side guesses.
+			 */
+			function supplierProductGroupsFor(supplierKey) {
+				if (!CAT) return []
+				if (supplierGroupsCatalog !== CAT) {
+					supplierGroupsCatalog = CAT
+					supplierGroupsByKey = new Map()
+					const byId = new Map(CAT.products.map((p) => [p.id, p]))
+					let definitions = Array.isArray(CAT.supplier_product_groups) ? CAT.supplier_product_groups : null
+
+					if (!definitions) {
+						const fallback = new Map()
+						for (const p of CAT.products) {
+							if (!p.supplier_key) continue
+							const identity = p.canonical_product_key ? `canonical:${p.canonical_product_key}` : `row:${p.id}`
+							const key = `${p.supplier_key}\u0000${identity}`
+							if (!fallback.has(key)) fallback.set(key, { key: identity, supplier_key: p.supplier_key, products: [] })
+							fallback.get(key).products.push(p)
+						}
+						definitions = [...fallback.values()].map((group) => {
+							const representative = group.products
+								.slice()
+								.sort(
+									(a, b) =>
+										a.gaps.length - b.gaps.length ||
+										Number(!!a.image_approx) - Number(!!b.image_approx) ||
+										Number(a.sort_order) - Number(b.sort_order) ||
+										Number(a.id) - Number(b.id),
+								)[0]
+							return {
+								key: group.key,
+								supplier_key: group.supplier_key,
+								representative_id: representative.id,
+								product_ids: group.products.map((p) => p.id),
+								listing_count: group.products.length,
+								priced: !representative.gaps.includes('no_price'),
+								ready: !representative.gaps.length,
+								cost_total: representative.cost_total,
+							}
+						})
+					}
+
+					for (const definition of definitions) {
+						const aliases = (definition.product_ids || []).map((id) => byId.get(id)).filter(Boolean)
+						const representative = byId.get(definition.representative_id)
+						if (!representative || !aliases.length) continue
+						const group = { ...definition, aliases, representative }
+						if (!supplierGroupsByKey.has(group.supplier_key)) supplierGroupsByKey.set(group.supplier_key, [])
+						supplierGroupsByKey.get(group.supplier_key).push(group)
+					}
+				}
+				return supplierGroupsByKey.get(supplierKey) || []
+			}
+
+			/** Metrics over the exact unique-card set the supplier UI renders. */
+			function supplierProductSummary(supplierKey) {
+				const groups = supplierProductGroupsFor(supplierKey)
+				let knownCost = 0
+				let hasKnownCost = false
+				for (const group of groups) {
+					if (group.cost_total == null) continue
+					knownCost += group.cost_total
+					hasKnownCost = true
+				}
+				return {
+					product_count: groups.length,
+					listing_count: groups.reduce((n, group) => n + group.aliases.length, 0),
+					priced_count: groups.filter((group) => group.priced).length,
+					ready_count: groups.filter((group) => group.ready).length,
+					cost_total: hasKnownCost ? Math.round(knownCost * 100) / 100 : null,
+				}
+			}
+
+			function renderSupplierDrawer() {
+				if (!openSupplierKey) return
+				if (!CAT) {
+					closeSupplierDrawer()
+					return
+				}
+				const s = CAT.suppliers.find((x) => x.key === openSupplierKey)
+				if (!s) {
+					// Stall was deleted or renamed away; don't leave a ghost panel open.
+					closeSupplierDrawer()
+					return
+				}
+				const idx = CAT.suppliers.indexOf(s)
+				document.getElementById('sdShop').textContent = s.shop_name
+				const loc = locText(s.location) || s.stall || t('unlocated')
+				const siblings = CAT.suppliers.filter((x) => x.shop_key === s.shop_key && x.key !== s.key)
+				const siblingNote = siblings.length
+					? `<span class="pill">${esc(t('sdOtherStalls'))} ${siblings.length} ${esc(t('sdStallsSuffix'))}: ${esc(siblings.map((x) => x.stall).filter(Boolean).join(', '))}</span>`
+					: ''
+				document.getElementById('sdLoc').innerHTML =
+					`<span>${esc(loc)}</span>` +
+					(s.mall ? `<span>· ${esc(s.mall)}</span>` : '') +
+					(s.address ? `<span>· ${esc(s.address)}</span>` : '') +
+					siblingNote
+
+				const allGroups = supplierProductGroupsFor(s.key)
+				const summary = supplierProductSummary(s.key)
+				const pct = (n, d) => (d ? Math.round((n / d) * 100) : 0)
+				document.getElementById('sdStats').innerHTML = [
+					{
+						v: summary.product_count,
+						k: t('sdProducts'),
+						detail: summary.listing_count > summary.product_count ? `${summary.listing_count} ${t('sdListings')}` : '',
+					},
+					{
+						v: summary.priced_count,
+						k: t('sdPriced'),
+						bar: pct(summary.priced_count, summary.product_count),
+						color: 'var(--yellow)',
+					},
+					{
+						v: summary.ready_count,
+						k: t('sdReady'),
+						bar: pct(summary.ready_count, summary.product_count),
+						color: 'var(--green)',
+					},
+					{ v: summary.cost_total != null ? fmtMoney(summary.cost_total) : '—', k: t('sdUnitCost') },
+				]
+					.map((c) => {
+						const bar = c.bar != null ? `<div class="bar"><i style="width:${c.bar}%;background:${c.color}"></i></div>` : ''
+						const detail = c.detail ? `<div class="detail">${esc(c.detail)}</div>` : ''
+						return `<div class="stat"><div class="v">${esc(c.v)}</div><div class="k">${esc(c.k)}</div>${detail}${bar}</div>`
+					})
+					.join('')
+
+				document.getElementById('sdActions').innerHTML = CAN_EDIT_CATALOG
+					? `<button class="btn sm primary" data-act="sup-add-product" data-idx="${idx}">+ ${esc(t('sdAddProduct'))}</button>` +
+						`<button class="btn sm" data-act="stall-edit" data-idx="${idx}">${esc(t('sdEditSupplier'))}</button>` +
+						`<button class="btn sm danger" data-act="stall-del" data-idx="${idx}">${esc(t('sdDeleteSupplier'))}</button>`
+					: ''
+
+				const q = norm(document.getElementById('sdSearch').value)
+				let groups = allGroups
+				if (q) {
+					groups = groups.filter((group) =>
+						group.aliases.some((p) =>
+							[p.title, p.stall, p.charm_code, p.charm_shop, typeLabel(p.product_type)].some((v) => norm(v).includes(q)),
+						),
+					)
+				}
+				groups = groups.slice().sort((a, b) => String(a.representative.title).localeCompare(String(b.representative.title)))
+
+				document.getElementById('sdCount').textContent = groups.length
+					? `${groups.length}${q ? ` ${t('of')} ${summary.product_count}` : ''}`
+					: summary.product_count
+						? `0 ${t('of')} ${summary.product_count}`
+						: ''
+
+				const body = document.getElementById('sdBody')
+				if (!summary.product_count) {
+					body.innerHTML =
+						`<div class="empty"><div class="big">${esc(t('sdNoProducts'))}</div><div>${esc(t('sdNoProductsSub'))}</div></div>`
+				} else if (!groups.length) {
+					body.innerHTML = `<div class="empty">${esc(t('sdNoMatch'))}</div>`
+				} else {
+					body.innerHTML = groups.map(supplierProductRowHtml).join('')
+				}
+			}
+
+			function supplierProductRowHtml(group) {
+				const p = group.representative
+				const price = (v, label, kind = '', title = '') => {
+					const classes = ['p', v == null ? 'none' : '', v != null ? kind : ''].filter(Boolean).join(' ')
+					return `<span class="${classes}"${title ? ` title="${esc(title)}"` : ''}>${v == null ? '—' : esc(fmtMoney(v))}<small>${esc(label)}</small></span>`
+				}
+				const pricedParts = [
+					[p.cost_case, t('priceCase')],
+					[p.cost_grip, t('priceGrip')],
+					[p.charm_cost, t('priceCharm')],
+				].filter(([v]) => v != null)
+				const totalTitle =
+					p.cost_total == null
+						? ''
+						: `${pricedParts.map(([v, label]) => `${label} ${fmtMoney(v)}`).join(' + ')} = ${t('priceTotal')} ${fmtMoney(p.cost_total)}`
+				// Four permanent slots keep values aligned between products and make
+				// the arithmetic explicit: Case + Grip + Charm = Total.
+				const costs = [
+					price(p.cost_case, t('priceCase')),
+					price(p.cost_grip, t('priceGrip')),
+					price(p.charm_cost, t('priceCharm'), 'charm'),
+					price(p.cost_total, t('priceTotal'), 'total', totalTitle),
+				]
+				const stallNote =
+					p.stall && p.stall !== (CAT.suppliers.find((s) => s.key === openSupplierKey) || {}).stall
+						? `<span class="missing">${esc(t('sdStallDiffers'))}: ${esc(p.stall)}</span>`
+						: p.stall_source === 'directory'
+							? `<em>(${esc(t('inferredStall'))})</em>`
+							: ''
+				const charmParts = []
+				if (p.charm_code) charmParts.push(`<b>${esc(p.charm_code)}</b>`)
+				if (p.charm_shop) charmParts.push(esc(p.charm_shop))
+				if (p.charm_stall) charmParts.push(`<em>${esc(p.charm_stall)}</em>`)
+				// The charm's COST belongs in the explicit Charm price column above,
+				// never as an unlabeled number in this identity/location line.
+				const charmDetails = charmParts.length ? `<span><b>${esc(t('sdCharmDetails'))}:</b> ${charmParts.join(' · ')}</span>` : ''
+				const gapDetails = p.gaps.map((g) => `<span class="gap-chip">${esc(gapLabel(g))}</span>`).join(' ')
+				const meta = [charmDetails, stallNote, gapDetails].filter(Boolean).join('<span aria-hidden="true">·</span>')
+				const isGrouped = group.aliases.length > 1
+				const groupedHint = `${group.aliases.length} ${t('sdListings')} · ${t('sdGroupedHint')}`
+				const groupBadge = isGrouped ? `<span class="pill" title="${esc(groupedHint)}">${group.aliases.length} ${esc(t('sdListings'))}</span>` : ''
+				const rowActions = isGrouped
+					? `<button class="iconbtn" data-act="sup-toggle-listings" data-id="${p.id}" title="${esc(t(CAN_EDIT_CATALOG ? 'sdManageListings' : 'sdViewListings'))}" aria-label="${esc(t(CAN_EDIT_CATALOG ? 'sdManageListings' : 'sdViewListings'))}"><svg viewBox="0 0 24 24"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg></button>`
+					: actionsHtml(p.id)
+				const aliasDetails = isGrouped ? supplierAliasDetailsHtml(group) : ''
+				return (
+					`<article class="prow">` +
+					thumbHtml(p) +
+					`<div><div class="top">` +
+					`<span class="badge t-${esc(p.product_type)}">${esc(typeLabel(p.product_type))}</span>` +
+					(p.product_type_source === 'derived' ? `<span class="auto-tag" title="${esc(t('autoTagHint'))}">${esc(t('autoTag'))}</span>` : '') +
+					groupBadge +
+					`</div><div class="title" title="${esc(p.title)}">${esc(p.title)}</div>` +
+					(meta ? `<div class="meta">${meta}</div>` : '') +
+					`</div>` +
+					`<div class="costs">${costs.join('')}</div>` +
+					`<div class="acts">${rowActions}</div>` +
+					aliasDetails +
+					`</article>`
+				)
+			}
+
+			/**
+			 * Preserve full per-listing CRUD without painting duplicate product
+			 * images/cards. Grouped aliases stay collapsed until explicitly opened.
+			 */
+			function supplierAliasDetailsHtml(group) {
+				const label = t(CAN_EDIT_CATALOG ? 'sdManageListings' : 'sdViewListings')
+				const rows = group.aliases
+					.map((alias) => {
+						const actions = CAN_EDIT_CATALOG ? actionsHtml(alias.id) : ''
+						return (
+							`<div class="alias-row"><div class="alias-title" title="${esc(alias.title)}">${esc(alias.title)}</div>` +
+							(actions ? `<div class="alias-actions">${actions}</div>` : '') +
+							`</div>`
+						)
+					})
+					.join('')
+				return (
+					`<details class="alias-details" id="supAliases-${group.representative.id}">` +
+					`<summary title="${esc(t('sdGroupedHint'))}">${esc(label)} (${group.aliases.length})</summary>` +
+					`<div class="alias-list">${rows}</div></details>`
+				)
+			}
+
+			function toggleSupplierListingDetails(id) {
+				const details = document.getElementById(`supAliases-${id}`)
+				if (details) details.open = !details.open
+			}
+
+			function addProductForOpenSupplier() {
+				if (!CAT || !openSupplierKey) return
+				const s = CAT.suppliers.find((x) => x.key === openSupplierKey)
+				if (!s) return
+				openProductModal(null, { shop_name: s.shop_name, stall: s.stall })
+			}
+
+			// ── Stall-supplier CRUD (supplier_directory) ──────────────────────
+			function openStallModal(idx) {
+				if (!CAN_EDIT_CATALOG) return toast(t('readOnly'), 'err')
+				const s = idx == null ? null : CAT.suppliers[idx]
+				editingStall = s ? { shop_name: s.shop_name, stall: s.stall, key: s.key } : null
+				document.getElementById('stTitleHead').textContent = s ? t('editSupplier2') : t('addSupplier2')
+				document.getElementById('stShop').value = s ? s.shop_name : ''
+				document.getElementById('stStall').value = s ? s.stall : ''
+				document.getElementById('stMall').value = s ? s.mall : ''
+				document.getElementById('stFloor').value = s ? s.floor : ''
+				document.getElementById('stAddress').value = s ? s.address : ''
+				document.getElementById('stNotes').value = s ? s.notes : ''
+				document.getElementById('stErr').textContent = ''
+				openModal('stallModal')
+				setTimeout(() => document.getElementById('stShop').focus(), 50)
+			}
+
+			async function saveStall() {
+				const body = {
+					shop_name: document.getElementById('stShop').value.trim(),
+					stall: document.getElementById('stStall').value.trim(),
+					mall: document.getElementById('stMall').value.trim(),
+					floor: document.getElementById('stFloor').value.trim(),
+					address: document.getElementById('stAddress').value.trim(),
+					notes: document.getElementById('stNotes').value.trim(),
+				}
+				if (!body.shop_name) {
+					document.getElementById('stErr').textContent = t('needShopName')
+					return
+				}
+				const btn = document.getElementById('stSave')
+				const editingKey = editingStall && editingStall.key
+				btn.disabled = true
+				try {
+					if (editingStall) {
+						await api('/api/route/suppliers', jsonBody('PUT', { orig_shop_name: editingStall.shop_name, orig_stall: editingStall.stall, ...body }))
+					} else {
+						await api('/api/route/suppliers', jsonBody('POST', body))
+					}
+					closeModal('stallModal')
+					await loadCatalog()
+					// A rename changes the composite key. Re-pin the drawer onto the
+					// new identity so the operator stays looking at the stall they edited.
+					if (editingKey && openSupplierKey === editingKey && CAT) {
+						const renamed = CAT.suppliers.find(
+							(s) => norm(s.shop_name) === norm(body.shop_name) && String(s.stall || '') === String(body.stall || ''),
+						)
+						openSupplierKey = renamed ? renamed.key : null
+						if (openSupplierKey) renderSupplierDrawer()
+						else closeSupplierDrawer()
+					}
+					toast(t('saved'), 'ok')
+				} catch (e) {
+					document.getElementById('stErr').textContent = e.message
+				} finally {
+					btn.disabled = false
+				}
+			}
+
+			async function deleteStall(idx) {
+				const s = CAT.suppliers[idx]
+				if (!s) return
+				const where = [s.shop_name, s.stall].filter(Boolean).join(' · ')
+				const warn = s.product_count
+					? LANG === 'zh'
+						? `\n\n该供应商目前关联 ${s.product_count} 件在售产品。继续操作会同时停用这些产品，并从产品目录和换款选择中移除。现有订单与历史记录会保留。`
+						: `\n\n${s.product_count} active catalog product(s) use this supplier. Continuing will discontinue them and remove them from Product Catalog and design-switch choices. Existing orders and history will be preserved.`
+					: ''
+				if (!confirm((LANG === 'zh' ? `删除“${where}”？` : `Delete “${where}”?`) + warn)) return
+				try {
+					let retireProducts = s.product_count > 0
+					for (;;) {
+						try {
+							await api(
+								'/api/route/suppliers',
+								jsonBody('DELETE', {
+									shop_name: s.shop_name,
+									stall: s.stall,
+									retire_products: retireProducts,
+									retired_reason: LANG === 'zh' ? '供应商已删除' : 'Supplier removed',
+								}),
+							)
+							break
+						} catch (error) {
+							// Imageless catalog rows are intentionally hidden from the
+							// Sourcing projection, but still protect their supplier.
+							if (error.code !== 'IN_USE' || retireProducts) throw error
+							const hiddenWarn =
+								LANG === 'zh'
+									? `另有 ${error.product_count} 条在售产品引用未显示在当前目录中。是否同时停用这些产品并继续？`
+									: `${error.product_count} active product reference(s), including items not visible in this photo-only view, still use this supplier. Discontinue them and continue?`
+							if (!confirm(hiddenWarn)) return
+							retireProducts = true
+						}
+					}
+					if (openSupplierKey === s.key) closeSupplierDrawer()
+					await loadCatalog()
+					toast(t('deleted'), 'ok')
+				} catch (e) {
+					toast(e.message, 'err')
+				}
+			}
+
+			// ── Charm-shop CRUD (charm_shop_directory) ────────────────────────
+			function openCshopModal(idx) {
+				if (!CAN_EDIT_CATALOG) return toast(t('readOnly'), 'err')
+				const s = idx == null ? null : CAT.charm_shops[idx]
+				editingCshop = s ? { shop_name: s.shop_name, stall: s.stall } : null
+				document.getElementById('csTitleHead').textContent = s ? t('editCharmShop') : t('addCharmShop')
+				document.getElementById('csShop').value = s ? s.shop_name : ''
+				document.getElementById('csStall').value = s ? s.stall : ''
+				document.getElementById('csNotes').value = s ? s.notes : ''
+				document.getElementById('csErr').textContent = ''
+				openModal('cshopModal')
+				setTimeout(() => document.getElementById('csShop').focus(), 50)
+			}
+
+			async function saveCshop() {
+				const body = {
+					shop_name: document.getElementById('csShop').value.trim(),
+					stall: document.getElementById('csStall').value.trim(),
+					notes: document.getElementById('csNotes').value.trim(),
+				}
+				if (!body.shop_name) {
+					document.getElementById('csErr').textContent = t('needShopName')
+					return
+				}
+				const btn = document.getElementById('csSave')
+				btn.disabled = true
+				try {
+					if (editingCshop) {
+						await api('/api/route/charm-shops', jsonBody('PUT', { orig_shop_name: editingCshop.shop_name, orig_stall: editingCshop.stall, ...body }))
+					} else {
+						await api('/api/route/charm-shops', jsonBody('POST', body))
+					}
+					closeModal('cshopModal')
+					await loadCatalog()
+					toast(t('saved'), 'ok')
+				} catch (e) {
+					document.getElementById('csErr').textContent = e.message
+				} finally {
+					btn.disabled = false
+				}
+			}
+
+			async function deleteCshop(idx) {
+				const s = CAT.charm_shops[idx]
+				if (!s) return
+				const where = [s.shop_name, s.stall].filter(Boolean).join(' · ')
+				if (!confirm(LANG === 'zh' ? `删除挂件店“${where}”？` : `Delete charm shop “${where}”?`)) return
+				try {
+					await api('/api/route/charm-shops', jsonBody('DELETE', { shop_name: s.shop_name, stall: s.stall }))
+					await loadCatalog()
+					toast(t('deleted'), 'ok')
+				} catch (e) {
+					toast(e.message, 'err')
+				}
+			}
+
+			// ══════════════════════════════════════════════════════════════════
+			// VIEW 3 · Design Library
+			// ══════════════════════════════════════════════════════════════════
 			// Rewriting a <select>'s innerHTML resets its value, and these run again on
-			// every language switch — which silently changed the visible package list (the
-			// status filter fell back to "all") and reset the upload category and any open
-			// edit modal. Preserve each selection across the relabel.
+			// every language switch — which silently changed the visible package list
+			// (the status filter fell back to "all") and reset the upload category and
+			// any open edit modal. Preserve each selection across the relabel.
 			function keepSelection(el, fill) {
 				if (!el) return
 				const prev = el.value
 				fill()
 				if (prev && [...el.options].some((o) => o.value === prev)) el.value = prev
 			}
-			function fillCategorySelects() {
-				const opts = () => META.categories.map((c) => `<option value="${c.id}">${esc(LANG === 'zh' ? c.label_zh : c.label)}</option>`).join('')
+			function fillLibrarySelects() {
+				const catOpts = () =>
+					(META.categories || []).map((c) => `<option value="${esc(c.id)}">${esc(LANG === 'zh' ? c.label_zh : c.label)}</option>`).join('')
 				for (const id of ['uploadCategory', 'pmCategory']) {
 					const el = document.getElementById(id)
-					keepSelection(el, () => (el.innerHTML = opts()))
+					keepSelection(el, () => (el.innerHTML = catOpts()))
 				}
-			}
-			function fillStatusSelects() {
-				const statusOpts = () => META.statuses.map((s) => `<option value="${s.id}">${esc(LANG === 'zh' ? s.label_zh : s.label)}</option>`).join('')
+				const statusOpts = () =>
+					(META.statuses || []).map((s) => `<option value="${esc(s.id)}">${esc(LANG === 'zh' ? s.label_zh : s.label)}</option>`).join('')
 				const sf = document.getElementById('statusFilter')
 				keepSelection(sf, () => (sf.innerHTML = `<option value="">${esc(t('allStatuses'))}</option>` + statusOpts()))
 				const pm = document.getElementById('pmStatus')
 				keepSelection(pm, () => (pm.innerHTML = statusOpts()))
 			}
 
-			async function loadSuppliers() {
+			async function loadDesignSuppliers() {
 				try {
 					const data = await api('/api/sourcing/suppliers')
-					SUPPLIERS = data.suppliers || []
-					renderSuppliers()
-					if (selectedId && !SUPPLIERS.some((s) => s.id === selectedId)) selectedId = null
-					if (selectedId) renderSupplierView()
+					DESIGN = data.suppliers || []
+					designLoaded = true
+					if (selectedDesignId && !DESIGN.some((s) => s.id === selectedDesignId)) selectedDesignId = null
+					renderDesignList()
+					renderDesignView()
+					renderNavCounts()
 				} catch (e) {
-					document.getElementById('supplierList').innerHTML = `<div class="empty">${esc(e.message)}</div>`
+					document.getElementById('designList').innerHTML = `<div class="empty">${esc(e.message)}</div>`
 				}
 			}
 
-			function renderSuppliers() {
-				const q = (document.getElementById('supplierSearch').value || '').toLowerCase()
-				const list = document.getElementById('supplierList')
-				const rows = SUPPLIERS.filter((s) => !q || s.name.toLowerCase().includes(q) || (s.location || '').toLowerCase().includes(q))
-				if (!SUPPLIERS.length) {
-					list.innerHTML = `<div class="empty" style="padding:30px 14px"><div class="big">${LANG === 'zh' ? '暂无供应商' : 'No suppliers yet'}</div><div>${LANG === 'zh' ? '点击“新增”添加第一个货源。' : 'Click “Add” to record your first supplier.'}</div></div>`
+			function currentDesign() {
+				return DESIGN.find((s) => s.id === selectedDesignId) || null
+			}
+
+			function renderDesignList() {
+				const q = norm(document.getElementById('designSearch').value)
+				const list = document.getElementById('designList')
+				if (!DESIGN.length) {
+					list.innerHTML = `<div class="empty" style="padding:30px 14px"><div class="big">${LANG === 'zh' ? '暂无供应商' : 'No suppliers yet'}</div><div>${
+						LANG === 'zh' ? '点击“新增”添加第一个货源。' : 'Click “Add” to record your first supplier.'
+					}</div></div>`
 					return
 				}
+				const rows = DESIGN.filter((s) => !q || norm(s.name).includes(q) || norm(s.location).includes(q))
 				if (!rows.length) {
 					list.innerHTML = `<div class="empty" style="padding:30px 14px">${LANG === 'zh' ? '无匹配供应商' : 'No matching suppliers'}</div>`
 					return
 				}
 				list.innerHTML = rows
-					.map((s) => {
-						const active = s.id === selectedId ? ' active' : ''
-						const loc = s.location ? esc(s.location) : LANG === 'zh' ? '未填写所在地' : 'No location set'
-						return `<div class="supplier-card${active}" onclick="selectSupplier(${s.id})">
-							<div class="name"><span>${esc(s.name)}</span><span class="pill">${s.package_count || 0}</span></div>
-							<div class="loc">📍 ${loc}</div>
-						</div>`
-					})
+					.map(
+						(s) =>
+							`<div class="supplier-card${s.id === selectedDesignId ? ' active' : ''}" data-act="design-select" data-id="${s.id}">
+								<div class="name"><span>${esc(s.name)}</span><span class="pill">${s.package_count || 0}</span></div>
+								<div class="loc">${s.location ? esc(s.location) : LANG === 'zh' ? '未填写所在地' : 'No location set'}</div>
+							</div>`,
+					)
 					.join('')
 			}
 
-			function selectSupplier(id) {
-				selectedId = id
-				catFilter = 'all'
-				renderSuppliers()
-				renderSupplierView()
+			function selectDesign(id) {
+				selectedDesignId = id
+				libCatFilter = 'all'
+				renderDesignList()
+				renderDesignView()
 				loadPackages()
 			}
 
-			function currentSupplier() {
-				return SUPPLIERS.find((s) => s.id === selectedId) || null
-			}
-
-			function renderSupplierView() {
-				const s = currentSupplier()
-				document.getElementById('noSupplier').style.display = s ? 'none' : 'block'
-				document.getElementById('supplierView').style.display = s ? 'block' : 'none'
+			function renderDesignView() {
+				const s = currentDesign()
+				document.getElementById('noDesign').hidden = !!s
+				document.getElementById('designView').hidden = !s
 				if (!s) return
-				document.getElementById('svName').textContent = s.name
+				document.getElementById('dvName').textContent = s.name
 				const meta = []
-				if (s.location) meta.push(`<span>📍 ${esc(s.location)}</span>`)
+				if (s.location) meta.push(`<span>${esc(s.location)}</span>`)
 				// Shown right on the supplier header so the employee can reach them for a
 				// new drop without opening the edit modal.
 				if (s.wechat) meta.push(`<span>💬 ${LANG === 'zh' ? '微信' : 'WeChat'}: ${esc(s.wechat)}</span>`)
 				if (s.qq) meta.push(`<span>🐧 QQ: ${esc(s.qq)}</span>`)
 				if (s.notes) meta.push(`<span style="color:var(--muted)">📝 ${esc(s.notes)}</span>`)
-				document.getElementById('svMeta').innerHTML = meta.join('') || `<span>${LANG === 'zh' ? '暂无店铺位置' : 'No shop location set yet'}</span>`
-				renderCatTabs()
+				document.getElementById('dvMeta').innerHTML = meta.join('') || `<span>${LANG === 'zh' ? '暂无店铺位置' : 'No shop location set yet'}</span>`
+				renderLibCatTabs()
 			}
 
-			function renderCatTabs() {
-				const s = currentSupplier()
+			function renderLibCatTabs() {
+				const s = currentDesign()
 				if (!s) return
 				const counts = s.package_counts || {}
-				const total = s.package_count || 0
-				const tabs = [{ id: 'all', label: t('allCat'), count: total }].concat(META.categories.map((c) => ({ id: c.id, label: catLabel(c.id), count: counts[c.id] || 0 })))
-				document.getElementById('catTabs').innerHTML = tabs
-					.map((tb) => `<button class="cat-tab${tb.id === catFilter ? ' active' : ''}" onclick="setCatFilter('${tb.id}')">${esc(tb.label)} <span class="count">${tb.count}</span></button>`)
+				const tabs = [{ id: 'all', label: t('allCat'), count: s.package_count || 0 }].concat(
+					(META.categories || []).map((c) => ({ id: c.id, label: catLabel(c.id), count: counts[c.id] || 0 })),
+				)
+				document.getElementById('libCatTabs').innerHTML = tabs
+					.map(
+						(tb) =>
+							`<button class="cat-tab${tb.id === libCatFilter ? ' active' : ''}" data-act="lib-cat" data-val="${esc(tb.id)}">${esc(tb.label)} <span class="count">${
+								tb.count
+							}</span></button>`,
+					)
 					.join('')
 			}
-			function setCatFilter(id) {
-				catFilter = id
+
+			function setLibCatFilter(id) {
+				libCatFilter = id
 				if (id !== 'all') document.getElementById('uploadCategory').value = id
-				renderCatTabs()
+				renderLibCatTabs()
 				renderPackages()
 			}
 
 			async function loadPackages() {
-				if (!selectedId) return
+				if (!selectedDesignId) return
 				const area = document.getElementById('pkgArea')
 				area.innerHTML = `<div class="loading">${esc(t('loading'))}</div>`
 				try {
-					const data = await api('/api/sourcing/packages?supplier_id=' + selectedId)
+					const data = await api('/api/sourcing/packages?supplier_id=' + selectedDesignId)
 					PACKAGES = data.packages || []
 					renderPackages()
 				} catch (e) {
@@ -1076,20 +3716,15 @@
 				}
 			}
 
-			let renderTimer = null
-			function scheduleRenderPackages() {
-				clearTimeout(renderTimer)
-				renderTimer = setTimeout(renderPackages, 140)
-			}
-
 			function renderPackages() {
 				const area = document.getElementById('pkgArea')
-				const q = (document.getElementById('pkgSearch').value || '').toLowerCase()
+				if (!area || !currentDesign()) return
+				const q = norm(document.getElementById('pkgSearch').value)
 				const st = document.getElementById('statusFilter').value
 				let rows = PACKAGES.slice()
-				if (catFilter !== 'all') rows = rows.filter((p) => p.category === catFilter)
+				if (libCatFilter !== 'all') rows = rows.filter((p) => p.category === libCatFilter)
 				if (st) rows = rows.filter((p) => p.status === st)
-				if (q) rows = rows.filter((p) => (p.title || '').toLowerCase().includes(q) || (p.original_filename || '').toLowerCase().includes(q) || (p.notes || '').toLowerCase().includes(q))
+				if (q) rows = rows.filter((p) => norm(p.title).includes(q) || norm(p.original_filename).includes(q) || norm(p.notes).includes(q))
 
 				if (!PACKAGES.length) {
 					area.innerHTML = `<div class="empty"><div class="big">${esc(t('noPackages'))}</div><div>${esc(t('noPackagesSub'))}</div></div>`
@@ -1102,18 +3737,25 @@
 				const body = rows
 					.map((p) => {
 						const title = esc(p.title || p.original_filename || 'Untitled')
-						const fname = p.original_filename && p.original_filename !== p.title ? `<div class="pkg-sub">${esc(p.original_filename)}${p.uploaded_by ? ' · ' + esc(p.uploaded_by) : ''}</div>` : p.uploaded_by ? `<div class="pkg-sub">${esc(p.uploaded_by)}</div>` : ''
-						const statusOpts = META.statuses.map((s) => `<option value="${s.id}"${s.id === p.status ? ' selected' : ''}>${esc(LANG === 'zh' ? s.label_zh : s.label)}</option>`).join('')
+						const sub =
+							p.original_filename && p.original_filename !== p.title
+								? `<div class="pkg-sub">${esc(p.original_filename)}${p.uploaded_by ? ' · ' + esc(p.uploaded_by) : ''}</div>`
+								: p.uploaded_by
+									? `<div class="pkg-sub">${esc(p.uploaded_by)}</div>`
+									: ''
+						const statusOpts = (META.statuses || [])
+							.map((s) => `<option value="${esc(s.id)}"${s.id === p.status ? ' selected' : ''}>${esc(LANG === 'zh' ? s.label_zh : s.label)}</option>`)
+							.join('')
 						return `<tr>
-							<td><div class="pkg-title">${title}</div>${fname}</td>
+							<td><div class="pkg-title">${title}</div>${sub}</td>
 							<td><span class="badge cat">${esc(catLabel(p.category))}</span></td>
 							<td style="color:var(--muted)">${fmtBytes(p.size_bytes)}</td>
-							<td><select class="status-select st-${esc(p.status)}" onchange="changeStatus(${p.id}, this.value)">${statusOpts}</select></td>
+							<td><select class="status-select st-${esc(p.status)}" data-act="pkg-status" data-id="${p.id}">${statusOpts}</select></td>
 							<td style="color:var(--muted);white-space:nowrap">${fmtDate(p.created_at)}</td>
 							<td><div class="row-actions">
-								<button class="iconbtn" title="${esc(t('download'))}" onclick="downloadPkg(${p.id})"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 11 5 5 5-5"/><path d="M5 21h14"/></svg></button>
-								<button class="iconbtn" title="${esc(t('edit'))}" onclick="openPkgModal(${p.id})"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
-								<button class="iconbtn danger" title="${esc(t('delete'))}" onclick="deletePkg(${p.id})"><svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg></button>
+								<button class="iconbtn" title="${esc(t('download'))}" data-act="pkg-dl" data-id="${p.id}"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 11 5 5 5-5"/><path d="M5 21h14"/></svg></button>
+								<button class="iconbtn" title="${esc(t('edit'))}" data-act="pkg-edit" data-id="${p.id}"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
+								<button class="iconbtn danger" title="${esc(t('delete'))}" data-act="pkg-del" data-id="${p.id}"><svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg></button>
 							</div></td>
 						</tr>`
 					})
@@ -1123,82 +3765,78 @@
 				</tr></thead><tbody>${body}</tbody></table>`
 			}
 
-			function renderAll() {
-				fillCategorySelects()
-				fillStatusSelects()
-				renderSuppliers()
-				renderSupplierView()
-				renderPackages()
+			// ── Design-supplier CRUD ──────────────────────────────────────────
+			function openDesignModal(edit) {
+				editingDesign = !!edit
+				const s = edit ? currentDesign() : null
+				document.getElementById('dsTitleHead').textContent = edit ? t('editDesignSupplier') : t('addDesignSupplier')
+				document.getElementById('dsName').value = s ? s.name : ''
+				document.getElementById('dsLocation').value = s ? s.location : ''
+				document.getElementById('dsWechat').value = s ? s.wechat || '' : ''
+				document.getElementById('dsQq').value = s ? s.qq || '' : ''
+				document.getElementById('dsNotes').value = s ? s.notes : ''
+				document.getElementById('dsErr').textContent = ''
+				openModal('designModal')
+				setTimeout(() => document.getElementById('dsName').focus(), 50)
 			}
 
-			// ── Supplier CRUD ───────────────────────────────────────────────────
-			function openSupplierModal(edit) {
-				editingSupplier = !!edit
-				const s = edit ? currentSupplier() : null
-				document.getElementById('smTitle').textContent = edit ? t('editSupplier') : t('addSupplier')
-				document.getElementById('smName').value = s ? s.name : ''
-				document.getElementById('smLocation').value = s ? s.location : ''
-				document.getElementById('smWechat').value = s ? s.wechat || '' : ''
-				document.getElementById('smQq').value = s ? s.qq || '' : ''
-				document.getElementById('smNotes').value = s ? s.notes : ''
-				document.getElementById('smErr').textContent = ''
-				openModal('supplierModal')
-				setTimeout(() => document.getElementById('smName').focus(), 50)
-			}
-
-			async function saveSupplier() {
+			async function saveDesign() {
 				const body = {
-					name: document.getElementById('smName').value.trim(),
-					location: document.getElementById('smLocation').value.trim(),
-					wechat: document.getElementById('smWechat').value.trim(),
-					qq: document.getElementById('smQq').value.trim(),
-					notes: document.getElementById('smNotes').value.trim(),
+					name: document.getElementById('dsName').value.trim(),
+					location: document.getElementById('dsLocation').value.trim(),
+					wechat: document.getElementById('dsWechat').value.trim(),
+					qq: document.getElementById('dsQq').value.trim(),
+					notes: document.getElementById('dsNotes').value.trim(),
 				}
 				if (!body.name) {
-					document.getElementById('smErr').textContent = LANG === 'zh' ? '请填写供应商名称。' : 'Please enter a supplier name.'
+					document.getElementById('dsErr').textContent = LANG === 'zh' ? '请填写供应商名称。' : 'Please enter a supplier name.'
 					return
 				}
-				const btn = document.getElementById('smSave')
+				const btn = document.getElementById('dsSave')
 				btn.disabled = true
 				try {
 					let data
-					if (editingSupplier && selectedId) {
-						data = await api('/api/sourcing/suppliers/' + selectedId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-					} else {
-						data = await api('/api/sourcing/suppliers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-						if (data.supplier) selectedId = data.supplier.id
+					if (editingDesign && selectedDesignId) data = await api('/api/sourcing/suppliers/' + selectedDesignId, jsonBody('PUT', body))
+					else {
+						data = await api('/api/sourcing/suppliers', jsonBody('POST', body))
+						if (data.supplier) selectedDesignId = data.supplier.id
 					}
-					SUPPLIERS = data.suppliers || SUPPLIERS
-					closeModal('supplierModal')
-					renderSuppliers()
-					renderSupplierView()
-					toast(LANG === 'zh' ? '已保存' : 'Saved', 'ok')
+					DESIGN = data.suppliers || DESIGN
+					closeModal('designModal')
+					renderDesignList()
+					renderDesignView()
+					renderNavCounts()
+					toast(t('saved'), 'ok')
 				} catch (e) {
-					document.getElementById('smErr').textContent = e.message
+					document.getElementById('dsErr').textContent = e.message
 				} finally {
 					btn.disabled = false
 				}
 			}
 
-			async function deleteSupplier() {
-				const s = currentSupplier()
+			async function deleteDesign() {
+				const s = currentDesign()
 				if (!s) return
 				const n = s.package_count || 0
-				const msg = LANG === 'zh' ? `删除“${s.name}”？这将同时删除其 ${n} 个产品文件夹，且无法撤销。` : `Delete “${s.name}”? This also removes its ${n} product folder(s) and cannot be undone.`
+				const msg =
+					LANG === 'zh'
+						? `删除“${s.name}”？这将同时删除其 ${n} 个产品文件夹，且无法撤销。`
+						: `Delete “${s.name}”? This also removes its ${n} product folder(s) and cannot be undone.`
 				if (!confirm(msg)) return
 				try {
 					const data = await api('/api/sourcing/suppliers/' + s.id, { method: 'DELETE' })
-					SUPPLIERS = data.suppliers || []
-					selectedId = null
-					renderSuppliers()
-					renderSupplierView()
+					DESIGN = data.suppliers || []
+					selectedDesignId = null
+					renderDesignList()
+					renderDesignView()
+					renderNavCounts()
 					toast(LANG === 'zh' ? '供应商已删除' : 'Supplier deleted', 'ok')
 				} catch (e) {
 					toast(e.message, 'err')
 				}
 			}
 
-			// ── Package edit / status / delete ──────────────────────────────────
+			// ── Package edit / status / delete / download ─────────────────────
 			function openPkgModal(id) {
 				const p = PACKAGES.find((x) => x.id === id)
 				if (!p) return
@@ -1222,13 +3860,13 @@
 				const btn = document.getElementById('pmSave')
 				btn.disabled = true
 				try {
-					const data = await api('/api/sourcing/packages/' + editingPkgId, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-					if (data.suppliers) SUPPLIERS = data.suppliers
+					const data = await api('/api/sourcing/packages/' + editingPkgId, jsonBody('PUT', body))
+					if (data.suppliers) DESIGN = data.suppliers
 					closeModal('pkgModal')
 					await loadPackages()
-					renderSuppliers()
-					renderSupplierView()
-					toast(LANG === 'zh' ? '已保存' : 'Saved', 'ok')
+					renderDesignList()
+					renderDesignView()
+					toast(t('saved'), 'ok')
 				} catch (e) {
 					document.getElementById('pmErr').textContent = e.message
 				} finally {
@@ -1236,9 +3874,9 @@
 				}
 			}
 
-			async function changeStatus(id, status) {
+			async function changePkgStatus(id, status) {
 				try {
-					await api('/api/sourcing/packages/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) })
+					await api('/api/sourcing/packages/' + id, jsonBody('PUT', { status }))
 					const p = PACKAGES.find((x) => x.id === id)
 					if (p) p.status = status
 					renderPackages()
@@ -1255,12 +3893,12 @@
 				if (!confirm(msg)) return
 				try {
 					const data = await api('/api/sourcing/packages/' + id, { method: 'DELETE' })
-					if (data.suppliers) SUPPLIERS = data.suppliers
+					if (data.suppliers) DESIGN = data.suppliers
 					PACKAGES = PACKAGES.filter((x) => x.id !== id)
 					renderPackages()
-					renderSuppliers()
-					renderSupplierView()
-					toast(LANG === 'zh' ? '已删除' : 'Deleted', 'ok')
+					renderDesignList()
+					renderDesignView()
+					toast(t('deleted'), 'ok')
 				} catch (e) {
 					toast(e.message, 'err')
 				}
@@ -1272,9 +3910,9 @@
 				window.location.href = API + '/api/sourcing/packages/' + id + '/download'
 			}
 
-			// ── Upload (streamed via XHR for progress) ────────────────────────────
+			// ── Upload (streamed via XHR for progress) ─────────────────────────
 			function handleFiles(files) {
-				if (!selectedId) {
+				if (!selectedDesignId) {
 					toast(LANG === 'zh' ? '请先选择供应商。' : 'Select a supplier first.', 'err')
 					return
 				}
@@ -1308,7 +3946,7 @@
 				const bar = row.querySelector('.progress > div')
 				const pct = row.querySelector('.pct')
 
-				const params = new URLSearchParams({ supplier_id: String(selectedId), category, filename: file.name })
+				const params = new URLSearchParams({ supplier_id: String(selectedDesignId), category, filename: file.name })
 				const xhr = new XMLHttpRequest()
 				xhr.open('POST', API + '/api/sourcing/packages/upload?' + params.toString())
 				xhr.withCredentials = true
@@ -1328,25 +3966,26 @@
 					if (xhr.status >= 200 && xhr.status < 300) {
 						pct.textContent = '✓'
 						bar.style.width = '100%'
-						if (data.suppliers) SUPPLIERS = data.suppliers
+						if (data.suppliers) DESIGN = data.suppliers
 						setTimeout(() => row.remove(), 1200)
 						loadPackages()
-						renderSuppliers()
-						renderSupplierView()
+						renderDesignList()
+						renderDesignView()
+						renderNavCounts()
 						toast((LANG === 'zh' ? '已上传：' : 'Uploaded: ') + file.name, 'ok')
 					} else {
 						if (xhr.status === 401) {
 							window.location.href = '/login'
 							return
 						}
-						pct.textContent = '✕'
+						pct.textContent = '×'
 						pct.style.color = 'var(--red)'
 						toast((data.error || (LANG === 'zh' ? '上传失败' : 'Upload failed')) + ' — ' + file.name, 'err')
 						setTimeout(() => row.remove(), 4000)
 					}
 				}
 				xhr.onerror = () => {
-					pct.textContent = '✕'
+					pct.textContent = '×'
 					pct.style.color = 'var(--red)'
 					toast((LANG === 'zh' ? '网络错误：' : 'Network error: ') + file.name, 'err')
 					setTimeout(() => row.remove(), 4000)
@@ -1355,19 +3994,215 @@
 			}
 
 			// ── Modal helpers ─────────────────────────────────────────────────
+			const modalReturnFocus = new Map()
 			function openModal(id) {
-				document.getElementById(id).classList.add('open')
+				const root = document.getElementById(id)
+				if (!root) return
+				modalReturnFocus.set(id, document.activeElement)
+				root.classList.add('open')
+				root.setAttribute('aria-hidden', 'false')
 			}
 			function closeModal(id) {
-				document.getElementById(id).classList.remove('open')
+				const root = document.getElementById(id)
+				if (!root) return
+				const wasOpen = root.classList.contains('open')
+				root.classList.remove('open')
+				root.setAttribute('aria-hidden', 'true')
+				const target = modalReturnFocus.get(id)
+				modalReturnFocus.delete(id)
+				if (wasOpen && target?.isConnected) setTimeout(() => target.focus(), 0)
 			}
+			document.addEventListener(
+				'keydown',
+				(event) => {
+					const roots = [...document.querySelectorAll('.modal-bg.open')]
+					const root = roots[roots.length - 1]
+					if (!root) return
+					if (event.key === 'Escape') {
+						event.preventDefault()
+						closeModal(root.id)
+						return
+					}
+					if (event.key !== 'Tab') return
+					const dialog = root.querySelector('[role="dialog"], .modal')
+					const focusable = [
+						...dialog.querySelectorAll(
+							'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+						),
+					].filter((node) => node.getClientRects().length > 0)
+					if (!focusable.length) {
+						event.preventDefault()
+						dialog.focus()
+						return
+					}
+					const first = focusable[0]
+					const last = focusable[focusable.length - 1]
+					if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+						event.preventDefault()
+						last.focus()
+					} else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
+						event.preventDefault()
+						first.focus()
+					}
+				},
+				true,
+			)
 
-			// ── Wire up events ─────────────────────────────────────────────────
+			// ══════════════════════════════════════════════════════════════════
+			// Events
+			// ══════════════════════════════════════════════════════════════════
+			// One delegated click handler for every dynamic control. Row actions carry
+			// an id or an index in a data- attribute, so a composite key containing
+			// quotes or Chinese characters never has to survive being interpolated into
+			// an inline onclick — an escaping bug class this page cannot have.
+			document.addEventListener('click', (e) => {
+				const el = e.target.closest('[data-act]')
+				if (!el) return
+				const act = el.dataset.act
+				const id = el.dataset.id ? Number(el.dataset.id) : null
+				const idx = el.dataset.idx ? Number(el.dataset.idx) : null
+
+				switch (act) {
+					case 'stop':
+						e.stopPropagation()
+						return
+					case 'view':
+						return setView(el.dataset.view)
+					case 'lang':
+						return setLang(el.dataset.lang)
+					case 'close':
+						return closeModal(el.dataset.target)
+
+					// Catalog
+					case 'cat-refresh':
+						return loadCatalog()
+					case 'cat-mode':
+						catFilters.mode = catFilters.mode === 'grid' ? 'table' : 'grid'
+						localStorage.setItem('sourcingCatMode', catFilters.mode)
+						return renderCatalog()
+					case 'cat-more':
+						catShown += CAT_PAGE_SIZE
+						return renderCatalog()
+					case 'chip-type':
+					case 'chip-gap': {
+						const set = act === 'chip-type' ? catFilters.types : catFilters.gaps
+						if (set.has(el.dataset.val)) set.delete(el.dataset.val)
+						else set.add(el.dataset.val)
+						catShown = CAT_PAGE_SIZE
+						return renderCatalog()
+					}
+					case 'product-new':
+						return openProductModal(null)
+					case 'product-edit':
+						return openProductModal(id)
+					case 'product-del':
+						return deleteProduct(id)
+					case 'product-del-modal':
+						return deleteProduct(editingProductId)
+					case 'product-save':
+						return saveProduct()
+
+					// Suppliers
+					case 'sup-open':
+						return openSupplierDrawer(idx)
+					case 'sup-close':
+						return closeSupplierDrawer()
+					case 'sup-add-product':
+						return addProductForOpenSupplier()
+					case 'sup-toggle-listings':
+						return toggleSupplierListingDetails(id)
+					case 'stall-new':
+						return openStallModal(null)
+					case 'stall-edit':
+						return openStallModal(idx)
+					case 'stall-del':
+						return deleteStall(idx)
+					case 'stall-save':
+						return saveStall()
+					case 'cshop-new':
+						return openCshopModal(null)
+					case 'cshop-edit':
+						return openCshopModal(idx)
+					case 'cshop-del':
+						return deleteCshop(idx)
+					case 'cshop-save':
+						return saveCshop()
+
+					// Design library
+					case 'design-new':
+						return openDesignModal(false)
+					case 'design-edit':
+						return openDesignModal(true)
+					case 'design-del':
+						return deleteDesign()
+					case 'design-save':
+						return saveDesign()
+					case 'design-select':
+						return selectDesign(id)
+					case 'lib-cat':
+						return setLibCatFilter(el.dataset.val)
+					case 'pick-files':
+						return document.getElementById('fileInput').click()
+					case 'pkg-edit':
+						return openPkgModal(id)
+					case 'pkg-del':
+						return deletePkg(id)
+					case 'pkg-dl':
+						return downloadPkg(id)
+					case 'pkg-save':
+						return savePackage()
+					default:
+						return
+				}
+			})
+
+			// The one dynamic <select> that mutates on change.
+			document.addEventListener('change', (e) => {
+				const el = e.target.closest('[data-act="pkg-status"]')
+				if (el) changePkgStatus(Number(el.dataset.id), el.value)
+			})
+
+			// Debounced re-render for the search + filter inputs. Filtering 700+ rows on
+			// every keystroke is cheap, but re-rendering the DOM is not.
+			function debounce(fn, ms) {
+				let h = null
+				return () => {
+					clearTimeout(h)
+					h = setTimeout(fn, ms)
+				}
+			}
+			const rerenderCatalog = debounce(() => {
+				catShown = CAT_PAGE_SIZE
+				renderCatalog()
+			}, 160)
+			document.getElementById('catSearch').addEventListener('input', rerenderCatalog)
+			document.getElementById('catSupplier').addEventListener('change', rerenderCatalog)
+			document.getElementById('catSort').addEventListener('change', rerenderCatalog)
+			document.getElementById('supSearch').addEventListener('input', debounce(renderSuppliers, 160))
+			document.getElementById('supBuilding').addEventListener('change', renderSuppliers)
+			document.getElementById('sdSearch').addEventListener('input', debounce(renderSupplierDrawer, 140))
+			document.getElementById('designSearch').addEventListener('input', debounce(renderDesignList, 120))
+			document.getElementById('pkgSearch').addEventListener('input', debounce(renderPackages, 140))
+			document.getElementById('statusFilter').addEventListener('change', renderPackages)
+
+			// Product editor live hints.
+			for (const id of ['prCharmShop', 'prCharmCode', 'prType', 'prStall']) {
+				document.getElementById(id).addEventListener('input', onProductFieldChange)
+				document.getElementById(id).addEventListener('change', onProductFieldChange)
+			}
+			document.getElementById('prShop').addEventListener('input', onProductFieldChange)
+			document.getElementById('prShop').addEventListener('change', autofillStallFromSupplier)
+			document.getElementById('prShop').addEventListener('blur', autofillStallFromSupplier)
+
+			// Upload wiring.
 			document.getElementById('fileInput').addEventListener('change', (e) => {
 				handleFiles(e.target.files)
 				e.target.value = ''
 			})
 			const dz = document.getElementById('dropzone')
+			dz.addEventListener('click', (e) => {
+				if (!e.target.closest('[data-act]')) document.getElementById('fileInput').click()
+			})
 			;['dragenter', 'dragover'].forEach((ev) =>
 				dz.addEventListener(ev, (e) => {
 					e.preventDefault()
@@ -1388,14 +4223,35 @@
 			window.addEventListener('dragover', (e) => e.preventDefault())
 			window.addEventListener('drop', (e) => e.preventDefault())
 
+			// Modal dismissal.
 			document.querySelectorAll('.modal-bg').forEach((bg) =>
 				bg.addEventListener('click', (e) => {
 					if (e.target === bg) bg.classList.remove('open')
 				}),
 			)
 			document.addEventListener('keydown', (e) => {
-				if (e.key === 'Escape') document.querySelectorAll('.modal-bg.open').forEach((m) => m.classList.remove('open'))
+				if (e.key !== 'Escape') return
+				const openModalBg = document.querySelector('.modal-bg.open')
+				if (openModalBg) {
+					openModalBg.classList.remove('open')
+					return
+				}
+				if (openSupplierKey) closeSupplierDrawer()
 			})
+
+			// Broken product photos: drop the card/row rather than leave a blank
+			// hole. Capture-phase so it works for dynamically inserted <img>s
+			// without an inline onerror (forbidden by the page contract).
+			document.addEventListener(
+				'error',
+				(e) => {
+					const img = e.target
+					if (!(img instanceof HTMLImageElement)) return
+					const host = img.closest('.pcard, .prow, tr')
+					if (host) host.remove()
+				},
+				true,
+			)
 
 			document.getElementById('logoutBtn').addEventListener('click', async () => {
 				try {

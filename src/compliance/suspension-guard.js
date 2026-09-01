@@ -30,6 +30,7 @@ const MAX_BULK_SHIP_PER_BATCH = BULK_SHIP_CHUNK_SIZE;
 const MAX_SHIPS_PER_SHOP_PER_HOUR = 40;
 const MAX_INV_WATCH_CHECKS_PER_CYCLE = 20;
 const INV_WATCH_STARTUP_DELAY_MS = 10 * 60 * 1000;
+const ETSY_API_TERMS_URL = 'https://www.etsy.com/legal/api/';
 
 /** Split an array into consecutive chunks of at most `size`. */
 function chunk(arr, size) {
@@ -80,32 +81,69 @@ function analyzeSuspensionRisks(config) {
         level: 'critical',
         code: 'API_KEY_SHOP_OVERFLOW',
         title: `API key ${masked} is mapped to ${names.length} shops (Etsy limit: ${ETSY_SHOPS_PER_KEY})`,
-        detail: `Shops on this key: ${names.join(', ')}. Exceeding the Personal Access limit is an explicit Etsy anti-abuse trigger and can cause OAuth revocation or shop review across ALL shops on the key.`,
-        remediation: `Move the extra shop(s) to a separate Etsy developer app (new api_key + shared_secret) and re-run oauth:setup for each moved shop from its own AdsPower profile + static IP.`,
+        detail: `Shops on this key: ${names.join(', ')}. This exceeds the access allocation recorded for this Personal Access key.`,
+        remediation: `Do not create duplicate apps/keys to bypass limits. Ask developer@etsy.com to approve the intended shop/key topology for this single application, then connect only the shops Etsy authorizes. Terms: ${ETSY_API_TERMS_URL}`,
       });
     }
   }
 
-  // ── 2. Many shops sharing one egress IP (association / linked-account risk) ──
+  // Etsy's current API Terms say each application uses its designated API key
+  // and prohibit additional keys/apps created to circumvent limits or duplicate
+  // substantially the same service. A single dashboard configured with several
+  // keys therefore needs explicit Etsy approval; network/proxy separation does
+  // not change that application-level requirement.
+  if (shopsPerKey.size > 1) {
+    const approved = config.etsy_multi_key_approved === true;
+    risks.push({
+      level: approved ? 'info' : 'high',
+      code: approved ? 'MULTIPLE_API_KEYS_APPROVAL_RECORDED' : 'MULTIPLE_API_KEYS_ONE_APPLICATION',
+      title: approved
+        ? `Written multi-key approval is recorded for ${shopsPerKey.size} Etsy API keys`
+        : `This application is configured with ${shopsPerKey.size} Etsy API keys without a recorded approval`,
+      detail: approved
+        ? 'The local attestation records that Etsy approved this exact topology. Keep the written approval with the application compliance records.'
+        : 'Etsy API Terms assign one designated key to an application and prohibit duplicate applications or extra keys used to circumvent limits. Technical routing separation is not policy approval.',
+      remediation: approved
+        ? `Reconfirm approval before changing keys, shop count, ownership, or application purpose. Terms: ${ETSY_API_TERMS_URL}`
+        : `Confirm this exact multi-key topology in writing with developer@etsy.com. If approved, retain the response and set etsy_multi_key_approved to true. Otherwise migrate to the key/topology Etsy designates. Terms: ${ETSY_API_TERMS_URL}`,
+    });
+  }
+
+  // Etsy API Terms §5(25), updated Aug 18 2026, prohibit requesting Etsy
+  // content for analytics unless Etsy expressly authorizes it in writing.
+  // Manual Growth avoids API requests and scraping, but §5(24)'s broad
+  // automated-analysis wording is disclosed separately rather than treated as
+  // permission created by this technical gate.
+  if (config.catalog_health_sync === true && config.etsy_api_analytics_approved !== true) {
+    risks.push({
+      level: 'critical',
+      code: 'API_ANALYTICS_APPROVAL_REQUIRED',
+      title: 'API-based Growth analytics is enabled without a written-approval attestation',
+      detail: 'catalog_health_sync would request listings, views, shop data and reviews for analytics. Etsy API Terms §5(25) require express written authorization for that purpose.',
+      remediation: `Set catalog_health_sync to false and use manual Growth imports. Enable it only after Etsy grants written authorization, then set etsy_api_analytics_approved to true. Terms: ${ETSY_API_TERMS_URL}`,
+    });
+  }
+
+  // ── 2. Network routing is operational, never a compliance control ───────────
   for (const group of config.groups) {
     const shopCount = (group.shops || []).length;
     if (shopCount <= 1) continue;
 
     if (!usesGroupProxy(group)) {
       risks.push({
-        level: 'high',
+        level: 'info',
         code: 'DIRECT_MULTI_SHOP_GROUP',
-        title: `Group "${group.label}" has ${shopCount} shops on a direct (no-proxy) connection`,
-        detail: 'All shops in this group share the server\'s public IP. Etsy correlates accounts by IP and browser fingerprint; multiple shops from one IP is a primary linked-account signal.',
-        remediation: 'Assign each shop group its own static residential IP (IPFoxy) via AdsPower, or at minimum separate groups per identity document.',
+        title: `Group "${group.label}" has ${shopCount} shops on one direct network route`,
+        detail: 'This is an operational routing choice, not evidence of policy compliance or non-compliance. All developer/shop ownership information must remain accurate and complete.',
+        remediation: 'Use a stable, secure network path and disclose the real application purpose and ownership accurately to Etsy. Do not use proxies or browser profiles to conceal common control.',
       });
     } else if (shopCount > ETSY_SHOPS_PER_KEY) {
       risks.push({
         level: 'medium',
         code: 'PROXY_GROUP_MANY_SHOPS',
         title: `Group "${group.label}" routes ${shopCount} shops through one proxy`,
-        detail: 'Even with a residential proxy, routing more than 5 shops through one IP increases Etsy\'s linked-account confidence score. This is not an API violation but is an OpSec risk.',
-        remediation: 'Split shops across multiple proxy endpoints (one per identity group of ≤5 shops).',
+        detail: 'A proxy changes transport only; it does not expand an API key allocation or authorize a multi-shop/multi-key topology.',
+        remediation: 'Do not split traffic to evade platform controls. Confirm the application and shop allocation with Etsy Developer Support.',
       });
     }
   }
@@ -134,12 +172,12 @@ function analyzeSuspensionRisks(config) {
   }
 
   // ── 4. Auto-restock without physical stock (overselling → ODR → suspension) ─
-  if (config.auto_restock_enabled !== false) {
+  if (config.auto_restock_enabled === true) {
     risks.push({
       level: 'high',
       code: 'AUTO_RESTOCK_ENABLED',
-      title: 'Auto-restock is ON — listings show stock even when you have zero physical units',
-      detail: 'When a variation hits qty 0 on Etsy, the sync worker automatically PUTs it back to restock_quantity (default 3). Buyers can purchase items you cannot fulfil → cases, bad reviews, and ODR penalties are the #1 organic suspension cause for high-volume shops.',
+      title: 'Auto-restock is ON — every quantity increase must be backed by fulfillable stock',
+      detail: 'When a variation reaches 0, the worker raises it to restock_quantity. If physical inventory is not authoritative, this can create unavailable orders, cancellations, poor reviews, and buyer cases; repeated service-standard failures can affect visibility or selling privileges.',
       remediation: 'Set auto_restock_enabled: false in config.json unless you maintain real-time physical inventory. Use ZERO_STOCK alerts instead.',
     });
   }
@@ -149,8 +187,8 @@ function analyzeSuspensionRisks(config) {
     level: 'info',
     code: 'PRE_TRANSIT_WORKFLOW',
     title: 'Pre-transit shipping workflow is active',
-    detail: 'This dashboard supports marking orders shipped on Etsy before the carrier physically scans the parcel (to meet ship-by deadlines). Etsy policy requires truthful shipping status; buyer complaints about "shipped but not moving" directly raise case rates.',
-    remediation: 'Only mark shipped after creating a real 4PX label. Monitor pre-transit orders and prioritise purchasing/packing. Consider reducing pre_transit_days to keep the queue tight.',
+    detail: 'This dashboard can submit tracking before the carrier first scan. Shipment status and dates must accurately represent the real handoff and processing promise; long label-only periods can lead to buyer contacts or cases.',
+    remediation: 'Submit shipment completion only when it accurately reflects the parcel workflow. Monitor label-only parcels, hand them to the carrier promptly, and keep processing times realistic.',
   });
 
   return risks;
@@ -163,25 +201,23 @@ function analyzeSuspensionRisks(config) {
  * @param {object} raw  Parsed config.json (pre-defaults)
  * @param {SuspensionRisk[]} risks
  */
-function enforceConfigCompliance(raw, risks) {
-  const allowOverload = raw.allow_overloaded_api_keys === true
-    || process.env.ALLOW_OVERLOADED_API_KEYS === '1'
-    || process.env.ALLOW_OVERLOADED_API_KEYS === 'true';
-
+function enforceConfigCompliance(_raw, risks) {
   const critical = risks.filter((r) => r.level === 'critical');
-  if (critical.length && !allowOverload) {
-    const lines = critical.map((r) => `  • ${r.title}\n    ${r.remediation}`).join('\n');
+  const approvalRequired = critical.filter((r) => r.code === 'API_ANALYTICS_APPROVAL_REQUIRED');
+  if (approvalRequired.length) {
+    const lines = approvalRequired.map((r) => `  • ${r.title}\n    ${r.remediation}`).join('\n');
     throw new Error(
-      `config.json violates Etsy Personal Access limits and cannot start:\n${lines}\n\n` +
-      'To override (NOT recommended — risks suspension across all shops on the key), ' +
-      'set allow_overloaded_api_keys: true in config.json or ALLOW_OVERLOADED_API_KEYS=1 in the environment.'
+      `config.json enables Etsy API analytics without recording written authorization:\n${lines}\n\n` +
+      'There is no runtime override for this policy gate; use manual Growth imports or record Etsy\'s written approval.'
     );
   }
 
-  if (critical.length && allowOverload) {
-    console.warn(
-      '[compliance] ⚠ allow_overloaded_api_keys is set — starting despite API key shop overflow. ' +
-      'This is an Etsy anti-abuse trigger; migrate shops to separate app keys ASAP.'
+  const allocationCritical = critical.filter((r) => r.code !== 'API_ANALYTICS_APPROVAL_REQUIRED');
+  if (allocationCritical.length) {
+    const lines = allocationCritical.map((r) => `  • ${r.title}\n    ${r.remediation}`).join('\n');
+    throw new Error(
+      `config.json violates Etsy Personal Access limits and cannot start:\n${lines}\n\n` +
+      'There is no runtime override for Etsy\'s allocation. Reduce the connected shops or obtain the required Etsy approval.'
     );
   }
 }
@@ -285,8 +321,8 @@ function warnPreTransitShip(receiptRow, shopId) {
   if (receiptRow?.carrier_confirmed_at) return;
   console.warn(
     `[compliance] Pre-transit ship: ${shopId} receipt — tracking "${receiptRow?.tracking_code || '?'}" ` +
-    'marked shipped on Etsy before carrier first-scan. High case-rate shops are Etsy\'s primary suspension trigger. ' +
-    'Ensure the 4PX label is real and the parcel ships within 48h.'
+    'marked shipped on Etsy before carrier first-scan. Confirm the status accurately reflects the real parcel handoff ' +
+    'and monitor it until the carrier accepts it.'
   );
 }
 

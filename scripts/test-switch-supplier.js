@@ -93,6 +93,15 @@ function makeDb() {
       image_url TEXT, image_data BLOB, image_mime TEXT, note TEXT,
       created_at INTEGER, updated_at INTEGER, UNIQUE (receipt_id, item_key)
     );
+    CREATE TABLE listing_phash (
+      listing_id INTEGER PRIMARY KEY, phash TEXT, design_phash TEXT,
+      sha TEXT, algo TEXT, canonical_key TEXT, computed_at INTEGER
+    );
+    CREATE TABLE product_merges (
+      listing_a INTEGER NOT NULL, listing_b INTEGER NOT NULL,
+      note TEXT, created_by TEXT, created_at INTEGER,
+      PRIMARY KEY (listing_a, listing_b), CHECK (listing_a < listing_b)
+    );
   `);
   return db;
 }
@@ -108,6 +117,11 @@ const NEW_KEY = routeDashboard.lineItemKey(NEW_TITLE, NEW_LISTING);
 
 const ORIG_SUPPLIER = { shop: '热麦', stall: '5B13' }; // stale — must NOT win after switch
 const NEW_SUPPLIER = { shop: '虎山', stall: 'A223' };  // the correct switched supplier
+
+// A separate Etsy listing for the SAME physical case the custom switch describes.
+// Only an operator can know they are one product, which is what 同款 records.
+const TWIN_TITLE = 'My Melody Clear Pink Case, Cute Aesthetic Cover for iPhone 17 16 15 Pro Max';
+const TWIN_LISTING = 333;
 
 function txFor(title, listingId) {
   return JSON.stringify([{ title, listing_id: listingId, quantity: 1, variations: [] }]);
@@ -128,6 +142,14 @@ function seed(db) {
   ins.run({ receipt_id: 2001, shop_id: 'SHOP_A', name: 'Switched', etsy_created_at: now - 3600, all_transactions: txFor(ORIG_TITLE, ORIG_LISTING) });
   ins.run({ receipt_id: 2002, shop_id: 'SHOP_A', name: 'Control', etsy_created_at: now - 3600, all_transactions: txFor(ORIG_TITLE, ORIG_LISTING) });
   ins.run({ receipt_id: 2003, shop_id: 'SHOP_A', name: 'CustomSwitch', etsy_created_at: now - 3600, all_transactions: txFor(ORIG_TITLE, ORIG_LISTING) });
+  // 2004 — the twin: an ordinary order of the real listing for the same case.
+  ins.run({ receipt_id: 2004, shop_id: 'SHOP_A', name: 'Twin', etsy_created_at: now - 3600, all_transactions: txFor(TWIN_TITLE, TWIN_LISTING) });
+
+  // Durable product identities, as the phash reconcile pass leaves them.
+  const insHash = db.prepare("INSERT INTO listing_phash (listing_id, phash, algo, canonical_key, computed_at) VALUES (?,?,'dhash256-v2',?,?)");
+  insHash.run(ORIG_LISTING, 'aa', `P-${ORIG_LISTING}`, now);
+  insHash.run(NEW_LISTING, 'bb', `P-${NEW_LISTING}`, now);
+  insHash.run(TWIN_LISTING, 'cc', `P-${TWIN_LISTING}`, now);
 
   // The ORIGINAL product carries a saved supplier (the stale one). This is the
   // priority-2 default that used to leak onto the switched line.
@@ -195,6 +217,47 @@ assert(routeDashboard.productDefaultsKey(ORIG_KEY, { source: 'custom', new_title
     `custom-switched line does NOT inherit the original supplier "${ORIG_SUPPLIER.shop}" (got "${r && r.supplier_shop}")`);
   assert(r && r.supplier_in_catalog === false,
     'custom-switched line is (correctly) UNMATCHED — operator must source it');
+}
+
+// — Canonical product identity: which card a line lands on in Shopping Mode. —
+// Shopping Mode groups its product cards by `product_key`, so this chain decides
+// whether two order lines share one photo and one set of model rows, or sit on
+// two cards the shopper has to reconcile by eye in the aisle.
+{
+  assert(byReceipt(2002).product_key === `P-${ORIG_LISTING}`,
+    'unswitched line takes its identity from its own listing');
+  assert(byReceipt(2001).product_key === `P-${NEW_LISTING}`,
+    'catalog switch takes the REPLACEMENT listing\'s identity, never the original\'s');
+  assert(byReceipt(2003).product_key === '',
+    'custom switch has NO identity until someone says otherwise — it must not be filed under the design it was switched away from');
+  assert(byReceipt(2004).product_key === `P-${TWIN_LISTING}`,
+    'the twin listing keeps its own identity');
+}
+
+// — The 同款 (same product) merge must actually move a custom switch onto the
+//   card it was merged with. Before this worked, the control reported success,
+//   wrote the merge, and left the shopper looking at two identical cards. —
+{
+  const now = Math.floor(Date.now() / 1000);
+  // What an operator merge leaves behind: the edge, plus the shared key the
+  // reconcile pass then writes onto every listing in the group (its own tests
+  // cover that resolution; here we assert what buildRouteRows does with it).
+  db.prepare('INSERT INTO product_merges (listing_a, listing_b, note, created_by, created_at) VALUES (?,?,?,?,?)')
+    .run(ORIG_LISTING, TWIN_LISTING, 'same case, different listing photos', 'operator', now);
+  db.prepare('UPDATE listing_phash SET canonical_key = ? WHERE listing_id IN (?,?)')
+    .run(`P-${ORIG_LISTING}`, ORIG_LISTING, TWIN_LISTING);
+
+  const merged = routeDashboard.buildRouteRows(db, {}, { enrich_supplier: false, include_issues: true });
+  const at = (rid) => merged.find((r) => r.receipt_id === rid);
+
+  assert(at(2003).product_key === `P-${ORIG_LISTING}`,
+    'a merged custom switch adopts the shared identity');
+  assert(at(2003).product_key === at(2004).product_key,
+    'so it lands on ONE card with the listing it was merged with — one photo, the models beneath it');
+  assert(at(2001).product_key === `P-${NEW_LISTING}`,
+    'an unrelated catalog switch is untouched by someone else\'s merge');
+  assert(at(2002).product_key === `P-${ORIG_LISTING}`,
+    'and the unswitched original line keeps reading its own listing');
 }
 
 db.close();

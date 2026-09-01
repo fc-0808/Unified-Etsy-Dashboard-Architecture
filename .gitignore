@@ -3,6 +3,7 @@ config.json
 tokens.json
 .env
 .env.*
+!.env.example
 
 # SQLite database files (contain live order data)
 data/
@@ -24,6 +25,7 @@ supplier_catalog.xlsx
 # Vendored route-engine: keep the code (src/, requirements.txt), ignore the
 # bundled data + scratch dirs (large binaries / regenerated at runtime).
 route-engine/data/
+route-engine/data.moved-*/
 route-engine/cache/
 route-engine/input/
 route-engine/output/

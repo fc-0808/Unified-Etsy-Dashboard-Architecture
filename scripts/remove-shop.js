@@ -133,6 +133,8 @@ function buildPlan(id, names) {
 		{ table: 'listing_image_data', where: listingSub },
 		{ table: 'listing_phash', where: listingSub },
 		{ table: 'listing_style_images', where: listingSub },
+		{ table: 'listing_variation_images', where: listingSub },
+		{ table: 'listing_variation_image_state', where: listingSub },
 
 		// Bulk-create job items (reachable through bulk_jobs).
 		{ table: 'bulk_job_items', where: bulkJobSub },
@@ -159,7 +161,7 @@ function buildPlan(id, names) {
 const EXPLICIT_TABLES = new Set([
 	'route_assignments', 'receipt_item_purchase', 'order_issues', 'order_exchanges',
 	'order_line_substitutions', 'listing_inventory', 'listing_images', 'listing_image_data',
-	'listing_phash', 'listing_style_images', 'bulk_job_items', 'transactions', 'etsy_payments',
+	'listing_phash', 'listing_style_images', 'listing_variation_images', 'listing_variation_image_state', 'bulk_job_items', 'transactions', 'etsy_payments',
 	'ledger_entries', 'sync_log', 'receipts', 'listings', 'events', 'route_manual_items',
 	'shop_listing_settings', 'bulk_jobs', 'shops', 'groups',
 ]);

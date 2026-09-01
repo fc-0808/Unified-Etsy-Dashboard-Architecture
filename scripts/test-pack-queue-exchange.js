@@ -1,15 +1,22 @@
 'use strict'
 
 /**
- * Regression test — wrong-model exchanges must be HELD OUT of the packing queue.
+ * Regression test — wrong-model SWAPS must be HELD OUT of the packing queue, and
+ * buy-shaped model fixes must NOT be.
  *
  * Guards the invariant introduced when we stopped letting orders that still owe a
  * supplier swap leak into "📦 To pack & ship". Such an order is physically in hand
  * but in the WRONG phone model; its components stay marked "Purchased" (so it is
  * never re-bought), which means it would otherwise look perfectly packable — and a
  * packer could seal + ship the wrong model. The Ready-to-pack scope therefore
- * excludes any order with an OPEN order_exchanges row, and re-admits it the moment
- * the exchange is marked done.
+ * excludes any order owing an OPEN swap, and re-admits it the moment that swap is
+ * marked done.
+ *
+ * The hold is scoped to SWAPS. A model fix with nothing in hand (blank have_model)
+ * is a PURCHASE: its case sits at Pending until bought, so purchase state already
+ * keeps the order out of the queue. Holding on those records too would deadlock
+ * the order — the corrected case could be bought and marked Purchased and the
+ * parcel would still never become packable.
  *
  * The scope predicates live in src/orders/pack-queue.js and are imported here (and
  * by the server), so this test and production can never drift. The test runs the
@@ -90,6 +97,12 @@ function seed(db) {
 		...base, receipt_id: 1005, name: 'PreTransitExchange', status: 'Paid',
 		is_shipped: 1, tracking_code: '4PXTESTPT', shipment_notified_at: NOW - DAY, carrier_confirmed_at: null,
 	})
+	// R6 — model fix with NOTHING in hand (a BUY, not a swap). There is no swap to
+	//      carry back, so the hold must NOT apply: whether this order is packable is
+	//      decided purely by its purchase state, exactly like any other order.
+	//      Holding it here instead would deadlock it — the corrected case can be
+	//      bought and marked Purchased and the parcel would still never be packable.
+	ins.run({ ...base, receipt_id: 1006, name: 'BuyModelFix', status: 'Paid' })
 
 	const insEx = db.prepare(`
     INSERT INTO order_exchanges (receipt_id, item_key, title, have_model, need_model, components, status)
@@ -97,6 +110,7 @@ function seed(db) {
   `)
 	insEx.run(1002, 'plain sticker pack\x00555', 'Plain Sticker Pack', 'iPhone 17 Pro', 'iPhone 17 Pro Max', 'case')
 	insEx.run(1005, 'plain sticker pack\x00555', 'Plain Sticker Pack', 'iPhone 17 Pro', 'iPhone 17 Pro Max', 'grip')
+	insEx.run(1006, 'plain sticker pack\x00555', 'Plain Sticker Pack', null, 'iPhone 16', 'case')
 }
 
 const tmpPath = path.join(os.tmpdir(), `pack-queue-test-${process.pid}-${Date.now()}.db`)
@@ -115,9 +129,10 @@ try {
 		assert(!ids.includes(1005), `pre-transit order owing a swap (1005) is HELD OUT of the pack queue`)
 		assert(!ids.includes(1003), `already-packaged order (1003) is not in the pack queue`)
 		assert(!ids.includes(1004), `cancelled order (1004) is not in the pack queue`)
+		assert(ids.includes(1006), `order owing a BUY-shaped model fix (1006) is NOT held — its purchase state alone decides packability`)
 
 		const held = packQueue.openExchangeHoldCount(db, CONFIG)
-		assert(held === 2, `hold count reflects BOTH swap-held orders while open (got: ${held}, want 2)`)
+		assert(held === 2, `hold count reflects ONLY the two swap-held orders (got: ${held}, want 2)`)
 	}
 
 	// ── After BOTH exchanges are marked done ──────────────────────────────────

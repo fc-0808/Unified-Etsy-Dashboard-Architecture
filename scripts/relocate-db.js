@@ -15,15 +15,17 @@
  * aside (never deletes your data).
  */
 
-require('dotenv').config()
+require('dotenv').config({ quiet: true })
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const Database = require('better-sqlite3')
+const { loadConfig } = require('../src/config/schema')
 
-const configPath = path.resolve('config.json')
-const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'))
-const srcPath = path.resolve(cfg.db_path)
+const configPath = process.env.DASHBOARD_CONFIG_PATH
+	? path.resolve(process.env.DASHBOARD_CONFIG_PATH)
+	: path.resolve('config.json')
+const srcPath = loadConfig().db_path
 
 if (!fs.existsSync(srcPath)) {
 	console.error(`✗ Database not found at ${srcPath}`)
@@ -76,16 +78,24 @@ try {
 
 // 3. Repoint config.json (minimal edit — only the db_path value).
 const raw = fs.readFileSync(configPath, 'utf8')
-const updated = raw.replace(/("db_path"\s*:\s*)"[^"]*"/, `$1${JSON.stringify(targetPath)}`)
+const updated = raw.replace(/("db_path"\s*:\s*)(?:"[^"]*"|null)/, `$1${JSON.stringify(targetPath)}`)
 if (updated === raw) {
-	console.warn('⚠ Could not auto-edit config.json — set "db_path" manually to:\n  ' + targetPath)
-} else {
-	fs.writeFileSync(configPath, updated)
-	console.log('✓ Updated config.json db_path.')
+	console.error('✗ Could not auto-edit config.json. The verified copy was left at:\n  ' + targetPath)
+	console.error('  The original database and config are untouched; set db_path manually if desired.')
+	process.exit(1)
 }
+const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+const configBackup = `${configPath}.bak-${stamp}`
+try {
+	fs.copyFileSync(configPath, configBackup)
+} catch (e) {
+	console.error('✗ Could not back up config.json; refusing to repoint it:', e.message)
+	process.exit(1)
+}
+fs.writeFileSync(configPath, updated)
+console.log(`✓ Updated config.json db_path (backup: ${configBackup}).`)
 
 // 4. Rename the old cloud-synced DB aside (keep as a safety copy, never delete).
-const stamp = new Date().toISOString().replace(/[:.]/g, '-')
 for (const suffix of ['', '-wal', '-shm']) {
 	const f = srcPath + suffix
 	if (fs.existsSync(f)) {

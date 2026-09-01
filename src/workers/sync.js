@@ -34,7 +34,17 @@ const SYNC_LOCK_OWNER = `${os.hostname()}:${process.pid}`;
 // a crashed holder's lock is reclaimable after this window.
 const SYNC_LOCK_TTL_SEC = 20 * 60;
 
-const { loadConfig, getAllShops }   = require('../config/schema');
+// Tracking is a separate workload with a separate lock. It uses 4PX rather than
+// Etsy, so it can run on a tighter cadence without consuming Etsy's QPD budget,
+// while the cross-process mutex prevents duplicate dashboard/worker instances
+// from polling the same parcels simultaneously.
+const TRACKING_LOCK_NAME = 'tracking_cycle';
+const TRACKING_LOCK_TTL_SEC = 30 * 60;
+// SQLite's advisory lock deliberately lets the SAME owner renew/reacquire. This
+// in-process guard covers that case, while the DB lock covers other processes.
+let _trackingCyclePromise = null;
+
+const { loadConfig, getAllShops, isAutoRestockEnabled, refreshConfigInPlace } = require('../config/schema');
 const { TokenManager, TokenExpiredError } = require('../auth/token-manager');
 const { createGroupProxyClient, verifyGroupProxy } = require('../proxy/factory');
 const { usesGroupProxy } = require('../config/schema');
@@ -43,7 +53,8 @@ const {
   paginateReceipts,
   resolveShopId,
   getShop,
-  getListingImagesBatch,
+  getListingImageCatalogBatch,
+  getListingVariationImages,
   getListingInventory,
   updateListingInventory,
   paginateLedgerEntries,
@@ -55,9 +66,12 @@ const {
   syncConfigToDb,
   upsertReceipt,
   upsertListingImage,
+  replaceListingVariationImages,
+  listingIdsNeedingVariationRefresh,
   upsertListingInventory,
   updateCarrierStatus,
   updateTrackingDetail,
+  recordTrackingCheckFailure,
   recordFourpxFreight,
   logEvent,
   startSyncLog,
@@ -65,14 +79,20 @@ const {
   acquireLock,
   renewLock,
   releaseLock,
+  syncShippingAlertLedger,
+  startTrackingSyncRun,
+  updateTrackingSyncRunProgress,
+  finishTrackingSyncRun,
+  getLatestTrackingSyncRun,
   updateShopSyncTime,
-  updateShopListingCount,
+  updateShopHealth,
   updateShopLedgerSyncTime,
   upsertTransaction,
   upsertLedgerEntry,
   upsertEtsyPayment,
   reattributeLedgerEntries,
 } = require('../db/setup');
+const { buildVariationImageRows } = require('../listings/variation-images');
 const { getTrackingSnapshot } = require('../tracking/checker');
 const { resolveReceiptFreight } = require('../fourpx/freight');
 const {
@@ -83,11 +103,128 @@ const {
   orderCheckPriority,
   formatStyleLabel,
 } = require('../inventory/helpers');
+const { maybeSyncShopCatalogHealth } = require('../growth/catalog-sync');
 
 const {
   MAX_INV_WATCH_CHECKS_PER_CYCLE,
   INV_WATCH_STARTUP_DELAY_MS,
 } = require('../compliance/suspension-guard');
+
+// One coordinator owns every workload that spends the shared Etsy API budget.
+// The in-process guard is mandatory because acquireLock intentionally lets the
+// same owner renew; the DB lock independently excludes other processes.
+let _etsyWorkPromise = null;
+
+function getEtsyWorkStatus(db) {
+  const now = Math.floor(Date.now() / 1000);
+  let lock = null;
+  try {
+    lock = db.prepare(
+      'SELECT owner, acquired_at, heartbeat_at FROM app_locks WHERE name = ?'
+    ).get(SYNC_LOCK_NAME) || null;
+  } catch { /* schema may not be ready in a diagnostic caller */ }
+  const lockHeld = !!(lock && (lock.heartbeat_at ?? 0) >= now - SYNC_LOCK_TTL_SEC);
+  return {
+    in_process: _etsyWorkPromise?.kind ?? null,
+    lock_held: lockHeld,
+    lock_owner: lock?.owner ?? null,
+    lock_acquired_at: lock?.acquired_at ?? null,
+    lock_heartbeat_at: lock?.heartbeat_at ?? null,
+  };
+}
+
+function isEtsyWorkRunning() {
+  return _etsyWorkPromise != null;
+}
+
+// Etsy variation photos change rarely. Cache 7 days, and cap per-shop fetches
+// so a large receipt page cannot blow the daily API budget on cosmetics.
+const VARIATION_IMAGE_TTL_SEC = 7 * 24 * 3600;
+const MAX_VARIATION_IMAGE_FETCHES_PER_SHOP = 40;
+
+/**
+ * Pull Etsy variation-images for `listingIds` and persist style → CDN URL.
+ * Non-fatal: a single listing 404/timeout never aborts the receipt sync.
+ *
+ * @param {object} args
+ * @param {import('better-sqlite3').Database} args.db
+ * @param {import('axios').AxiosInstance} args.shopClient
+ * @param {number} args.shopId
+ * @param {number[]} args.listingIds
+ * @param {Map<number, {heroUrl: string|null, byImageId: Map<number, string>}>} args.catalog
+ * @param {string} args.label
+ * @param {Function} [args.heartbeat]
+ */
+async function cacheStyleVariationImages({ db, shopClient, shopId, listingIds, catalog, label, heartbeat }) {
+  const ids = [...new Set((listingIds || []).map(Number).filter((id) => Number.isInteger(id) && id > 0))];
+  if (!ids.length) return 0;
+  let mapped = 0;
+  let attempted = 0;
+  for (const listingId of ids) {
+    heartbeat?.();
+    const byImageId = catalog.get(listingId)?.byImageId;
+    if (!(byImageId instanceof Map) || byImageId.size === 0) {
+      console.warn(`${label} No image catalog for listing ${listingId}; skipping variation-image cache`);
+      continue;
+    }
+    attempted += 1;
+    try {
+      const results = await getListingVariationImages(shopClient, shopId, listingId);
+      const rows = buildVariationImageRows(results, byImageId);
+      replaceListingVariationImages(db, listingId, rows);
+      mapped += rows.length;
+    } catch (err) {
+      const status = err.response?.status;
+      if (status === 404) {
+        try { replaceListingVariationImages(db, listingId, []); } catch { /* ignore */ }
+      } else {
+        console.warn(`${label} Variation images for listing ${listingId} failed (non-fatal): ${err.message}`);
+      }
+    }
+    if (attempted < ids.length) await new Promise((r) => setTimeout(r, 150));
+  }
+  if (attempted) {
+    console.log(`${label} Cached style variation images for ${attempted} listing(s) (${mapped} mapping(s))`);
+  }
+  return attempted;
+}
+
+/**
+ * Single front door for receipt sync, manual/backfill sync, and inventory watch.
+ * Returns immediately with a promise, mirroring startTrackingCycle.
+ */
+function startEtsyWork(db, kind, fn) {
+  const skipped = (reason, activeKind = null) => ({
+    started: false,
+    reason,
+    kind: activeKind,
+    promise: Promise.resolve({ started: false, reason, kind: activeKind }),
+  });
+
+  if (_etsyWorkPromise) return skipped('running', _etsyWorkPromise.kind);
+  if (!acquireLock(db, SYNC_LOCK_NAME, SYNC_LOCK_OWNER, SYNC_LOCK_TTL_SEC)) {
+    return skipped('locked');
+  }
+
+  const token = {};
+  const heartbeat = () => {
+    if (renewLock(db, SYNC_LOCK_NAME, SYNC_LOCK_OWNER)) return true;
+    const err = new Error('Etsy work lost its advisory lock; aborting to prevent duplicate API calls.');
+    err.code = 'ETSY_LOCK_LOST';
+    throw err;
+  };
+
+  const promise = (async () => {
+    try {
+      return await fn({ heartbeat });
+    } finally {
+      releaseLock(db, SYNC_LOCK_NAME, SYNC_LOCK_OWNER);
+      if (_etsyWorkPromise?.token === token) _etsyWorkPromise = null;
+    }
+  })();
+  _etsyWorkPromise = { kind, token, promise };
+  return { started: true, kind, promise };
+}
 
 const TOKENS_PATH = path.resolve(__dirname, '../../tokens.json');
 
@@ -135,6 +272,16 @@ function jitter(maxMs) {
  */
 function sleep(ms) {
   return new Promise((res) => setTimeout(res, ms));
+}
+
+/** A telemetry/UI callback must never be able to abort the background worker. */
+function safeTrackingHook(fn, payload, label) {
+  if (typeof fn !== 'function') return;
+  try {
+    fn(payload);
+  } catch (err) {
+    console.warn(`[tracking] ${label} callback failed: ${err.message}`);
+  }
 }
 
 /**
@@ -185,9 +332,9 @@ function intervalToCron(minutes) {
  *   1. Always live-check ordered listings (cache is used only to prioritize when
  *      more than MAX_CHECKS_PER_CYCLE listings need attention in one cycle).
  *   2. Call Etsy GET listing inventory to get live quantities.
- *   3. If any offering is at zero AND auto_restock_enabled, PUT all offerings
+ *   3. If any offering is at zero AND auto-restock is enabled, PUT all offerings
  *      back to config.restock_quantity and log an ORDER_RESTOCK event.
- *   4. If auto_restock_enabled is false, just log ZERO_STOCK (alert mode).
+ *   4. If auto-restock is disabled, just log ZERO_STOCK (alert mode).
  *
  * Budget: at most 1 GET + 1 PUT per affected listing per sync cycle.
  * Listings whose cached stock is fine are skipped without any API call.
@@ -198,11 +345,12 @@ function intervalToCron(minutes) {
  * @param {object}       config     - full app config (auto_restock_enabled, restock_quantity)
  * @param {import('better-sqlite3').Database} db
  */
-async function checkAndRestockForOrders(listingIds, shopClient, shop, config, db) {
+async function checkAndRestockForOrders(listingIds, shopClient, shop, config, db, options = {}) {
   if (!listingIds.size) return;
+  const heartbeat = options.heartbeat || null;
 
   const restockQty  = config.restock_quantity ?? 3;
-  const autoRestock = config.auto_restock_enabled !== false;
+  const autoRestock = isAutoRestockEnabled(config);
   const label       = `[order-restock] ${shop.shop_name}`;
   const twoHoursAgo = Math.floor(Date.now() / 1000) - 7200;
 
@@ -257,6 +405,7 @@ async function checkAndRestockForOrders(listingIds, shopClient, shop, config, db
   // when the entire cap of 10 listings needs checking back-to-back.
   for (const [idx, listingId] of toCheck.entries()) {
     if (idx > 0) await sleep(300);
+    heartbeat?.();
     try {
       // Fetch live inventory from Etsy and immediately refresh the local cache
       const inv = await getListingInventory(shopClient, listingId);
@@ -375,7 +524,7 @@ async function checkAndRestockForOrders(listingIds, shopClient, shop, config, db
  *        Called after every written batch so callers can stream live progress.
  */
 async function syncShop(shop, group, config, proxyClient, tokenManager, db, egressIp = null, options = {}) {
-  const { fullBackfill = false, onProgress = null } = options;
+  const { fullBackfill = false, onProgress = null, heartbeat = null } = options;
   const label = `[sync] ${shop.shop_name} (${group.group_id})`;
   const logId = startSyncLog(db, shop.shop_id, group.group_id, egressIp);
 
@@ -429,16 +578,22 @@ async function syncShop(shop, group, config, proxyClient, tokenManager, db, egre
 
     // ── 3b. Refresh the persisted active-listing count (THROTTLED) ────────────
     // The Etsy Shop object exposes listing_active_count directly, but it's a
-    // cosmetic figure that barely moves — so we refresh it at most once per
-    // LISTING_COUNT_TTL_MS per shop rather than burning a GET /shops on every
-    // sync cycle. Non-fatal: a failure here must never abort the receipt sync.
+    // cosmetic figure that barely moves. It is analytics metadata under Etsy's
+    // Aug 2026 API Terms, so we fetch it only under the same written-approval +
+    // collection opt-ins as catalog health, and then at most once per TTL.
+    // Non-fatal: a failure here must never abort the receipt sync.
     const lastCount = _lastListingCountRefresh.get(shop.shop_id) ?? 0;
-    if (Date.now() - lastCount >= LISTING_COUNT_TTL_MS) {
+    const optionalAnalyticsApproved =
+      config.catalog_health_sync === true &&
+      config.etsy_api_analytics_approved === true;
+    if (optionalAnalyticsApproved && Date.now() - lastCount >= LISTING_COUNT_TTL_MS) {
       try {
         const shopData = await getShop(shopClient, shop.shop_id);
-        if (shopData && shopData.listing_active_count != null) {
-          updateShopListingCount(db, shop.shop_id, shopData.listing_active_count);
-          console.log(`${label} Active listings: ${shopData.listing_active_count}`);
+        if (shopData) {
+          updateShopHealth(db, shop.shop_id, shopData);
+          if (shopData.listing_active_count != null) {
+            console.log(`${label} Active listings: ${shopData.listing_active_count}`);
+          }
         }
         _lastListingCountRefresh.set(shop.shop_id, Date.now());
       } catch (err) {
@@ -458,6 +613,7 @@ async function syncShop(shop, group, config, proxyClient, tokenManager, db, egre
 
     // Prepare a fast lookup: which listing_ids already have cached images?
     const cachedImgCheck = db.prepare('SELECT 1 FROM listing_images WHERE listing_id = ?');
+    let variationFetchesThisShop = 0;
 
     // Helper: write a batch of receipts to DB + cache listing images
     const writeBatch = async (batch) => {
@@ -490,22 +646,46 @@ async function syncShop(shop, group, config, proxyClient, tokenManager, db, egre
         try { onProgress({ shop_id: shop.shop_id, written: receiptsWritten }); }
         catch { /* progress reporting must never break the sync */ }
       }
+      heartbeat?.();
 
-      const uncachedIds = [...new Set(
+      const listingIds = [...new Set(
         batch.flatMap((r) => (r.transactions ?? []).map((t) => t.listing_id))
-      )].filter((id) => id && !cachedImgCheck.get(id));
+      )].filter((id) => id);
 
-      if (uncachedIds.length > 0) {
-        const imageMap = await getListingImagesBatch(shopClient, uncachedIds);
-        if (imageMap.size > 0) {
+      const uncachedIds = listingIds.filter((id) => !cachedImgCheck.get(id));
+      const remainingVarBudget = MAX_VARIATION_IMAGE_FETCHES_PER_SHOP - variationFetchesThisShop;
+      const staleVarIds = remainingVarBudget > 0
+        ? listingIdsNeedingVariationRefresh(db, listingIds, VARIATION_IMAGE_TTL_SEC)
+            .slice(0, remainingVarBudget)
+        : [];
+
+      const catalogIds = [...new Set([...uncachedIds, ...staleVarIds].map(Number).filter(Boolean))];
+      let catalog = new Map();
+      if (catalogIds.length > 0) {
+        catalog = await getListingImageCatalogBatch(shopClient, catalogIds);
+        if (catalog.size > 0) {
           const saveImages = db.transaction(() => {
-            for (const [listingId, url] of imageMap) {
-              upsertListingImage(db, listingId, url);
+            for (const [listingId, entry] of catalog) {
+              if (entry?.heroUrl) upsertListingImage(db, listingId, entry.heroUrl);
             }
           });
           saveImages();
-          console.log(`${label} Cached ${imageMap.size} listing image(s)`);
+          const heroCount = [...catalog.values()].filter((e) => e?.heroUrl).length;
+          if (heroCount) console.log(`${label} Cached ${heroCount} listing image(s)`);
         }
+      }
+
+      if (staleVarIds.length > 0) {
+        const fetched = await cacheStyleVariationImages({
+          db,
+          shopClient,
+          shopId: numericId,
+          listingIds: staleVarIds,
+          catalog,
+          label,
+          heartbeat,
+        });
+        variationFetchesThisShop += fetched;
       }
     };
 
@@ -543,6 +723,40 @@ async function syncShop(shop, group, config, proxyClient, tokenManager, db, egre
       }
     }
 
+    // Backfill Etsy style photos for still-open orders whose listings were
+    // already in listing_images (so writeBatch skipped them historically).
+    const remainingVar = MAX_VARIATION_IMAGE_FETCHES_PER_SHOP - variationFetchesThisShop;
+    if (remainingVar > 0) {
+      try {
+        const openListingIds = db.prepare(`
+          SELECT DISTINCT t.listing_id
+          FROM transactions t
+          JOIN receipts r ON r.receipt_id = t.receipt_id
+          WHERE r.shop_id = ?
+            AND t.listing_id IS NOT NULL
+            AND r.is_shipped = 0
+            AND r.status NOT IN ('Canceled','Cancelled','Fully Refunded','Fully refunded')
+        `).all(shop.shop_id).map((row) => row.listing_id);
+        const stale = listingIdsNeedingVariationRefresh(db, openListingIds, VARIATION_IMAGE_TTL_SEC)
+          .slice(0, remainingVar);
+        if (stale.length) {
+          heartbeat?.();
+          const catalog = await getListingImageCatalogBatch(shopClient, stale);
+          await cacheStyleVariationImages({
+            db,
+            shopClient,
+            shopId: numericId,
+            listingIds: stale,
+            catalog,
+            label,
+            heartbeat,
+          });
+        }
+      } catch (err) {
+        console.warn(`${label} Style-variation backfill skipped (non-fatal): ${err.message}`);
+      }
+    }
+
     // ── 5. Order-triggered inventory check ───────────────────────────────────
     // For every listing that appeared in a recently-created order, refresh
     // its live inventory from Etsy. If any offering is at zero, auto-restock.
@@ -550,7 +764,32 @@ async function syncShop(shop, group, config, proxyClient, tokenManager, db, egre
     // minutes of a sale rather than waiting for the 4-hour periodic sweep.
     if (orderListingIds.size > 0) {
       console.log(`${label} Order-triggered inventory check for ${orderListingIds.size} listing(s)…`);
-      await checkAndRestockForOrders(orderListingIds, shopClient, shop, config, db);
+      heartbeat?.();
+      await checkAndRestockForOrders(orderListingIds, shopClient, shop, config, db, { heartbeat });
+    }
+
+    // ── 5b. Catalog health (views / reviews / expired counts) ────────────────
+    // Non-fatal except QPD exhaustion, which the outer handler uses to skip the
+    // rest of this API key. Default cadence is once per shop per 24h.
+    // Fail closed: Etsy API Terms §5(25) require express written authorization
+    // for API analytics. A sync opt-in alone is never enough.
+    if (config.catalog_health_sync === true && config.etsy_api_analytics_approved === true) {
+      try {
+        heartbeat?.();
+        await maybeSyncShopCatalogHealth({
+          db,
+          shopClient,
+          numericShopId: numericId,
+          shopId: shop.shop_id,
+          shopName: shop.shop_name,
+          analyticsApproved: config.etsy_api_analytics_approved,
+          intervalHours: config.catalog_health_interval_hours,
+          heartbeat,
+        });
+      } catch (err) {
+        if (isQpdExhaustedError(err)) throw err;
+        console.warn(`${label} Catalog health skipped (non-fatal): ${err.message}`);
+      }
     }
 
     // ── 6. Update shop metadata + finish log ──────────────────────────────────
@@ -560,6 +799,10 @@ async function syncShop(shop, group, config, proxyClient, tokenManager, db, egre
     return { status: 'success', shop_id: shop.shop_id, api_key: shop.api_key };
 
   } catch (err) {
+    if (err?.code === 'ETSY_LOCK_LOST') {
+      finishSyncLog(db, logId, 'error', receiptsWritten, err.message);
+      throw err;
+    }
     // QPD exhaustion is a transient, self-resolving budget condition shared by
     // every shop on the same API key — NOT a per-shop failure. Record it as a
     // distinct, non-alarming 'rate_limited' status (rendered amber, not red) and
@@ -600,7 +843,7 @@ async function syncShop(shop, group, config, proxyClient, tokenManager, db, egre
  * @returns {Promise<{ entries: number, attributed: number }>}
  */
 async function syncLedgerForShop(shop, group, config, proxyClient, tokenManager, db, options = {}) {
-  const { fullBackfill = false, onProgress = null } = options;
+  const { fullBackfill = false, onProgress = null, heartbeat = null } = options;
   const label = `[ledger] ${shop.shop_name}`;
 
   const accessToken = await tokenManager.getAccessToken(
@@ -638,6 +881,7 @@ async function syncLedgerForShop(shop, group, config, proxyClient, tokenManager,
   let maxDate = minCreated;
 
   for (let winStart = minCreated; winStart <= now; winStart += CHUNK) {
+    heartbeat?.();
     const winEnd = Math.min(winStart + CHUNK - 1, now);
     for await (const page of paginateLedgerEntries(shopClient, shop.shop_id, { minCreated: winStart, maxCreated: winEnd })) {
       for (const e of page) {
@@ -652,6 +896,7 @@ async function syncLedgerForShop(shop, group, config, proxyClient, tokenManager,
       if (typeof onProgress === 'function') {
         try { onProgress({ shop_id: shop.shop_id, entries: buffer.length }); } catch { /* ignore */ }
       }
+      heartbeat?.();
     }
   }
 
@@ -701,7 +946,8 @@ async function syncLedgerForShop(shop, group, config, proxyClient, tokenManager,
  * @param {TokenManager} tokenManager
  * @param {import('better-sqlite3').Database} db
  */
-async function syncGroup(group, shopsInGroup, config, tokenManager, db) {
+async function syncGroup(group, shopsInGroup, config, tokenManager, db, options = {}) {
+  const heartbeat = options.heartbeat || null;
   const label = `[sync] group:${group.group_id}`;
 
   // Verify network path before touching any shops — fail closed regardless of routing type.
@@ -772,8 +1018,9 @@ async function syncGroup(group, shopsInGroup, config, tokenManager, db) {
     const delaySec = Math.round(delayMs / 1000);
     console.log(`${label} Scheduling ${shop.shop_name} in ~${delaySec}s`);
     await sleep(delayMs);
+    heartbeat?.();
 
-    const result = await syncShop(shop, group, config, proxyClient, tokenManager, db, egressIp);
+    const result = await syncShop(shop, group, config, proxyClient, tokenManager, db, egressIp, { heartbeat });
 
     if (result?.status === 'rate_limited' && shop.api_key) {
       exhaustedKeys.add(shop.api_key);
@@ -791,8 +1038,124 @@ async function syncGroup(group, shopsInGroup, config, tokenManager, db) {
 // ─── Pass D: Carrier tracking status check ────────────────────────────────────
 
 /**
- * Query the 4PX tracking API for all recently shipped, unconfirmed orders
- * and update `carrier_confirmed_at` for those that have been picked up.
+ * Resolve bounded, defensive settings for the independent 4PX tracking worker.
+ * Config validation also normalizes these values, but this function protects
+ * direct/test callers and keeps all polling math in one source of truth.
+ *
+ * @param {object} config
+ */
+function getTrackingPollSettings(config = {}) {
+  const finite = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+  const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+  return {
+    enabled: config.fourpx_tracking_sync !== false,
+    intervalMinutes: Math.round(clamp(finite(config.fourpx_tracking_interval_minutes, 15), 5, 24 * 60)),
+    windowDays: Math.round(clamp(finite(config.fourpx_tracking_window_days, 120), 30, 365)),
+    longTailRecheckHours: clamp(finite(config.fourpx_tracking_long_tail_recheck_hours, 168), 24, 30 * 24),
+    preRecheckHours: clamp(finite(config.fourpx_tracking_pre_recheck_hours, 2), 0.25, 72),
+    transitRecheckHours: clamp(finite(config.fourpx_tracking_transit_recheck_hours, 6), 0.5, 168),
+    maxPerCycle: Math.round(clamp(finite(config.fourpx_tracking_max_per_cycle, 250), 1, 1000)),
+    requestDelayMs: Math.round(clamp(finite(config.fourpx_tracking_request_delay_ms, 250), 100, 5000)),
+    errorRetryMinutes: clamp(finite(config.fourpx_tracking_error_retry_minutes, 15), 1, 120),
+    errorRetryMaxMinutes: clamp(finite(config.fourpx_tracking_error_retry_max_minutes, 120), 5, 24 * 60),
+  };
+}
+
+/**
+ * Shared candidate window/freshness parameters.
+ * @param {object} settings
+ * @param {number} [nowEpoch]
+ */
+function trackingCandidateParams(settings, nowEpoch = Math.floor(Date.now() / 1000)) {
+  return {
+    nowEpoch,
+    windowCutoff: nowEpoch - settings.windowDays * 86400,
+    longTailCutoff: nowEpoch - settings.longTailRecheckHours * 3600,
+    preCutoff: nowEpoch - settings.preRecheckHours * 3600,
+    transitCutoff: nowEpoch - settings.transitRecheckHours * 3600,
+  };
+}
+
+const TRACKING_SHIP_DATE_SQL = 'COALESCE(r.shipment_notified_at, r.fourpx_created_at, r.etsy_created_at)';
+// 4PX's official lookup accepts its own number or a downstream provider number;
+// neither is contractually required to start with "4PX". The dedicated
+// fourpx_tracking_no column or a 4PX consignment proves carrier ownership.
+const TRACKING_LOOKUP_NO_SQL = `COALESCE(
+  NULLIF(TRIM(r.fourpx_tracking_no), ''),
+  CASE
+    WHEN r.fourpx_consignment_no IS NOT NULL OR r.tracking_code LIKE '4PX%'
+    THEN NULLIF(TRIM(r.tracking_code), '')
+  END
+)`;
+const TRACKING_LOOKUP_SCOPE_SQL = `(${TRACKING_LOOKUP_NO_SQL} IS NOT NULL)`;
+// Older official-client builds sent an Accept header that made the 4PX gateway
+// replace non-ASCII tracking text with '?' / U+FFFD. Those snapshots receive an
+// accelerated rewrite cadence; once repaired, this predicate becomes false.
+const TRACKING_CORRUPT_TEXT_SQL = `(
+  INSTR(COALESCE(r.tracking_last_event, ''), '???') > 0
+  OR INSTR(COALESCE(r.tracking_last_event, ''), '�') > 0
+)`;
+
+/**
+ * Due predicate shared verbatim by count and selection.
+ *
+ * The hot window uses phase-specific cache TTLs. Older parcels are deliberately
+ * not abandoned: an open parcel has no inferred terminal state, so it receives a
+ * low-frequency long-tail check until 4PX reports delivery/disposal or an
+ * operator archives it. Explicit error retries remain due at their own cadence.
+ */
+const TRACKING_DUE_SQL = `(
+  r.tracking_checked_at IS NULL
+  OR (
+    ${TRACKING_CORRUPT_TEXT_SQL}
+    AND r.tracking_last_error IS NULL
+    AND r.tracking_checked_at < @preCutoff
+  )
+  OR (r.tracking_next_check_at IS NOT NULL AND r.tracking_next_check_at <= @nowEpoch)
+  OR (
+    r.tracking_next_check_at IS NULL
+    AND (
+      (
+        ${TRACKING_SHIP_DATE_SQL} >= @windowCutoff
+        AND (
+          (r.carrier_confirmed_at IS NULL     AND r.tracking_checked_at < @preCutoff)
+          OR (r.carrier_confirmed_at IS NOT NULL AND r.tracking_checked_at < @transitCutoff)
+        )
+      )
+      OR (
+        ${TRACKING_SHIP_DATE_SQL} < @windowCutoff
+        AND r.tracking_checked_at < @longTailCutoff
+      )
+    )
+  )
+)`;
+
+/**
+ * Count parcels due for a live 4PX check. Kept alongside the selection query so
+ * the status endpoint and worker cannot drift into different definitions of
+ * "backlog".
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {object} settings
+ * @param {number} [nowEpoch]
+ */
+function countTrackingCandidates(db, settings, nowEpoch = Math.floor(Date.now() / 1000)) {
+  const params = trackingCandidateParams(settings, nowEpoch);
+  return Number(db.prepare(`
+    SELECT COUNT(*) AS n
+    FROM receipts r
+    WHERE ${TRACKING_LOOKUP_SCOPE_SQL}
+      AND COALESCE(r.fourpx_order_status, '') != 'cancelled'
+      AND r.archived_at IS NULL
+      AND COALESCE(r.tracking_status, '') != 'delivered'
+      AND r.tracking_delivered_at IS NULL
+      AND ${TRACKING_DUE_SQL}
+  `).get(params).n || 0);
+}
+
+/**
+ * Query the 4PX tracking API for open parcels whose cached snapshot is due and
+ * persist their latest event, canonical status, health and pickup/delivery time.
  *
  * This is the core engine that powers accurate Pre-transit detection.
  * The Etsy v3 API does NOT expose carrier scan status — only the carrier
@@ -809,104 +1172,409 @@ async function syncGroup(group, shopsInGroup, config, tokenManager, db) {
  *
  * Rate limiting strategy:
  *   - Unchecked orders (tracking_checked_at IS NULL) are prioritized.
- *   - Previously checked orders are re-checked only after TRACKING_RECHECK_HOURS.
- *   - At most MAX_TRACK_CHECKS_PER_CYCLE orders are processed per sync cycle.
- *   - A 150ms pause between requests avoids hammering the 4PX API.
+ *   - Recently shipped orders use phase-specific freshness windows.
+ *   - Older open orders receive a bounded weekly long-tail check; they are never
+ *     inferred delivered merely because time passed.
+ *   - At most `fourpx_tracking_max_per_cycle` parcels are processed per cycle.
+ *   - Requests are serial and paced; one failure never aborts the remaining batch.
  *
  * @param {import('better-sqlite3').Database} db
- * @param {object} config - App config (pre_transit_days)
+ * @param {object} config
+ * @param {object} [options]
+ * @param {(trackingNo:string, credentials:object)=>Promise<object>} [options.getSnapshot]
+ * @param {()=>void} [options.heartbeat]
+ * @param {(progress:object)=>void} [options.onProgress]
+ * @returns {Promise<object>} aggregate run summary
  */
-async function runTrackingCheckPass(db, config) {
-  // Window: don't keep polling parcels older than this (they're surely delivered
-  // even if the carrier never posted a final scan). Generous so the Shipping tab
-  // still tracks long-haul/stuck parcels.
-  const TRACKING_WINDOW_DAYS    = Math.max((config.pre_transit_days ?? 30) + 3, 120);
-  const PRE_RECHECK_HOURS       = 4;   // pre-transit: check often (pickup detection)
-  const TRANSIT_RECHECK_HOURS   = 18;  // in-transit: refresh status / detect delivery + stuck
-  const MAX_TRACK_CHECKS_PER_CYCLE = 250;
-  const INTER_REQUEST_MS        = 150;
+async function runTrackingCheckPass(db, config, options = {}) {
+  const settings = getTrackingPollSettings(config);
+  const nowEpoch = Math.floor(Date.now() / 1000);
+  const params = {
+    ...trackingCandidateParams(settings, nowEpoch),
+    max: settings.maxPerCycle,
+  };
+  const getSnapshot = options.getSnapshot || getTrackingSnapshot;
 
-  const nowEpoch      = Math.floor(Date.now() / 1000);
-  const windowCutoff  = nowEpoch - TRACKING_WINDOW_DAYS * 86400;
-  const preCutoff     = nowEpoch - PRE_RECHECK_HOURS * 3600;
-  const transitCutoff = nowEpoch - TRANSIT_RECHECK_HOURS * 3600;
-
-  // Candidates: every 4PX parcel that is NOT yet delivered, within the window,
-  // whose snapshot is stale for its phase. Pre-transit parcels (no first scan) are
-  // refreshed frequently to detect pickup; in-transit parcels less often to keep
-  // their status / last-event / delivery / stuck state current for the Shipping tab.
-  // Never-checked parcels are most urgent; pre-transit beats in-transit.
-  const candidates = db.prepare(`
-    SELECT receipt_id, tracking_code, carrier_name, shop_id, carrier_confirmed_at
-    FROM receipts
-    WHERE tracking_code LIKE '4PX%'
-      AND COALESCE(tracking_status, '') != 'delivered'
-      AND tracking_delivered_at IS NULL
-      AND COALESCE(shipment_notified_at, etsy_created_at) >= @windowCutoff
-      AND (
-        tracking_checked_at IS NULL
-        OR (carrier_confirmed_at IS NULL     AND tracking_checked_at < @preCutoff)
-        OR (carrier_confirmed_at IS NOT NULL AND tracking_checked_at < @transitCutoff)
-      )
+  // Candidates: every open 4PX parcel whose snapshot is due. Hot-window
+  // pre-transit parcels are refreshed frequently to detect pickup; moving parcels
+  // less often; the older open tail remains on its bounded weekly cadence.
+  // Never-checked parcels are most urgent; then abnormal health, pre-transit,
+  // and finally the oldest cached checks. Prefer Etsy's buyer-visible tracking
+  // number, with the dashboard-created 4PX number as a fallback.
+  const trackingSelect = `
+    SELECT
+      r.receipt_id,
+      ${TRACKING_LOOKUP_NO_SQL} AS tracking_no,
+      r.carrier_name,
+      r.shop_id,
+      r.carrier_confirmed_at,
+      r.tracking_status,
+      r.tracking_health,
+      r.tracking_checked_at
+    FROM receipts r`;
+  const explicitIds = [...new Set((options.receiptIds || [])
+    .map(Number)
+    .filter(Number.isInteger))]
+    .slice(0, 50);
+  const candidates = explicitIds.length
+    ? db.prepare(`
+        ${trackingSelect}
+        WHERE r.receipt_id IN (${explicitIds.map(() => '?').join(',')})
+          AND ${TRACKING_LOOKUP_SCOPE_SQL}
+          AND COALESCE(r.fourpx_order_status, '') != 'cancelled'
+          AND r.archived_at IS NULL
+        ORDER BY r.receipt_id
+      `).all(...explicitIds)
+    : db.prepare(`
+    ${trackingSelect}
+    WHERE ${TRACKING_LOOKUP_SCOPE_SQL}
+      AND COALESCE(r.fourpx_order_status, '') != 'cancelled'
+      AND r.archived_at IS NULL
+      AND COALESCE(r.tracking_status, '') != 'delivered'
+      AND r.tracking_delivered_at IS NULL
+      AND ${TRACKING_DUE_SQL}
     ORDER BY
-      CASE WHEN tracking_checked_at IS NULL THEN 0 ELSE 1 END ASC,
-      CASE WHEN carrier_confirmed_at IS NULL THEN 0 ELSE 1 END ASC,
-      COALESCE(shipment_notified_at, etsy_created_at) DESC
+      CASE WHEN r.tracking_checked_at IS NULL THEN 0 ELSE 1 END ASC,
+      CASE WHEN r.tracking_next_check_at IS NOT NULL THEN 0 ELSE 1 END ASC,
+      CASE WHEN ${TRACKING_SHIP_DATE_SQL} >= @windowCutoff THEN 0 ELSE 1 END ASC,
+      CASE r.tracking_health WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END ASC,
+      CASE WHEN r.carrier_confirmed_at IS NULL THEN 0 ELSE 1 END ASC,
+      COALESCE(r.tracking_checked_at, 0) ASC,
+      COALESCE(r.shipment_notified_at, r.fourpx_created_at, r.etsy_created_at) DESC
     LIMIT @max
-  `).all({ windowCutoff, preCutoff, transitCutoff, max: MAX_TRACK_CHECKS_PER_CYCLE });
+  `).all(params);
+
+  const summary = {
+    candidateCount: candidates.length,
+    checkedCount: 0,
+    updatedCount: 0,
+    preTransit: 0,
+    inTransit: 0,
+    delivered: 0,
+    exception: 0,
+    unknown: 0,
+    errors: 0,
+    backlogRemaining: 0,
+  };
+  if (options.includeResults) summary.results = [];
 
   if (!candidates.length) {
     console.log('[tracking] No parcels need a tracking check this cycle.');
-    return;
+    return summary;
   }
 
   console.log(`[tracking] Checking ${candidates.length} parcel(s) via ${config.fourpx_app_key ? '4PX Official API (authenticated)' : '4PX Public API (fallback)'}…`);
-
-  let confirmed = 0, stillPre = 0, delivered = 0, exception = 0, unknown = 0;
+  safeTrackingHook(options.onProgress, {
+    checked: 0,
+    total: candidates.length,
+    ...summary,
+  }, 'progress');
 
   for (const [idx, order] of candidates.entries()) {
-    if (idx > 0) await sleep(INTER_REQUEST_MS);
-
-    const snap = await getTrackingSnapshot(order.tracking_code, {
-      appKey:    config.fourpx_app_key    ?? null,
-      appSecret: config.fourpx_app_secret ?? null,
-    });
-
-    if (!snap.ok) {
-      // Transient error / not yet registered — record the attempt only so we don't
-      // hammer it, and leave any previously-known status intact (fail-open).
-      unknown++;
-      updateTrackingDetail(db, order.receipt_id, { checkedAt: nowEpoch });
-      continue;
+    if (idx > 0) await sleep(settings.requestDelayMs);
+    if (typeof options.heartbeat === 'function' && options.heartbeat() === false) {
+      const err = new Error('Tracking cycle lost its advisory lock; aborting to prevent duplicate polling.');
+      err.code = 'TRACKING_LOCK_LOST';
+      err.partialSummary = {
+        ...summary,
+        backlogRemaining: countTrackingCandidates(db, settings),
+      };
+      throw err;
     }
 
-    // First physical scan → carrier_confirmed_at (drives pre-transit detection).
-    const firstScanAt =
-      (snap.status === 'in_transit' || snap.status === 'delivered' || snap.status === 'exception')
-        ? (snap.firstScanAt ?? nowEpoch)
-        : null;
+    const checkedAt = Math.floor(Date.now() / 1000);
+    summary.checkedCount++;
+    try {
+      const snap = await getSnapshot(order.tracking_no, {
+        appKey:    config.fourpx_app_key    ?? null,
+        appSecret: config.fourpx_app_secret ?? null,
+        stuckDays: config.fourpx_stuck_days ?? 10,
+      });
 
-    if (snap.status === 'delivered') delivered++;
-    else if (snap.status === 'exception') exception++;
-    else if (snap.status === 'in_transit') confirmed++;
-    else stillPre++;
+      if (!snap?.ok) {
+        // Transient error / not yet registered — record the attempt only so we
+        // don't hammer it, and preserve any previously-known status (fail-open).
+        summary.unknown++;
+        if (!['unknown', 'not_found'].includes(String(snap?.status || '').toLowerCase())) {
+          summary.errors++;
+        }
+        const failure = recordTrackingCheckFailure(db, order.receipt_id, {
+          checkedAt,
+          error: snap?.error || snap?.status || 'Tracking data unavailable',
+          baseRetryMinutes: settings.errorRetryMinutes,
+          maxRetryMinutes: settings.errorRetryMaxMinutes,
+        });
+        if (summary.results) {
+          summary.results.push({
+            receipt_id: order.receipt_id,
+            tracking_no: order.tracking_no,
+            ok: false,
+            status: snap?.status || 'unknown',
+            source: snap?.source || null,
+            error: snap?.error || snap?.status || 'Tracking data unavailable',
+            next_check_at: failure.nextCheckAt,
+          });
+        }
+      } else {
+        const firstScanAt =
+          ['in_transit', 'delivered', 'exception'].includes(snap.status)
+            ? (snap.firstScanAt ?? checkedAt)
+            : null;
 
-    updateTrackingDetail(db, order.receipt_id, {
-      status:       snap.status,
-      firstScanAt,
-      lastEventAt:  snap.lastEventAt,
-      lastEvent:    snap.lastEvent,
-      lastLocation: snap.lastLocation,
-      deliveredAt:  snap.deliveredAt,
-      health:       snap.health,
-      checkedAt:    nowEpoch,
-    });
+        if (snap.status === 'delivered') summary.delivered++;
+        else if (snap.status === 'exception') summary.exception++;
+        else if (snap.status === 'in_transit') summary.inTransit++;
+        else summary.preTransit++;
+
+        updateTrackingDetail(db, order.receipt_id, {
+          status:       snap.status,
+          firstScanAt,
+          lastEventAt:  snap.lastEventAt,
+          lastEvent:    snap.lastEvent,
+          lastLocation: snap.lastLocation,
+          deliveredAt:  snap.deliveredAt,
+          health:       snap.health,
+          checkedAt,
+        });
+        summary.updatedCount++;
+        if (summary.results) {
+          summary.results.push({
+            receipt_id: order.receipt_id,
+            tracking_no: order.tracking_no,
+            ok: true,
+            status: snap.status,
+            events: snap.events || [],
+            health: snap.health || null,
+            source: snap.source || null,
+          });
+        }
+      }
+    } catch (err) {
+      summary.errors++;
+      summary.unknown++;
+      const failure = recordTrackingCheckFailure(db, order.receipt_id, {
+        checkedAt,
+        error: err.message,
+        baseRetryMinutes: settings.errorRetryMinutes,
+        maxRetryMinutes: settings.errorRetryMaxMinutes,
+      });
+      console.warn(`[tracking] ${order.tracking_no} failed: ${err.message}`);
+      if (summary.results) {
+        summary.results.push({
+          receipt_id: order.receipt_id,
+          tracking_no: order.tracking_no,
+          ok: false,
+          status: 'error',
+          error: err.message,
+          next_check_at: failure.nextCheckAt,
+        });
+      }
+    }
+
+    if (idx === candidates.length - 1 || (idx + 1) % 10 === 0) {
+      safeTrackingHook(options.onProgress, {
+        checked: idx + 1,
+        total: candidates.length,
+        ...summary,
+      }, 'progress');
+    }
   }
 
+  // This pass is where a parcel actually turns stuck or disposed, so it is the
+  // honest place to date the incident. Reconciling here — rather than only when
+  // a browser asks — is what lets the morning board say "flagged 6h ago" for
+  // something detected overnight instead of "flagged just now".
+  //
+  // Bookkeeping, never a reason to fail a completed carrier sweep: the "new"
+  // flag itself comes from the review ledger and stands without this.
+  try {
+    const ledger = syncShippingAlertLedger(db);
+    summary.alertsOpened = ledger.opened;
+    summary.alertsEscalated = ledger.escalated;
+    summary.alertsClosed = ledger.closed;
+    if (ledger.opened || ledger.escalated) {
+      console.log(`[tracking] Morning review — ${ledger.opened} newly abnormal, ${ledger.escalated} escalated, ${ledger.closed} recovered.`);
+    }
+  } catch (err) {
+    console.warn(`[tracking] Shipping alert ledger sync failed: ${err.message}`);
+  }
+
+  summary.backlogRemaining = countTrackingCandidates(db, settings);
   console.log(
-    `[tracking] Done — ${confirmed} in-transit, ${delivered} delivered, ` +
-    `${exception} exception, ${stillPre} pre-transit, ${unknown} unknown/error`
+    `[tracking] Done — ${summary.inTransit} in-transit, ${summary.delivered} delivered, ` +
+    `${summary.exception} exception, ${summary.preTransit} pre-transit, ` +
+    `${summary.unknown} unknown/error, ${summary.backlogRemaining} still due`
   );
+  return summary;
+}
+
+/**
+ * Atomically launch one independent tracking cycle.
+ *
+ * Returns immediately with a promise so HTTP callers can send 202 Accepted
+ * without holding the request open for a potentially large 4PX batch.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {object} config
+ * @param {object} [options]
+ * @returns {{started:boolean, reason?:string, runId?:number, promise:Promise<object>}}
+ */
+function startTrackingCycle(db, config, options = {}) {
+  const settings = getTrackingPollSettings(config);
+  if (!settings.enabled && !options.ignoreDisabled) {
+    return {
+      started: false,
+      reason: 'disabled',
+      promise: Promise.resolve({ started: false, reason: 'disabled' }),
+    };
+  }
+  if (_trackingCyclePromise) {
+    return {
+      started: false,
+      reason: 'running',
+      promise: Promise.resolve({ started: false, reason: 'running' }),
+    };
+  }
+  if (!acquireLock(db, TRACKING_LOCK_NAME, SYNC_LOCK_OWNER, TRACKING_LOCK_TTL_SEC)) {
+    return {
+      started: false,
+      reason: 'running',
+      promise: Promise.resolve({ started: false, reason: 'running' }),
+    };
+  }
+
+  const trigger = options.trigger || 'scheduled';
+  const startedMs = Date.now();
+  let runId;
+  try {
+    runId = startTrackingSyncRun(db, trigger);
+  } catch (err) {
+    releaseLock(db, TRACKING_LOCK_NAME, SYNC_LOCK_OWNER);
+    throw err;
+  }
+  safeTrackingHook(options.onStart, { runId, trigger, startedAt: Math.floor(startedMs / 1000) }, 'start');
+
+  const cycleToken = {};
+  const promise = (async () => {
+    try {
+      const externalProgress = options.onProgress;
+      const summary = await runTrackingCheckPass(db, config, {
+        ...options,
+        heartbeat: () => renewLock(db, TRACKING_LOCK_NAME, SYNC_LOCK_OWNER),
+        onProgress: (progress) => {
+          updateTrackingSyncRunProgress(db, runId, progress);
+          safeTrackingHook(externalProgress, progress, 'progress');
+        },
+      });
+      summary.durationMs = Date.now() - startedMs;
+      summary.status = summary.errors > 0 ? 'partial' : 'success';
+      finishTrackingSyncRun(db, runId, summary);
+      const result = { started: true, runId, trigger, ...summary };
+      safeTrackingHook(options.onComplete, result, 'complete');
+      return result;
+    } catch (err) {
+      const partial = err.partialSummary || {};
+      const failed = {
+        ...partial,
+        status: err.code === 'TRACKING_LOCK_LOST' ? 'interrupted' : 'error',
+        durationMs: Date.now() - startedMs,
+        backlogRemaining: partial.backlogRemaining ?? (() => {
+          try { return countTrackingCandidates(db, settings); }
+          catch { return 0; }
+        })(),
+        error: err.message,
+      };
+      finishTrackingSyncRun(db, runId, failed);
+      safeTrackingHook(options.onError, { started: true, runId, trigger, ...failed }, 'error');
+      throw err;
+    } finally {
+      releaseLock(db, TRACKING_LOCK_NAME, SYNC_LOCK_OWNER);
+      if (_trackingCyclePromise?.token === cycleToken) _trackingCyclePromise = null;
+    }
+  })();
+  _trackingCyclePromise = { token: cycleToken, promise };
+
+  return { started: true, runId, promise };
+}
+
+/**
+ * Awaiting wrapper used by scheduled/background code.
+ */
+async function runTrackingCycle(db, config, options = {}) {
+  const launch = startTrackingCycle(db, config, options);
+  return launch.promise;
+}
+
+/**
+ * Read-only status model for the Shipping tab.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {object} config
+ */
+function getTrackingCycleStatus(db, config) {
+  const settings = getTrackingPollSettings(config);
+  const now = Math.floor(Date.now() / 1000);
+  const lock = db.prepare('SELECT owner, acquired_at, heartbeat_at FROM app_locks WHERE name = ?')
+    .get(TRACKING_LOCK_NAME);
+  const running = !!(lock && (lock.heartbeat_at || 0) >= now - TRACKING_LOCK_TTL_SEC);
+  const { windowCutoff } = trackingCandidateParams(settings, now);
+  const fleet = db.prepare(`
+    SELECT
+      COUNT(*) AS tracked_count,
+      SUM(CASE
+        WHEN COALESCE(r.tracking_status, '') != 'delivered'
+          AND r.tracking_delivered_at IS NULL
+        THEN 1 ELSE 0 END) AS open_count,
+      SUM(CASE
+        WHEN r.tracking_checked_at IS NULL
+          AND COALESCE(r.tracking_status, '') != 'delivered'
+          AND r.tracking_delivered_at IS NULL
+        THEN 1 ELSE 0 END) AS never_checked,
+      SUM(CASE
+        WHEN COALESCE(r.tracking_status, '') != 'delivered'
+          AND r.tracking_delivered_at IS NULL
+          AND ${TRACKING_SHIP_DATE_SQL} < @windowCutoff
+        THEN 1 ELSE 0 END) AS long_tail_open_count,
+      MAX(r.tracking_checked_at) AS last_checked_at
+    FROM receipts r
+    WHERE ${TRACKING_LOOKUP_SCOPE_SQL}
+      AND COALESCE(r.fourpx_order_status, '') != 'cancelled'
+      AND r.archived_at IS NULL
+  `).get({ windowCutoff });
+
+  let dueCount = 0;
+  try { dueCount = countTrackingCandidates(db, settings, now); }
+  catch { dueCount = 0; }
+
+  let latest = getLatestTrackingSyncRun(db);
+  // A process can die after writing "running" but before finishing the row. The
+  // advisory-lock heartbeat is authoritative; present a stale run as interrupted
+  // immediately instead of showing a permanent spinner until the next cycle.
+  if (latest?.status === 'running' && !running) {
+    latest = {
+      ...latest,
+      status: 'interrupted',
+      error_message: latest.error_message || 'The previous process stopped before this refresh completed.',
+    };
+  }
+
+  return {
+    enabled: settings.enabled,
+    running,
+    interval_minutes: settings.intervalMinutes,
+    window_days: settings.windowDays,
+    long_tail_recheck_hours: settings.longTailRecheckHours,
+    pre_recheck_hours: settings.preRecheckHours,
+    transit_recheck_hours: settings.transitRecheckHours,
+    max_per_cycle: settings.maxPerCycle,
+    due_count: dueCount,
+    tracked_count: Number(fleet.tracked_count || 0),
+    open_count: Number(fleet.open_count || 0),
+    long_tail_open_count: Number(fleet.long_tail_open_count || 0),
+    never_checked: Number(fleet.never_checked || 0),
+    last_checked_at: fleet.last_checked_at || null,
+    latest,
+  };
 }
 
 // ─── Pass E: 4PX freight (shipping-cost) sync ─────────────────────────────────
@@ -996,30 +1664,18 @@ async function runFreightSyncPass(db, config) {
 // ─── Main sync cycle ──────────────────────────────────────────────────────────
 
 async function runSyncCycle(config, tokenManager, db) {
-  // ── Cross-process guard ─────────────────────────────────────────────────────
-  // Only one process may run a sync cycle at a time. If another live process
-  // already holds the lock (e.g. a stray duplicate dashboard, or the standalone
-  // worker running alongside the embedded scheduler), bail out immediately so we
-  // never double-sync shops or burn double the Etsy API budget.
-  if (!acquireLock(db, SYNC_LOCK_NAME, SYNC_LOCK_OWNER, SYNC_LOCK_TTL_SEC)) {
-    console.warn(
-      '[sync] Another process is already running a sync cycle (lock held) — skipping this trigger. ' +
-      'This is expected if a duplicate dashboard/worker is running; close the extra instance to stop double syncs.'
-    );
-    return;
-  }
+  const launch = startEtsyWork(db, 'sync', async ({ heartbeat }) => {
+    refreshConfigInPlace(config);
+    console.log(`\n${'─'.repeat(60)}`);
+    console.log(`[sync] Cycle started at ${new Date().toISOString()} (owner ${SYNC_LOCK_OWNER})`);
+    console.log('─'.repeat(60));
 
-  console.log(`\n${'─'.repeat(60)}`);
-  console.log(`[sync] Cycle started at ${new Date().toISOString()} (owner ${SYNC_LOCK_OWNER})`);
-  console.log('─'.repeat(60));
-
-  try {
     const allShops = getAllShops(config);
     const shopsWithTokens = allShops.filter((s) => tokenManager.hasTokens(s.shop_id));
 
     if (shopsWithTokens.length === 0) {
       console.warn('[sync] No shops have tokens. Run: npm run oauth:setup');
-      return;
+      return { started: true, shops: 0 };
     }
 
     console.log(`[sync] ${shopsWithTokens.length}/${allShops.length} shops have tokens — syncing those`);
@@ -1035,36 +1691,32 @@ async function runSyncCycle(config, tokenManager, db) {
     for (const [groupId, shops] of byGroup) {
       const group = config.groups.find((g) => g.group_id === groupId);
       if (!group) continue;
-      renewLock(db, SYNC_LOCK_NAME, SYNC_LOCK_OWNER); // keep the lock fresh across long cycles
-      await syncGroup(group, shops, config, tokenManager, db);
-    }
-
-    // Pass D: carrier tracking check for all recently shipped unconfirmed orders.
-    // Runs after ALL shops are synced so it covers every shop in one pass.
-    // Uses 4PX's public tracking API to determine if the carrier has physically
-    // picked up each package, enabling precise Pre-transit vs In-transit detection.
-    try {
-      renewLock(db, SYNC_LOCK_NAME, SYNC_LOCK_OWNER);
-      await runTrackingCheckPass(db, config);
-    } catch (err) {
-      console.error(`[tracking] Tracking check pass failed: ${err.message}`);
+      heartbeat();
+      await syncGroup(group, shops, config, tokenManager, db, { heartbeat });
     }
 
     // Pass E: pull the actual billed shipping cost (freight) from 4PX for every
-    // order with a consignment that hasn't been billed yet. Runs after tracking
-    // so it shares the same once-per-cycle, post-sync cadence.
+    // order with a consignment that hasn't been billed yet.
     try {
-      renewLock(db, SYNC_LOCK_NAME, SYNC_LOCK_OWNER);
+      heartbeat();
       await runFreightSyncPass(db, config);
     } catch (err) {
+      if (err?.code === 'ETSY_LOCK_LOST') throw err;
       console.error(`[freight] Freight sync pass failed: ${err.message}`);
     }
 
     const totalReceipts = db.prepare('SELECT COUNT(*) AS c FROM receipts').get().c;
     console.log(`\n[sync] Cycle complete — ${totalReceipts} total receipts in DB`);
-  } finally {
-    releaseLock(db, SYNC_LOCK_NAME, SYNC_LOCK_OWNER);
+    return { started: true, shops: shopsWithTokens.length, totalReceipts };
+  });
+
+  if (!launch.started) {
+    console.warn(
+      `[sync] Etsy work already running (${launch.kind || launch.reason}) — skipping this trigger.`
+    );
+    return launch;
   }
+  return launch.promise;
 }
 
 // ─── Periodic inventory watch (safety net) ───────────────────────────────────
@@ -1084,8 +1736,20 @@ async function runSyncCycle(config, tokenManager, db) {
  * @param {import('better-sqlite3').Database} db
  */
 async function runInventoryWatchCycle(config, tokenManager, db) {
+  const launch = startEtsyWork(db, 'inventory_watch', ({ heartbeat }) => {
+    refreshConfigInPlace(config);
+    return runInventoryWatchCycleBody(config, tokenManager, db, heartbeat);
+  });
+  if (!launch.started) {
+    console.log(`[inventory-watch] Skipping — Etsy work already running (${launch.kind || launch.reason}).`);
+    return launch;
+  }
+  return launch.promise;
+}
+
+async function runInventoryWatchCycleBody(config, tokenManager, db, heartbeat) {
   const RESTOCK_QTY = config.restock_quantity ?? 3;
-  const autoRestock = config.auto_restock_enabled !== false;
+  const autoRestock = isAutoRestockEnabled(config);
 
   console.log('\n[inventory-watch] Starting inventory check from local cache…');
 
@@ -1143,6 +1807,7 @@ async function runInventoryWatchCycle(config, tokenManager, db) {
 
   for (const [idx, [listingIdStr, rows]] of capped.entries()) {
     if (idx > 0) await sleep(300);
+    if (idx % 5 === 0) heartbeat();
 
     const listingId = parseInt(listingIdStr);
     const { shop_id, listing_title } = rows[0];
@@ -1272,6 +1937,24 @@ async function main() {
 
   const db = initDb(config.db_path);
   syncConfigToDb(db, config); // keep DB in sync with config.json on every startup
+  // Owner-scoped cleanup keeps a graceful standalone-worker restart from leaving
+  // either advisory lock blocked until its TTL expires.
+  let locksReleased = false;
+  const releaseOwnedLocks = () => {
+    if (locksReleased) return;
+    locksReleased = true;
+    releaseSyncLock(db);
+    releaseTrackingLock(db);
+  };
+  process.once('exit', releaseOwnedLocks);
+  process.once('SIGINT', () => {
+    releaseOwnedLocks();
+    process.exit(0);
+  });
+  process.once('SIGTERM', () => {
+    releaseOwnedLocks();
+    process.exit(0);
+  });
 
   const intervalMinutes = config.sync_interval_minutes ?? 60;
   console.log(`\n  Sync interval : ${intervalMinutes} minutes`);
@@ -1300,6 +1983,36 @@ async function main() {
     }
   });
 
+  // ── Independent 4PX tracking refresh ───────────────────────────────────────
+  // The dashboard server owns this scheduler by default (including when its Etsy
+  // EMBEDDED_SYNC is off), avoiding two processes competing for every tick.
+  // Headless deployments may explicitly elect this worker instead.
+  const trackingSettings = getTrackingPollSettings(config);
+  if (trackingSettings.enabled && process.env.FOURPX_TRACKING_WORKER === '1') {
+    console.log(`[tracking] Scheduling independent refresh every ${trackingSettings.intervalMinutes}m`);
+    const triggerTracking = (trigger) =>
+      runTrackingCycle(db, config, { trigger })
+        .then((result) => {
+          if (result?.started === false) console.log(`[tracking] ${trigger} trigger skipped (${result.reason || 'not started'}).`);
+          return result;
+        })
+        .catch((err) => console.error(`[tracking] ${trigger} refresh error:`, err.message));
+    // Starts independently after the initial receipt cycle, including the
+    // no-Etsy-token case.
+    setTimeout(() => {
+      triggerTracking('startup');
+    }, 10_000);
+    // Elapsed timer is intentional: cron steps only preserve cadence for values
+    // that divide the clock field (e.g. */40 alternates 40m then 20m).
+    setInterval(() => {
+      triggerTracking('scheduled');
+    }, trackingSettings.intervalMinutes * 60 * 1000);
+  } else if (!trackingSettings.enabled) {
+    console.log('[tracking] Independent refresh is disabled (fourpx_tracking_sync=false).');
+  } else {
+    console.log('[tracking] Scheduler owned by dashboard server (set FOURPX_TRACKING_WORKER=1 only for a headless worker).');
+  }
+
   // ── Inventory auto-restock watcher ─────────────────────────────────────────
   // Runs every 4 hours (separate from receipt sync to stay within API budget).
   //
@@ -1313,7 +2026,8 @@ async function main() {
   //              monitoring = 0 extra API calls (reads local DB only)
   //
   // Requires: listings_w OAuth scope (WRITE). If 403, logs RESTOCK_FAILED.
-  // Enable/disable: set auto_restock_enabled: true/false in config.json (default true)
+  // Enable/disable: auto_restock_enabled in config.json, or the dashboard toggle
+  // (PATCH /api/inventory/auto-restock). Default is false (alert-only).
 
   const INV_WATCH_INTERVAL_MIN = config.inv_watch_interval_minutes ?? 240;
 
@@ -1369,6 +2083,15 @@ function releaseSyncLock(db) {
   }
 }
 
+/** Release the tracking-cycle advisory lock if this process owns it. */
+function releaseTrackingLock(db) {
+  try {
+    releaseLock(db, TRACKING_LOCK_NAME, SYNC_LOCK_OWNER);
+  } catch {
+    /* best-effort during shutdown */
+  }
+}
+
 // ─── Exports (used by server for manual sync triggers) ───────────────────────
 // Only export when required as a module; don't run main() in that case.
 if (require.main === module) {
@@ -1377,5 +2100,25 @@ if (require.main === module) {
     process.exit(1);
   });
 } else {
-  module.exports = { syncShop, syncGroup, runSyncCycle, runTrackingCheckPass, runFreightSyncPass, checkAndRestockForOrders, runInventoryWatchCycle, syncLedgerForShop, releaseSyncLock, intervalToCron };
+  module.exports = {
+    syncShop,
+    syncGroup,
+    runSyncCycle,
+    startEtsyWork,
+    isEtsyWorkRunning,
+    getEtsyWorkStatus,
+    runTrackingCheckPass,
+    runTrackingCycle,
+    startTrackingCycle,
+    getTrackingCycleStatus,
+    getTrackingPollSettings,
+    countTrackingCandidates,
+    runFreightSyncPass,
+    checkAndRestockForOrders,
+    runInventoryWatchCycle,
+    syncLedgerForShop,
+    releaseSyncLock,
+    releaseTrackingLock,
+    intervalToCron,
+  };
 }

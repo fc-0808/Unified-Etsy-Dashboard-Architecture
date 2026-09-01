@@ -20,7 +20,7 @@ const {
   getCharmByCode, insertCharmLibraryRow, updateCharmLibraryRow,
   getCharmShopDirectory, insertCharmShopDirectoryRow, updateCharmShopDirectoryRow,
   upsertRouteAssignment, upsertProductAssignment, mergeProductMapSupplierCharm,
-  getSubstitutionForLine,
+  getSubstitutionForLine, getProductMapRow,
 } = require('../db/setup');
 const routeDashboard = require('./dashboard');
 const enginePaths    = require('./engine-paths');
@@ -49,7 +49,6 @@ function seedCharmLibraryIfEmpty(db, config) {
     const { charms } = routeDashboard.loadCharmCatalog(engineDir);
     const rows = charms.map((c, idx) => ({
       code:               c.code,
-      sku:                c.sku || '',
       default_charm_shop: c.default_charm_shop || '',
       notes:              c.notes || '',
       image_file:         c.image_file || (c.has_image ? `${c.code}.png` : ''),
@@ -70,7 +69,6 @@ function resyncCharmLibrary(db, config) {
     const { charms } = routeDashboard.loadCharmCatalog(engineDir);
     const rows = charms.map((c, idx) => ({
       code:               c.code,
-      sku:                c.sku || '',
       default_charm_shop: c.default_charm_shop || '',
       notes:              c.notes || '',
       image_file:         c.image_file || (c.has_image ? `${c.code}.png` : ''),
@@ -262,7 +260,7 @@ function reorderCharmImages(config, renames) {
  *      TRUTH every view resolves a charm's shop through (see buildRouteRows), so
  *      writing only the per-order snapshot would leave the UI on the old shop.
  *      A brand-new (or legacy hand-typed) code is created here; an existing one
- *      keeps its sku / notes / photo.
+ *      keeps its notes / photo.
  *   3. route_assignments — this order line's charm.
  *   4. product_assignments + product_map — the per-product default, so future
  *      orders of the same product inherit it (mirrors POST /api/route/assign).
@@ -356,7 +354,8 @@ function linkCharmToSupplier(db, o) {
     const sub = getSubstitutionForLine(db, receiptId, itemKey);
     const productKey = routeDashboard.productDefaultsKey(itemKey, sub);
     const effectiveTitle = sub && sub.new_title ? sub.new_title : o.title;
-    if (productKey) {
+    const catalogEntry = getProductMapRow(db, { title: effectiveTitle });
+    if (productKey && catalogEntry?.status !== 'retired') {
       upsertProductAssignment(db, { item_key: productKey, title: effectiveTitle, charm_code: code, charm_shop: shopName });
       try {
         mergeProductMapSupplierCharm(db, { title: effectiveTitle, charm_code: code, charm_shop: shopName });

@@ -140,6 +140,43 @@ console.log('\nrowsToImportOrders (batch Excel export):')
 	assert(none.length === 0, 'a pure case-only swap is excluded from the batch buy list')
 }
 
+// ── 7. AirPods Case+Charm — the attached charm travels with the case ─────────
+console.log('\nAirPods Case+Charm SWAP (integral charm travels with the case):')
+{
+	const air = comboExchangeRow({
+		title: 'Kawaii Bunny Green AirPods Case with Charm',
+		phone_model: 'AirPods Pro',
+		style: 'Case+Charm',
+		has_grip: false,
+		charm_integral: true,
+		exchange_components: 'case,charm',
+		exchange_have_model: 'AirPods Pro',
+		exchange_need_model: 'AirPods Pro 2',
+		charm_code: '',
+		charm_shop: '',
+	})
+	const held = rd.exchangeHeldComponents(air)
+	assert(held.has('case') && held.has('charm') && !held.has('grip'), 'AirPods SWAP holds case + attached charm')
+	eq(rd.shoppableComponentFlags(air), { has_case: false, has_grip: false, has_charm: false }, 'nothing remains to buy — the whole unit is swapped')
+	assert(rd.rowHasShoppingWork(air) === false, 'AirPods Case+Charm SWAP has no leftover shopping work')
+	assert(rd.rowShoppingProjection(air) === null, 'it drops out of the buy list')
+	assert(rd.rowsToImportOrders([air]).length === 0, 'it is excluded from the printed shopping route')
+
+	// Legacy record that only stored "case" must still hold the attached charm,
+	// otherwise the shopper is sent to buy a charm dangling from the wrong case.
+	const legacy = rd.exchangeHeldComponents(comboExchangeRow({
+		title: 'Kawaii Bunny Green AirPods Case with Charm',
+		phone_model: 'AirPods Pro 2',
+		style: 'Case+Charm',
+		has_grip: false,
+		charm_integral: true,
+		exchange_components: 'case',
+		exchange_have_model: 'AirPods Pro',
+		exchange_need_model: 'AirPods Pro 2',
+	}))
+	assert(legacy.has('case') && legacy.has('charm'), 'legacy AirPods "case"-only SWAP self-heals to hold the attached charm')
+}
+
 console.log('')
 if (failures > 0) {
 	console.error(`${failures} assertion(s) FAILED`)

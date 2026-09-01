@@ -763,8 +763,7 @@ async function createShipOrder(appKey, appSecret, input) {
   };
 
   const data = await callApi(appKey, appSecret, 'ds.xms.order.create', payload);
-
-  return {
+  return normalizeShipOrderResponse(data, ref_no) || {
     dsConsignmentNo:    data.ds_consignment_no,
     trackingNo:         data['4px_tracking_no'],
     labelBarcode:       data.label_barcode,
@@ -772,6 +771,128 @@ async function createShipOrder(appKey, appSecret, input) {
     logisticsChannelNo: data.logistics_channel_no,
     odaResultSign:      data.oda_result_sign,
   };
+}
+
+/**
+ * Normalize the flat/list/nested shapes returned by 4PX order.create/order.get.
+ * @returns {object|null}
+ */
+function normalizeShipOrderResponse(data, requestNo = '') {
+  if (!data || typeof data !== 'object') return null;
+  const queue = [{ value: data, depth: 0 }];
+  const seen = new Set();
+  const candidates = [];
+  while (queue.length) {
+    const { value, depth } = queue.shift();
+    if (!value || typeof value !== 'object' || seen.has(value)) continue;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      if (depth < 5) value.forEach((item) => queue.push({ value: item, depth: depth + 1 }));
+      continue;
+    }
+    const consignment =
+      value.ds_consignment_no ?? value.dsConsignmentNo ?? value.consignment_no ?? null;
+    const tracking =
+      value['4px_tracking_no'] ?? value.trackingNo ?? value.tracking_no ?? null;
+    const refNo = value.ref_no ?? value.refNo ?? value.reference_no ?? null;
+    if (consignment || tracking) {
+      candidates.push({
+        raw: value,
+        consignment,
+        tracking,
+        refNo,
+      });
+    }
+    if (depth < 5) {
+      Object.values(value).forEach((child) => {
+        if (child && typeof child === 'object') queue.push({ value: child, depth: depth + 1 });
+      });
+    }
+  }
+  if (!candidates.length) return null;
+  const wanted = String(requestNo || '');
+  const chosen =
+    candidates.find((candidate) => wanted && String(candidate.refNo || '') === wanted)
+    || candidates[0];
+  const value = chosen.raw;
+  return {
+    dsConsignmentNo: chosen.consignment,
+    trackingNo: chosen.tracking,
+    labelBarcode: value.label_barcode ?? value.labelBarcode ?? null,
+    refNo: chosen.refNo,
+    logisticsChannelNo:
+      value.logistics_channel_no ?? value.logisticsChannelNo ?? null,
+    odaResultSign: value.oda_result_sign ?? value.odaResultSign ?? null,
+  };
+}
+
+function planShipOrderReference({
+  source,
+  receiptId,
+  previousRef = '',
+  orderStatus = '',
+  hasConsignment = false,
+  now = Date.now(),
+} = {}) {
+  const baseRef = source === 'manual'
+    ? `MANUAL-${Math.abs(Number(receiptId))}`
+    : `ETSY-${receiptId}`;
+  const replacingCancelled = orderStatus === 'cancelled';
+  const replacementPrefix = `${baseRef}-R`;
+  const prior = String(previousRef || '');
+  const refNo = replacingCancelled
+    ? (
+        prior.startsWith(replacementPrefix)
+          ? prior
+          : `${replacementPrefix}${Number(now).toString(36).toUpperCase()}`
+      )
+    : (prior || baseRef);
+  return {
+    baseRef,
+    refNo,
+    replacingCancelled,
+    retryingPendingRef:
+      (!replacingCancelled && !hasConsignment && !!prior)
+      || (replacingCancelled && prior.startsWith(replacementPrefix)),
+  };
+}
+
+/**
+ * Mint a fresh 4PX ref_no when the previous reference cannot be reused.
+ *
+ * Used by the US-island ZIP fallback (S5058 → S5118): a rejected S5058 create
+ * can leave the original ref "in processing" (DS000007) for several seconds even
+ * though no consignment was committed. Reusing that ref for the S5118 retry
+ * fails with DS000007; a new ref is free immediately.
+ *
+ * Shape mirrors cancelled-order replacements: `{baseRef}-{TAG}{base36time}`.
+ *
+ * @param {string} baseRef   From planShipOrderReference().baseRef (e.g. ETSY-123).
+ * @param {string} [tag='ISL'] Short reason tag (letters/digits only).
+ * @param {number} [now=Date.now()]
+ * @returns {string}
+ */
+function mintShipOrderFallbackRef(baseRef, tag = 'ISL', now = Date.now()) {
+  const root = String(baseRef || 'ETSY').trim() || 'ETSY';
+  const safeTag = String(tag || 'R').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6) || 'R';
+  return `${root}-${safeTag}${Number(now).toString(36).toUpperCase()}`;
+}
+
+/**
+ * True when 4PX rejected a create because the ref_no is still "in processing"
+ * (DS000007). Distinct from a committed duplicate: no consignment exists yet,
+ * but the same ref cannot be submitted again until 4PX releases it.
+ *
+ * @param {Error|string|object|null|undefined} error
+ * @returns {boolean}
+ */
+function isRefInProcessingRejection(error) {
+  if (error == null) return false;
+  const code = String(error.code || '').trim().toUpperCase();
+  if (code === 'DS000007') return true;
+  const msg = String(error.message || error || '');
+  if (/DS000007/i.test(msg)) return true;
+  return /Ref_no.*in processing/i.test(msg);
 }
 
 /**
@@ -1175,6 +1296,10 @@ module.exports = {
   getShipOrder,
   getOrderFreight,
   getEstimatedCost,
+  normalizeShipOrderResponse,
+  planShipOrderReference,
+  mintShipOrderFallbackRef,
+  isRefInProcessingRejection,
   normalizeFreightResponse,
   safeLabelBaseName,
   assignUniqueLabelNames,

@@ -36,7 +36,7 @@ function makeDb() {
   const db = new Database(':memory:');
   db.exec(`
     CREATE TABLE charm_library (
-      code TEXT PRIMARY KEY, sku TEXT DEFAULT '', default_charm_shop TEXT DEFAULT '',
+      code TEXT PRIMARY KEY, default_charm_shop TEXT DEFAULT '',
       notes TEXT DEFAULT '', image_file TEXT DEFAULT '', sort_order INTEGER DEFAULT 0,
       updated_at INTEGER
     );
@@ -58,9 +58,9 @@ function makeDb() {
 // Three charms; the "Toy Story" charm is CH-00065, assigned to an order.
 function seed(db) {
   const charms = [
-    { code: 'CH-00063', sku: 'BEAR',    default_charm_shop: '壳引力', notes: '', image_file: 'CH-00063.jpg', sort_order: 0 },
-    { code: 'CH-00064', sku: 'BLUE',    default_charm_shop: '壳引力', notes: '', image_file: 'CH-00064.jpg', sort_order: 1 },
-    { code: 'CH-00065', sku: 'TOYSTORY',default_charm_shop: '壳引力', notes: '', image_file: 'CH-00065.jpg', sort_order: 2 },
+    { code: 'CH-00063', default_charm_shop: '壳引力', notes: '', image_file: 'CH-00063.jpg', sort_order: 0 },
+    { code: 'CH-00064', default_charm_shop: '壳引力', notes: '', image_file: 'CH-00064.jpg', sort_order: 1 },
+    { code: 'CH-00065', default_charm_shop: '壳引力', notes: '', image_file: 'CH-00065.jpg', sort_order: 2 },
   ];
   setup.replaceCharmLibrary(db, charms);
   // A Toy Story order line is assigned CH-00065.

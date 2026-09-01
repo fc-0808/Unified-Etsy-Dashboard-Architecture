@@ -18,7 +18,6 @@ const {
   getShopProductionPartners,
   getShopSections,
   getShopReadinessStateDefinitions,
-  createShopReadinessStateDefinition,
   findTaxonomyId,
 } = require('../etsy/client');
 const productTypes = require('./product-types');
@@ -28,11 +27,18 @@ const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 // Pick the shop section that best matches the product type (e.g. an "AirPods
 // Cases" section for an AirPods run), else the first section for iPhone, else
 // none — so an AirPods run never silently defaults to the iPhone section.
+//
+// A keyword match alone is not enough: every line's keywords include the word
+// every section shares ("case"), so "iPad Cases" matches the iPhone pattern
+// too. A section another line clearly owns is therefore skipped outright,
+// including in the iPhone fallback — publishing an iPhone case into the iPad
+// section is the same mistake, just quieter.
 function pickSection(sections, pt) {
-  if (!sections.length) return null;
-  const preferred = sections.find((s) => pt.sectionKeywords.test(s.title || ''));
+  const ours = sections.filter((s) => !sectionBelongsToOtherType(s.title, pt));
+  if (!ours.length) return null;
+  const preferred = ours.find((s) => pt.sectionKeywords.test(s.title || ''));
   if (preferred) return preferred.shop_section_id;
-  return pt.id === 'iphone_case' ? sections[0].shop_section_id : null;
+  return pt.id === 'iphone_case' ? ours[0].shop_section_id : null;
 }
 
 // Escape a string for safe interpolation into a RegExp.
@@ -82,7 +88,9 @@ function reconcileShopSection(desiredId, sections, pt) {
   // matching section when one exists, else fall back to auto-selection (which,
   // for AirPods, is "no section" rather than silently using the iPhone one).
   if (desired && sectionBelongsToOtherType(desired.title, pt)) {
-    const preferred = list.find((s) => pt.sectionKeywords.test(s.title || ''));
+    const preferred = list.find(
+      (s) => pt.sectionKeywords.test(s.title || '') && !sectionBelongsToOtherType(s.title, pt),
+    );
     return preferred ? preferred.shop_section_id : autoId;
   }
   // Honour a valid, non-conflicting explicit choice.
@@ -149,20 +157,9 @@ async function fetchShopListingSettings(shopClient, shopId, productType) {
 
   let readinessStates = mapReadiness(readinessRes.results);
 
-  // Fallback: a shop with no processing profile cannot list physical items at
-  // all. Auto-create a sensible default (made-to-order, 3-5 days) so listing
-  // creation just works — mirrors how mature listing tools handle this.
-  if (!readinessStates.length) {
-    try {
-      const created = await createShopReadinessStateDefinition(shopClient, shopId, {
-        readiness_state: 'made_to_order', min_processing_time: 3, max_processing_time: 5, processing_time_unit: 'days',
-      });
-      const one = created && (created.readiness_state_definition_id ?? created.readiness_state_id) != null
-        ? mapReadiness([created])
-        : mapReadiness((await getShopReadinessStateDefinitions(shopClient, shopId).catch(() => ({ results: [] }))).results);
-      readinessStates = one;
-    } catch { /* shops_w may be missing — surfaced as a clear error at create time */ }
-  }
+  // Reading settings must never hide an Etsy write. If a physical-listing
+  // processing profile is missing, surface it for explicit setup in Shop
+  // Manager; do not silently create one during a preview or page load.
 
   // Resolve the taxonomy for THIS product type by trying its keyword candidates
   // in order (e.g. AirPods → earbud/headphone/earphone case nodes).
@@ -197,13 +194,18 @@ async function fetchShopListingSettings(shopClient, shopId, productType) {
     processing_max: selectedProfile ? (selectedProfile.max_processing_days || null) : null,
   };
 
+  const warnings = [shop, shippingRes, returnRes, partnerRes, sectionRes, readinessRes]
+    .filter((r) => r && r._error)
+    .map((r) => r._error);
+  if (!readinessStates.length) {
+    warnings.push('No processing profile found. Create one explicitly in Etsy Shop Manager before creating drafts.');
+  }
+
   return {
     shop_name: shop.shop_name,
     shop_id: shop.shop_id,
     currency_code: shop.currency_code || null,
-    warnings: [shippingRes, returnRes, partnerRes, sectionRes]
-      .filter((r) => r && r._error)
-      .map((r) => r._error),
+    warnings,
     shipping_profiles: shippingProfiles,
     return_policies: returnPolicies,
     production_partners: productionPartners,
@@ -211,14 +213,10 @@ async function fetchShopListingSettings(shopClient, shopId, productType) {
     readiness_states: readinessStates,
     taxonomy_id: taxonomyId,
     // Product-type context the UI mirrors: the active type, its device-model set,
-    // the styles it offers, and capability flags. `product_types` (the full list)
-    // is added by the server so this cached object stays product-type specific.
-    product_type: pt.id,
-    device_label: pt.deviceLabel,
-    models: pt.models.slice(),
-    style_keys: pt.allowedStyles.slice(),
-    supports_grip: pt.supportsGrip,
-    supports_magsafe: pt.supportsMagsafe,
+    // the values it offers on each axis, and capability flags. `product_types`
+    // (the full list) is added by the server so this cached object stays
+    // product-type specific.
+    ...productTypes.productMeta(pt),
     defaults,
   };
 }
@@ -233,8 +231,9 @@ async function fetchShopListingSettings(shopClient, shopId, productType) {
  * @param {string|number} args.shopId      numeric shop ID
  * @param {string} args.shopKey            config shop_id (cache key / row id)
  * @param {boolean} [args.force]
+ * @param {boolean} [args.cacheOnly]       never call Etsy; fail if cache is unavailable/stale
  */
-async function getShopListingSettings({ db, shopClient, shopId, shopKey, productType, force = false }) {
+async function getShopListingSettings({ db, shopClient, shopId, shopKey, productType, force = false, cacheOnly = false }) {
   const pt = productTypes.getProductType(productType);
   // Cache is per (shop, product type) — taxonomy, default section, models and
   // styles all differ by product type, so they must never share a cache row.
@@ -255,6 +254,15 @@ async function getShopListingSettings({ db, shopClient, shopId, shopKey, product
         }
       }
     } catch { /* table may not exist yet — fall through to live fetch */ }
+  }
+
+  if (cacheOnly) {
+    const e = new Error(
+      'Cached shop settings are unavailable or stale. Explicitly refresh Shop settings, then run the safe preview again.'
+    );
+    e.status = 409;
+    e.code = 'SHOP_SETTINGS_CACHE_REQUIRED';
+    throw e;
   }
 
   const settings = await fetchShopListingSettings(shopClient, shopId, pt);

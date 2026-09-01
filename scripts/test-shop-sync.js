@@ -35,17 +35,33 @@ assert(ShopSync.costOpId({ kind: 'charm', code: 'CH-1' }) !== ShopSync.costOpId(
 assert(ShopSync.costOpId({ kind: 'product', title: 'X', part: 'case' }) !== ShopSync.costOpId({ kind: 'charm', code: 'X' }), 'product and charm cost ids never collide')
 
 // ── Assign entry: fresh ───────────────────────────────────────────────────────
-const e1 = ShopSync.makeAssignEntry(null, { receipt_id: 5, item_key: 'k', title: 'Widget', patch: { status_case: 'Purchased' } }, 1000)
+const e1 = ShopSync.makeAssignEntry(null, {
+	receipt_id: 5,
+	item_key: 'k',
+	title: 'Widget',
+	patch: { status_case: 'Purchased' },
+	context: {
+		phone_model: 'iPhone 17 Pro Max',
+		style: 'Case 1 + Grip 1 + Charm',
+		quantity: 2,
+		product_listing_id: 777,
+		product_image_url: '/api/route/listing-image/777?w=300',
+	},
+}, 1000)
 assert(e1.url === '/api/shop/assign', 'assign entry targets /api/shop/assign')
 assert(e1.id === ShopSync.assignOpId(5, 'k'), 'assign entry id matches its line')
 assert(e1.body.receipt_id === 5 && e1.body.item_key === 'k' && e1.body.title === 'Widget', 'assign body carries line identity')
 assert(e1.body.status_case === 'Purchased', 'assign body carries the patch')
+assert(e1.body.phone_model === 'iPhone 17 Pro Max' && e1.body.style === 'Case 1 + Grip 1 + Charm', 'assign body snapshots the model and style shown to the shopper')
+assert(e1.body.product_listing_id === 777 && e1.body.product_image_url.includes('/listing-image/777'), 'assign body snapshots the exact product image reference')
+assert(e1.body.activity_context_version === ShopSync.ACTIVITY_CONTEXT_VERSION, 'assign body versions its event-time activity context')
 assert(e1.ts === 1000, 'assign entry stamps the provided clock')
 
 // ── Assign entry: coalescing (case then charm → ONE write with both) ────────────
 const e2 = ShopSync.makeAssignEntry(e1, { receipt_id: 5, item_key: 'k', title: 'Widget', patch: { status_charm: 'Purchased' } }, 2000)
 assert(e2.id === e1.id, 'a second tap on the same line coalesces into the same entry')
 assert(e2.body.status_case === 'Purchased' && e2.body.status_charm === 'Purchased', 'coalesced entry retains BOTH component changes')
+assert(e2.body.phone_model === 'iPhone 17 Pro Max' && e2.body.product_image_url === e1.body.product_image_url, 'coalescing preserves the event-time product context')
 assert(e2.ts === 2000, 'coalesced entry advances the timestamp')
 
 // ── Assign entry: last-writer-wins on the same component ────────────────────────
@@ -55,6 +71,8 @@ assert(e3.body.status_charm === 'Purchased', 'unrelated coalesced fields are pre
 
 // ── makeAssignEntry never mutates the previous entry (no shared-ref bugs) ────────
 assert(e1.body.status_charm === undefined, 'merging does not mutate the earlier entry body')
+assert(!ShopSync.canAcknowledgeEntry(e2, e1), 'an older in-flight ACK cannot delete a newer coalesced entry')
+assert(ShopSync.canAcknowledgeEntry(e2, e2), 'the exact current entry can be deleted after ACK')
 
 // ── Cost entry ────────────────────────────────────────────────────────────────
 const c1 = ShopSync.makeCostEntry({ kind: 'product', title: 'Widget', part: 'grip', cost: 12.5 }, 1000)

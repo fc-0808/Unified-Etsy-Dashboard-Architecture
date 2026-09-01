@@ -128,7 +128,7 @@
 		</style>
 	</head>
 	<body>
-		<form class="card" id="loginForm" autocomplete="off">
+		<form class="card" id="loginForm">
 			<div class="brand"><span class="dot"></span> Unified Dashboard</div>
 			<div class="sub">Sign in to continue · 请登录以继续</div>
 
@@ -140,6 +140,7 @@
 
 			<button type="submit" id="submitBtn">Sign in · 登录</button>
 			<div class="error" id="error"></div>
+			<p class="foot">The term “Etsy” is a trademark of Etsy, Inc. This Application uses Etsy’s API, but is not endorsed or certified by Etsy.</p>
 		</form>
 
 		<script>
@@ -170,7 +171,8 @@
 					}
 					// Success — go where this role belongs (shoppers → mobile route,
 					// everyone else → full dashboard). Server tells us via `redirect`.
-					window.location.href = data.redirect || '/'
+					const redirect = typeof data.redirect === 'string' && /^\/(?!\/)/.test(data.redirect) ? data.redirect : '/'
+					window.location.href = redirect
 				} catch {
 					err.textContent = 'Network error · 网络错误'
 					btn.disabled = false

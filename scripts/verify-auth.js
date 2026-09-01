@@ -1,9 +1,12 @@
 /**
  * verify-auth.js — end-to-end proof that Owner/Employee access control works.
  *
- * Suite A — env bootstrap accounts (password only).
+ * Suite A — env bootstrap accounts (password only), including the employee's
+ *           full authority over the shopping route.
  * Suite B — named DB-backed accounts: per-user login, the offboarding kill-switch,
  *           and login rate-limiting.
+ * Suite C — the `shopper` role stays confined to the mobile shopping route even
+ *           though the employee role was widened.
  *
  * Everything runs on throwaway ports against an in-memory DB — it never touches
  * your real server, database, or .env passwords.  Run any time:
@@ -12,6 +15,8 @@
 
 process.env.DASHBOARD_OWNER_PASSWORD = process.env.DASHBOARD_OWNER_PASSWORD || 'test-owner-pw'
 process.env.DASHBOARD_PACKER_PASSWORD = process.env.DASHBOARD_PACKER_PASSWORD || 'test-packer-pw'
+process.env.DASHBOARD_SHOPPER_PASSWORD = process.env.DASHBOARD_SHOPPER_PASSWORD || 'test-shopper-pw'
+process.env.DASHBOARD_AUTH_SECRET = process.env.DASHBOARD_AUTH_SECRET || 'offline-auth-test-secret-32-bytes-minimum'
 
 const express = require('express')
 const Database = require('better-sqlite3')
@@ -57,10 +62,26 @@ function buildApp(store) {
 	app.delete('/api/exchanges/:id', (_req, res) => res.json({ ok: true }))
 	app.post('/api/exchanges/:id/done', (_req, res) => res.json({ ok: true }))
 	app.post('/api/exchanges/:id/reopen', (_req, res) => res.json({ ok: true }))
-	// Charm shopping list: read-only bundle is employee-safe; the full route planner is not.
+	// Shopping route — the employee owns this surface end to end.
 	app.get('/api/route/charms-to-buy', (_req, res) => res.json({ ok: true, rows: [], charms: [], charm_shops: [], progress: {} }))
 	app.get('/api/route/dashboard', (_req, res) => res.json({ rows: [] }))
 	app.post('/api/route/assign', (_req, res) => res.json({ ok: true }))
+	app.post('/api/route/dismiss', (_req, res) => res.json({ ok: true }))
+	app.get('/api/route/charms', (_req, res) => res.json({ charms: [] }))
+	app.post('/api/route/charms', (_req, res) => res.json({ ok: true }))
+	app.put('/api/route/charms', (_req, res) => res.json({ ok: true }))
+	app.delete('/api/route/charms', (_req, res) => res.json({ ok: true }))
+	app.post('/api/route/suppliers', (_req, res) => res.json({ ok: true }))
+	app.delete('/api/route/charm-shops', (_req, res) => res.json({ ok: true }))
+	app.put('/api/route/product-map', (_req, res) => res.json({ ok: true }))
+	app.post('/api/route/manual-order', (_req, res) => res.json({ ok: true }))
+	app.post('/api/route/generate', (_req, res) => res.json({ ok: true }))
+	app.post('/api/route/import-status', (_req, res) => res.json({ ok: true }))
+	app.get('/api/route/charm-image', (_req, res) => res.json({ ok: true }))
+	app.get('/api/shop/route', (_req, res) => res.json({ rows: [] }))
+	// Opening a file in a desktop app happens on the SERVER's machine, so it stays
+	// with whoever is sitting at it.
+	app.get('/api/route/open', (_req, res) => res.json({ ok: true }))
 	// Manual (off-Etsy) orders: pack/ship + tracking are employee-safe; create/edit/delete are not.
 	app.post('/api/orders/manual', (_req, res) => res.json({ created: true }))
 	app.put('/api/orders/manual/:id', (_req, res) => res.json({ ok: true }))
@@ -94,6 +115,17 @@ async function suiteA() {
 	check('Employee BLOCKED from earnings (403)', r.status === 403, `got ${r.status}`)
 	r = await fetch(base + '/api/orders', { headers: { cookie: packer } })
 	check('Employee CAN see orders (200)', r.status === 200, `got ${r.status}`)
+	const remoteHeaders = {
+		cookie: packer,
+		'x-forwarded-for': '203.0.113.10, 127.0.0.1',
+		'x-forwarded-proto': 'https',
+	}
+	r = await fetch(base + '/api/orders', { headers: remoteHeaders })
+	check('Remote employee is BLOCKED from desktop order APIs (403)', r.status === 403 && (await r.clone().json()).code === 'REMOTE_SCOPE_RESTRICTED', `got ${r.status}`)
+	r = await fetch(base + '/api/shop/route', { headers: remoteHeaders })
+	check('Remote employee retains the mobile shopping route (200)', r.status === 200, `got ${r.status}`)
+	r = await fetch(base + '/', { headers: remoteHeaders, redirect: 'manual' })
+	check('Remote employee dashboard page redirects to /shop', r.status === 302 && r.headers.get('location') === '/shop', `got ${r.status}`)
 	r = await fetch(base + '/api/orders/5/ship', { method: 'POST', headers: { cookie: packer, 'Content-Type': 'application/json' }, body: '{}' })
 	check('Employee CAN ship an order (200)', r.status === 200, `got ${r.status}`)
 
@@ -107,9 +139,10 @@ async function suiteA() {
 	check('Employee CAN flag an order needs-purchase (200)', r.status === 200, `got ${r.status}`)
 	r = await post('/api/orders/5/clear-needs-purchase')
 	check('Employee CAN clear an order needs-purchase (200)', r.status === 200, `got ${r.status}`)
-	// Bulk needs-purchase stays owner-only (the packer UI never exposes it).
+	// Bulk needs-purchase is the same decision as the per-order flag, applied to a
+	// selection — it powers "Send to Route", so the employee has it too.
 	r = await post('/api/orders/bulk-needs-purchase')
-	check('Employee BLOCKED from bulk needs-purchase (403)', r.status === 403, `got ${r.status}`)
+	check('Employee CAN bulk-flag orders needs-purchase (200)', r.status === 200, `got ${r.status}`)
 
 	// Wrong-model exchange ("Fix model") — an employee sourcing the buy queue can
 	// flag a design-right/model-wrong line to swap, and manage that exchange.
@@ -124,14 +157,48 @@ async function suiteA() {
 	r = await fetch(base + '/api/exchanges/9', { method: 'DELETE', headers: { cookie: packer } })
 	check('Employee CAN remove an exchange (200)', r.status === 200, `got ${r.status}`)
 
-	// Charms-to-buy list is read-only + employee-safe; the owner route planner and
-	// its assign endpoint stay blocked (employees persist via component-status).
-	r = await fetch(base + '/api/route/charms-to-buy', { headers: { cookie: packer } })
+	// Shopping route — the employee runs the Orders Sorting Dashboard and owns the
+	// case/grip/charm master data behind it, so read, per-line writes, catalog CRUD
+	// and generation must all pass.
+	const get = (path) => fetch(base + path, { headers: { cookie: packer } })
+	const send = (method, path) => fetch(base + path, { method, headers: { cookie: packer, 'Content-Type': 'application/json' }, body: '{}' })
+
+	r = await get('/api/route/charms-to-buy')
 	check('Employee CAN read the charm shopping list (200)', r.status === 200, `got ${r.status}`)
-	r = await fetch(base + '/api/route/dashboard', { headers: { cookie: packer } })
-	check('Employee BLOCKED from the owner route planner (403)', r.status === 403, `got ${r.status}`)
+	r = await get('/api/route/dashboard')
+	check('Employee CAN open the Orders Sorting Dashboard (200)', r.status === 200, `got ${r.status}`)
+	r = await get('/api/route/charm-image?code=CH-1')
+	check('Employee CAN load charm images (200)', r.status === 200, `got ${r.status}`)
 	r = await post('/api/route/assign')
-	check('Employee BLOCKED from route/assign (403)', r.status === 403, `got ${r.status}`)
+	check('Employee CAN assign a route line (200)', r.status === 200, `got ${r.status}`)
+	r = await post('/api/route/dismiss')
+	check('Employee CAN remove a line from the route (200)', r.status === 200, `got ${r.status}`)
+	r = await post('/api/route/manual-order')
+	check('Employee CAN add an order to the route (200)', r.status === 200, `got ${r.status}`)
+
+	// Full CRUD on the case/grip/charm catalog.
+	r = await get('/api/route/charms')
+	check('Employee CAN read the charm library (200)', r.status === 200, `got ${r.status}`)
+	r = await post('/api/route/charms')
+	check('Employee CAN create a charm (200)', r.status === 200, `got ${r.status}`)
+	r = await send('PUT', '/api/route/charms')
+	check('Employee CAN update a charm (200)', r.status === 200, `got ${r.status}`)
+	r = await send('DELETE', '/api/route/charms')
+	check('Employee CAN delete a charm (200)', r.status === 200, `got ${r.status}`)
+	r = await post('/api/route/suppliers')
+	check('Employee CAN add a supplier (200)', r.status === 200, `got ${r.status}`)
+	r = await send('DELETE', '/api/route/charm-shops')
+	check('Employee CAN delete a charm shop (200)', r.status === 200, `got ${r.status}`)
+	r = await send('PUT', '/api/route/product-map')
+	check('Employee CAN edit the product catalog (200)', r.status === 200, `got ${r.status}`)
+	r = await post('/api/route/generate')
+	check('Employee CAN generate the shopping route (200)', r.status === 200, `got ${r.status}`)
+	r = await post('/api/route/import-status')
+	check('Employee CAN import a purchase-status workbook (200)', r.status === 200, `got ${r.status}`)
+
+	// …but launching a desktop app happens on the server's machine, not theirs.
+	r = await get('/api/route/open?file=shopping_route.xlsx')
+	check('Employee BLOCKED from opening a file on the server desktop (403)', r.status === 403, `got ${r.status}`)
 
 	// Manual orders in the packing queue: pack/ship + tracking allowed; edit/delete/create not.
 	r = await post('/api/orders/manual/-5/shipped')
@@ -150,6 +217,35 @@ async function suiteA() {
 
 	r = await fetch(base + '/api/finance/summary', { headers: { cookie: 'sid=eyJyb2xlIjoib3duZXIifQ.forged; role=owner' } })
 	check('Forged cookie rejected (401)', r.status === 401, `got ${r.status}`)
+	r = await fetch(base + '/api/finance/summary', { headers: { cookie: 'sid=%E0%A4%A; role=owner' } })
+	check('Malformed cookie is rejected without crashing middleware (401)', r.status === 401, `got ${r.status}`)
+	r = await login(base, { password: 'x'.repeat(1025) })
+	check('Oversized login input is rejected before hashing (400)', r.status === 400, `got ${r.status}`)
+
+	// The browser is told its own permissions by the server, from the same table
+	// the gate enforces — that is what keeps the UI from offering a 403.
+	r = await fetch(base + '/auth-session.js', { headers: { cookie: packer } })
+	const shim = await r.text()
+	const caps = JSON.parse(shim.replace(/^window\.__AUTH=/, '').replace(/;$/, ''))
+	check('Session bootstrap declares the employee role', caps.role === 'packer', shim.slice(0, 120))
+	check('Session bootstrap grants route control', caps.capabilities.includes('route:catalog') && caps.capabilities.includes('route:assign'))
+	check('Session bootstrap withholds earnings', !caps.capabilities.includes('finance:read'))
+	check('Session bootstrap is never cached', /no-store/.test(r.headers.get('cache-control') || ''))
+
+	r = await fetch(base + '/api/auth/login', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json', 'x-forwarded-proto': 'https' },
+		body: JSON.stringify({ password: process.env.DASHBOARD_OWNER_PASSWORD }),
+	})
+	const secureCookie = cookieHeader(r)
+	check('TLS-terminated login marks the session cookie Secure', /secure/i.test(setCookies(r).find((c) => c.startsWith('sid=')) || ''))
+	r = await fetch(base + '/api/auth/logout', {
+		method: 'POST',
+		headers: { cookie: secureCookie, 'x-forwarded-proto': 'https' },
+	})
+	const clearedSid = setCookies(r).find((c) => c.startsWith('sid=')) || ''
+	check('HTTPS logout clears sid with matching Secure/SameSite attributes', /sid=;/.test(clearedSid) && /secure/i.test(clearedSid) && /samesite=lax/i.test(clearedSid))
+
 	server.close()
 }
 
@@ -157,6 +253,13 @@ async function suiteB() {
 	console.log('\n  Suite B — named accounts, offboarding kill-switch, rate limiting\n')
 	const db = new Database(':memory:')
 	const store = createUserStore(db)
+	let weakPasswordRejected = false
+	try {
+		store.add({ username: 'weak', password: 'short', role: 'packer', createdBy: 'test' })
+	} catch {
+		weakPasswordRejected = true
+	}
+	check('Named accounts enforce the 12-character minimum', weakPasswordRejected)
 	const mei = store.add({ username: 'mei', password: 'packer-pass-1', role: 'packer', createdBy: 'test' })
 	store.add({ username: 'boss', password: 'owner-pass-1', role: 'owner', createdBy: 'test' })
 
@@ -202,9 +305,81 @@ async function suiteB() {
 	server.close()
 }
 
+/**
+ * Widening the employee role must not widen the shopper role with it. The
+ * shopper is the in-person mobile account: it may work its route and nothing
+ * else, and this suite is what proves the two roles stayed independent.
+ */
+async function suiteC() {
+	console.log('\n  Suite C — the shopper role stays confined to the mobile route\n')
+	const server = await listen(buildApp(null))
+	const base = `http://127.0.0.1:${server.address().port}`
+
+	let r = await login(base, { password: process.env.DASHBOARD_SHOPPER_PASSWORD })
+	const shopper = cookieHeader(r)
+	check('Shopper (env) login → role "shopper"', r.status === 200 && (await r.clone().json()).role === 'shopper')
+	check('Shopper lands on the mobile route', (await r.clone().json()).redirect === '/shop')
+
+	const get = (path) => fetch(base + path, { headers: { cookie: shopper } })
+	const post = (path) => fetch(base + path, { method: 'POST', headers: { cookie: shopper, 'Content-Type': 'application/json' }, body: '{}' })
+
+	r = await get('/api/route/charm-image?code=CH-1')
+	check('Shopper CAN load charm images (200)', r.status === 200, `got ${r.status}`)
+	r = await post('/api/exchanges/9/done')
+	check('Shopper CAN mark an exchange done (200)', r.status === 200, `got ${r.status}`)
+
+	r = await get('/api/route/dashboard')
+	check('Shopper BLOCKED from the sorting dashboard (403)', r.status === 403, `got ${r.status}`)
+	r = await post('/api/route/charms')
+	check('Shopper BLOCKED from charm CRUD (403)', r.status === 403, `got ${r.status}`)
+	r = await post('/api/route/generate')
+	check('Shopper BLOCKED from route generation (403)', r.status === 403, `got ${r.status}`)
+	r = await get('/api/orders')
+	check('Shopper BLOCKED from the order list (403)', r.status === 403, `got ${r.status}`)
+	r = await get('/api/finance/summary')
+	check('Shopper BLOCKED from earnings (403)', r.status === 403, `got ${r.status}`)
+
+	// A denial names the permission that was missing, so an owner has something
+	// actionable instead of a bare 403.
+	const body = await r.json()
+	check('Denial names the missing permission', body.code === 'FORBIDDEN_ROLE' && 'required' in body, JSON.stringify(body))
+
+	r = await fetch(base + '/', { headers: { cookie: shopper }, redirect: 'manual' })
+	check('Shopper redirected off the desktop dashboard (302 → /shop)', r.status === 302 && r.headers.get('location') === '/shop', `got ${r.status}`)
+
+	server.close()
+}
+
+async function suiteD() {
+	console.log('\n  Suite D — secret configuration fails closed\n')
+	const previous = process.env.DASHBOARD_AUTH_SECRET
+	delete process.env.DASHBOARD_AUTH_SECRET
+	let missingRejected = false
+	try {
+		createAuth()
+	} catch {
+		missingRejected = true
+	}
+	check('Auth requires a session secret when enabled', missingRejected)
+
+	process.env.DASHBOARD_AUTH_SECRET = 'too-short'
+	let rejected = false
+	try {
+		createAuth()
+	} catch {
+		rejected = true
+	} finally {
+		if (previous === undefined) delete process.env.DASHBOARD_AUTH_SECRET
+		else process.env.DASHBOARD_AUTH_SECRET = previous
+	}
+	check('Auth rejects an explicitly weak session secret', rejected)
+}
+
 ;(async () => {
 	await suiteA()
 	await suiteB()
+	await suiteC()
+	await suiteD()
 	console.log(`\n  ${pass} passed, ${fail} failed\n`)
 	process.exit(fail ? 1 : 0)
 })()

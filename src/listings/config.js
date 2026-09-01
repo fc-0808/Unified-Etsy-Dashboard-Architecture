@@ -11,7 +11,7 @@
 const path = require('path')
 
 try {
-	require('dotenv').config()
+	require('dotenv').config({ quiet: true })
 } catch {
 	/* dotenv optional — env vars may be set by the shell/PM2 instead */
 }
@@ -62,9 +62,49 @@ const config = {
 		visionMaxTokensCeiling: int(process.env.OPENAI_VISION_MAX_TOKENS_CEILING, 16000),
 	},
 
+	// Listing-copy quality controls. The title is the single biggest SEO lever, so
+	// it gets a dedicated design-analysis pass, an optional image-grounded copy
+	// call, and a deterministic quality gate with a bounded repair loop. Every
+	// stage can be switched off independently if a provider misbehaves.
+	copy: {
+		// Dedicated vision pass that extracts the concrete design fingerprint
+		// (subject, motifs, art style, finish, printed text, buyer search phrases).
+		// Without it the copy model only ever sees a thin generic summary.
+		designAnalysis: bool(process.env.DESIGN_ANALYSIS, true),
+		// How many artwork frames the design pass looks at. More frames = more
+		// signal but a larger payload; 4 covers hero + backs + close-ups.
+		designImages: Math.min(8, Math.max(1, int(process.env.DESIGN_ANALYSIS_IMAGES, 4))),
+
+		// Show the copy model the hero photos as well as the extracted facts.
+		//   auto — enable when the text model is known to accept images (default)
+		//   on   — always attach (use when running a vision model for copy too)
+		//   off  — never attach; rely on the design fingerprint alone
+		// "auto"/"on" degrade to text-only automatically if the provider rejects
+		// an image payload, so a misconfigured text model can never break a run.
+		vision: (() => {
+			const raw = (process.env.COPY_VISION || 'auto').trim().toLowerCase()
+			return ['auto', 'on', 'off'].includes(raw) ? raw : 'auto'
+		})(),
+
+		// Deterministic gate: a title that does not reflect the real design is
+		// rejected and rewritten with a specific critique before it can ship.
+		titleGate: bool(process.env.TITLE_QUALITY_GATE, true),
+		titleMinScore: Math.min(100, Math.max(0, int(process.env.TITLE_MIN_SCORE, 70))),
+		titleRepairAttempts: Math.min(3, Math.max(0, int(process.env.TITLE_REPAIR_ATTEMPTS, 1))),
+	},
+
 	bulk: {
-		defaultState: (process.env.LISTING_DEFAULT_STATE || 'draft').toLowerCase() === 'published' ? 'published' : 'draft',
-		concurrency: Math.max(1, int(process.env.BULK_CONCURRENCY, 1)),
+		// Every create is a draft. Activation is a separate reviewed transition;
+		// an environment variable must never make new AI-generated copy go live.
+		defaultState: 'draft',
+		// How many products a run works on at once. The slow phase is the vision +
+		// copy pass (~3 min/product, bound by the AI provider); the Etsy write phase
+		// is serialised per shop by the runner's write lock, so raising this speeds
+		// up generation without adding any burst pressure to the Etsy rate budget.
+		// 3 keeps the AI phase the bottleneck — much higher and products just queue
+		// behind the Etsy lock instead. Capped at 8 to bound memory (each worker
+		// decodes up to 12 photos through sharp).
+		concurrency: Math.min(8, Math.max(1, int(process.env.BULK_CONCURRENCY, 3))),
 		restockQuantity: Math.max(0, int(process.env.BULK_RESTOCK_QUANTITY, 3)),
 	},
 

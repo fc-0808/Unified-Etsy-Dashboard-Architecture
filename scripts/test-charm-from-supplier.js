@@ -20,7 +20,7 @@
  *
  * The operation must also be ATOMIC (no half-created charm shop when a later write
  * fails) and IDEMPOTENT (clicking twice changes nothing), and it must never
- * clobber a charm's existing photo / sku / notes, nor a stall an operator recorded.
+ * clobber a charm's existing photo / notes, nor a stall an operator recorded.
  *
  * Run: `node scripts/test-charm-from-supplier.js`
  * Exit code 0 = all assertions pass, 1 = a regression was detected.
@@ -71,7 +71,7 @@ function makeDb() {
       canonical_product_key TEXT, sort_order INTEGER DEFAULT 0, updated_at INTEGER
     );
     CREATE TABLE charm_library (
-      code TEXT PRIMARY KEY, sku TEXT DEFAULT '', default_charm_shop TEXT DEFAULT '',
+      code TEXT PRIMARY KEY, default_charm_shop TEXT DEFAULT '',
       notes TEXT DEFAULT '', image_file TEXT DEFAULT '', sort_order INTEGER DEFAULT 0,
       updated_at INTEGER
     );
@@ -120,10 +120,10 @@ console.log('Charm-from-supplier regression test\n');
   assert(assigned(db).charm_code === code && assigned(db).charm_shop === '壳引力', 'the assignment is unchanged');
 }
 
-// ── 3. Re-pointing an EXISTING charm keeps its sku / notes / photo ──────────
+// ── 3. Re-pointing an EXISTING charm keeps its notes / photo ────────────────
 {
   const db = makeDb();
-  db.prepare("INSERT INTO charm_library (code, sku, default_charm_shop, notes, image_file, sort_order) VALUES ('CH-00055','SKU-9','小艾飾品','beaded','CH-00055.jpg',0)").run();
+  db.prepare("INSERT INTO charm_library (code, default_charm_shop, notes, image_file, sort_order) VALUES ('CH-00055','小艾飾品','beaded','CH-00055.jpg',0)").run();
   db.prepare("INSERT INTO charm_shop_directory (shop_name, stall, sort_order) VALUES ('小艾飾品','2D41-43',0)").run();
 
   const out = charmLibrary.linkCharmToSupplier(db, { ...LINE, code: 'CH-00055', shop_name: '壳引力', stall: 'A2-33' });
@@ -131,7 +131,7 @@ console.log('Charm-from-supplier regression test\n');
 
   assert(out.created_charm === false, 'an existing charm is updated, not recreated');
   assert(row.default_charm_shop === '壳引力', 'the charm is re-pointed at the supplier');
-  assert(row.sku === 'SKU-9' && row.notes === 'beaded' && row.image_file === 'CH-00055.jpg', 'sku, notes and photo survive the re-point (image_file omitted = keep)');
+  assert(row.notes === 'beaded' && row.image_file === 'CH-00055.jpg', 'notes and photo survive the re-point (image_file omitted = keep)');
   assert(shops(db).length === 2, 'the new supplier is added alongside the old charm shop (which is left intact)');
 }
 

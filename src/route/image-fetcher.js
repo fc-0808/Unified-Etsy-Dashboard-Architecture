@@ -214,4 +214,4 @@ async function batchFetchRouteImages(db, listingIdToUrl) {
   return result;
 }
 
-module.exports = { fetchAndCacheImage, batchFetchRouteImages };
+module.exports = { fetchImageBuffer, fetchAndCacheImage, batchFetchRouteImages };

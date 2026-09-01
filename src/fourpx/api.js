@@ -43,7 +43,7 @@ const FOURPX_PATH    = '/router/api/service';
 // The ds.xms.* (Direct Shipping) family of methods this module talks to runs on
 // API version 1.0.0. Calling them with v2.0.0 routes to a non-existent
 // downstream service and returns "服务商接口404" (service provider interface 404).
-// (Tracking methods tr.* use 2.0.0 but those live in src/tracking/checker.js.)
+// Tracking pins its own documented version in src/tracking/checker.js.
 const FOURPX_VERSION = '1.0.0';
 
 // ── Signature ────────────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@
 
 // Load .env (OpenAI key + bulk-listing tuning) before anything else reads
 // process.env. Non-fatal if the file is absent — config.json still drives Etsy.
-require('dotenv').config()
+require('dotenv').config({ quiet: true })
 
 const crypto = require('crypto')
 const sharp = require('sharp')
@@ -25,36 +25,69 @@ const sharp = require('sharp')
 const path = require('path')
 const https = require('https')
 const fs = require('fs')
-const { spawn } = require('child_process')
+const { spawn, execSync } = require('child_process')
 const os = require('os')
 const express = require('express')
 const cors = require('cors')
 const cron = require('node-cron')
+const Database = require('better-sqlite3')
 // RFC 6266 / RFC 5987 Content-Disposition builder (same library Express uses
 // internally for res.download). Produces a valid ASCII `filename=` fallback PLUS
 // a UTF-8 `filename*=` form, so non-ASCII buyer names (e.g. "Łukasz Gierszon")
 // never throw ERR_INVALID_CHAR when written to the response header.
 const contentDisposition = require('content-disposition')
 
-const { loadConfig, getAllShops, usesGroupProxy } = require('../config/schema')
+const { loadConfig, getAllShops, usesGroupProxy, isAutoRestockEnabled, patchRuntimeSettings } = require('../config/schema')
+const { resolveListenHost } = require('./network-policy')
 const { analyzeSuspensionRisks, formatRiskReport, summarizeRisks, assertShipRateOk, warnPreTransitShip, chunk: chunkArray, sleep: complianceSleep, BULK_SHIP_CHUNK_SIZE, BULK_SHIP_INTER_REQUEST_MS, BULK_SHIP_INTER_BATCH_MS, BULK_SHIP_ABSOLUTE_MAX, INV_WATCH_STARTUP_DELAY_MS } = require('../compliance/suspension-guard')
+const destinationTax = require('../compliance/destination-tax')
+const { createRateStore, convert: convertCurrencyAmount } = require('../compliance/exchange-rates')
 const { TokenManager } = require('../auth/token-manager')
 const { initDb, syncConfigToDb } = require('../db/setup')
 // Single source of truth for the Ready-to-pack ("To pack & ship") queue scope,
 // shared with scripts/test-pack-queue-exchange.js so the two can never drift.
 const packQueue = require('../orders/pack-queue')
+const { unsealableReasons: getUnsealableReasons } = require('../orders/seal-guard')
 // Single source of truth for the Need-to-purchase ("🛒 Need to purchase") queue
 // scope AND for the charm shopping list derived from it, shared with
 // scripts/test-charms-to-buy-scope.js so the order list, the "Charms to buy"
 // list and the test can never disagree about what still has to be bought.
 const buyQueue = require('../orders/buy-queue')
+// Single source of truth for an order line's identity — the (receipt_id, item_key)
+// every per-line fact is stored under. A Route-tab manual order names its lines
+// with a per-variant key held in route_manual_items, so any surface that instead
+// re-derives the key from receipts.all_transactions addresses a row nothing else
+// writes (shopping marks the charm bought; the Orders tab shows it as still to
+// buy). Every consumer resolves through this module so the two can never split.
+// Contract + rationale: src/orders/line-identity.js; tests:
+// scripts/test-manual-line-identity.js.
+const lineIdentity = require('../orders/line-identity')
+// Event-time product snapshots + batched historical enrichment for line-level
+// Activity log entries (model, style and the exact product image).
+const activityProductContext = require('../orders/activity-product-context')
 // Pure per-employee shift-summary rollup, shared with scripts/test-shift-summary.js.
 const { summarizeShift } = require('../orders/shift-summary')
+// Shared, SQLite-only Monday-to-Sunday operations checklist. This module has no
+// Etsy client/token dependency; every listed action remains a human attestation.
+const operationsChecklist = require('../operations/checklist')
+// Durable ledger of "this order still owes Etsy a completion". Creating a 4PX
+// label is an irreversible, paid side effect; completing the order on Etsy is a
+// second call that can fail or be interrupted. The ledger + the reconciler below
+// guarantee the second half always happens, so a 4PX-shipped order can never be
+// stranded in Needs-shipping. State machine + tests: src/orders/etsy-completion.js.
+const etsyCompletion = require('../orders/etsy-completion')
 // Single source of truth for Etsy double-fire / "ghost receipt" suppression,
 // shared with scripts/test-dedup.js (synthetic unit tests) and
 // scripts/verify-dedup-fix.js (live-DB regression check) so the three can never
 // drift. The heavy reasoning lives in the module's header comment.
 const { computeDuplicateSuppression, actionableOrderSql } = require('../orders/dedup')
+// Single source of truth for "the buyer paid extra for faster shipping". It reads
+// Etsy's per-transaction `shipping_upgrade` and decides the tier + the expedited
+// boolean; the Express badge, the Express filter, the express-first sort and the
+// 4PX lane recommendation all resolve through it, so those four can never
+// disagree. Contract + rationale: src/orders/shipping-upgrade.js; tests:
+// scripts/test-express-orders.js.
+const shippingUpgrade = require('../orders/shipping-upgrade')
 const { createGroupProxyClient } = require('../proxy/factory')
 const { buildShopClient, resolveShopId, createReceiptShipment, paginateListings, updateListing, createDraftListing, deleteListing, getListingInventory, updateListingInventory, getShop, updateShop, isQpdExhaustedError, getBudgetSnapshots, getShopSections, createShopSection, updateShopSection, deleteShopSection } = require('../etsy/client')
 const {
@@ -67,14 +100,43 @@ const {
 	recordFourpxFreight,
 	recordFourpxShipmentInputs,
 	getFourpxShippingSummary,
+	FOURPX_PICKUP_BLOCKING_STATUSES,
+	openFourpxPickupAppointment,
+	resolveFourpxPickupAppointment,
+	attachFourpxPickupParcels,
+	setFourpxPickupFormUrl,
+	cancelFourpxPickupAppointment,
+	getFourpxPickupAppointment,
+	findActiveFourpxPickupAppointment,
+	pruneStaleFourpxPickupAppointments,
+	listFourpxPickupAppointments,
+	listParcelsAwaitingFourpxPickup,
 	updateTrackingDetail,
 	getShipments,
 	getShippingStats,
+	getShippingAlerts,
+	reviewShippingAlerts,
+	syncShippingAlertLedger,
+	updateShippingClaim,
+	getShippingBuyerNotice,
+	recordShippingBuyerNotice,
+	clearShippingBuyerNotice,
+	MAX_SHIPPING_NOTICE_BODY_LENGTH,
+	backfillDisposedTrackingFlags,
+	backfillDeliveredTrackingFlags,
+	backfillFalseCustomsStuckFlags,
+	queueOverdueTrackingRechecks,
+	acquireLock,
+	releaseLock,
+	SHIPPING_CLAIM_STATUSES,
+	MAX_SHIPPING_CLAIM_NOTE_LENGTH,
 	setFourpxBalance,
 	getFourpxBalanceStatus,
 	upsertRouteAssignment,
+	getRouteAssignment,
 	getAllRouteAssignments,
 	upsertProductAssignment,
+	getProductAssignment,
 	getAllProductAssignments,
 	getSupplierDirectory,
 	getCharmShopDirectory,
@@ -110,11 +172,14 @@ const {
 	deleteProductMapRow,
 	mergeProductMapSupplierCharm,
 	syncProductMapToAssignments,
+	getProductMapRow,
+	resolveWrongStallForProduct,
 	reconcileAssignmentsToProductMap,
-	insertManualItem,
+	createRouteManualOrder,
+	MAX_ROUTE_MANUAL_ITEMS,
 	getManualItems,
 	getManualItemImage,
-	deleteManualItemByReceipt,
+	deleteManualOrderLine,
 	insertManualOrder,
 	updateManualOrder,
 	deleteManualOrder,
@@ -127,7 +192,8 @@ const {
 	listPurchaseSyncRuns,
 	getPurchaseSyncRun,
 	getListingImageData,
-	updateShopListingCount,
+	updateShopHealth,
+	upsertShopHealthSnapshot,
 	getEarningsSummary,
 	getCurrentMonthNet,
 	getPerOrderEarnings,
@@ -158,44 +224,76 @@ const {
 	upsertOrderSubstitution,
 	deleteOrderSubstitution,
 	getSubstitutionImage,
-	normalizeStyleKey,
 	upsertListingStyleImage,
 	deleteListingStyleImage,
 	getListingStyleImageMeta,
 	getListingStyleImage,
 	getListingStyleImageMap,
+	getListingVariationImageMap,
 } = require('../db/setup')
+const { lookupStyleKeyed, lookupVariationImage, parseStyleValueId, resolveUnswitchedLineImage, resolveSwitchedLineImage } = require('../listings/variation-images')
 const routeDashboard = require('../route/dashboard')
+const routeSourcing = require('../route/sourcing')
 const productMerges = require('../route/product-merges')
 const productSimilarity = require('../route/product-similarity')
+const { ProductIdentityCoordinator } = require('../route/product-identity-coordinator')
 const { FLOOR_MAPS, normalizeStallCode, stallCodeAliases } = require('../route/floor-map')
 const { generateBuyerIssueMessage } = require('../support/buyer-message')
 const { checkMessageCompliance } = require('../support/message-compliance')
 const enginePaths = require('../route/engine-paths')
 const sourcingLib = require('../sourcing/library')
+const sourcingCatalog = require('../sourcing/catalog')
+const sourcingCatalogView = require('../sourcing/catalog-view')
 const statusImport = require('../route/status-import')
 const { buildSyncReportWorkbook } = require('../route/sync-report-xlsx')
-const { batchFetchRouteImages } = require('../route/image-fetcher')
+const { batchFetchRouteImages, fetchImageBuffer } = require('../route/image-fetcher')
+const { shopRouteImageUrl, ensureListingImageBytes } = require('../route/shop-images')
+const { sendStoredImage } = require('../route/stored-image-security')
 const unmatchedImages = require('../route/unmatched-images')
 const { logZeroStockIfNeeded, listingHasLiveZero, raiseOfferingsToTarget, getZeroStylesForListing, formatStyleLabel, removeModelFromInventory } = require('../inventory/helpers')
-const { syncShop, runSyncCycle, runInventoryWatchCycle, syncLedgerForShop, releaseSyncLock, intervalToCron } = require('../workers/sync')
+const { syncShop, runSyncCycle, runInventoryWatchCycle, startEtsyWork, isEtsyWorkRunning, getEtsyWorkStatus, syncLedgerForShop, startTrackingCycle, getTrackingCycleStatus, getTrackingPollSettings, releaseSyncLock, releaseTrackingLock, intervalToCron } = require('../workers/sync')
 const { createGroupClient } = require('../proxy/factory')
-const { getLogisticsProducts, createShipOrder, getShipLabel, cancelShipOrder, getShipOrder, getOrderFreight, getEstimatedCost, splitName, safeLabelBaseName, assignUniqueLabelNames } = require('../fourpx/orders')
-const { renderLabelBitmap, printBitmapWindows, writeTempLabelPng } = require('../fourpx/label-print')
+const { getLogisticsProducts, createShipOrder, getShipLabel, cancelShipOrder, getShipOrder, getOrderFreight, getEstimatedCost, normalizeShipOrderResponse, planShipOrderReference, mintShipOrderFallbackRef, isRefInProcessingRejection, splitName, safeLabelBaseName, assignUniqueLabelNames } = require('../fourpx/orders')
+const { renderLabelBitmap, printBitmapWindows, writeTempLabelPng, MIN_HEALTHY_COVERAGE_PCT } = require('../fourpx/label-print')
+// 4PX door-to-door collection booking (揽收预约). Namespaced rather than
+// destructured: the module is a small API surface used in one place, and reading
+// `fourpxCollect.assertReserveDate(...)` at the call site says which carrier
+// contract the rule comes from.
+const fourpxCollect = require('../fourpx/collect')
+const { listReserveDateOptions, PICKUP_FIELDS: FOURPX_PICKUP_FIELDS, DEFAULT_PICKUP_TIMEZONE: FOURPX_DEFAULT_PICKUP_TIMEZONE } = fourpxCollect
 const { downloadToBuffer, isTransientDownloadError } = require('../util/http-download')
 const { resolveReceiptFreight } = require('../fourpx/freight')
-const { FOURPX_POSTLINK_S5058_CODE, FOURPX_POSTLINK_S5058_COUNTRIES, FOURPX_COUNTRY_DEFAULT_PRODUCT, resolveLogisticsProduct } = require('../fourpx/product-preference')
-const { getFullTrackingEvents, getTrackingSnapshot, _withHealth } = require('../tracking/checker')
+const { FOURPX_POSTLINK_S5058_CODE, FOURPX_POSTLINK_S5058_COUNTRIES, FOURPX_COUNTRY_DEFAULT_PRODUCT, FOURPX_EXPRESS_WORLDWIDE, FOURPX_EXPRESS_BY_COUNTRY, resolveLogisticsProduct, isExpressProduct, expressCandidates, assessExpressChoice, resolveUsIslandZipFallback } = require('../fourpx/product-preference')
+const { getFullTrackingEvents, _withHealth } = require('../tracking/checker')
+const { normalizeTrackingCode, normalizeFourpxLookupCode, normalizeCarrierName } = require('../tracking/validation')
 const { scanInputRoot } = require('../listings/scanner')
 const { getShopListingSettings } = require('../listings/shop-settings')
 const { BulkJobManager } = require('../listings/bulk-runner')
-const { listProductTypes } = require('../listings/product-types')
-const { getPricesForCurrency, STYLE_KEYS } = require('../listings/pricing')
+const { listProductTypes, getProductType, styleKeysFor, deviceFamilyOf, crossFamilyModelError, canonicalModelsForFamily, primaryComponentLabel, FAMILY_IPHONE, FAMILY_AIRPODS, FAMILY_WATCH, FAMILY_IPAD } = require('../listings/product-types')
+const { getPricesForCurrency } = require('../listings/pricing')
 const { resolveDefaultPrices, getShopCurrentStylePrices } = require('../listings/shop-prices')
 const { ShopRepricer } = require('../listings/repricer')
 const { CHARACTERS } = require('../listings/character-catalog')
+const thumbnails = require('../listings/thumbnails')
+const { buildGrowthReport, listThirdPartyRightsReview } = require('../growth/diagnostics')
+const { shopNeedsCatalogHealth, syncShopCatalogHealth } = require('../growth/catalog-sync')
+const {
+	parsePastedStatsText,
+	saveManualComparison,
+	listManualComparisons,
+	deleteManualComparison,
+} = require('../growth/manual-import')
+const {
+	parsePastedListingStats,
+	saveListingDetailImport,
+	listListingDetailImports,
+	deleteListingDetailImport,
+} = require('../growth/manual-listing-import')
 
-const TOKENS_PATH = path.resolve(__dirname, '../../tokens.json')
+// Default remains the repo-local, gitignored token store. Tests and isolated
+// secondary instances can point at their own file so merely booting the real
+// server module never reads or rewrites production credentials.
+const TOKENS_PATH = process.env.DASHBOARD_TOKENS_PATH ? path.resolve(process.env.DASHBOARD_TOKENS_PATH) : path.resolve(__dirname, '../../tokens.json')
 
 // Absolute path to THIS dashboard's project root (src/server → ../../).
 // Used to keep generated artifacts (e.g. shopping-route Excel files) inside
@@ -242,6 +340,22 @@ function broadcastRouteEvent(payload) {
  */
 function broadcastRouteRefresh(receiptId, reason) {
 	broadcastRouteEvent({ type: 'refresh', receipt_id: Number(receiptId) || null, reason: reason || 'change' })
+}
+
+/**
+ * Catalog and supplier mutations affect every product browser and may also
+ * change live route resolution. Use the existing route stream so all tabs and
+ * devices invalidate from one ordered event instead of maintaining a second
+ * best-effort notification channel.
+ */
+function broadcastCatalogRefresh(reason, details = {}) {
+	broadcastRouteEvent({
+		type: 'refresh',
+		scope: 'catalog',
+		receipt_id: null,
+		reason: reason || 'catalog-changed',
+		...details,
+	})
 }
 
 // ─── Shopping Route generation job state ──────────────────────────────────────
@@ -301,13 +415,16 @@ const _fpxValidCodesCache = new Map()
  *   countries — ISO-2 destinations where this product is offered; [] = worldwide.
  */
 
-// Helper — ISO-2 codes for common destination regions
-const _EU27 = ['DE', 'FR', 'NL', 'IT', 'ES', 'PL', 'SE', 'BE', 'AT', 'PT', 'CZ', 'HU', 'RO', 'SK', 'FI', 'DK', 'IE', 'HR', 'SI', 'LT', 'LV', 'EE', 'BG', 'GR', 'LU', 'MT', 'CY']
+// Helper — ISO-2 codes for common destination regions. Sourced from the
+// destination-tax registry so the product catalogue, the customs data we
+// transmit and the packing bench cannot drift to different ideas of "the EU".
+const _EU27 = [...destinationTax.EU27]
 
 // Destinations where 4PX requires an IOSS number for parcels with a declared
 // value ≤ €150 (EU27 — the IOSS scheme covers the whole EU customs union). The
-// server attaches config.fourpx_ioss_no to orders bound for these countries.
-const FOURPX_IOSS_COUNTRIES = new Set(_EU27)
+// server attaches the resolved marketplace IOSS number to orders bound for these
+// countries (see destinationTax.resolveShipmentIoss).
+const FOURPX_IOSS_COUNTRIES = destinationTax.EU_IOSS_COUNTRIES
 
 const FOURPX_RECOMMENDED_PRODUCTS = [
 	// ── POSTLINK-LW (S5058) — the default workhorse for light parcels ────────────
@@ -447,7 +564,40 @@ try {
 }
 
 const app = express()
-app.use(cors())
+const trustProxyRaw = String(process.env.DASHBOARD_TRUST_PROXY || 'loopback').trim()
+const trustProxy = /^\d+$/.test(trustProxyRaw) ? Number(trustProxyRaw) : /^(?:false|off|no)$/i.test(trustProxyRaw) ? false : trustProxyRaw
+app.set('trust proxy', trustProxy)
+app.disable('x-powered-by')
+app.use((_req, res, next) => {
+	res.setHeader('X-Content-Type-Options', 'nosniff')
+	res.setHeader('X-Frame-Options', 'DENY')
+	res.setHeader('Referrer-Policy', 'no-referrer')
+	res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+	// The current UI intentionally uses inline scripts/styles and event handlers,
+	// so those two sources remain allowed. The policy still blocks framing,
+	// plugins, foreign scripts, and unexpected network destinations.
+	res.setHeader('Content-Security-Policy', "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; " + "form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; " + "img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; " + "connect-src 'self'; worker-src 'self' blob:")
+	next()
+})
+// The shipped UI is same-origin and needs no CORS. Cross-origin browser access is
+// opt-in and exact-origin only; a wildcard on a credentialed operations API would
+// unnecessarily widen the attack surface.
+const configuredCorsOrigins = new Set(
+	String(process.env.DASHBOARD_CORS_ORIGINS || '')
+		.split(',')
+		.map((origin) => origin.trim())
+		.filter(Boolean),
+)
+if (configuredCorsOrigins.size) {
+	app.use(
+		cors({
+			origin(origin, callback) {
+				callback(null, !origin || configuredCorsOrigins.has(origin))
+			},
+			credentials: true,
+		}),
+	)
+}
 // gzip/deflate every JSON + HTML response. Big win on slow mobile/cellular and
 // LAN (Cloudflare compresses edge→client, but this covers LAN + origin→edge).
 // CRITICAL: never compress Server-Sent Events — buffering the stream would break
@@ -462,25 +612,67 @@ app.use(
 		},
 	}),
 )
-// 25 MB body limit so base64 charm-image uploads (POST/PUT /api/route/charms)
-// pass through. Express's default is only 100 KB, which rejected image uploads
-// with a 413 before the route handler ran.
-app.use(express.json({ limit: '25mb' }))
-
 // ─── Authentication & role-based access control ─────────────────────────────────
-// Installs the owner/packer login + deny-by-default packer gate BEFORE any routes
-// so every endpoint below is protected. Auth is opt-in: it activates only when
-// DASHBOARD_OWNER_PASSWORD is set, so existing single-user setups keep working.
+// Installs login + the deny-by-default role gate BEFORE any routes, so every
+// endpoint below is protected. WHO may do WHAT lives in src/auth/policy.js. Auth
+// is opt-in: it activates only when DASHBOARD_OWNER_PASSWORD is set, so existing
+// single-user setups keep working.
 const { createAuth } = require('../auth/access')
 const { createUserStore } = require('../auth/user-store')
 const userStore = createUserStore(db)
 const auth = createAuth({ store: userStore })
 auth.install(app)
+// In passwordless single-owner mode the server binds to loopback. Also pin Host:
+// otherwise a malicious public hostname can DNS-rebind to 127.0.0.1 and become
+// same-origin with owner-level APIs in the victim's browser.
+if (!auth.enabled) {
+	const localHosts = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
+	app.use((req, res, next) => {
+		if (!localHosts.has(String(req.hostname || '').toLowerCase())) {
+			return res.status(421).json({ error: 'Invalid local dashboard host', code: 'INVALID_HOST' })
+		}
+		next()
+	})
+}
+// Reject browser-initiated cross-site mutations (and GET endpoints that have a
+// physical side effect). Same-origin UI calls and non-browser automation, which
+// do not send Sec-Fetch-Site, retain their existing behavior.
+app.use((req, res, next) => {
+	if (!req.path.startsWith('/api/')) return next()
+	const sideEffectGet = req.method === 'GET' && (/^\/api\/4px\/label-print\//.test(req.path) || req.path === '/api/route/open' || req.path === '/api/route/supplier-catalog/open')
+	const mutating = !['GET', 'HEAD', 'OPTIONS'].includes(req.method)
+	if (mutating || sideEffectGet) {
+		const origin = String(req.headers.origin || '').trim()
+		let sameOrigin = false
+		if (origin) {
+			try {
+				sameOrigin = new URL(origin).host === String(req.headers.host || '')
+			} catch {
+				sameOrigin = false
+			}
+		}
+		const explicitlyTrusted = !!origin && configuredCorsOrigins.has(origin)
+		const fetchSite = String(req.headers['sec-fetch-site'] || '').toLowerCase()
+		if ((origin && !sameOrigin && !explicitlyTrusted) || (['cross-site', 'same-site'].includes(fetchSite) && !sameOrigin && !explicitlyTrusted)) {
+			return res.status(403).json({ error: 'Cross-site request blocked', code: 'CROSS_SITE_BLOCKED' })
+		}
+	}
+	next()
+})
+// Parse large JSON only AFTER authentication/authorization. The login route has
+// its own tight 16 KB parser in access.js, so an unauthenticated client cannot
+// force 25 MB JSON parsing on protected endpoints.
+app.use(express.json({ limit: '25mb' }))
 if (auth.enabled) {
 	console.log(`[auth] Access control ENABLED — ${userStore.count()} named user(s) + env bootstrap (owner / packer).`)
 } else {
 	console.warn('[auth] Auth OFF (single-owner mode). Set DASHBOARD_OWNER_PASSWORD in .env, or add a user: npm run user -- add <name> <role>')
 }
+
+// Staff administration: accounts, the audit log and shift reports. The gate above
+// already denies these to everyone but the owner; naming the capability at the
+// route keeps the requirement visible where the handler lives.
+const requireStaffAdmin = auth.requireCapability('admin:users')
 
 // ─── Audit log ──────────────────────────────────────────────────────────────────
 // Records every state-changing API call with the acting role, so the owner can
@@ -493,12 +685,16 @@ db.exec(`CREATE TABLE IF NOT EXISTS audit_log (
   user TEXT,
   method TEXT,
   path TEXT,
-  status INTEGER
+  status INTEGER,
+  details TEXT,
+  product_context TEXT
 )`)
 // Additive migrations for DBs created before these columns existed. `details`
 // stores a small, redacted JSON snapshot of the request so the activity feed can
 // say exactly WHICH order/product/shop an action touched — not just the URL.
-for (const col of ['user TEXT', 'details TEXT']) {
+// `product_context` is a bounded, versioned event-time snapshot for order-level
+// actions such as packaging, where one receipt may contain several products.
+for (const col of ['user TEXT', 'details TEXT', 'product_context TEXT']) {
 	try {
 		db.exec(`ALTER TABLE audit_log ADD COLUMN ${col}`)
 	} catch {
@@ -524,6 +720,14 @@ function _auditSnapshot(req) {
 		if (!src || typeof src !== 'object') return
 		for (const [key, val] of Object.entries(src)) {
 			if (val == null || val === '') continue
+			// Shopping Mode deliberately sends the exact image reference the employee
+			// saw. Keep it only after a strict allowlist check; every other image/blob
+			// field remains excluded by _AUDIT_BULKY_KEY below.
+			if (key === 'product_image_url') {
+				const safeImage = activityProductContext.safeProductImageUrl(val)
+				if (safeImage) out[key] = safeImage
+				continue
+			}
 			if (_AUDIT_SECRET_KEY.test(key) || _AUDIT_BULKY_KEY.test(key)) continue
 			if (Array.isArray(val)) {
 				out[key] = `${val.length} item${val.length === 1 ? '' : 's'}`
@@ -536,22 +740,42 @@ function _auditSnapshot(req) {
 			}
 		}
 	}
-	// Body/query first, then params last so the authoritative URL id wins.
-	collect(req.body)
+	// Query is the least authoritative source on a mutating request. Body values
+	// describe the applied mutation and URL params identify its resource, so both
+	// must override a conflicting query string rather than letting it forge the
+	// audit target.
 	collect(req.query)
+	collect(req.body)
 	collect(req.params)
 	const keys = Object.keys(out)
 	if (keys.length === 0) return null
-	const json = JSON.stringify(out)
-	return json.length > 2000 ? null : json
+	let json = JSON.stringify(out)
+	if (json.length <= 2000) return json
+
+	// A long but valid image URL must never make the ENTIRE audit identity vanish.
+	// Drop the optional media reference first, then pack identifiers/status fields
+	// ahead of descriptive extras until the hard row budget is reached.
+	delete out.product_image_url
+	const priority = ['receipt_id', 'item_key', 'activity_context_version', 'title', 'component', 'status', 'status_case', 'status_grip', 'status_charm', 'listing_id', 'product_listing_id', 'phone_model', 'ordered_phone_model', 'style', 'quantity']
+	const compact = {}
+	const orderedKeys = [...new Set([...priority, ...Object.keys(out)])]
+	for (const key of orderedKeys) {
+		if (!Object.prototype.hasOwnProperty.call(out, key)) continue
+		compact[key] = out[key]
+		const candidate = JSON.stringify(compact)
+		if (candidate.length > 2000) delete compact[key]
+	}
+	json = JSON.stringify(compact)
+	return Object.keys(compact).length && json.length <= 2000 ? json : null
 }
 
-const _auditInsert = db.prepare('INSERT INTO audit_log (ts, role, user, method, path, status, details) VALUES (?, ?, ?, ?, ?, ?, ?)')
+const _auditInsert = db.prepare('INSERT INTO audit_log (ts, role, user, method, path, status, details, product_context) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
 app.use((req, res, next) => {
-	if ((req.path.startsWith('/api/') || req.path === '/api') && (req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE') && !req.path.startsWith('/api/auth/')) {
+	if ((req.path.startsWith('/api/') || req.path === '/api') && (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE') && !req.path.startsWith('/api/auth/')) {
 		res.on('finish', () => {
 			try {
-				_auditInsert.run(Date.now(), (req.auth && req.auth.role) || 'anon', (req.auth && req.auth.user) || null, req.method, req.path, res.statusCode, _auditSnapshot(req))
+				const productContext = activityProductContext.serializeOrderProductSnapshot(res.locals.auditOrderProductSnapshot)
+				_auditInsert.run(Date.now(), (req.auth && req.auth.role) || 'anon', (req.auth && req.auth.user) || null, req.method, req.path, res.statusCode, _auditSnapshot(req), productContext)
 			} catch {
 				/* never let auditing break a request */
 			}
@@ -560,12 +784,29 @@ app.use((req, res, next) => {
 	next()
 })
 
+operationsChecklist.installRoutes(app, {
+	db,
+	timeZone: () => config.operations_timezone,
+})
+
+function _captureAuditOrderProductSnapshot(res, receiptId) {
+	try {
+		const snapshot = activityProductContext.buildOrderProductSnapshot(db, config, receiptId)
+		if (snapshot) res.locals.auditOrderProductSnapshot = snapshot
+	} catch (error) {
+		// Auditing is best-effort and must never block the physical packing flow.
+		// GET /api/audit retains its historical read-time fallback when this fails.
+		console.warn(`[audit] could not snapshot products for receipt ${receiptId}:`, error.message)
+	}
+}
+
 // Owner-only: recent audit entries (packer is denied by the gate above anyway).
 // Optional `since`/`until` (epoch ms) bound the window so the client can request
 // a real day/range accurately — the caller computes local-day boundaries, the
 // server only compares numeric timestamps (timezone-agnostic).
-app.get('/api/audit', auth.requireOwner, (req, res) => {
-	const limit = Math.min(Number(req.query.limit) || 200, 2000)
+app.get('/api/audit', requireStaffAdmin, (req, res) => {
+	const requestedLimit = Number.parseInt(req.query.limit, 10)
+	const limit = Number.isInteger(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 2000) : 200
 	const since = Number(req.query.since)
 	const until = Number(req.query.until)
 	const where = []
@@ -579,12 +820,12 @@ app.get('/api/audit', auth.requireOwner, (req, res) => {
 		whereParams.push(until)
 	}
 	const whereSql = where.length ? ' WHERE ' + where.join(' AND ') : ''
-	const rows = db.prepare(`SELECT id, ts, role, user, method, path, status, details FROM audit_log${whereSql} ORDER BY id DESC LIMIT ?`).all(...whereParams, limit)
+	const rows = db.prepare(`SELECT id, ts, role, user, method, path, status, details, product_context FROM audit_log${whereSql} ORDER BY id DESC LIMIT ?`).all(...whereParams, limit)
 	// Authoritative per-person counts over the WHOLE range (never capped by the
 	// row limit), so the UI's per-user totals stay correct even when the rendered
 	// list is truncated. Cardinality is tiny (one row per user/role pair).
 	const tallies = db.prepare(`SELECT user, role, COUNT(*) AS n FROM audit_log${whereSql} GROUP BY user, role`).all(...whereParams)
-	const entries = rows.map((r) => {
+	const parsedEntries = rows.map((r) => {
 		let details = null
 		if (r.details) {
 			try {
@@ -594,6 +835,16 @@ app.get('/api/audit', auth.requireOwner, (req, res) => {
 			}
 		}
 		return { ...r, details }
+	})
+	// New shopper writes already carry event-time product metadata plus a safe image
+	// reference. Older audit rows are resolved in batches from their canonical
+	// order-line key, so historical activity gains best-effort current images/styles
+	// without rewriting audit history.
+	const entries = activityProductContext.enrichAuditEntries({
+		db,
+		config,
+		entries: parsedEntries,
+		onError: (error) => console.warn('[audit] product context enrichment failed:', error.message),
 	})
 	res.json({ entries, tallies })
 })
@@ -608,7 +859,7 @@ app.get('/api/audit', auth.requireOwner, (req, res) => {
  * Query: since, until (epoch ms — caller computes local-day boundaries, as with
  * /api/audit), user (optional filter). Returns per-user totals.
  */
-app.get('/api/shift-summary', auth.requireOwner, (req, res) => {
+app.get('/api/shift-summary', requireStaffAdmin, (req, res) => {
 	const since = Number(req.query.since)
 	const until = Number(req.query.until)
 	const userFilter = (req.query.user || '').trim()
@@ -627,15 +878,18 @@ app.get('/api/shift-summary', auth.requireOwner, (req, res) => {
 		p.push(userFilter)
 	}
 	const whereSql = where.length ? ' WHERE ' + where.join(' AND ') : ''
-	const rows = db.prepare(`SELECT ts, role, user, method, path, status, details FROM audit_log${whereSql} ORDER BY id ASC`).all(...p).map((r) => {
-		let details = null
-		try {
-			details = r.details ? JSON.parse(r.details) : null
-		} catch {
-			details = null
-		}
-		return { ...r, details }
-	})
+	const rows = db
+		.prepare(`SELECT ts, role, user, method, path, status, details FROM audit_log${whereSql} ORDER BY id ASC`)
+		.all(...p)
+		.map((r) => {
+			let details = null
+			try {
+				details = r.details ? JSON.parse(r.details) : null
+			} catch {
+				details = null
+			}
+			return { ...r, details }
+		})
 
 	res.json({
 		since: Number.isFinite(since) ? since : null,
@@ -644,13 +898,13 @@ app.get('/api/shift-summary', auth.requireOwner, (req, res) => {
 	})
 })
 
-// ─── Team / user management (owner only) ─────────────────────────────────────────
-// Named accounts for accountability + clean offboarding. Packer sessions are
-// already denied by the deny-by-default gate; requireOwner is belt-and-suspenders.
-app.get('/api/users', auth.requireOwner, (_req, res) => {
+// ─── Team / user management ──────────────────────────────────────────────────
+// Named accounts for accountability + clean offboarding. Non-owner sessions are
+// already denied by the deny-by-default gate; the guard is belt-and-suspenders.
+app.get('/api/users', requireStaffAdmin, (_req, res) => {
 	res.json({ users: userStore.list() })
 })
-app.post('/api/users', auth.requireOwner, (req, res) => {
+app.post('/api/users', requireStaffAdmin, (req, res) => {
 	try {
 		const { username, password, role } = req.body || {}
 		const u = userStore.add({ username, password, role, createdBy: (req.auth && req.auth.user) || 'owner' })
@@ -659,7 +913,7 @@ app.post('/api/users', auth.requireOwner, (req, res) => {
 		res.status(400).json({ error: e.message })
 	}
 })
-app.post('/api/users/:id/disable', auth.requireOwner, (req, res) => {
+app.post('/api/users/:id/disable', requireStaffAdmin, (req, res) => {
 	const id = Number(req.params.id)
 	const u = userStore.getById(id)
 	if (!u) return res.status(404).json({ error: 'User not found' })
@@ -668,17 +922,17 @@ app.post('/api/users/:id/disable', auth.requireOwner, (req, res) => {
 	if (u.role === 'owner' && u.active && userStore.activeOwnerCount() <= 1) return res.status(400).json({ error: 'Cannot disable the last active owner.' })
 	res.json({ user: userStore.setActive(id, false) })
 })
-app.post('/api/users/:id/enable', auth.requireOwner, (req, res) => {
+app.post('/api/users/:id/enable', requireStaffAdmin, (req, res) => {
 	const u = userStore.getById(Number(req.params.id))
 	if (!u) return res.status(404).json({ error: 'User not found' })
 	res.json({ user: userStore.setActive(Number(req.params.id), true) })
 })
-app.post('/api/users/:id/revoke', auth.requireOwner, (req, res) => {
+app.post('/api/users/:id/revoke', requireStaffAdmin, (req, res) => {
 	const u = userStore.getById(Number(req.params.id))
 	if (!u) return res.status(404).json({ error: 'User not found' })
 	res.json({ user: userStore.revokeSessions(Number(req.params.id)) })
 })
-app.post('/api/users/:id/password', auth.requireOwner, (req, res) => {
+app.post('/api/users/:id/password', requireStaffAdmin, (req, res) => {
 	try {
 		const u = userStore.getById(Number(req.params.id))
 		if (!u) return res.status(404).json({ error: 'User not found' })
@@ -694,26 +948,45 @@ app.post('/api/users/:id/password', auth.requireOwner, (req, res) => {
 // consistent online snapshot (better-sqlite3 .backup()) to a NON-synced local
 // folder and keep the last N. Configure via DASHBOARD_BACKUP_DIR / _KEEP.
 const BACKUP_DIR = process.env.DASHBOARD_BACKUP_DIR || path.join(process.env.LOCALAPPDATA || os.homedir(), 'EtsyDashboard', 'backups')
-const BACKUP_KEEP = Number(process.env.DASHBOARD_BACKUP_KEEP) || 14
+const BACKUP_KEEP = Math.min(365, Math.max(1, Math.floor(Number(process.env.DASHBOARD_BACKUP_KEEP) || 14)))
 async function runDbBackup(reason) {
 	try {
 		fs.mkdirSync(BACKUP_DIR, { recursive: true })
 		const stamp = new Date().toISOString().replace(/[:.]/g, '-')
 		const dest = path.join(BACKUP_DIR, `etsy_dashboard-${stamp}.db`)
 		await db.backup(dest) // online backup → a consistent single-file snapshot
-		const files = fs
-			.readdirSync(BACKUP_DIR)
-			.filter((f) => f.startsWith('etsy_dashboard-') && f.endsWith('.db'))
-			.sort()
-		while (files.length > BACKUP_KEEP) {
-			const f = files.shift()
+		const routeDbPath = enginePaths.catalogDbPath(config)
+		let routeBackedUp = false
+		if (routeDbPath && fs.existsSync(routeDbPath)) {
+			const routeBackup = path.join(BACKUP_DIR, `route_engine-${stamp}.db`)
+			let routeDb = null
 			try {
-				fs.unlinkSync(path.join(BACKUP_DIR, f))
-			} catch {
-				/* ignore */
+				routeDb = new Database(routeDbPath, { readonly: true, fileMustExist: true })
+				await routeDb.backup(routeBackup)
+				routeBackedUp = true
+			} catch (err) {
+				console.warn(`[backup] Route-engine DB backup failed; dashboard backup is still valid: ${err.message}`)
+			} finally {
+				try {
+					routeDb?.close()
+				} catch {}
 			}
 		}
-		console.log(`[backup] ${reason} → ${dest} (keeping ${Math.min(files.length, BACKUP_KEEP)})`)
+		for (const prefix of ['etsy_dashboard-', 'route_engine-']) {
+			const files = fs
+				.readdirSync(BACKUP_DIR)
+				.filter((f) => f.startsWith(prefix) && f.endsWith('.db'))
+				.sort()
+			while (files.length > BACKUP_KEEP) {
+				const file = files.shift()
+				try {
+					fs.unlinkSync(path.join(BACKUP_DIR, file))
+				} catch {
+					/* best-effort retention */
+				}
+			}
+		}
+		console.log(`[backup] ${reason} → ${BACKUP_DIR} (dashboard${routeBackedUp ? ' + route-engine' : ''} SQLite; keeping ${BACKUP_KEEP} each)`)
 	} catch (e) {
 		console.warn('[backup] FAILED:', e.message)
 	}
@@ -728,6 +1001,13 @@ async function runDbBackup(reason) {
 		console.warn('  │  Live SQLite must NOT be synced by OneDrive/Dropbox/Drive.              │')
 		console.warn('  │  Move it out (server stopped):   node scripts/relocate-db.js           │')
 		console.warn('  └───────────────────────────────────────────────────────────────────────┘')
+	}
+}
+{
+	const routeDataAbs = enginePaths.engineDataDir(config)
+	if (routeDataAbs && /onedrive|dropbox|google ?drive|gdrive/i.test(routeDataAbs)) {
+		console.warn(`[route] Mutable route-engine data is inside a cloud-synced folder: ${routeDataAbs}`)
+		console.warn('[route] Stop the dashboard and run `npm run relocate-route-data` to protect its SQLite/catalog files.')
 	}
 }
 setTimeout(() => runDbBackup('startup'), 30 * 1000)
@@ -865,7 +1145,8 @@ app.get('/api/etsy/budget', (req, res) => {
 
 /**
  * GET /api/shops/listing-counts
- * Live active-listing counts per shop, fetched from Etsy in parallel.
+ * Cached active-listing counts per shop. A live Etsy refresh is allowed only
+ * when written API-analytics approval and catalog collection are both enabled.
  *
  * Returns { counts: { [shop_id]: { active, digital, source, error? } } }.
  * The Etsy Shop object exposes `listing_active_count` directly, so a single
@@ -882,13 +1163,16 @@ app.get('/api/etsy/budget', (req, res) => {
 // budget and pinning it at the fulfilment reserve floor (it could never recover
 // because the dashboard re-consumed every call the sliding window released). We
 // therefore serve from the persisted DB cache and only refresh a shop from Etsy
-// when its cached count is older than this TTL. `?force=1` bypasses the TTL for an
-// explicit manual refresh.
+// when analytics approval is recorded and its cached count is older than this
+// TTL. `?force=1` may bypass the TTL, never the approval gate.
 const LISTING_COUNT_TTL_MS = 6 * 60 * 60 * 1000 // 6 hours
 
 app.get('/api/shops/listing-counts', async (req, res) => {
 	const shops = getAllShops(config).filter((s) => s.group_id !== MANUAL_GROUP_ID)
 	const force = req.query.force === '1' || req.query.force === 'true'
+	const liveMetadataApproved =
+		config.catalog_health_sync === true &&
+		config.etsy_api_analytics_approved === true
 
 	// Last known good value + when it was last refreshed from Etsy.
 	const cachedRow = (shopId) => db.prepare('SELECT listing_active_count, listing_count_synced_at FROM shops WHERE shop_id = ?').get(shopId)
@@ -908,7 +1192,7 @@ app.get('/api/shops/listing-counts', async (req, res) => {
 
 			// Cache-first: serve persisted value without spending an Etsy call unless the
 			// cache is stale (or a manual force-refresh was requested).
-			if (!tokenManager.hasTokens(shopCfg.shop_id) || (isFresh && !force)) {
+			if (!liveMetadataApproved || !tokenManager.hasTokens(shopCfg.shop_id) || (isFresh && !force)) {
 				return [shopCfg.shop_id, { active: cached, digital: 0, source: 'cache' }]
 			}
 
@@ -916,8 +1200,7 @@ app.get('/api/shops/listing-counts', async (req, res) => {
 				const { shopClient } = await getShopClientForShopName(shopCfg.shop_name)
 				const shopData = await getShop(shopClient, shopCfg.shop_id)
 				const active = shopData.listing_active_count ?? cached
-				// Persist so future page loads render instantly from the DB.
-				updateShopListingCount(db, shopCfg.shop_id, active)
+				updateShopHealth(db, shopCfg.shop_id, shopData || { listing_active_count: active })
 				return [
 					shopCfg.shop_id,
 					{
@@ -1060,6 +1343,73 @@ function computeSuppressedDuplicates() {
 	return computeDuplicateSuppression(rows)
 }
 
+// ── Ship-by deadline ─────────────────────────────────────────────────────────
+// Etsy gives every transaction its own expected_ship_date; an order's real
+// deadline is the EARLIEST of them, because missing any one line makes the whole
+// order late. The Orders page computes exactly that from the transaction list it
+// renders (Math.min over expected_ship_date, falling back to first_ship_by), so
+// this is the SQL twin of that rule — one definition shared by the deadline
+// rollup and the ship-by sorts, so a banner, a sort and a card can never
+// disagree about when an order is due.
+//
+// `first_ship_by` alone is not enough: it is the FIRST transaction's date, which
+// on a multi-line order can be later than the earliest one.
+//
+// json_each() raises on malformed input, so the CASE guards it — SQLite's CASE
+// short-circuits, leaving legacy or truncated rows to fall back to the column.
+const SHIP_BY_DEADLINE_SQL = (alias = 'r') => {
+	if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) throw new TypeError('Invalid SQL alias')
+	return `COALESCE(
+    CASE WHEN json_valid(${alias}.all_transactions)
+         THEN (SELECT MIN(json_extract(t.value, '$.expected_ship_date')) FROM json_each(${alias}.all_transactions) t)
+    END,
+    ${alias}.first_ship_by)`
+}
+
+/** How far ahead the deadline banner looks. Beyond this nothing is "soon". */
+const DEADLINE_HORIZON_SEC = 48 * 3600
+/** Payload guard. Far more than any real urgent queue; see the `truncated` flag. */
+const DEADLINE_MAX_ROWS = 750
+
+/**
+ * Ship-by deadlines for every order that still has to leave the warehouse and is
+ * already overdue or due within DEADLINE_HORIZON_SEC.
+ *
+ * Deliberately DATABASE-WIDE rather than scoped to the caller's filters, exactly
+ * like the ship-recovery banner: a deadline is an obligation to Etsy, and it does
+ * not stop counting because the operator narrowed the view to one shop or paged
+ * past it. Duplicate ghosts and non-actionable provisional receipts are excluded
+ * so the count matches the orders a human can actually act on.
+ *
+ * Returns raw timestamps rather than counts so the page can re-derive "overdue"
+ * and "due within 24h" on every tick — the banner stays exact as the clock
+ * crosses a threshold, with no polling and no server round-trip.
+ *
+ * @param {Set<number>} suppressedDupIds  Ghost receipts already hidden from the list.
+ * @returns {{ deadlines: number[], truncated: boolean }}
+ */
+function collectShippingDeadlines(suppressedDupIds) {
+	const horizon = Math.floor(Date.now() / 1000) + DEADLINE_HORIZON_SEC
+	const dupFilter = suppressedDupIds?.size ? `AND r.receipt_id NOT IN (${[...suppressedDupIds].map(Number).filter(Number.isInteger).join(',')})` : ''
+	const rows = db
+		.prepare(
+			`SELECT ship_by FROM (
+         SELECT ${SHIP_BY_DEADLINE_SQL('r')} AS ship_by
+           FROM receipts r
+          WHERE r.is_shipped = 0
+            AND r.status NOT IN ('Canceled','Fully Refunded','Cancelled','Fully refunded')
+            AND ${actionableOrderSql('r')}
+            ${dupFilter}
+       )
+       WHERE ship_by IS NOT NULL AND ship_by <= @horizon
+       ORDER BY ship_by ASC
+       LIMIT @cap`,
+		)
+		.all({ horizon, cap: DEADLINE_MAX_ROWS + 1 })
+	const deadlines = rows.map((r) => Number(r.ship_by)).filter(Number.isFinite)
+	return { deadlines: deadlines.slice(0, DEADLINE_MAX_ROWS), truncated: deadlines.length > DEADLINE_MAX_ROWS }
+}
+
 /**
  * GET /api/orders
  * Paginated, filterable orders list.
@@ -1070,21 +1420,32 @@ function computeSuppressedDuplicates() {
  *   status    — filter by status string
  *   limit     — page size (default 50, max 200)
  *   offset    — pagination offset
- *   sort      — 'newest' (default) | 'oldest' | 'packaged_newest' | 'packaged_oldest'
+ *   sort      — 'newest' (default) | 'oldest' | 'packaged_newest' | 'packaged_oldest' |
+ *               'ship_by_soonest' | 'ship_by_latest' | 'express_first'
  *   shipped   — false | true | pre_transit | in_transit | needs_purchase |
  *               ready_to_pack | to_verify | recently_packaged | cancelled | issues | all
  *   purchased_cohort — today | yesterday | recent. Narrow to orders whose shopping
  *               was FINISHED in that local-day window (packer's "shopped yesterday").
+ *   packaged_cohort  — today | yesterday | YYYY-MM-DD | all. Narrow Recently packaged
+ *               to orders sealed on that local day (powers the day chips).
  *   purchase  — ready (fully purchased) | outstanding (still needs buying).
  *               Orthogonal to `shipped`; combine with Needs-shipping/Pre-transit
  *               to isolate "fully purchased but not yet packed" orders.
  *   np_filter — needs_purchase view only: all (default) | tobuy | onhold.
  *   packaged  — true | false (parcel physically packed flag)
+ *   expedited — true | false. Narrow to orders where the buyer paid extra for a
+ *               faster shipping option (Etsy `shipping_upgrade`), or to ordinary
+ *               ones. Orthogonal to every other filter.
+ *
+ * Every order carries `shipping_upgrade` (null on ordinary orders) plus a flat
+ * `is_expedited` boolean, so a consumer can badge or gate on one field.
  *
  * Response adds `np_counts` ({ all, tobuy, onhold }) on the needs_purchase view —
  * the size of every sub-filter, so the tab badge can count actionable work only.
+ * On recently_packaged, response adds `packaged_days` ([{ date, count }, …], newest
+ * first, full history) so the day chips stay stable as the packer clicks between them.
  */
-app.get('/api/orders', (req, res) => {
+app.get('/api/orders', async (req, res) => {
 	const limit = Math.min(Math.max(parseInt(req.query.limit ?? 50, 10), 1), 5000)
 	const offset = parseInt(req.query.offset ?? 0, 10)
 
@@ -1256,17 +1617,13 @@ app.get('/api/orders', (req, res) => {
 	} else if (req.query.shipped === 'recently_packaged') {
 		// ── Recently-packaged review queue ─────────────────────────────────────
 		// The packer's audit trail: every order physically marked as packaged
-		// (packaged_at IS NOT NULL) within the recently_packaged_days window, newest
-		// first (see sort default below). Its purpose is a short, high-signal "what
-		// did I just seal?" list so a mistake — wrong item, wrong buyer, wrong model —
-		// can be caught and corrected (Unmark packaged / re-pack) shortly after the
-		// parcel was closed. It is deliberately independent of ship state: an order is
-		// often marked packaged BEFORE it is shipped, and stays reviewable either way.
-		// Cancelled/refunded receipts are excluded so the review list is actionable.
-		const recentlyPackagedDays = config.recently_packaged_days ?? 7
-		const cutoff = Math.floor(Date.now() / 1000) - recentlyPackagedDays * 24 * 3600
+		// (packaged_at IS NOT NULL), newest first (see sort default below). Full
+		// history — day chips + archive picker let the operator jump to any sealing
+		// day; pagination keeps the unfiltered "All" view fast. Independent of ship
+		// state: an order is often marked packaged BEFORE it is shipped, and stays
+		// reviewable either way. Cancelled/refunded receipts are excluded so the list
+		// stays actionable.
 		conditions.push(`r.packaged_at IS NOT NULL
-      AND r.packaged_at >= ${cutoff}
       AND r.status NOT IN ('Canceled', 'Cancelled', 'Fully Refunded', 'Fully refunded')`)
 	}
 
@@ -1287,12 +1644,52 @@ app.get('/api/orders', (req, res) => {
 		conditions.push('r.packaged_at IS NULL')
 	}
 
+	// ── Express / shipping-upgrade filter ────────────────────────────────────────
+	// Orthogonal to every scope above, so it composes with any view (its most
+	// useful pairings are Needs-shipping and Ready-to-pack — "what did someone pay
+	// to have rushed, and is it packed yet?").
+	//   expedited=true  → only orders where the buyer bought a SPEED upgrade
+	//   expedited=false → only ordinary-shipping orders
+	//   (omit)          → all orders
+	// COALESCE guards rows written before the column existed, which carry NULL
+	// rather than 0 and would otherwise vanish from BOTH sides of the filter.
+	if (req.query.expedited === 'true') {
+		conditions.push('r.is_expedited = 1')
+	} else if (req.query.expedited === 'false') {
+		conditions.push('COALESCE(r.is_expedited, 0) = 0')
+	}
+
 	// ── Purchase-completion cohort filter ────────────────────────────────────────
 	// Narrow to orders whose shopping was finished in a local-day window (today /
 	// yesterday / recent). Lets the packer pull "the orders I shopped yesterday"
 	// the next morning. Orthogonal to every other filter; see pack-queue module.
 	if (req.query.purchased_cohort) {
 		conditions.push(packQueue.purchasedCohortSql(req.query.purchased_cohort, 'r'))
+	}
+
+	// ── Packaged-day cohort (Recently packaged day chips) ─────────────────────
+	// Day chips describe the WHOLE review window — every local day that has at
+	// least one sealed parcel — so selecting Tuesday never empties Monday's chip.
+	// Counts are taken from the SAME conditions that drive the list (dedup,
+	// actionable, shop, rolling window), BEFORE the day cohort narrows them —
+	// one source of truth, so the All chip can never disagree with `total`.
+	let packagedDays = null
+	if (req.query.shipped === 'recently_packaged') {
+		const dayExtraWhere = conditions.length ? conditions.join(' AND ') : '1 = 1'
+		try {
+			packagedDays = packQueue.listPackagedDayCounts(db, {
+				windowDays: 0,
+				extraWhere: dayExtraWhere,
+				params,
+			})
+		} catch (err) {
+			console.error('[orders] packaged_days rollup failed:', err.message)
+			packagedDays = []
+		}
+		const packagedCohort = String(req.query.packaged_cohort || '').trim()
+		if (packagedCohort && packagedCohort !== 'all') {
+			conditions.push(packQueue.packagedCohortSql(packagedCohort, 'r'))
+		}
 	}
 
 	// ── Purchase-state filter ──────────────────────────────────────────────────
@@ -1389,6 +1786,18 @@ app.get('/api/orders', (req, res) => {
 		// is used on a mixed scope. The Recently-packaged scope is packaged-only.
 		packaged_newest: 'r.packaged_at DESC',
 		packaged_oldest: 'r.packaged_at ASC',
+		// Deadline order — what the ship-by banner jumps to. Orders with no
+		// deadline sort last in both directions (they are never urgent), so the top
+		// of the list is always the work with the least time left on it.
+		ship_by_soonest: `${SHIP_BY_DEADLINE_SQL('r')} IS NULL, ${SHIP_BY_DEADLINE_SQL('r')} ASC`,
+		ship_by_latest: `${SHIP_BY_DEADLINE_SQL('r')} IS NULL, ${SHIP_BY_DEADLINE_SQL('r')} DESC`,
+		// Express-first triage. The buyer paid a separate fee for SPEED, so on any
+		// working queue those parcels are picked, packed and handed over ahead of
+		// standard ones. Ties break on the ship-by deadline (soonest first) so the
+		// express block is itself ordered by urgency rather than arbitrarily, and
+		// the standard block below it keeps the same deadline discipline.
+		// COALESCE keeps pre-migration rows (NULL) sorting with the standard block.
+		express_first: `COALESCE(r.is_expedited, 0) DESC, ${SHIP_BY_DEADLINE_SQL('r')} IS NULL, ${SHIP_BY_DEADLINE_SQL('r')} ASC`,
 	}
 	// The Recently-packaged review queue is chronological by packing time by
 	// definition ("what did I just seal?"), so it defaults to packaged_at DESC
@@ -1402,10 +1811,7 @@ app.get('/api/orders', (req, res) => {
 	// readable, while preserving the caller's chronological sort WITHIN each group.
 	// Done in SQL so the grouping is stable across paginated pages. No effect on the
 	// 'active'/'cancelled' sub-filters (each is homogeneous) or any other view.
-	const issuesGrouping =
-		req.query.shipped === 'issues'
-			? "CASE WHEN r.status IN ('Canceled', 'Cancelled', 'Fully Refunded', 'Fully refunded') THEN 1 ELSE 0 END, "
-			: ''
+	const issuesGrouping = req.query.shipped === 'issues' ? "CASE WHEN r.status IN ('Canceled', 'Cancelled', 'Fully Refunded', 'Fully refunded') THEN 1 ELSE 0 END, " : ''
 
 	const rows = db
 		.prepare(
@@ -1448,6 +1854,10 @@ app.get('/api/orders', (req, res) => {
       r.needs_purchase_at,
       r.needs_purchase_note,
       r.packaged_at,
+      -- Paid shipping upgrade, straight from Etsy's per-transaction
+      -- shipping_upgrade field (rolled up per receipt at sync time). Projected by
+      -- the module that reads it back, so the aliases can never drift.
+      ${shippingUpgrade.selectSql('r')},
       li.url                AS product_image_url,
       r.etsy_created_at,
       r.etsy_updated_at,
@@ -1505,6 +1915,7 @@ app.get('/api/orders', (req, res) => {
 	// `${listing_id}\x00${style_key}`. These override the ambiguous listing hero
 	// shot for a specific style (e.g. show the grip for a "Grip 3 Only" line).
 	const styleImageMap = getListingStyleImageMap(db, allListingIds)
+	const variationImageMap = getListingVariationImageMap(db, allListingIds)
 
 	// Per-line purchase state for the page's receipts, so the Orders tab can show a
 	// purchasing control per product — and, when a product is a Case/Grip/Charm style,
@@ -1547,9 +1958,11 @@ app.get('/api/orders', (req, res) => {
 		// versions. All small/bounded and wrapped so a charm-catalog hiccup can
 		// never take down the orders list.
 		try {
-			db.prepare('SELECT item_key, charm_code, charm_shop FROM product_assignments').all().forEach((a) => {
-				productCharmByKey[a.item_key] = { charm_code: a.charm_code || '', charm_shop: a.charm_shop || '' }
-			})
+			db.prepare('SELECT item_key, charm_code, charm_shop FROM product_assignments')
+				.all()
+				.forEach((a) => {
+					productCharmByKey[a.item_key] = { charm_code: a.charm_code || '', charm_shop: a.charm_shop || '' }
+				})
 		} catch {}
 		// Charm library = single source of truth for a charm code → its supplier shop.
 		// Assignments only cache the shop from when the charm was assigned, so we
@@ -1560,7 +1973,9 @@ app.get('/api/orders', (req, res) => {
 		} catch {}
 		try {
 			getCharmShopDirectory(db).forEach((c) => {
-				const k = String(c.shop_name || '').trim().toLowerCase()
+				const k = String(c.shop_name || '')
+					.trim()
+					.toLowerCase()
 				if (k && !charmStallByShop.has(k)) charmStallByShop.set(k, c.stall || '')
 			})
 		} catch {}
@@ -1626,6 +2041,27 @@ app.get('/api/orders', (req, res) => {
 	}
 	const PURCHASE_OUTSTANDING = new Set(['Pending', 'Out of Stock', 'Wrong Stall'])
 
+	// Canonical line identity for every receipt on the page, loaded in ONE query.
+	// A Route-tab manual order names its lines with a per-variant key (so the same
+	// listing in two models stays two lines); resolving through this is what keeps
+	// the component chips below reading the very rows Shopping Mode wrote.
+	const lineKeys = lineIdentity.lineKeyResolver(
+		db,
+		rows.map((r) => r.receipt_id),
+	)
+
+	// Warm the rate table if boot's refresh has not landed yet. Without this, the
+	// first orders payload after a restart carries customs_declaration.amount = null
+	// and every employee bench shows a blank "declare in GBP".
+	if (!Object.keys(rateStore.snapshot().rates).length) {
+		try {
+			await rateStore.get()
+		} catch (err) {
+			console.warn('[orders] exchange rates unavailable:', err.message)
+		}
+	}
+	const rateSnap = rateStore.snapshot()
+
 	const enriched = rows.map((r) => {
 		let transactions = []
 		try {
@@ -1643,18 +2079,27 @@ app.get('/api/orders', (req, res) => {
 		//                      chips so the operator can mark case bought / grip still to buy.
 		//   • needs_purchase — binary fallback for products with NO components.
 		//   • line_outstanding — true while this line still has something to buy.
-		const transactionsWithImages = transactions.map((t) => {
-			const itemKey = routeDashboard.lineItemKey(t.title || '', t.listing_id)
+		const lineKeysForOrder = lineKeys.keysFor(r.receipt_id, transactions)
+		const transactionsWithImages = transactions.map((t, txIndex) => {
+			const itemKey = lineKeysForOrder[txIndex]
 			// A local design switch overrides what we render + purchase for this
 			// line. The style drives which Case/Grip/Charm chips appear, so we use
 			// the switched style when one is set (never touches Etsy).
 			const sub = subStates[itemKey] || null
-			const { style: origStyle } = routeDashboard.parseVariations(t.variations)
+			const { style: origStyle, phoneModel: origModel } = routeDashboard.parseVariations(t.variations)
 			const style = sub && sub.new_style ? sub.new_style : origStyle
-			const sc = routeDashboard.styleComponents(style)
+			// The effective title/model also decide the line's device family, which
+			// names its primary unit ("Case" on a phone line, "Band" on a watch one)
+			// and lets a single-axis line — whose style says nothing — still declare
+			// the one unit it has to buy.
+			const lineTitle = (sub && sub.new_title) || t.title || ''
+			const lineModel = (sub && sub.new_phone_model) || origModel || ''
+			const lineDeviceFamily = deviceFamilyOf(lineModel, lineTitle)
+			const sc = routeDashboard.styleComponents(style, { phoneModel: lineModel, title: lineTitle })
+			const primaryLabel = primaryComponentLabel(lineDeviceFamily)
 			const a = raStates[itemKey] || {}
 			const components = []
-			if (sc.hasCase) components.push({ comp: 'case', label: 'Case', status: a.status_case || 'Pending' })
+			if (sc.hasCase) components.push({ comp: 'case', label: primaryLabel, status: a.status_case || 'Pending' })
 			if (sc.hasGrip) components.push({ comp: 'grip', label: 'Grip', status: a.status_grip || 'Pending' })
 			if (sc.hasCharm) {
 				// Attach the CONFIRMED charm assignment (never suggestions) so the buy
@@ -1670,9 +2115,7 @@ app.get('/api/orders', (req, res) => {
 				// Supplier shop follows the CODE via the charm library (source of truth);
 				// the per-order/per-product snapshot is only a fallback for a code the
 				// library doesn't know, so a Manage-charms supplier edit shows up here too.
-				const charmShop = (charmCode && charmShopByCode.has(charmCode)
-					? charmShopByCode.get(charmCode)
-					: (a.charm_shop || pd.charm_shop || '')).trim()
+				const charmShop = (charmCode && charmShopByCode.has(charmCode) ? charmShopByCode.get(charmCode) : a.charm_shop || pd.charm_shop || '').trim()
 				const charmStall = charmShop ? charmStallByShop.get(charmShop.toLowerCase()) || '' : ''
 				components.push({
 					comp: 'charm',
@@ -1697,23 +2140,30 @@ app.get('/api/orders', (req, res) => {
 			// the route builder enforces, so Orders counts and the route never disagree.
 			const issue = issueStates[itemKey] || null
 			const issueOpen = !!(issue && issue.status === 'open') && !routeDashboard.substitutionSupersedesIssue(sub, issue)
-			// A line with an OPEN wrong-model exchange holds ONLY the swapped piece
-			// (the case) in hand — that piece is not "outstanding to buy". But any
-			// grip/charm on the SAME line still must be bought, so the line stays
-			// outstanding while those pieces are unbought (a case-only swap on a
-			// Case+Grip+Charm line must NOT mark the whole line done).
+			// A line with an OPEN wrong-model exchange holds ONLY the generation-
+			// specific piece (the case on iPhone; the case + attached charm on
+			// AirPods) in hand — that piece is not "outstanding to buy". But any
+			// grip / separately-sourced charm on the SAME line still must be bought,
+			// so the line stays outstanding while those pieces are unbought (a case-
+			// only swap on a Case+Grip+Charm iPhone line must NOT mark the whole
+			// line done).
 			const exchange = exchangeStates[itemKey] || null
 			const exchangeOpen = !!(exchange && exchange.status === 'open')
+			const lineCharmIntegral = !!(sc.hasCharm && routeDashboard.isAirpodsProduct(lineModel, lineTitle))
 			const exchangeHeld = exchangeOpen
-				? routeDashboard.exchangeHeldComponents({ needs_exchange: true, exchange_components: exchange.components })
+				? routeDashboard.exchangeHeldComponents({
+						needs_exchange: true,
+						exchange_components: exchange.components,
+						exchange_have_model: exchange.have_model,
+						has_case: sc.hasCase,
+						has_grip: sc.hasGrip,
+						has_charm: sc.hasCharm,
+						charm_integral: lineCharmIntegral,
+						phone_model: lineModel,
+						title: lineTitle,
+					})
 				: null
-			const lineOutstanding = issueOpen
-				? false
-				: components.length
-					? components.some((c) => !(exchangeHeld && exchangeHeld.has(c.comp)) && PURCHASE_OUTSTANDING.has(c.status))
-					: exchangeOpen
-						? false
-						: needsPurchase
+			const lineOutstanding = issueOpen ? false : components.length ? components.some((c) => !(exchangeHeld && exchangeHeld.has(c.comp)) && PURCHASE_OUTSTANDING.has(c.status)) : exchangeOpen ? false : needsPurchase
 			// "In hand" — we physically have (part or all of) this product AND it is
 			// not blocked (no open issue / exchange). A partially-bought line counts:
 			// if the case is purchased but the charm is still pending, we DO hold a
@@ -1730,39 +2180,33 @@ app.get('/api/orders', (req, res) => {
 			// original style) overrides the ambiguous listing hero shot — but only
 			// when the line hasn't been switched to another design (a switch is a
 			// different product and carries its own image, which always wins).
-			const styleImg = t.listing_id ? styleImageMap[`${t.listing_id}\x00${normalizeStyleKey(origStyle)}`] || null : null
-
-			// The switched-design image, resolved so a switched line ALWAYS shows the
-			// REPLACEMENT design — never the original the buyer moved away from:
-			//   1. an uploaded blob served from our endpoint (custom switch), else
-			//   2. the switch's own stored CDN url (catalog switch), else
-			//   3. the replacement listing's cached thumbnail (via source_listing_id,
-			//      loaded into imageMap above) — this retroactively fixes switches
-			//      saved before the image was resolved at write time, else
-			//   4. null → a neutral placeholder. We deliberately do NOT fall back to
-			//      imageMap[t.listing_id] (the ORIGINAL design's photo): doing so made
-			//      a switched line look unchanged ("same old case").
-			// Content-addressed (`?v=updated_at`) so re-uploading the switched-design
-			// photo changes the URL and the mobile service worker can't serve a stale
-			// image — see route/dashboard.js emitRow for the full rationale.
-			const subImageUrl = sub
-				? sub.has_image_data
-					? `/api/route/substitution-image/${sub.id}?v=${sub.updated_at || 0}`
-					: sub.image_url && String(sub.image_url).trim()
-						? sub.image_url
-						: sub.source_listing_id != null
-							? imageMap[sub.source_listing_id] || null
-							: null
+			const styleImg = t.listing_id ? lookupStyleKeyed(styleImageMap, t.listing_id, origStyle) : null
+			// The Etsy photo for the exact Styles value the buyer bought — matched
+			// on the transaction's value_id, so a renamed style still resolves.
+			const variationImg = t.listing_id
+				? lookupVariationImage(variationImageMap, t.listing_id, {
+						valueId: parseStyleValueId(t.variations),
+						style: origStyle,
+					})
 				: null
 
-			// Image priority: design switch → per-variant override → listing thumb.
+			// The switched-design image. Resolved by the SAME function the route
+			// builder uses, so the Orders tab and the shopping floor can never
+			// disagree about which design a switched line shows.
+			const subImageUrl = resolveSwitchedLineImage(sub, (id) => imageMap[id] || null)
+
+			// Image priority: design switch → operator Fix Image → Etsy style
+			// variation photo → listing hero. The variation photo is what the
+			// buyer saw for "Case 1 + Grip 1" on the listing page.
 			let imageUrl
 			if (sub) {
 				imageUrl = subImageUrl
-			} else if (styleImg) {
-				imageUrl = `/api/route/style-image/${styleImg.id}?v=${styleImg.updated_at || 0}`
 			} else {
-				imageUrl = imageMap[t.listing_id] ?? null
+				imageUrl = resolveUnswitchedLineImage({
+					styleImg,
+					variationUrl: variationImg?.url || null,
+					listingUrl: t.listing_id ? (imageMap[t.listing_id] ?? null) : null,
+				})
 			}
 
 			return {
@@ -1772,6 +2216,11 @@ app.get('/api/orders', (req, res) => {
 				// listing + style, so the UI can badge the thumbnail and offer revert.
 				style_image_id: styleImg ? styleImg.id : null,
 				item_key: itemKey,
+				// Resolved fulfilment identity — authoritative for model-fix UI (never
+				// re-parse variations client-side; honours design switches).
+				phone_model: lineModel,
+				device_family: lineDeviceFamily,
+				charm_integral: lineCharmIntegral,
 				components,
 				needs_purchase: needsPurchase,
 				purchased,
@@ -1849,8 +2298,41 @@ app.get('/api/orders', (req, res) => {
 		const verifiedItems = transactionsWithImages.filter((t) => t.in_hand && t.verified).length
 		const onHoldItems = transactionsWithImages.filter((t) => t.issue && t.issue.on_hold).length
 
+		// `orders:read` is an operational permission, not a finance permission.
+		// Keep the order/fulfilment shape intact for employees while removing the
+		// same revenue fields that /api/summary already strips server-side.
+		const visibleReceipt = { ...r }
+		if (!req.auth || req.auth.role !== 'owner') {
+			delete visibleReceipt.grandtotal_amount
+			delete visibleReceipt.grandtotal_currency
+			delete visibleReceipt.subtotal_amount
+		}
+		// The paid shipping upgrade travels as ONE shaped object (or null), never as
+		// loose columns, so a consumer cannot half-read it — e.g. see a tier but
+		// miss the expedited flag the filter and the sort actually key on.
+		// Deliberately NOT a finance field: what the buyer paid is stripped above,
+		// but "this parcel was bought as Express" is a fulfilment instruction every
+		// packer must see, so it stays on the employee payload.
+		const upgrade = shippingUpgrade.shapeForApi(r, transactions)
+		for (const f of shippingUpgrade.API_INTERNAL_FIELDS) delete visibleReceipt[f]
+
+		// Customs figure the packer writes on the form. Converted here, while we
+		// still have the shop-currency subtotal: employees never receive that
+		// subtotal (it is revenue), so a browser-side conversion always produces
+		// a blank amount on their bench. The destination-currency number is an
+		// operational instruction, not a finance field.
+		const customsDeclaration = customsDeclarationForReceipt(r, rateSnap)
+
 		return {
-			...r,
+			...visibleReceipt,
+			customs_declaration: customsDeclaration,
+			// null on ordinary orders; { name, method, tier, label, expedited,
+			// lines, upgradedLines } when the buyer paid to upgrade shipping.
+			shipping_upgrade: upgrade,
+			// Flattened so the card, the 4PX drawer and any future consumer can gate
+			// on one boolean without null-checking the object first. Mirrors the
+			// is_expedited column the SQL filter and sort read.
+			is_expedited: !!(upgrade && upgrade.expedited),
 			transactions: transactionsWithImages,
 			needs_purchase_items: needsPurchaseItems,
 			open_issues: openIssues,
@@ -1884,6 +2366,39 @@ app.get('/api/orders', (req, res) => {
 		}
 	}
 
+	// ── Etsy-completion state ─────────────────────────────────────────────────
+	// An order can hold a real, paid 4PX label and still be unshipped on Etsy —
+	// the half-finished state that used to leave it stuck in Needs-shipping with
+	// no explanation. The ledger knows whether that gap is being retried, or has
+	// given up and needs a human, so the card can say which instead of looking
+	// like an ordinary un-actioned order. Null on every healthy order.
+	let etsyCompletionPending = 0
+	try {
+		const intents = etsyCompletion.getIntents(
+			db,
+			enriched.map((o) => o.receipt_id),
+		)
+		const nowSec = Math.floor(Date.now() / 1000)
+		for (const o of enriched) {
+			const shaped = o.is_shipped ? null : etsyCompletion.shapeForApi(intents.get(o.receipt_id), nowSec)
+			if (shaped) o.etsy_completion = shaped
+		}
+		etsyCompletionPending = etsyCompletion.countStranded(db, { now: nowSec })
+	} catch (err) {
+		// Diagnostics must never take down the orders list.
+		console.error('[orders] etsy-completion annotation failed:', err.message)
+	}
+
+	// ── Ship-by deadline rollup ───────────────────────────────────────────────
+	// Timestamps, not counts, so the page can keep the banner exact as the clock
+	// runs (see collectShippingDeadlines). Never fatal to the list.
+	let shippingDeadlines = { deadlines: [], truncated: false }
+	try {
+		shippingDeadlines = collectShippingDeadlines(suppressedDupIds)
+	} catch (err) {
+		console.error('[orders] ship-by deadline rollup failed:', err.message)
+	}
+
 	res.json({
 		total: countRow.total,
 		limit,
@@ -1908,6 +2423,23 @@ app.get('/api/orders', (req, res) => {
 		// the whole queue, so the tab badge can show the actionable figure (tobuy)
 		// and still reconcile it against the rows on screen.
 		...(npCounts ? { np_counts: npCounts } : {}),
+		// Recently-packaged view only: local-day breakdown of every sealed parcel
+		// ({ date: 'YYYY-MM-DD', count }[], newest first). Independent of the
+		// selected day so the chips stay put as the packer clicks between them.
+		...(packagedDays ? { packaged_days: packagedDays } : {}),
+		// How many orders across the WHOLE database still owe Etsy a completion for
+		// a 4PX label already paid for, counting only those the fast path has
+		// already missed (see etsy-completion.isStranded) so an ordinary shipment
+		// in flight never trips it. Any non-zero value is a real, visible problem —
+		// every one of those is a live late shipment — so the Needs-shipping view
+		// surfaces it as a banner with a "finish them now" action.
+		etsy_completion_pending: etsyCompletionPending,
+		// Ship-by deadlines (Unix seconds, ascending) for every unshipped order that
+		// is overdue or due within the next 48 hours — database-wide, so paging or
+		// filtering can never hide a deadline that is about to be missed. The page
+		// derives its own counts from these and re-derives them every second.
+		shipping_deadlines: shippingDeadlines.deadlines,
+		shipping_deadlines_truncated: shippingDeadlines.truncated,
 		orders: enriched,
 	})
 })
@@ -2012,6 +2544,8 @@ app.get('/api/export/orders-for-route', (req, res) => {
 			})
 	}
 
+	const variationImageMap = getListingVariationImageMap(db, allListingIds)
+
 	// Format a Unix timestamp as the date string Etsy uses on PDFs: "Jan 15, 2025"
 	const fmtDate = (ts) =>
 		ts
@@ -2046,12 +2580,21 @@ app.get('/api/export/orders-for-route', (req, res) => {
 					const title = (t.title || '').trim()
 					if (!title) return null
 					const { style, phoneModel } = parseVariations(t.variations)
+					const variationImg = t.listing_id
+						? lookupVariationImage(variationImageMap, t.listing_id, {
+								valueId: parseStyleValueId(t.variations),
+								style,
+							})
+						: null
 					return {
 						title: title,
 						quantity: t.quantity || 1,
 						phone_model: phoneModel,
 						style: style,
-						image_url: t.listing_id ? imageMap[t.listing_id] || null : null,
+						image_url: resolveUnswitchedLineImage({
+							variationUrl: variationImg?.url || null,
+							listingUrl: t.listing_id ? imageMap[t.listing_id] || null : null,
+						}),
 					}
 				})
 				.filter(Boolean)
@@ -2112,13 +2655,22 @@ app.post('/api/admin/reload-tokens', (req, res) => {
 		}
 
 		tokenManager.reload()
+		const tokenStore = tokenManager.getStoreHealth()
+		if (!tokenStore.valid) {
+			return res.status(409).json({
+				success: false,
+				code: 'TOKEN_STORE_INVALID',
+				error: 'tokens.json is invalid. Repair or restore it before reloading OAuth credentials.',
+				config_reloaded: configReloaded,
+			})
+		}
 		const allShopIds = getAllShops(config).map((s) => s.shop_id)
 		const status = tokenManager.getStatus(allShopIds)
 		console.log(`[admin] Reloaded ${configReloaded ? 'config + ' : ''}tokens from disk (${status.length} shops)`)
 		res.json({ success: true, config_reloaded: configReloaded, shops: status.length })
 	} catch (err) {
 		console.error('[admin] Failed to reload:', err.message)
-		res.status(500).json({ error: err.message })
+		res.status(err.status || 500).json({ error: err.message, code: err.code })
 	}
 })
 
@@ -2138,7 +2690,20 @@ app.get('/api/admin/suspension-risk', (req, res) => {
  * "Restart server" button to detect when the process has come back up.
  */
 app.get('/api/health', (req, res) => {
-	res.json({ ok: true, pid: process.pid, uptime_s: Math.round(process.uptime()), pm2: process.env.pm_id !== undefined })
+	if (!req.auth || req.auth.role !== 'owner') {
+		return res.json({ ok: true })
+	}
+	res.json({
+		ok: true,
+		pid: process.pid,
+		uptime_s: Math.round(process.uptime()),
+		pm2: process.env.pm_id !== undefined,
+		// What code is actually running vs. what's on disk — this is a long-lived
+		// pm2 process, so edits don't take effect until a restart. Compare `build`
+		// here against `git log -1` to confirm a fix has actually shipped instead
+		// of guessing from behavior alone.
+		build: BOOT_FINGERPRINT,
+	})
 })
 
 /**
@@ -2252,10 +2817,11 @@ app.post('/api/sync/trigger/:shop_id', async (req, res) => {
 	if (!shopCfg) return res.status(404).json({ error: 'Shop not found' })
 	if (_syncingShops.has(shopId)) return res.status(409).json({ error: 'Sync already running' })
 
+	const launch = _startManualSync([shopCfg])
+	if (!launch.started) {
+		return res.status(409).json({ error: 'Another Etsy sync task is already running.', reason: launch.reason, kind: launch.kind || null, ...getEtsyWorkStatus(db) })
+	}
 	res.status(202).json({ ok: true, message: `Sync started for ${shopId}` })
-
-	// Run async — result delivered via SSE
-	_runManualSync([shopCfg])
 })
 
 /**
@@ -2279,78 +2845,92 @@ app.post('/api/sync/trigger-all', async (req, res) => {
 	const alreadyRunning = allShops.filter((s) => _syncingShops.has(s.shop_id))
 	if (alreadyRunning.length === allShops.length) return res.status(409).json({ error: 'All shops already syncing' })
 
+	const launch = _startManualSync(allShops)
+	if (!launch.started) {
+		return res.status(409).json({ error: 'Another Etsy sync task is already running.', reason: launch.reason, kind: launch.kind || null, ...getEtsyWorkStatus(db) })
+	}
 	_lastTriggerAllAt = Date.now()
 	res.status(202).json({ ok: true, message: `Sync started for ${allShops.length} shops` })
-	_runManualSync(allShops)
 })
 
 /**
  * Internal helper: run syncShop for each shop in the list,
  * broadcasting SSE events at each lifecycle step.
  */
-async function _runManualSync(shops) {
-	// QPD is per API key — once a key is spent, skip its remaining shops this run
-	// instead of firing doomed requests that just burn into the cooldown.
-	const exhaustedKeys = new Set()
+function _startManualSync(shops) {
+	const launch = startEtsyWork(db, 'manual', async ({ heartbeat }) => {
+		// QPD is per API key — once a key is spent, skip its remaining shops this run
+		// instead of firing doomed requests that just burn into the cooldown.
+		const exhaustedKeys = new Set()
 
-	let _shopIdx = -1
-	for (const shopCfg of shops) {
-		_shopIdx++
-		if (_syncingShops.has(shopCfg.shop_id)) continue
+		let _shopIdx = -1
+		for (const shopCfg of shops) {
+			_shopIdx++
+			heartbeat()
+			if (_syncingShops.has(shopCfg.shop_id)) continue
 
-		if (exhaustedKeys.has(shopCfg.api_key)) {
-			broadcastSyncEvent({
-				type: 'sync_skipped',
-				shop_id: shopCfg.shop_id,
-				reason: 'rate_limited',
-				message: "Daily API budget for this shop's key is exhausted — skipped; resumes automatically.",
-				ts: Date.now(),
-			})
-			continue
-		}
-
-		// Stagger consecutive shops in a multi-shop run so same-key shops don't fire
-		// back-to-back. The per-key QPS bucket already caps the rate, but this keeps
-		// the traffic shaped like the jittered background worker rather than a burst.
-		if (_shopIdx > 0) await new Promise((r) => setTimeout(r, 1500 + Math.floor(Math.random() * 2000)))
-
-		_syncingShops.add(shopCfg.shop_id)
-
-		broadcastSyncEvent({ type: 'sync_start', shop_id: shopCfg.shop_id, ts: Date.now() })
-
-		try {
-			const groupCfg = config.groups.find((g) => g.group_id === shopCfg.group_id)
-			const proxyClient = createGroupClient(groupCfg, config.vpn_local_port)
-			const accessToken = await tokenManager.getAccessToken(shopCfg.shop_id, shopCfg.api_key, shopCfg.refresh_token ?? null, proxyClient)
-			// Pre-flight fail-closed check: a proxied group must carry a proxy agent.
-			buildShopClient(proxyClient, shopCfg.api_key, shopCfg.shared_secret, accessToken, null, { requireProxy: usesGroupProxy(groupCfg) })
-
-			const result = await syncShop(shopCfg, groupCfg, config, proxyClient, tokenManager, db)
-			if (result?.status === 'rate_limited' && shopCfg.api_key) {
-				exhaustedKeys.add(shopCfg.api_key)
+			if (exhaustedKeys.has(shopCfg.api_key)) {
+				broadcastSyncEvent({
+					type: 'sync_skipped',
+					shop_id: shopCfg.shop_id,
+					reason: 'rate_limited',
+					message: "Daily API budget for this shop's key is exhausted — skipped; resumes automatically.",
+					ts: Date.now(),
+				})
+				continue
 			}
 
-			// Read the fresh log entry just written by syncShop
-			const entry = db
-				.prepare(
-					`
+			// Stagger consecutive shops in a multi-shop run so same-key shops don't fire
+			// back-to-back. The per-key QPS bucket already caps the rate, but this keeps
+			// the traffic shaped like the jittered background worker rather than a burst.
+			if (_shopIdx > 0) await new Promise((r) => setTimeout(r, 1500 + Math.floor(Math.random() * 2000)))
+
+			_syncingShops.add(shopCfg.shop_id)
+
+			broadcastSyncEvent({ type: 'sync_start', shop_id: shopCfg.shop_id, ts: Date.now() })
+
+			try {
+				const groupCfg = config.groups.find((g) => g.group_id === shopCfg.group_id)
+				const proxyClient = createGroupClient(groupCfg, config.vpn_local_port)
+				const accessToken = await tokenManager.getAccessToken(shopCfg.shop_id, shopCfg.api_key, shopCfg.refresh_token ?? null, proxyClient)
+				// Pre-flight fail-closed check: a proxied group must carry a proxy agent.
+				buildShopClient(proxyClient, shopCfg.api_key, shopCfg.shared_secret, accessToken, null, { requireProxy: usesGroupProxy(groupCfg) })
+
+				const result = await syncShop(shopCfg, groupCfg, config, proxyClient, tokenManager, db, null, { heartbeat })
+				if (result?.status === 'rate_limited' && shopCfg.api_key) {
+					exhaustedKeys.add(shopCfg.api_key)
+				}
+
+				// Read the fresh log entry just written by syncShop
+				const entry = db
+					.prepare(
+						`
         SELECT sl.*, s.shop_name,
           sl.completed_at - sl.started_at AS duration_seconds,
           datetime(sl.started_at,'unixepoch') AS started_at_iso
         FROM sync_log sl JOIN shops s ON s.shop_id = sl.shop_id
         WHERE sl.shop_id = ? ORDER BY sl.started_at DESC LIMIT 1
       `,
-				)
-				.get(shopCfg.shop_id)
+					)
+					.get(shopCfg.shop_id)
 
-			broadcastSyncEvent({ type: 'sync_complete', shop_id: shopCfg.shop_id, entry, ts: Date.now() })
-		} catch (err) {
-			console.error(`[manual-sync] ${shopCfg.shop_id}: ${err.message}`)
-			broadcastSyncEvent({ type: 'sync_error', shop_id: shopCfg.shop_id, error: err.message, ts: Date.now() })
-		} finally {
-			_syncingShops.delete(shopCfg.shop_id)
+				broadcastSyncEvent({ type: 'sync_complete', shop_id: shopCfg.shop_id, entry, ts: Date.now() })
+			} catch (err) {
+				if (err?.code === 'ETSY_LOCK_LOST') throw err
+				console.error(`[manual-sync] ${shopCfg.shop_id}: ${err.message}`)
+				broadcastSyncEvent({ type: 'sync_error', shop_id: shopCfg.shop_id, error: err.message, ts: Date.now() })
+			} finally {
+				_syncingShops.delete(shopCfg.shop_id)
+			}
 		}
+	})
+	if (launch.started) {
+		launch.promise.catch((err) => {
+			console.error(`[manual-sync] Work failed: ${err.message}`)
+			broadcastSyncEvent({ type: 'sync_error', scope: 'manual', error: err.message, ts: Date.now() })
+		})
 	}
+	return launch
 }
 
 // ─── Full order backfill (first order → today) ────────────────────────────────
@@ -2370,8 +2950,11 @@ app.post('/api/sync/backfill-all', (req, res) => {
 	const shops = getAllShops(config).filter((s) => tokenManager.hasTokens(s.shop_id))
 	if (shops.length === 0) return res.status(400).json({ error: 'No authenticated shops' })
 
+	const launch = _startBackfill(shops)
+	if (!launch.started) {
+		return res.status(409).json({ error: 'Another Etsy sync task is already running.', reason: launch.reason, kind: launch.kind || null, ...getEtsyWorkStatus(db) })
+	}
 	res.status(202).json({ ok: true, message: `Backfill started for ${shops.length} shop(s)`, shops: shops.length })
-	_runBackfill(shops)
 })
 
 /**
@@ -2384,8 +2967,11 @@ app.post('/api/sync/backfill/:shop_id', (req, res) => {
 	if (!shopCfg) return res.status(404).json({ error: 'Shop not found' })
 	if (!tokenManager.hasTokens(shopCfg.shop_id)) return res.status(401).json({ error: 'Shop not authenticated' })
 
+	const launch = _startBackfill([shopCfg])
+	if (!launch.started) {
+		return res.status(409).json({ error: 'Another Etsy sync task is already running.', reason: launch.reason, kind: launch.kind || null, ...getEtsyWorkStatus(db) })
+	}
 	res.status(202).json({ ok: true, message: `Backfill started for ${shopCfg.shop_name}` })
-	_runBackfill([shopCfg])
 })
 
 /**
@@ -2393,79 +2979,91 @@ app.post('/api/sync/backfill/:shop_id', (req, res) => {
  * sync_start / sync_progress / sync_complete events over SSE. A terminal
  * `backfill_done` event tells the client the whole run has finished.
  */
-async function _runBackfill(shops) {
-	_backfillRunning = true
-	broadcastSyncEvent({ type: 'backfill_start', total: shops.length, ts: Date.now() })
+function _startBackfill(shops) {
+	const launch = startEtsyWork(db, 'backfill', async ({ heartbeat }) => {
+		_backfillRunning = true
+		broadcastSyncEvent({ type: 'backfill_start', total: shops.length, ts: Date.now() })
 
-	let completed = 0
-	let totalWritten = 0
-	// QPD is per API key — once a key is spent, skip its remaining shops so a
-	// history backfill doesn't keep stampeding a key that's already over budget.
-	const exhaustedKeys = new Set()
+		let completed = 0
+		let totalWritten = 0
+		// QPD is per API key — once a key is spent, skip its remaining shops so a
+		// history backfill doesn't keep stampeding a key that's already over budget.
+		const exhaustedKeys = new Set()
 
-	try {
-		for (const shopCfg of shops) {
-			if (_syncingShops.has(shopCfg.shop_id)) continue
+		try {
+			for (const shopCfg of shops) {
+				heartbeat()
+				if (_syncingShops.has(shopCfg.shop_id)) continue
 
-			if (exhaustedKeys.has(shopCfg.api_key)) {
-				broadcastSyncEvent({
-					type: 'sync_skipped',
-					mode: 'backfill',
-					shop_id: shopCfg.shop_id,
-					reason: 'rate_limited',
-					message: "Daily API budget for this shop's key is exhausted — backfill paused for it; resume later.",
-					ts: Date.now(),
-				})
-				completed++
-				broadcastSyncEvent({ type: 'backfill_progress', completed, total: shops.length, ts: Date.now() })
-				continue
-			}
-
-			_syncingShops.add(shopCfg.shop_id)
-			broadcastSyncEvent({ type: 'sync_start', mode: 'backfill', shop_id: shopCfg.shop_id, ts: Date.now() })
-
-			try {
-				const groupCfg = config.groups.find((g) => g.group_id === shopCfg.group_id)
-				const proxyClient = createGroupClient(groupCfg, config.vpn_local_port)
-
-				const result = await syncShop(shopCfg, groupCfg, config, proxyClient, tokenManager, db, null, {
-					fullBackfill: true,
-					onProgress: ({ written }) => {
-						broadcastSyncEvent({ type: 'sync_progress', mode: 'backfill', shop_id: shopCfg.shop_id, written, ts: Date.now() })
-					},
-				})
-				if (result?.status === 'rate_limited' && shopCfg.api_key) {
-					exhaustedKeys.add(shopCfg.api_key)
+				if (exhaustedKeys.has(shopCfg.api_key)) {
+					broadcastSyncEvent({
+						type: 'sync_skipped',
+						mode: 'backfill',
+						shop_id: shopCfg.shop_id,
+						reason: 'rate_limited',
+						message: "Daily API budget for this shop's key is exhausted — backfill paused for it; resume later.",
+						ts: Date.now(),
+					})
+					completed++
+					broadcastSyncEvent({ type: 'backfill_progress', completed, total: shops.length, ts: Date.now() })
+					continue
 				}
 
-				const entry = db
-					.prepare(
-						`
+				_syncingShops.add(shopCfg.shop_id)
+				broadcastSyncEvent({ type: 'sync_start', mode: 'backfill', shop_id: shopCfg.shop_id, ts: Date.now() })
+
+				try {
+					const groupCfg = config.groups.find((g) => g.group_id === shopCfg.group_id)
+					const proxyClient = createGroupClient(groupCfg, config.vpn_local_port)
+
+					const result = await syncShop(shopCfg, groupCfg, config, proxyClient, tokenManager, db, null, {
+						fullBackfill: true,
+						heartbeat,
+						onProgress: ({ written }) => {
+							broadcastSyncEvent({ type: 'sync_progress', mode: 'backfill', shop_id: shopCfg.shop_id, written, ts: Date.now() })
+						},
+					})
+					if (result?.status === 'rate_limited' && shopCfg.api_key) {
+						exhaustedKeys.add(shopCfg.api_key)
+					}
+
+					const entry = db
+						.prepare(
+							`
           SELECT sl.*, s.shop_name,
             sl.completed_at - sl.started_at AS duration_seconds,
             datetime(sl.started_at,'unixepoch') AS started_at_iso
           FROM sync_log sl JOIN shops s ON s.shop_id = sl.shop_id
           WHERE sl.shop_id = ? ORDER BY sl.started_at DESC LIMIT 1
         `,
-					)
-					.get(shopCfg.shop_id)
+						)
+						.get(shopCfg.shop_id)
 
-				totalWritten += entry?.receipts_synced ?? 0
-				broadcastSyncEvent({ type: 'sync_complete', mode: 'backfill', shop_id: shopCfg.shop_id, entry, ts: Date.now() })
-			} catch (err) {
-				console.error(`[backfill] ${shopCfg.shop_id}: ${err.message}`)
-				broadcastSyncEvent({ type: 'sync_error', mode: 'backfill', shop_id: shopCfg.shop_id, error: err.message, ts: Date.now() })
-			} finally {
-				_syncingShops.delete(shopCfg.shop_id)
-				completed++
-				broadcastSyncEvent({ type: 'backfill_progress', completed, total: shops.length, ts: Date.now() })
+					totalWritten += entry?.receipts_synced ?? 0
+					broadcastSyncEvent({ type: 'sync_complete', mode: 'backfill', shop_id: shopCfg.shop_id, entry, ts: Date.now() })
+				} catch (err) {
+					if (err?.code === 'ETSY_LOCK_LOST') throw err
+					console.error(`[backfill] ${shopCfg.shop_id}: ${err.message}`)
+					broadcastSyncEvent({ type: 'sync_error', mode: 'backfill', shop_id: shopCfg.shop_id, error: err.message, ts: Date.now() })
+				} finally {
+					_syncingShops.delete(shopCfg.shop_id)
+					completed++
+					broadcastSyncEvent({ type: 'backfill_progress', completed, total: shops.length, ts: Date.now() })
+				}
 			}
+		} finally {
+			_backfillRunning = false
+			broadcastSyncEvent({ type: 'backfill_done', completed, total: shops.length, total_written: totalWritten, ts: Date.now() })
+			console.log(`[backfill] Complete — ${completed}/${shops.length} shops, ${totalWritten} receipts upserted`)
 		}
-	} finally {
-		_backfillRunning = false
-		broadcastSyncEvent({ type: 'backfill_done', completed, total: shops.length, total_written: totalWritten, ts: Date.now() })
-		console.log(`[backfill] Complete — ${completed}/${shops.length} shops, ${totalWritten} receipts upserted`)
+	})
+	if (launch.started) {
+		launch.promise.catch((err) => {
+			console.error(`[backfill] Work failed: ${err.message}`)
+			broadcastSyncEvent({ type: 'sync_error', scope: 'backfill', error: err.message, ts: Date.now() })
+		})
 	}
+	return launch
 }
 
 // ─── Finance / earnings ───────────────────────────────────────────────────────
@@ -2550,9 +3148,12 @@ app.post('/api/finance/sync-all', (req, res) => {
 	}
 
 	const full = req.body?.full !== false
+	const launch = _startLedgerSync(shops, { fullBackfill: full })
+	if (!launch.started) {
+		return res.status(409).json({ error: 'Another Etsy sync task is already running.', reason: launch.reason, kind: launch.kind || null, ...getEtsyWorkStatus(db) })
+	}
 	_lastFinanceSyncAllAt = Date.now()
 	res.status(202).json({ ok: true, message: `Earnings sync started for ${shops.length} shop(s)`, shops: shops.length, full })
-	_runLedgerSync(shops, { fullBackfill: full })
 })
 
 /**
@@ -2565,76 +3166,387 @@ app.post('/api/finance/sync/:shop_id', (req, res) => {
 	if (!shopCfg) return res.status(404).json({ error: 'Shop not found' })
 	if (!tokenManager.hasTokens(shopCfg.shop_id)) return res.status(401).json({ error: 'Shop not authenticated' })
 	const full = req.body?.full !== false
+	const launch = _startLedgerSync([shopCfg], { fullBackfill: full })
+	if (!launch.started) {
+		return res.status(409).json({ error: 'Another Etsy sync task is already running.', reason: launch.reason, kind: launch.kind || null, ...getEtsyWorkStatus(db) })
+	}
 	res.status(202).json({ ok: true, message: `Earnings sync started for ${shopCfg.shop_name}`, full })
-	_runLedgerSync([shopCfg], { fullBackfill: full })
+})
+
+/**
+ * GET /api/growth
+ * Sales / traffic diagnosis from already-synced data. Never calls Etsy.
+ * Query: days=7|28, shop_id=
+ */
+function growthApiAnalyticsEnabled() {
+	return config.catalog_health_sync === true && config.etsy_api_analytics_approved === true
+}
+
+app.get('/api/growth', (req, res) => {
+	try {
+		const days = Number(req.query.days) === 28 ? 28 : 7
+		const shopId = req.query.shop_id ? String(req.query.shop_id) : ''
+		const report = buildGrowthReport(db, { windowDays: days, shopId: shopId || undefined })
+		report.compliance = summarizeRisks(analyzeSuspensionRisks(config))
+		const apiEnabled = growthApiAnalyticsEnabled()
+		report.collection = {
+			mode: apiEnabled ? 'manual_with_approved_api_opt_in' : 'manual',
+			api_enabled: apiEnabled,
+			analytics_approval_recorded: config.etsy_api_analytics_approved === true,
+			api_calls_on_page_load: 0,
+			authorization_guaranteed_by_manual_mode: false,
+			terms_notice: 'Manual mode avoids automated Etsy access and scraping, but Etsy API Terms §5(24) use broad language about automated analysis of Etsy data. Retain Etsy written scope confirmation for the lowest contractual risk.',
+			message: apiEnabled
+				? 'Manual imports are preferred. Optional API analytics is enabled under a recorded written-approval attestation.'
+				: 'Manual mode: opening and refreshing Growth makes zero Etsy API calls.',
+		}
+		res.json(report)
+	} catch (err) {
+		console.error('[growth] report failed:', err.message)
+		res.status(500).json({ error: err.message || 'Growth report failed' })
+	}
+})
+
+function growthCsvCell(value) {
+	let text = String(value ?? '')
+	// Spreadsheet formula injection: listing titles are external Etsy content.
+	if (/^[=+\-@]/.test(text)) text = `'${text}`
+	return `"${text.replace(/"/g, '""')}"`
+}
+
+/**
+ * GET /api/growth/rights-review.csv
+ * Complete local-only authorization review queue. Never calls Etsy and contains
+ * no buyer/order data. Identification is a review trigger, not a legal verdict.
+ */
+app.get('/api/growth/rights-review.csv', (_req, res) => {
+	const rows = listThirdPartyRightsReview(db)
+	const columns = [
+		['Shop', (row) => row.shop_name],
+		['Listing ID', (row) => row.listing_id],
+		['Title', (row) => row.title],
+		['Identified Character', (row) => row.character],
+		['Likely Rights Holder', (row) => row.rights_holder],
+		['Lifetime Views (cached)', (row) => row.views],
+		['Listing URL', (row) => row.listing_url],
+		['Required Review', () => 'Retain documented authorization and confirm Etsy Creativity Standards eligibility; otherwise remove/exclude'],
+	]
+	const csv = [
+		columns.map(([label]) => growthCsvCell(label)).join(','),
+		...rows.map((row) => columns.map(([, get]) => growthCsvCell(get(row))).join(',')),
+	].join('\r\n')
+	res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+	res.setHeader('Content-Disposition', `attachment; filename="etsy-rights-review-${new Date().toISOString().slice(0, 10)}.csv"`)
+	res.setHeader('X-Export-Row-Count', String(rows.length))
+	res.send('\uFEFF' + csv)
+})
+
+/**
+ * GET /api/growth/status
+ * Catalog-health coverage + whether a catalog sync is running.
+ */
+app.get('/api/growth/status', (req, res) => {
+	const intervalHours = config.catalog_health_interval_hours ?? 24
+	const shops = getAllShops(config).filter((s) => s.shop_id !== MANUAL_SHOP_ID)
+	const work = getEtsyWorkStatus(db)
+	const rows = shops.map((s) => {
+		const row = db.prepare(
+			`SELECT catalog_health_synced_at, reviews_synced_at, review_average, review_count, is_vacation, listing_active_count FROM shops WHERE shop_id = ?`
+		).get(s.shop_id) || {}
+		return {
+			shop_id: s.shop_id,
+			shop_name: s.shop_name,
+			authenticated: tokenManager.hasTokens(s.shop_id),
+			stale: shopNeedsCatalogHealth(db, s.shop_id, intervalHours),
+			catalog_health_synced_at: row.catalog_health_synced_at ?? null,
+			reviews_synced_at: row.reviews_synced_at ?? null,
+			review_average: row.review_average ?? null,
+			review_count: row.review_count ?? null,
+			is_vacation: row.is_vacation === 1,
+			listing_active_count: row.listing_active_count ?? null,
+		}
+	})
+	res.json({
+		mode: growthApiAnalyticsEnabled() ? 'manual_with_approved_api_opt_in' : 'manual',
+		api_enabled: growthApiAnalyticsEnabled(),
+		analytics_approval_recorded: config.etsy_api_analytics_approved === true,
+		api_calls_on_page_load: 0,
+		interval_hours: intervalHours,
+		running: work.in_process === 'catalog_health',
+		etsy_work: work,
+		shops: rows,
+	})
+})
+
+/**
+ * POST /api/growth/manual/parse
+ * Parse pasted aggregate Shop Manager text in memory. The original text is
+ * deliberately not stored. This endpoint never imports or calls Etsy.
+ */
+app.post('/api/growth/manual/parse', (req, res) => {
+	try {
+		// `raw` intentionally matches the audit middleware's bulky/redacted
+		// key policy, so preview text cannot leak into audit_log.details.
+		const parsed = parsePastedStatsText(req.body?.raw)
+		res.json({ ok: true, parsed })
+	} catch (err) {
+		res.status(err.status || 400).json({ error: err.message, code: err.code || 'INVALID_GROWTH_PASTE', field: err.field || null })
+	}
+})
+
+/**
+ * POST /api/growth/manual
+ * Persist one validated current-vs-previous aggregate comparison. Owner-only,
+ * local SQLite only, idempotent through import_key, and zero Etsy API calls.
+ */
+app.post('/api/growth/manual', (req, res) => {
+	try {
+		const result = saveManualComparison(db, req.body, {
+			importedBy: req.auth?.user || 'owner',
+		})
+		res.status(result.deduplicated ? 200 : 201).json({ ok: true, ...result })
+	} catch (err) {
+		console.warn(`[growth] manual import rejected: ${err.message}`)
+		res.status(err.status || 400).json({ error: err.message, code: err.code || 'INVALID_GROWTH_IMPORT', field: err.field || null })
+	}
+})
+
+/** GET /api/growth/manual — recent local imports for provenance/correction. */
+app.get('/api/growth/manual', (req, res) => {
+	try {
+		const shopId = req.query.shop_id ? String(req.query.shop_id) : null
+		const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50))
+		res.json({ imports: listManualComparisons(db, { shopId, limit }) })
+	} catch (err) {
+		res.status(500).json({ error: err.message || 'Could not load manual Growth imports' })
+	}
+})
+
+/** DELETE /api/growth/manual/:id — remove a mistaken local aggregate import. */
+app.delete('/api/growth/manual/:id', (req, res) => {
+	try {
+		const deleted = deleteManualComparison(db, req.params.id)
+		if (!deleted) return res.status(404).json({ error: 'Manual Growth import not found' })
+		res.json({ ok: true })
+	} catch (err) {
+		res.status(err.status || 400).json({ error: err.message, code: err.code || 'INVALID_GROWTH_IMPORT' })
+	}
+})
+
+/**
+ * POST /api/growth/manual/listings/parse
+ * Parse two copied per-listing Stats tables in memory. Raw text is redacted by
+ * the audit middleware and discarded after this response.
+ */
+app.post('/api/growth/manual/listings/parse', (req, res) => {
+	try {
+		const parsed = parsePastedListingStats(req.body?.raw)
+		res.json({ ok: true, parsed })
+	} catch (err) {
+		res.status(err.status || 400).json({
+			error: err.message,
+			code: err.code || 'INVALID_GROWTH_LISTING_PASTE',
+			field: err.field || null,
+		})
+	}
+})
+
+/**
+ * POST /api/growth/manual/listings
+ * Persist a validated per-listing comparison in local SQLite. The request
+ * contains normalized aggregate metrics only and never triggers an Etsy call.
+ */
+app.post('/api/growth/manual/listings', (req, res) => {
+	try {
+		const result = saveListingDetailImport(db, req.body, {
+			importedBy: req.auth?.user || 'owner',
+		})
+		res.status(result.deduplicated ? 200 : 201).json({ ok: true, ...result })
+	} catch (err) {
+		console.warn(`[growth] manual listing import rejected: ${err.message}`)
+		res.status(err.status || 400).json({
+			error: err.message,
+			code: err.code || 'INVALID_GROWTH_LISTING_IMPORT',
+			field: err.field || null,
+		})
+	}
+})
+
+/** GET /api/growth/manual/listings — local per-listing import provenance. */
+app.get('/api/growth/manual/listings', (req, res) => {
+	try {
+		const shopId = req.query.shop_id ? String(req.query.shop_id) : null
+		const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25))
+		res.json({ imports: listListingDetailImports(db, { shopId, limit }) })
+	} catch (err) {
+		res.status(500).json({ error: err.message || 'Could not load per-listing Growth imports' })
+	}
+})
+
+/** DELETE /api/growth/manual/listings/:id — remove one mistaken local import. */
+app.delete('/api/growth/manual/listings/:id', (req, res) => {
+	try {
+		const deleted = deleteListingDetailImport(db, req.params.id)
+		if (!deleted) return res.status(404).json({ error: 'Per-listing Growth import not found' })
+		res.json({ ok: true })
+	} catch (err) {
+		res.status(err.status || 400).json({
+			error: err.message,
+			code: err.code || 'INVALID_GROWTH_LISTING_IMPORT',
+		})
+	}
+})
+
+let _lastGrowthSyncAt = 0
+
+/**
+ * POST /api/growth/sync
+ * Walk stale shops' active listings + reviews. Owner-only (no ACL rule).
+ * Body: { force?: boolean }
+ */
+app.post('/api/growth/sync', (req, res) => {
+	if (!growthApiAnalyticsEnabled()) {
+		return res.status(409).json({
+			error: 'API analytics is disabled. Etsy written authorization plus both etsy_api_analytics_approved and catalog_health_sync are required; use manual Growth imports otherwise.',
+			code: 'ETSY_API_ANALYTICS_NOT_APPROVED',
+		})
+	}
+	if (req.body?.confirm_api_calls !== true) {
+		return res.status(400).json({ error: 'Explicit confirmation is required before making Etsy API calls.' })
+	}
+	const shops = getAllShops(config).filter((s) => tokenManager.hasTokens(s.shop_id) && s.shop_id !== MANUAL_SHOP_ID)
+	if (shops.length === 0) return res.status(400).json({ error: 'No authenticated shops' })
+	const requestedShopId = String(req.body?.shop_id || '').trim()
+	if (!requestedShopId) {
+		return res.status(400).json({ error: 'Select one shop for an on-demand API collection.' })
+	}
+	const selected = shops.find((shop) => shop.shop_id === requestedShopId)
+	if (!selected) return res.status(404).json({ error: 'Authenticated shop not found' })
+
+	const sinceLast = Date.now() - _lastGrowthSyncAt
+	if (sinceLast < 15_000) {
+		return res.status(429).json({ error: `Catalog sync was just triggered — try again in ${Math.ceil((15_000 - sinceLast) / 1000)}s.` })
+	}
+
+	const force = req.body?.force === true
+	const intervalHours = config.catalog_health_interval_hours ?? 24
+	const targets = force || shopNeedsCatalogHealth(db, selected.shop_id, intervalHours) ? [selected] : []
+	if (!targets.length) {
+		return res.json({ ok: true, message: 'Every shop already has a fresh catalog snapshot.', shops: 0 })
+	}
+
+	const launch = startEtsyWork(db, 'catalog_health', async ({ heartbeat }) => {
+		const results = []
+		for (const shop of targets) {
+			heartbeat()
+			try {
+				const { shopClient, numericShopId } = await getShopClientForShopName(shop.shop_name)
+				const result = await syncShopCatalogHealth({
+					db,
+					shopClient,
+					numericShopId,
+					shopId: shop.shop_id,
+					shopName: shop.shop_name,
+					analyticsApproved: config.etsy_api_analytics_approved,
+					heartbeat,
+				})
+				results.push({ shop_id: shop.shop_id, shop_name: shop.shop_name, ...result })
+			} catch (err) {
+				if (isQpdExhaustedError(err)) {
+					results.push({ shop_id: shop.shop_id, shop_name: shop.shop_name, skipped: 'qpd', error: err.message })
+					break
+				}
+				console.warn(`[growth] ${shop.shop_name} catalog failed: ${err.message}`)
+				results.push({ shop_id: shop.shop_id, shop_name: shop.shop_name, error: err.message })
+			}
+		}
+		return { shops: results }
+	})
+	if (!launch.started) {
+		return res.status(409).json({ error: 'Another Etsy sync task is already running.', reason: launch.reason, kind: launch.kind || null, ...getEtsyWorkStatus(db) })
+	}
+	_lastGrowthSyncAt = Date.now()
+	res.status(202).json({ ok: true, message: `Catalog health started for ${targets.length} shop(s)`, shops: targets.length, force })
 })
 
 /**
  * Internal: sync ledgers sequentially with SSE progress events
  * (ledger_sync_start / ledger_sync_progress / ledger_sync_done).
  */
-async function _runLedgerSync(shops, { fullBackfill }) {
-	_ledgerSyncRunning = true
-	broadcastSyncEvent({ type: 'ledger_sync_start', total: shops.length, full: !!fullBackfill, ts: Date.now() })
+function _startLedgerSync(shops, { fullBackfill }) {
+	const launch = startEtsyWork(db, 'ledger', async ({ heartbeat }) => {
+		_ledgerSyncRunning = true
+		broadcastSyncEvent({ type: 'ledger_sync_start', total: shops.length, full: !!fullBackfill, ts: Date.now() })
 
-	let completed = 0
-	let totalEntries = 0
-	// A full earnings backfill walks years of ledger history per shop and is the
-	// heaviest QPD consumer in the app. QPD is per API key, so when one shop on a
-	// key runs out, skip the rest of that key's shops — they'd only burn into the
-	// cooldown — and let the operator resume once the window frees budget.
-	const exhaustedKeys = new Set()
+		let completed = 0
+		let totalEntries = 0
+		// A full earnings backfill walks years of ledger history per shop and is the
+		// heaviest QPD consumer in the app. QPD is per API key, so when one shop on a
+		// key runs out, skip the rest of that key's shops — they'd only burn into the
+		// cooldown — and let the operator resume once the window frees budget.
+		const exhaustedKeys = new Set()
 
-	try {
-		for (const shopCfg of shops) {
-			if (exhaustedKeys.has(shopCfg.api_key)) {
-				broadcastSyncEvent({
-					type: 'ledger_shop_skipped',
-					shop_id: shopCfg.shop_id,
-					reason: 'rate_limited',
-					message: "Daily API budget for this shop's key is exhausted — earnings sync paused for it; resume later.",
-					ts: Date.now(),
-				})
-				completed++
-				broadcastSyncEvent({ type: 'ledger_sync_progress', completed, total: shops.length, ts: Date.now() })
-				continue
-			}
-
-			broadcastSyncEvent({ type: 'ledger_shop_start', shop_id: shopCfg.shop_id, ts: Date.now() })
-			try {
-				const groupCfg = config.groups.find((g) => g.group_id === shopCfg.group_id)
-				const proxyClient = createGroupClient(groupCfg, config.vpn_local_port)
-				const { entries, attributed } = await syncLedgerForShop(shopCfg, groupCfg, config, proxyClient, tokenManager, db, {
-					fullBackfill,
-					onProgress: ({ entries }) => broadcastSyncEvent({ type: 'ledger_progress', shop_id: shopCfg.shop_id, entries, ts: Date.now() }),
-				})
-				totalEntries += entries
-				broadcastSyncEvent({ type: 'ledger_shop_done', shop_id: shopCfg.shop_id, entries, attributed, ts: Date.now() })
-			} catch (err) {
-				if (isQpdExhaustedError(err)) {
-					if (shopCfg.api_key) exhaustedKeys.add(shopCfg.api_key)
-					console.warn(`[ledger] ${shopCfg.shop_id}: paused — ${err.message}`)
+		try {
+			for (const shopCfg of shops) {
+				heartbeat()
+				if (exhaustedKeys.has(shopCfg.api_key)) {
 					broadcastSyncEvent({
 						type: 'ledger_shop_skipped',
 						shop_id: shopCfg.shop_id,
 						reason: 'rate_limited',
-						message: err.message,
+						message: "Daily API budget for this shop's key is exhausted — earnings sync paused for it; resume later.",
 						ts: Date.now(),
 					})
-				} else {
-					console.error(`[ledger] ${shopCfg.shop_id}: ${err.message}`)
-					broadcastSyncEvent({ type: 'ledger_shop_error', shop_id: shopCfg.shop_id, error: err.message, ts: Date.now() })
+					completed++
+					broadcastSyncEvent({ type: 'ledger_sync_progress', completed, total: shops.length, ts: Date.now() })
+					continue
 				}
-			} finally {
-				completed++
-				broadcastSyncEvent({ type: 'ledger_sync_progress', completed, total: shops.length, ts: Date.now() })
+
+				broadcastSyncEvent({ type: 'ledger_shop_start', shop_id: shopCfg.shop_id, ts: Date.now() })
+				try {
+					const groupCfg = config.groups.find((g) => g.group_id === shopCfg.group_id)
+					const proxyClient = createGroupClient(groupCfg, config.vpn_local_port)
+					const { entries, attributed } = await syncLedgerForShop(shopCfg, groupCfg, config, proxyClient, tokenManager, db, {
+						fullBackfill,
+						heartbeat,
+						onProgress: ({ entries }) => broadcastSyncEvent({ type: 'ledger_progress', shop_id: shopCfg.shop_id, entries, ts: Date.now() }),
+					})
+					totalEntries += entries
+					broadcastSyncEvent({ type: 'ledger_shop_done', shop_id: shopCfg.shop_id, entries, attributed, ts: Date.now() })
+				} catch (err) {
+					if (err?.code === 'ETSY_LOCK_LOST') throw err
+					if (isQpdExhaustedError(err)) {
+						if (shopCfg.api_key) exhaustedKeys.add(shopCfg.api_key)
+						console.warn(`[ledger] ${shopCfg.shop_id}: paused — ${err.message}`)
+						broadcastSyncEvent({
+							type: 'ledger_shop_skipped',
+							shop_id: shopCfg.shop_id,
+							reason: 'rate_limited',
+							message: err.message,
+							ts: Date.now(),
+						})
+					} else {
+						console.error(`[ledger] ${shopCfg.shop_id}: ${err.message}`)
+						broadcastSyncEvent({ type: 'ledger_shop_error', shop_id: shopCfg.shop_id, error: err.message, ts: Date.now() })
+					}
+				} finally {
+					completed++
+					broadcastSyncEvent({ type: 'ledger_sync_progress', completed, total: shops.length, ts: Date.now() })
+				}
 			}
+		} finally {
+			_ledgerSyncRunning = false
+			broadcastSyncEvent({ type: 'ledger_sync_done', completed, total: shops.length, total_entries: totalEntries, ts: Date.now() })
+			console.log(`[ledger] Earnings sync complete — ${completed}/${shops.length} shops, ${totalEntries} entries`)
 		}
-	} finally {
-		_ledgerSyncRunning = false
-		broadcastSyncEvent({ type: 'ledger_sync_done', completed, total: shops.length, total_entries: totalEntries, ts: Date.now() })
-		console.log(`[ledger] Earnings sync complete — ${completed}/${shops.length} shops, ${totalEntries} entries`)
+	})
+	if (launch.started) {
+		launch.promise.catch((err) => {
+			console.error(`[ledger] Work failed: ${err.message}`)
+			broadcastSyncEvent({ type: 'ledger_shop_error', scope: 'ledger', error: err.message, ts: Date.now() })
+		})
 	}
+	return launch
 }
 
 // ─── Order notes ──────────────────────────────────────────────────────────────
@@ -2795,8 +3707,8 @@ app.post('/api/issues/:id/draft-message', async (req, res) => {
 		let style = ''
 		let phoneModel = issue.phone_model || ''
 		try {
-			const txns = db.prepare('SELECT title, listing_id, variations FROM transactions WHERE receipt_id = ?').all(issue.receipt_id)
-			const match = txns.find((t) => routeDashboard.lineItemKey(t.title, t.listing_id) === issue.item_key) || txns.find((t) => issue.listing_id && Number(t.listing_id) === Number(issue.listing_id))
+			const txns = receiptLineRecords(issue.receipt_id)
+			const match = lineIdentity.findTransactionByLineKey(db, issue.receipt_id, txns, issue.item_key) || txns.find((t) => issue.listing_id && Number(t.listing_id) === Number(issue.listing_id))
 			if (match) {
 				const parsed = routeDashboard.parseVariations(match.variations)
 				style = parsed.style || ''
@@ -3011,12 +3923,40 @@ app.delete('/api/issues/:id', (req, res) => {
 // the line un-holds and flows back into the purchasing queue) and resets its
 // purchase status so the new design starts as "still to buy".
 
+/**
+ * A receipt's line records for identity / product-context resolution.
+ *
+ * Prefers the `transactions` table (populated for synced Etsy orders) and falls
+ * back to the cached `receipts.all_transactions` JSON — which is the ONLY place a
+ * MANUAL order's lines live, since a fabricated receipt has no Etsy transactions
+ * to sync. Without the fallback every manual line looked context-free, so an
+ * auto-raised issue or model fix on one carried no title / model / listing id.
+ *
+ * @param {number|string} receiptId
+ * @returns {Array<{title:string, listing_id:*, variations:*}>}
+ */
+function receiptLineRecords(receiptId) {
+	try {
+		const rows = db.prepare('SELECT title, listing_id, variations FROM transactions WHERE receipt_id = ?').all(Number(receiptId))
+		if (rows.length) return rows
+	} catch {
+		/* table may not exist yet on first run */
+	}
+	try {
+		const row = db.prepare('SELECT all_transactions FROM receipts WHERE receipt_id = ?').get(Number(receiptId))
+		const txs = JSON.parse(row?.all_transactions || '[]')
+		return Array.isArray(txs) ? txs : []
+	} catch {
+		return []
+	}
+}
+
 /** Resolve the original transaction title for a receipt line (for the snapshot). */
 function _origTitleForLine(receiptId, itemKey) {
 	try {
 		const row = db.prepare('SELECT all_transactions FROM receipts WHERE receipt_id = ?').get(receiptId)
 		const txs = JSON.parse(row?.all_transactions || '[]')
-		const match = (Array.isArray(txs) ? txs : []).find((t) => routeDashboard.lineItemKey(t.title || '', t.listing_id) === itemKey)
+		const match = lineIdentity.findTransactionByLineKey(db, receiptId, txs, itemKey)
 		return match ? match.title || '' : ''
 	} catch {
 		return ''
@@ -3091,6 +4031,29 @@ app.post('/api/orders/:receipt_id/substitution', express.json({ limit: '25mb' })
 	}
 
 	const sourceListingId = b.source_listing_id != null && String(b.source_listing_id).trim() !== '' ? Number(b.source_listing_id) : null
+	const substitutionSource =
+		b.source === 'catalog' || b.source === 'custom'
+			? b.source
+			: sourceListingId
+				? 'catalog'
+				: 'custom'
+	if (substitutionSource === 'catalog') {
+		const catalogId = Number(b.catalog_id)
+		const activeCatalogProduct = getProductMapRow(
+			db,
+			Number.isInteger(catalogId) && catalogId > 0 ? { id: catalogId } : { title: newTitle },
+		)
+		if (
+			!activeCatalogProduct ||
+			activeCatalogProduct.status === 'retired' ||
+			activeCatalogProduct.title_norm !== routeDashboard.normalizeTitle(newTitle)
+		) {
+			return res.status(409).json({
+				error: 'That replacement is no longer active in Product Catalog. Refresh and choose another design.',
+				code: 'CATALOG_PRODUCT_UNAVAILABLE',
+			})
+		}
+	}
 	// Authoritatively resolve the image to persist for the replacement design.
 	//   1. an explicit CDN url the client passed (the catalog thumbnail), else
 	//   2. for a catalog switch, the replacement LISTING's own cached image — so a
@@ -3113,7 +4076,7 @@ app.post('/api/orders/:receipt_id/substitution', express.json({ limit: '25mb' })
 			new_title: newTitle,
 			new_style: b.new_style != null ? String(b.new_style) : null,
 			new_phone_model: b.new_phone_model != null ? String(b.new_phone_model) : null,
-			source: b.source === 'catalog' || b.source === 'custom' ? b.source : sourceListingId ? 'catalog' : 'custom',
+			source: substitutionSource,
 			source_listing_id: sourceListingId,
 			image_url: storedImageUrl || null,
 			note: typeof b.note === 'string' ? b.note.trim().slice(0, 1000) : null,
@@ -3215,9 +4178,7 @@ app.get('/api/route/substitution-image/:id', (req, res) => {
 	try {
 		const img = getSubstitutionImage(db, id)
 		if (!img) return res.status(404).end()
-		res.setHeader('Content-Type', img.mime || 'image/png')
-		res.setHeader('Cache-Control', 'private, max-age=300')
-		res.send(img.data)
+		return sendStoredImage(res, img)
 	} catch (err) {
 		if (!res.headersSent) res.status(404).end()
 	}
@@ -3326,25 +4287,218 @@ app.get('/api/route/style-image/:id', (req, res) => {
 	try {
 		const img = getListingStyleImage(db, id)
 		if (!img) return res.status(404).end()
-		res.setHeader('Content-Type', img.mime || 'image/png')
-		res.setHeader('Cache-Control', 'private, max-age=300')
-		res.send(img.data)
+		return sendStoredImage(res, img)
 	} catch (err) {
 		if (!res.headersSent) res.status(404).end()
 	}
 })
 
-// ─── Wrong-model exchanges (item in hand, wrong model — swap at supplier) ────
+// ─── Model fixes (this line must be fulfilled with a DIFFERENT device model) ─
 //
-// Distinct from order_issues: the buyer still receives exactly what they ordered.
-// We simply hold the piece we already have (wrong model) and carry it back to the
-// stall to swap it for the model the order needs. An OPEN exchange holds the line
-// out of the purchasing Route (we have it) while surfacing it in the dedicated
-// "To exchange" bucket so staff never mistake it for done and ship the wrong model.
+// Distinct from order_issues: the buyer still receives a working product for the
+// device they actually have. A model fix takes one of two shapes, decided solely
+// by whether we already hold a physical wrong-model item (see the boundary
+// helpers in src/route/dashboard.js):
+//
+//   SWAP (have_model set)   — the item is in hand in the wrong model. Nothing is
+//        bought; it is carried back to the stall and swapped. The generation-
+//        specific unit (iPhone: the case; AirPods: the case and its attached
+//        charm) is held OUT of the purchasing Route and surfaced in the "To
+//        exchange" bucket so staff never mistake it for done and ship the wrong
+//        model.
+//   BUY  (have_model blank) — we hold nothing, so the corrected model is bought
+//        exactly like any other case. The line STAYS in the purchasing Route,
+//        now naming the corrected model, and settles itself the moment that unit
+//        is marked Purchased (see settleBoughtModelFixes).
+//
+// Cross-family corrections (iPhone ↔ AirPods) are refused: those are different
+// products, not a generation swap.
+
+/**
+ * Resolve the fulfilment identity of a line (title / model / present pieces)
+ * honouring a design switch, so a model fix covers the product we will actually
+ * pack — not the original the buyer already moved away from.
+ */
+function resolveLineForModelFix(receiptId, itemKey, fallbackTitle) {
+	let title = fallbackTitle || ''
+	let phoneModel = ''
+	let style = ''
+	try {
+		const row = db.prepare('SELECT all_transactions FROM receipts WHERE receipt_id = ?').get(Number(receiptId))
+		const txs = JSON.parse(row?.all_transactions || '[]')
+		const match = lineIdentity.findTransactionByLineKey(db, receiptId, txs, itemKey)
+		if (match) {
+			title = match.title || title
+			const parsed = routeDashboard.parseVariations(match.variations)
+			phoneModel = parsed.phoneModel || ''
+			style = parsed.style || ''
+		}
+	} catch {
+		/* receipt may be a manual line with no Etsy transactions */
+	}
+	try {
+		const sub = getSubstitutionForLine(db, Number(receiptId), String(itemKey))
+		if (sub) {
+			if (sub.new_title) title = sub.new_title
+			if (sub.new_phone_model) phoneModel = sub.new_phone_model
+			if (sub.new_style) style = sub.new_style
+		}
+	} catch {
+		/* table may not exist yet */
+	}
+	const comps = routeDashboard.styleComponents(style, { phoneModel, title })
+	return {
+		title,
+		phone_model: phoneModel,
+		style,
+		has_case: !!comps.hasCase,
+		has_grip: !!comps.hasGrip,
+		has_charm: !!comps.hasCharm,
+		charm_integral: !!(comps.hasCharm && routeDashboard.isAirpodsProduct(phoneModel, title)),
+	}
+}
+
+/**
+ * The open model fix on one order line, or null.
+ * @returns {object|null} the `order_exchanges` row
+ */
+function getOpenExchangeForLine(receiptId, itemKey) {
+	try {
+		return db.prepare("SELECT * FROM order_exchanges WHERE receipt_id = ? AND item_key = ? AND status = 'open'").get(Number(receiptId), String(itemKey)) || null
+	} catch {
+		return null // table may not exist yet on a fresh DB
+	}
+}
+
+/**
+ * The components a model fix covers. Prefers the stored list (so a deliberate
+ * write is honoured), then this line's generation-specific unit, then 'case'.
+ * AirPods self-heal: an integral charm rides with a covered case even on
+ * legacy records that only stored "case".
+ * @returns {string[]}
+ */
+function exchangeCoveredComponents(exchange, line) {
+	const comps = String((exchange && exchange.components) || '')
+		.split(',')
+		.map((c) => c.trim().toLowerCase())
+		.filter((c) => routeDashboard.EXCHANGE_COMPONENTS.includes(c))
+	const resolved = line || (exchange ? resolveLineForModelFix(exchange.receipt_id, exchange.item_key, exchange.title) : null)
+	const base = comps.length ? comps.slice() : routeDashboard.modelFixCoveredComponents(resolved)
+	const held = new Set(base)
+	if (resolved) {
+		const airpods = !!resolved.charm_integral || routeDashboard.isAirpodsProduct(resolved.phone_model, resolved.title)
+		if (airpods && resolved.has_charm) {
+			if (held.has('case')) held.add('charm')
+			if (!resolved.has_case) {
+				held.delete('case')
+				held.add('charm')
+			}
+		}
+	}
+	const ordered = routeDashboard.EXCHANGE_COMPONENTS.filter((c) => held.has(c))
+	return ordered.length ? ordered : ['case']
+}
+
+/**
+ * Put the pieces a BUY model fix covers back to 'Pending'.
+ *
+ * A buy means we do NOT hold the item: whatever the line's case status said
+ * before (Purchased for the wrong model, or Out of Stock for a model we are no
+ * longer buying) describes a product we are not going to ship. Leaving that
+ * status in place would let the corrected case be counted as already bought, and
+ * the line would vanish from every shopping surface without anyone buying it.
+ */
+function resetComponentsForBuyModelFix(receiptId, exchange) {
+	const patch = { receipt_id: Number(receiptId), item_key: String(exchange.item_key), title: exchange.title || undefined }
+	for (const comp of exchangeCoveredComponents(exchange)) patch[`status_${comp}`] = 'Pending'
+	upsertRouteAssignment(db, patch)
+	// A pending component is by definition not verified as in hand any more.
+	clearRouteVerified(db, Number(receiptId), String(exchange.item_key))
+}
+
+/**
+ * Close any BUY model fix on a line whose covered components are now all
+ * Purchased — the corrected model has been bought, so the fix is fulfilled.
+ *
+ * This is what keeps the buy shape self-settling. Without it the record would
+ * stay open after the shopper bought the right case, leaving a permanent, unclosable
+ * "still to fix" entry that nobody can act on, and requiring a second, redundant
+ * confirmation click before the order is considered finished. SWAP fixes are
+ * deliberately untouched: their components are Purchased by design from the
+ * start, so auto-closing them would discard the swap before it happened.
+ *
+ * Safe to call after any component-status write. Returns the ids it closed.
+ *
+ * @param {number} receiptId
+ * @param {string} itemKey
+ * @returns {number[]}
+ */
+function settleBoughtModelFixes(receiptId, itemKey) {
+	const exchange = getOpenExchangeForLine(receiptId, itemKey)
+	if (!exchange) return []
+	if (routeDashboard.exchangeRecordIntent(exchange) !== routeDashboard.EXCHANGE_INTENT_BUY) return []
+
+	const assignment = db.prepare('SELECT * FROM route_assignments WHERE receipt_id = ? AND item_key = ?').get(Number(receiptId), String(itemKey)) || {}
+	const allBought = exchangeCoveredComponents(exchange).every((comp) => (assignment[`status_${comp}`] || 'Pending') === 'Purchased')
+	if (!allBought) return []
+
+	patchOrderExchange(db, exchange.id, { status: 'done', done_at: Math.floor(Date.now() / 1000) })
+	console.log(`[model-fix] ${exchange.id} auto-settled — corrected model "${exchange.need_model}" purchased on receipt ${receiptId}`)
+	return [exchange.id]
+}
+
+/**
+ * Boot-time self-heal: close BUY model fixes whose covered components are ALREADY
+ * Purchased.
+ *
+ * Before the swap/buy boundary existed, a buy-shaped fix held its case out of the
+ * buy set exactly like a swap, so a record can be left open with its case marked
+ * Purchased — a contradiction: the corrected model is in hand, yet the order still
+ * reads as owing a fix, and nothing would ever close it. This applies the same
+ * decision settleBoughtModelFixes makes on every purchase to that history. It only
+ * ever CLOSES records and never writes a component status, so it cannot discard an
+ * operator's work; orders whose corrected case is still unbought are left alone to
+ * flow through the shopping route normally.
+ */
+function settleAlreadyBoughtModelFixes() {
+	let settled = 0
+	try {
+		const open = db.prepare("SELECT receipt_id, item_key, have_model FROM order_exchanges WHERE status = 'open'").all()
+		for (const row of open) {
+			if (routeDashboard.exchangeRecordIntent(row) !== routeDashboard.EXCHANGE_INTENT_BUY) continue
+			db.transaction(() => {
+				if (settleBoughtModelFixes(row.receipt_id, row.item_key).length) {
+					settled++
+					recomputeNeedsPurchaseRollup(row.receipt_id)
+				}
+			})()
+		}
+	} catch (e) {
+		console.warn('[model-fix] boot reconcile failed:', e.message)
+	}
+	if (settled) console.log(`[model-fix] reconciled ${settled} already-purchased model fix(es) at boot`)
+}
+
+/**
+ * GET /api/fulfilment/device-models
+ * Canonical fit values per device family for the model-fix UI: iPhone / AirPods
+ * generations, the Apple Watch band sizes and the iPad models. On a single-axis
+ * line the priced axis IS the only fit dimension, so that is what a model fix
+ * corrects there.
+ * Single source of truth: src/listings/product-types.js (never duplicate in the client).
+ */
+app.get('/api/fulfilment/device-models', (_req, res) => {
+	res.json({
+		iphone: canonicalModelsForFamily(FAMILY_IPHONE),
+		airpods: canonicalModelsForFamily(FAMILY_AIRPODS),
+		watch: canonicalModelsForFamily(FAMILY_WATCH),
+		ipad: canonicalModelsForFamily(FAMILY_IPAD),
+	})
+})
 
 /**
  * GET /api/orders/:receipt_id/exchanges
- * Lists every wrong-model exchange (open + done) on an order.
+ * Lists every model fix (open + done) on an order.
  */
 app.get('/api/orders/:receipt_id/exchanges', (req, res) => {
 	const exists = db.prepare('SELECT 1 FROM receipts WHERE receipt_id = ?').get(req.params.receipt_id)
@@ -3371,14 +4525,34 @@ app.post('/api/orders/:receipt_id/exchanges', (req, res) => {
 	const haveModel = typeof b.have_model === 'string' ? b.have_model.trim() : ''
 	const needModel = typeof b.need_model === 'string' ? b.need_model.trim() : ''
 	if (!needModel) return res.status(400).json({ error: 'need_model (the model the order needs / you will pack) is required' })
-	// A model fix ALWAYS applies to the case only. A case is model-specific (it
-	// must fit the phone), whereas a grip is universal and a charm has no model —
-	// neither has an alternative model to swap. We force the component set to the
-	// case regardless of what the client sends (older clients may still post more)
-	// so the grip/charm on the same line are always sourced through normal buying.
-	const components = 'case'
+	if (haveModel && haveModel.toLowerCase() === needModel.toLowerCase()) {
+		return res.status(400).json({ error: 'The model you have and the model the order needs are the same — there is nothing to fix.' })
+	}
 	const exists = db.prepare('SELECT 1 FROM receipts WHERE receipt_id = ?').get(receiptId)
 	if (!exists) return res.status(404).json({ error: 'Order not found' })
+
+	// Cover the generation-specific unit for THIS line. The client is not trusted
+	// with the component set (older clients always posted "case"; a grip on an
+	// iPhone line must stay shoppable; an AirPods attached charm must travel
+	// with the case).
+	const line = resolveLineForModelFix(receiptId, itemKey, b.title)
+	const lineFamily = deviceFamilyOf(line.phone_model, line.title)
+	const needErr = crossFamilyModelError(lineFamily, needModel)
+	if (needErr) return res.status(400).json({ error: needErr })
+	const haveErr = haveModel ? crossFamilyModelError(lineFamily, haveModel) : null
+	if (haveErr) return res.status(400).json({ error: haveErr })
+	const components = routeDashboard.modelFixCoveredComponents(line).join(',')
+
+	const intent = routeDashboard.modelFixIntentFrom(haveModel)
+	// What the line was under BEFORE this save decides whether the purchase state
+	// has to start over. Re-saving an unchanged buy (e.g. editing only the note)
+	// must NOT wipe out a shopper's progress, so we reset only when the fix is
+	// genuinely new, changed shape (swap → buy), or now targets a DIFFERENT model
+	// than the one already bought against.
+	const prior = getOpenExchangeForLine(receiptId, itemKey)
+	const priorIntent = routeDashboard.exchangeRecordIntent(prior)
+	const targetModelChanged = !prior || String(prior.need_model || '').trim() !== needModel
+	const restartsPurchasing = intent === routeDashboard.EXCHANGE_INTENT_BUY && (priorIntent !== routeDashboard.EXCHANGE_INTENT_BUY || targetModelChanged)
 
 	let exchange
 	const txn = db.transaction(() => {
@@ -3394,20 +4568,37 @@ app.post('/api/orders/:receipt_id/exchanges', (req, res) => {
 			supplier_stall: typeof b.supplier_stall === 'string' ? b.supplier_stall.trim() : null,
 			note: typeof b.note === 'string' ? b.note.trim().slice(0, 1000) : null,
 		})
-		// Holding a line out of purchasing must also clear any stale needs-purchase
-		// rollup so the order can't be both "buy this" and "already in hand".
+		if (restartsPurchasing) resetComponentsForBuyModelFix(receiptId, exchange)
+		// Changing what a line owes must re-derive the order's needs-purchase
+		// rollup: a swap holds it out of buying (it can't be both "buy this" and
+		// "already in hand"), while a buy puts it back in.
 		recomputeNeedsPurchaseRollup(receiptId)
 	})
 	txn()
 
-	console.log(`[exchange] receipt ${receiptId} line ${itemKey} flagged: ${haveModel ? `swap "${haveModel}" → "${needModel}"` : `buy "${needModel}" (no stock to swap)`}`)
+	console.log(`[model-fix] receipt ${receiptId} line ${itemKey} flagged: ${intent === routeDashboard.EXCHANGE_INTENT_SWAP ? `swap "${haveModel}" → "${needModel}"` : `buy "${needModel}" (nothing in hand to swap)`}`)
+	// Either shape changes what the shopper on the floor should be doing with this
+	// line — a buy puts it in the buy list under the corrected model, a swap pulls
+	// it out and into "To exchange" — and this endpoint is also how a fix is
+	// CHANGED from one shape to the other. Announce every write so live clients
+	// re-partition immediately; the handler re-fetches, which is correct for both
+	// directions. Staying silent on swaps left shoppers buying a case we'd just
+	// decided to swap, until someone happened to refresh.
+	broadcastRouteEvent({
+		type: 'exchange',
+		exchange_id: exchange.id,
+		receipt_id: receiptId,
+		status: 'open',
+		by: (req.auth && req.auth.user) || 'owner',
+	})
 	res.json({ success: true, exchange })
 })
 
 /**
  * POST /api/exchanges/:id/done
- * Marks the physical swap complete. The affected components are flipped to
- * Purchased so the line becomes genuinely fulfilled and the order can ship.
+ * Marks the fix complete — the swap was made at the stall, or the corrected
+ * model was bought. The affected components are flipped to Purchased so the line
+ * becomes genuinely fulfilled and the order can ship.
  */
 app.post('/api/exchanges/:id/done', (req, res) => {
 	const exchange = getExchangeById(db, req.params.id)
@@ -3416,23 +4607,15 @@ app.post('/api/exchanges/:id/done', (req, res) => {
 	let updated
 	const txn = db.transaction(() => {
 		updated = patchOrderExchange(db, exchange.id, { status: 'done', done_at: Math.floor(Date.now() / 1000) })
-		// The swapped pieces are now the correct model and in hand → Purchased, so
-		// the line drops from every buy view and the order becomes ready to ship.
-		const comps = String(exchange.components || '')
-			.split(',')
-			.map((c) => c.trim())
-			.filter(Boolean)
-		if (comps.length) {
-			const patch = { receipt_id: exchange.receipt_id, item_key: exchange.item_key, title: exchange.title || undefined }
-			if (comps.includes('case')) patch.status_case = 'Purchased'
-			if (comps.includes('grip')) patch.status_grip = 'Purchased'
-			if (comps.includes('charm')) patch.status_charm = 'Purchased'
-			upsertRouteAssignment(db, patch)
-		}
+		// The pieces are now the correct model and in hand → Purchased, so the line
+		// drops from every buy view and the order becomes ready to ship.
+		const patch = { receipt_id: exchange.receipt_id, item_key: exchange.item_key, title: exchange.title || undefined }
+		for (const comp of exchangeCoveredComponents(exchange)) patch[`status_${comp}`] = 'Purchased'
+		upsertRouteAssignment(db, patch)
 		recomputeNeedsPurchaseRollup(exchange.receipt_id)
 	})
 	txn()
-	console.log(`[exchange] ${exchange.id} marked exchanged (done)`)
+	console.log(`[model-fix] ${exchange.id} marked done (${routeDashboard.exchangeRecordIntent(exchange)})`)
 	// Notify live shopping-route clients so the exchange drops off every device.
 	broadcastRouteEvent({
 		type: 'exchange',
@@ -3446,8 +4629,11 @@ app.post('/api/exchanges/:id/done', (req, res) => {
 
 /**
  * POST /api/exchanges/:id/reopen
- * Re-opens a completed exchange (the swap fell through / needs redoing) — holds
- * the line out of buying again and returns it to the "To exchange" bucket.
+ * Re-opens a completed model fix (the swap fell through, or the case bought was
+ * still the wrong model). A SWAP goes back to being held out of buying and
+ * returns to the "To exchange" bucket; a BUY returns to the shopping route with
+ * its components reset, since marking it done had flipped them to Purchased and
+ * leaving them there would hide the line the operator just said is unfinished.
  */
 app.post('/api/exchanges/:id/reopen', (req, res) => {
 	const exchange = getExchangeById(db, req.params.id)
@@ -3455,6 +4641,9 @@ app.post('/api/exchanges/:id/reopen', (req, res) => {
 	let updated
 	const txn = db.transaction(() => {
 		updated = patchOrderExchange(db, exchange.id, { status: 'open', done_at: null })
+		if (routeDashboard.exchangeRecordIntent(exchange) === routeDashboard.EXCHANGE_INTENT_BUY) {
+			resetComponentsForBuyModelFix(exchange.receipt_id, exchange)
+		}
 		recomputeNeedsPurchaseRollup(exchange.receipt_id)
 	})
 	txn()
@@ -3516,39 +4705,7 @@ app.delete('/api/exchanges/:id', (req, res) => {
  *          the NOT-sealable orders are present; a sealable order is absent).
  */
 function unsealableReasons(receiptIds) {
-	const reasons = new Map()
-	const ids = (receiptIds || []).map(Number).filter(Number.isFinite)
-	if (!ids.length) return reasons
-	const ph = ids.map(() => '?').join(',')
-	let rows = []
-	try {
-		rows = db.prepare(`SELECT receipt_id, all_transactions FROM receipts WHERE receipt_id IN (${ph})`).all(...ids)
-	} catch {
-		return reasons
-	}
-	const { ready } = classifyPurchaseState(rows)
-	const openIssue = new Set()
-	const openExch = new Set()
-	try {
-		db.prepare(`SELECT DISTINCT receipt_id FROM order_issues WHERE status = 'open' AND receipt_id IN (${ph})`)
-			.all(...ids)
-			.forEach((r) => openIssue.add(r.receipt_id))
-	} catch {
-		/* table may be missing on a fresh DB */
-	}
-	try {
-		db.prepare(`SELECT DISTINCT receipt_id FROM order_exchanges WHERE status = 'open' AND receipt_id IN (${ph})`)
-			.all(...ids)
-			.forEach((r) => openExch.add(r.receipt_id))
-	} catch {
-		/* table may be missing on a fresh DB */
-	}
-	for (const id of ids) {
-		if (openIssue.has(id)) reasons.set(id, 'is on hold (a product is out of production or the model is unavailable)')
-		else if (openExch.has(id)) reasons.set(id, 'is awaiting a wrong-model supplier swap')
-		else if (!ready.has(id)) reasons.set(id, 'still has products that are not yet purchased / in hand')
-	}
-	return reasons
+	return getUnsealableReasons(db, receiptIds, config)
 }
 
 /**
@@ -3583,6 +4740,7 @@ app.post('/api/orders/:receipt_id/mark-packaged', (req, res) => {
 		.run({ receipt_id: req.params.receipt_id, packaged_at: nowEpoch })
 
 	if (result.changes === 0) return res.status(404).json({ error: 'Order not found' })
+	_captureAuditOrderProductSnapshot(res, receiptId)
 	console.log(`[packaged] receipt ${req.params.receipt_id} marked as packaged`)
 	res.json({ success: true, receipt_id: req.params.receipt_id, packaged_at: nowEpoch })
 })
@@ -3592,9 +4750,11 @@ app.post('/api/orders/:receipt_id/mark-packaged', (req, res) => {
  * Clears the packaged flag, returning the order to the "not yet packaged" state.
  */
 app.post('/api/orders/:receipt_id/unmark-packaged', (req, res) => {
-	const result = db.prepare('UPDATE receipts SET packaged_at = NULL WHERE receipt_id = ?').run(req.params.receipt_id)
+	const receiptId = Number(req.params.receipt_id)
+	const result = db.prepare('UPDATE receipts SET packaged_at = NULL WHERE receipt_id = ?').run(receiptId)
 
 	if (result.changes === 0) return res.status(404).json({ error: 'Order not found' })
+	_captureAuditOrderProductSnapshot(res, receiptId)
 	console.log(`[packaged] receipt ${req.params.receipt_id} packaged flag cleared`)
 	res.json({ success: true, receipt_id: req.params.receipt_id })
 })
@@ -3754,9 +4914,14 @@ app.post('/api/orders/manual/:receipt_id/shipped', (req, res) => {
 		const shipped = req.body?.shipped !== false
 		const ok = setManualOrderShipped(db, req.params.receipt_id, shipped)
 		if (!ok) return res.status(404).json({ error: 'Manual order not found.' })
+		// Keep the completion ledger in step. Un-shipping is a deliberate operator
+		// reversal, so any outstanding obligation is retired rather than left for
+		// the reconciler to undo the decision a minute later.
+		if (shipped) etsyCompletion.markDone(db, req.params.receipt_id)
+		else etsyCompletion.markSkipped(db, req.params.receipt_id, { reason: 'Operator marked the order unshipped' })
 		res.json({ success: true, receipt_id: Number(req.params.receipt_id), shipped })
 	} catch (err) {
-		const status = err.code === 'NOT_FOUND' ? 404 : err.code === 'FORBIDDEN' ? 403 : 500
+		const status = err.status || (err.code === 'NOT_FOUND' ? 404 : err.code === 'FORBIDDEN' ? 403 : 500)
 		if (status >= 500) console.error('[manual-order] shipped toggle error:', err.message)
 		res.status(status).json({ error: err.message })
 	}
@@ -3811,9 +4976,13 @@ app.post('/api/orders/manual/:receipt_id/tracking', (req, res) => {
 const PURCHASE_OUTSTANDING_STATUSES = new Set(['Pending', 'Out of Stock', 'Wrong Stall'])
 const VALID_PURCHASE_STATUSES = new Set(['Pending', 'Purchased', 'Out of Stock', 'Out of Production', 'Wrong Stall', 'Model Unavailable'])
 
-/** Present Case/Grip/Charm components implied by a Style string. */
-function componentsFromStyle(style) {
-	const sc = routeDashboard.styleComponents(style)
+/**
+ * Present Case/Grip/Charm components implied by a Style string. `line` (the
+ * effective model + title) lets a single-axis product — a watch band, whose
+ * only variation is its size — still declare its one physical unit.
+ */
+function componentsFromStyle(style, line) {
+	const sc = routeDashboard.styleComponents(style, line)
 	const out = []
 	if (sc.hasCase) out.push('case')
 	if (sc.hasGrip) out.push('grip')
@@ -3845,15 +5014,23 @@ function orderLineItems(receiptId) {
 		/* table may not exist yet */
 	}
 
+	// Resolve each line's canonical key (a manual order's lines are named by the
+	// per-variant key stored in route_manual_items), so the rollup, verification
+	// and "mark all purchased" paths built on this read and write the same rows
+	// the Route tab and Shopping Mode do.
+	const keys = lineIdentity.receiptLineKeys(db, receiptId, txs)
+
 	const seen = new Map()
-	for (const t of txs) {
-		const key = routeDashboard.lineItemKey(t.title || '', t.listing_id)
-		if (seen.has(key)) continue
+	txs.forEach((t, i) => {
+		const key = keys[i]
+		if (seen.has(key)) return
 		const sub = subs[key]
-		const style = sub && sub.new_style ? sub.new_style : routeDashboard.parseVariations(t.variations).style
+		const parsed = routeDashboard.parseVariations(t.variations)
+		const style = sub && sub.new_style ? sub.new_style : parsed.style
 		const title = sub ? sub.new_title : t.title || ''
-		seen.set(key, { item_key: key, title, components: componentsFromStyle(style) })
-	}
+		const phoneModel = (sub && sub.new_phone_model) || parsed.phoneModel || ''
+		seen.set(key, { item_key: key, title, phone_model: phoneModel, components: componentsFromStyle(style, { phoneModel, title }) })
+	})
 	return [...seen.values()]
 }
 
@@ -3882,16 +5059,33 @@ function orderHasOutstanding(receiptId) {
 	db.prepare("SELECT item_key FROM order_issues WHERE receipt_id = ? AND status = 'open'")
 		.all(receiptId)
 		.forEach((x) => onHold.add(x.item_key))
-	// A line with an OPEN wrong-model exchange only holds the swapped piece (the
-	// CASE) in hand — the grip/charm on the same line must still be bought, so we
+	// A line with an OPEN wrong-model exchange only holds the generation-specific
+	// piece (the CASE on iPhone; the case + attached charm on AirPods) in hand —
+	// a separately-sourced grip/charm on the same line must still be bought, so we
 	// skip only the held COMPONENTS, not the entire line. (Historically the whole
 	// line was skipped, which made a Case+Grip+Charm exchange wrongly report the
 	// order as fully in-hand while its grip/charm were still unbought.)
 	const exchangeHeld = new Map()
 	try {
-		db.prepare("SELECT item_key, components FROM order_exchanges WHERE receipt_id = ? AND status = 'open'")
+		db.prepare("SELECT item_key, components, have_model FROM order_exchanges WHERE receipt_id = ? AND status = 'open'")
 			.all(receiptId)
-			.forEach((x) => exchangeHeld.set(x.item_key, routeDashboard.exchangeHeldComponents({ needs_exchange: true, exchange_components: x.components })))
+			.forEach((x) => {
+				const it = items.find((i) => i.item_key === x.item_key)
+				const comps = (it && it.components) || []
+				exchangeHeld.set(
+					x.item_key,
+					routeDashboard.exchangeHeldComponents({
+						needs_exchange: true,
+						exchange_components: x.components,
+						exchange_have_model: x.have_model,
+						has_case: comps.includes('case'),
+						has_grip: comps.includes('grip'),
+						has_charm: comps.includes('charm'),
+						phone_model: it && it.phone_model,
+						title: it && it.title,
+					}),
+				)
+			})
 	} catch {
 		/* table may not exist yet on first run */
 	}
@@ -3974,8 +5168,8 @@ const SHOP_ISSUE_PRIORITY = ['out_of_production', 'model_unavailable']
  */
 function deriveLineContext(receiptId, itemKey) {
 	try {
-		const txns = db.prepare('SELECT title, listing_id, variations FROM transactions WHERE receipt_id = ?').all(receiptId)
-		const match = txns.find((t) => routeDashboard.lineItemKey(t.title, t.listing_id) === itemKey)
+		const txns = receiptLineRecords(receiptId)
+		const match = lineIdentity.findTransactionByLineKey(db, receiptId, txns, itemKey)
 		if (!match) return {}
 		const parsed = routeDashboard.parseVariations(match.variations)
 		// If the line was switched, any issue on it concerns the REPLACEMENT the
@@ -4160,8 +5354,11 @@ app.post('/api/orders/:receipt_id/clear-needs-purchase', (req, res) => {
  */
 app.post('/api/orders/:receipt_id/items/component-status', (req, res) => {
 	const receiptId = Number(req.params.receipt_id)
-	const { item_key: itemKey, title = null, component, status } = req.body || {}
+	const { title = null, component, status } = req.body || {}
 	const comp = String(component || '').toLowerCase()
+	// Canonicalise so a stale Orders-tab client that still holds the unsuffixed
+	// key writes the same row Shopping Mode / the Route tab already use.
+	const itemKey = lineIdentity.canonicalLineKey(db, receiptId, req.body?.item_key)
 	if (!itemKey || !['case', 'grip', 'charm'].includes(comp)) {
 		return res.status(400).json({ error: 'item_key and a valid component (case|grip|charm) are required' })
 	}
@@ -4182,6 +5379,9 @@ app.post('/api/orders/:receipt_id/items/component-status', (req, res) => {
 		// Bridge terminal statuses to the fulfilment-issue workflow, identically to
 		// the Route tab and mobile route, so on-hold state is consistent everywhere.
 		syncAssignmentIssue(receiptId, String(itemKey))
+		// Buying the corrected model IS completing a buy-shaped model fix, so close
+		// it here rather than asking for a second confirmation elsewhere.
+		settleBoughtModelFixes(receiptId, String(itemKey))
 		outstanding = recomputeNeedsPurchaseRollup(receiptId)
 	})
 	txn()
@@ -4222,8 +5422,9 @@ function verifyLine(receiptId, item, verified, by) {
  */
 app.post('/api/orders/:receipt_id/items/verify', (req, res) => {
 	const receiptId = Number(req.params.receipt_id)
-	const { item_key: itemKey, title = null } = req.body || {}
+	const { title = null } = req.body || {}
 	const verified = req.body?.verified !== false // default true
+	const itemKey = lineIdentity.canonicalLineKey(db, receiptId, req.body?.item_key)
 	if (!itemKey) return res.status(400).json({ error: 'item_key is required' })
 	const exists = db.prepare('SELECT 1 FROM receipts WHERE receipt_id = ?').get(receiptId)
 	if (!exists) return res.status(404).json({ error: 'Order not found' })
@@ -4302,8 +5503,9 @@ app.post('/api/orders/bulk-verify', (req, res) => {
  */
 app.post('/api/orders/:receipt_id/items/purchase-state', (req, res) => {
 	const receiptId = req.params.receipt_id
-	const { item_key: itemKey, title = null, needs_purchase: needsPurchase } = req.body || {}
+	const { title = null, needs_purchase: needsPurchase } = req.body || {}
 	const note = typeof req.body?.note === 'string' ? req.body.note.trim().slice(0, 500) : null
+	const itemKey = lineIdentity.canonicalLineKey(db, receiptId, req.body?.item_key)
 	if (!itemKey) return res.status(400).json({ error: 'item_key is required' })
 
 	const exists = db.prepare('SELECT 1 FROM receipts WHERE receipt_id = ?').get(receiptId)
@@ -4406,14 +5608,9 @@ function shipEtsyReceipt(receiptId, opts = {}) {
 }
 
 async function _shipEtsyReceiptImpl(receiptId, opts = {}) {
-	const tracking = (opts.tracking_code || '').trim()
-	const carrier = (opts.carrier_name || '4PX').trim()
+	const tracking = normalizeTrackingCode(opts.tracking_code)
+	const carrier = normalizeCarrierName(opts.carrier_name, { fallback: '4PX' })
 	const mode = opts.mode === 'update' ? 'update' : 'ship'
-	if (!tracking) {
-		const e = new Error('tracking_code is required')
-		e.status = 400
-		throw e
-	}
 
 	// 1. Resolve which shop this receipt belongs to (receipts store shop_id).
 	const order = db.prepare('SELECT shop_id, source, tracking_code, carrier_confirmed_at, is_shipped FROM receipts WHERE receipt_id = ?').get(receiptId)
@@ -4439,6 +5636,9 @@ async function _shipEtsyReceiptImpl(receiptId, opts = {}) {
 	// remaining ones are shipped. A DIFFERENT tracking number is treated as a
 	// genuine (re)ship and proceeds normally.
 	if (mode !== 'update' && order.is_shipped === 1 && (order.tracking_code || '').trim() === tracking) {
+		// The obligation is discharged either way — settle it so the reconciler
+		// stops carrying an order that is demonstrably already shipped.
+		etsyCompletion.markDone(db, receiptId, { trackingCode: tracking })
 		console.log(`[ship] ${order.shop_id} receipt ${receiptId} already shipped with ${tracking} — skipped (idempotent)`)
 		return { receipt_id: receiptId, tracking_code: tracking, carrier_name: carrier, skipped: true, alreadyShipped: true }
 	}
@@ -4507,7 +5707,19 @@ async function _shipEtsyReceiptImpl(receiptId, opts = {}) {
          tracking_code        = ?,
          carrier_name         = ?,
          carrier_confirmed_at = NULL,
-         tracking_checked_at  = NULL
+         tracking_checked_at  = NULL,
+         tracking_status      = NULL,
+         tracking_last_event  = NULL,
+         tracking_last_event_at = NULL,
+         tracking_last_location = NULL,
+         tracking_delivered_at = NULL,
+         tracking_health      = NULL,
+         tracking_health_reason = NULL,
+         tracking_is_disposed = 0,
+         tracking_last_error  = NULL,
+         tracking_error_at    = NULL,
+         tracking_error_count = 0,
+         tracking_next_check_at = NULL
        WHERE receipt_id = ?`,
 		).run(tracking, carrier, receiptId)
 		console.log(`[ship] ${order.shop_id} receipt ${receiptId} tracking UPDATED — new tracking: ${tracking}`)
@@ -4533,9 +5745,26 @@ async function _shipEtsyReceiptImpl(receiptId, opts = {}) {
          status               = 'Completed',
          shipment_notified_at = COALESCE(shipment_notified_at, strftime('%s','now')),
          carrier_confirmed_at = NULL,
-         tracking_checked_at  = NULL
+         tracking_checked_at  = NULL,
+         tracking_status      = NULL,
+         tracking_last_event  = NULL,
+         tracking_last_event_at = NULL,
+         tracking_last_location = NULL,
+         tracking_delivered_at = NULL,
+         tracking_health      = NULL,
+         tracking_health_reason = NULL,
+         tracking_is_disposed = 0,
+         tracking_last_error  = NULL,
+         tracking_error_at    = NULL,
+         tracking_error_count = 0,
+         tracking_next_check_at = NULL
        WHERE receipt_id = ?`,
 		).run(tracking, carrier, receiptId)
+		// Discharge the durable completion obligation, if one was recorded when the
+		// 4PX label was created. This is the ONE place every completion path
+		// converges on (ship modal, browser auto-complete, bulk complete, the
+		// background reconciler), so the ledger can never disagree with `receipts`.
+		etsyCompletion.markDone(db, receiptId, { trackingCode: tracking })
 		console.log(`[ship] ${order.shop_id} receipt ${receiptId} marked shipped — tracking: ${tracking} (now Ready-to-pack / Pre-transit)`)
 	}
 	return result
@@ -4563,6 +5792,272 @@ app.post('/api/orders/:receipt_id/ship', async (req, res) => {
 	}
 })
 
+// ─── Etsy-completion reconciler ───────────────────────────────────────────────
+//
+// The safety net behind "Ship with 4PX". Creating a 4PX label is irreversible
+// and paid; completing the order on Etsy is a SECOND call that can fail or be
+// interrupted. When it was, the order stayed in Needs-shipping with a live
+// parcel — a silent late shipment that only a human running
+// `scripts/complete-4px-pending.js` would ever fix.
+//
+// create4pxShipmentForReceipt now records a durable intent the moment the label
+// exists (src/orders/etsy-completion.js). This loop discharges those intents:
+//
+//   • runs shortly after each label is created (so an interrupted browser costs
+//     seconds, not days), and on a slow schedule as a floor,
+//   • adopts orphans — orders already stranded by older builds or the bulk CLI,
+//   • paces itself exactly like the bulk-complete flow (buyer notifications are
+//     the thing Etsy's anti-abuse systems watch), and
+//   • gives up loudly rather than silently: an intent that cannot succeed goes
+//     `dead` and the order card shows it with a one-click retry.
+//
+// Everything routes through shipEtsyReceipt, which de-duplicates concurrent
+// calls per receipt and is idempotent on the tracking number — so the browser's
+// fast path and this loop can race without ever double-notifying a buyer.
+
+/** Orders completed per sweep. Small on purpose: each one emails a buyer. */
+const ETSY_COMPLETION_SWEEP_LIMIT = 5
+
+let _etsyCompletionSweeping = false
+let _etsyCompletionTimer = null
+let _etsyCompletionTimerDueAt = null
+
+/**
+ * Request a sweep in `delaySec`. Collapses repeated requests into the EARLIEST
+ * one, so creating ten labels in a row schedules one sweep, not ten.
+ */
+function scheduleEtsyCompletionSweep(delaySec = 30) {
+	const dueAt = Date.now() + Math.max(1, delaySec) * 1000
+	if (_etsyCompletionTimer && _etsyCompletionTimerDueAt != null && _etsyCompletionTimerDueAt <= dueAt) return
+	if (_etsyCompletionTimer) clearTimeout(_etsyCompletionTimer)
+	_etsyCompletionTimerDueAt = dueAt
+	_etsyCompletionTimer = setTimeout(() => {
+		_etsyCompletionTimer = null
+		_etsyCompletionTimerDueAt = null
+		runEtsyCompletionSweep('kick').catch((err) => console.error('[completion] sweep failed:', err.message))
+	}, dueAt - Date.now())
+	// Never hold the process open for a retry timer.
+	if (typeof _etsyCompletionTimer.unref === 'function') _etsyCompletionTimer.unref()
+}
+
+/**
+ * Reconcile local state when Etsy reports the receipt is ALREADY shipped.
+ *
+ * This is a lost acknowledgement, not a failure: a previous attempt reached
+ * Etsy but its response never reached us. Re-submitting would send the buyer a
+ * second shipping email, so we mirror the outcome locally and stop. Mirrors the
+ * shipEtsyReceipt write, but preserves any tracking/carrier already recorded.
+ */
+function _reconcileAlreadyShipped(receiptId, tracking, carrier) {
+	db.prepare(
+		`UPDATE receipts SET
+       is_shipped           = 1,
+       tracking_code        = COALESCE(tracking_code, @tracking),
+       carrier_name         = COALESCE(carrier_name, @carrier),
+       status               = 'Completed',
+       shipment_notified_at = COALESCE(shipment_notified_at, strftime('%s','now')),
+       carrier_confirmed_at = NULL,
+       tracking_checked_at  = NULL
+     WHERE receipt_id = @receiptId`,
+	).run({ receiptId: Number(receiptId), tracking: tracking || null, carrier: carrier || '4PX' })
+	etsyCompletion.markDone(db, receiptId, { trackingCode: tracking })
+}
+
+/**
+ * Discharge ONE completion obligation.
+ *
+ * Shared by the background sweep and the operator's "Complete now" button so
+ * both behave identically — there is one implementation of "finish this order",
+ * and it always leaves the ledger and `receipts` agreeing with each other.
+ *
+ * @param {object} intent  A row from etsy_completion_intents.
+ * @returns {Promise<{ outcome: 'completed'|'already'|'skipped'|'retry'|'dead', message: string }>}
+ */
+async function dischargeCompletionIntent(intent) {
+	const rid = Number(intent.receipt_id)
+	const row = db.prepare('SELECT receipt_id, shop_id, status, is_shipped, source, tracking_code, carrier_name, fourpx_tracking_no, fourpx_consignment_no FROM receipts WHERE receipt_id = ?').get(rid)
+
+	if (!row) {
+		etsyCompletion.markFailed(db, rid, { error: 'The order no longer exists in the local database.', permanent: true })
+		return { outcome: 'dead', message: 'Order not found locally.' }
+	}
+	// Someone else finished it (ship modal, a sync, the bulk flow) — the
+	// obligation is discharged regardless of who discharged it.
+	if (row.is_shipped) {
+		etsyCompletion.markDone(db, rid)
+		return { outcome: 'already', message: 'Already completed.' }
+	}
+	// A cancelled or fully refunded order must never be shipped, and nothing is
+	// broken — retire the intent quietly instead of dead-lettering it.
+	if (etsyCompletion.isTerminalStatus(row.status)) {
+		etsyCompletion.markSkipped(db, rid, { reason: `Order is ${row.status}` })
+		return { outcome: 'skipped', message: `Order is ${row.status}.` }
+	}
+
+	const carrier = intent.carrier_name || '4PX'
+	const tracking = String(intent.tracking_code || '').trim() || etsyCompletion.resolveTracking(row)
+	if (!tracking) {
+		etsyCompletion.markFailed(db, rid, { error: 'No 4PX tracking number is recorded for this order.', permanent: true })
+		return { outcome: 'dead', message: 'No tracking number to complete with.' }
+	}
+
+	try {
+		if (row.source === 'manual') {
+			// Manual orders have no Etsy counterpart; completing them is a local write.
+			setManualOrderShipped(db, rid, true)
+			etsyCompletion.markDone(db, rid, { trackingCode: tracking })
+			console.log(`[completion] receipt ${rid} (manual) marked shipped — tracking ${tracking}`)
+			return { outcome: 'completed', message: 'Marked shipped.' }
+		}
+		// pacedBulk: this loop owns its own pacing (below), so the ad-hoc hourly
+		// ship cap must not block a recovery that only exists because an order is
+		// ALREADY late. recordShip() still accounts for it.
+		await shipEtsyReceipt(rid, { tracking_code: tracking, carrier_name: carrier, pacedBulk: true })
+		etsyCompletion.markDone(db, rid, { trackingCode: tracking })
+		return { outcome: 'completed', message: 'Completed on Etsy.' }
+	} catch (err) {
+		const { alreadyShipped, permanent, message } = etsyCompletion.classifyCompletionError(err)
+		if (alreadyShipped) {
+			_reconcileAlreadyShipped(rid, tracking, carrier)
+			console.log(`[completion] receipt ${rid} was already shipped on Etsy — reconciled locally`)
+			return { outcome: 'already', message: 'Already shipped on Etsy — reconciled.' }
+		}
+		const next = etsyCompletion.markFailed(db, rid, { error: message, permanent })
+		if (next.state === etsyCompletion.STATE.DEAD) {
+			console.error(`[completion] receipt ${rid} DEAD after ${next.attempts} attempt(s) — needs an operator: ${message}`)
+			return { outcome: 'dead', message }
+		}
+		console.warn(`[completion] receipt ${rid} attempt ${next.attempts} failed (${message}) — retrying in ${next.nextAttemptAt - Math.floor(Date.now() / 1000)}s`)
+		return { outcome: 'retry', message }
+	}
+}
+
+/**
+ * One pass of the reconciler: adopt stranded orders, then complete a small,
+ * paced batch of everything that is due.
+ *
+ * Single-flight — a slow pass never stacks on itself. Cross-process safety
+ * comes from the leases in the ledger, so a standalone worker sharing this DB
+ * cannot double-claim the same order.
+ *
+ * @param {string} [trigger]  'startup' | 'scheduled' | 'kick' | 'manual'
+ */
+async function runEtsyCompletionSweep(trigger = 'scheduled') {
+	if (_etsyCompletionSweeping) return { skipped: true, reason: 'A completion sweep is already running.' }
+	_etsyCompletionSweeping = true
+	const startedAt = Date.now()
+	const stats = { adopted: 0, attempted: 0, completed: 0, already: 0, skipped: 0, retry: 0, dead: 0 }
+
+	try {
+		try {
+			stats.adopted = etsyCompletion.adoptOrphans(db)
+			if (stats.adopted) console.log(`[completion] adopted ${stats.adopted} order(s) that hold a 4PX label but were never completed on Etsy`)
+		} catch (err) {
+			console.error('[completion] orphan adoption failed:', err.message)
+		}
+
+		const claimed = etsyCompletion.claimDue(db, { limit: ETSY_COMPLETION_SWEEP_LIMIT })
+		for (const [idx, intent] of claimed.entries()) {
+			// Same cadence as the bulk-complete flow: a burst of buyer ship
+			// notifications is the anti-abuse signal we must not emit.
+			if (idx > 0) await complianceSleep(BULK_SHIP_INTER_REQUEST_MS)
+			stats.attempted++
+			try {
+				const { outcome } = await dischargeCompletionIntent(intent)
+				stats[outcome] = (stats[outcome] || 0) + 1
+			} catch (err) {
+				// dischargeCompletionIntent handles its own failures; anything reaching
+				// here is a bug, and must not abandon the leases of the remaining batch.
+				stats.retry++
+				etsyCompletion.releaseClaim(db, intent.receipt_id)
+				console.error(`[completion] unexpected error on receipt ${intent.receipt_id}:`, err.message)
+			}
+		}
+
+		// Hit the per-sweep cap → there is a backlog. Come back for it soon rather
+		// than waiting out the full interval, still one paced batch at a time.
+		if (claimed.length >= ETSY_COMPLETION_SWEEP_LIMIT) scheduleEtsyCompletionSweep(60)
+
+		if (stats.attempted || stats.adopted) {
+			console.log(`[completion] ${trigger} sweep — completed ${stats.completed}, already ${stats.already}, skipped ${stats.skipped}, retrying ${stats.retry}, dead ${stats.dead} (${Date.now() - startedAt}ms)`)
+		}
+	} finally {
+		_etsyCompletionSweeping = false
+	}
+	return { skipped: false, ...stats }
+}
+
+/**
+ * POST /api/orders/:receipt_id/complete-with-4px
+ *
+ * Finish an order that already has a 4PX label but is not yet completed on
+ * Etsy — the retry behind the order card's "Finish on Etsy" button, and the way
+ * an operator discharges an intent the reconciler dead-lettered or never
+ * adopted (a stale label outside the automatic window).
+ *
+ * Runs the completion INLINE so the operator gets a real answer instead of
+ * "queued", and re-arms the ledger first so a failure is still owned durably.
+ */
+app.post('/api/orders/:receipt_id/complete-with-4px', async (req, res) => {
+	const rid = Number(req.params.receipt_id)
+	if (!Number.isInteger(rid)) return res.status(400).json({ error: 'Invalid order id.' })
+
+	try {
+		const row = db.prepare('SELECT receipt_id, status, is_shipped, source, tracking_code, fourpx_tracking_no, fourpx_consignment_no FROM receipts WHERE receipt_id = ?').get(rid)
+		if (!row) return res.status(404).json({ error: 'Order not found.' })
+		if (row.is_shipped) {
+			etsyCompletion.markDone(db, rid)
+			return res.json({ success: true, receipt_id: rid, outcome: 'already', message: 'This order is already completed.' })
+		}
+		if (etsyCompletion.isTerminalStatus(row.status)) {
+			return res.status(409).json({ error: `This order is ${row.status} and must not be shipped.`, code: 'ORDER_TERMINAL' })
+		}
+		const tracking = etsyCompletion.resolveTracking(row)
+		if (!tracking) {
+			return res.status(409).json({ error: 'This order has no 4PX tracking number yet — create the 4PX shipment first.', code: 'NO_TRACKING' })
+		}
+
+		// revive: an operator asking again is exactly the signal that clears a
+		// dead-lettered intent and gives it a fresh attempt budget.
+		const { intent } = etsyCompletion.enqueue(db, { receiptId: rid, trackingCode: tracking, origin: 'operator', graceSec: 0, expedite: true, revive: true })
+		const { outcome, message } = await dischargeCompletionIntent(intent)
+
+		if (outcome === 'completed' || outcome === 'already') {
+			return res.json({ success: true, receipt_id: rid, outcome, tracking_code: tracking, message })
+		}
+		if (outcome === 'skipped') return res.status(409).json({ error: message, outcome, code: 'ORDER_TERMINAL' })
+		// Still owed: the ledger keeps retrying in the background, so say so.
+		return res.status(502).json({ error: message, outcome, receipt_id: rid, retrying: outcome === 'retry' })
+	} catch (err) {
+		console.error(`[completion] manual completion of receipt ${rid} failed:`, err.message)
+		res.status(err.status || 500).json({ error: err.message })
+	}
+})
+
+/**
+ * POST /api/orders/complete-pending-4px
+ *
+ * Run the reconciler now and report what it did. Powers the Needs-shipping
+ * banner's "Finish them now" action; identical work to the scheduled sweep, so
+ * pressing it can never produce a different outcome than waiting would.
+ */
+app.post('/api/orders/complete-pending-4px', async (req, res) => {
+	try {
+		const result = await runEtsyCompletionSweep('manual')
+		// `stranded` is the same figure the banner renders, so the toast the
+		// operator reads after pressing the button can never contradict the banner
+		// that is still on screen behind it.
+		res.json({
+			success: !result.skipped,
+			...result,
+			pending: { ...etsyCompletion.summarize(db), stranded: etsyCompletion.countStranded(db) },
+		})
+	} catch (err) {
+		console.error('[completion] manual sweep failed:', err.message)
+		res.status(500).json({ error: err.message })
+	}
+})
+
 /**
  * POST /api/orders/:receipt_id/update-tracking
  * Body: { tracking_code, carrier_name?, note_to_buyer? }
@@ -4583,10 +6078,7 @@ app.post('/api/orders/:receipt_id/update-tracking', async (req, res) => {
 	const { tracking_code, carrier_name = '4PX', note_to_buyer = '' } = req.body
 
 	try {
-		const tracking = (tracking_code || '').trim()
-		if (!tracking) {
-			return res.status(400).json({ error: 'A tracking number is required.' })
-		}
+		const tracking = normalizeTrackingCode(tracking_code)
 
 		// Load current state to validate the edit is sensible BEFORE calling Etsy.
 		const row = db.prepare('SELECT is_shipped, status, tracking_code, shipment_notified_at, carrier_confirmed_at FROM receipts WHERE receipt_id = ?').get(receipt_id)
@@ -4664,6 +6156,7 @@ function get4pxCredentials() {
  */
 app.get('/api/4px/config', (_req, res) => {
 	const hasCreds = !!(config.fourpx_app_key && config.fourpx_app_secret)
+	const shipmentIoss = destinationTax.resolveShipmentIoss(config)
 	res.json({
 		enabled: hasCreds,
 		hasSender: !!config.fourpx_sender,
@@ -4673,9 +6166,20 @@ app.get('/api/4px/config', (_req, res) => {
 		// catalogue offers it; countryDefaultProducts + defaultProduct are fallbacks.
 		preferredProduct: FOURPX_POSTLINK_S5058_CODE,
 		countryDefaultProducts: FOURPX_COUNTRY_DEFAULT_PRODUCT,
-		// EU IOSS: whether a number is configured + the destinations it applies to,
-		// so the bulk wizard can reassure the operator that EU customs is handled.
-		iossConfigured: !!config.fourpx_ioss_no,
+		// ── Express lanes ─────────────────────────────────────────────────────────
+		// POSTLINK-LW above is the ECONOMY default. On an order the buyer paid to
+		// upgrade (Etsy `shipping_upgrade`) the drawer pre-selects from these
+		// instead, strongest first, and warns if the operator picks a slower lane.
+		// Server-side resolution uses the very same tables (resolveLogisticsProduct
+		// with expedited: true), so the pre-selection and the booked lane agree.
+		expressProducts: FOURPX_EXPRESS_WORLDWIDE,
+		expressProductsByCountry: FOURPX_EXPRESS_BY_COUNTRY,
+		// EU IOSS: whether a number will actually be transmitted + the destinations
+		// it applies to, so the bulk wizard can reassure the operator that EU
+		// customs is handled. This reflects the RESOLVED number (config override or
+		// registry value), not merely whether config.json names one.
+		iossConfigured: !!shipmentIoss.value,
+		iossSource: shipmentIoss.source,
 		iossCountries: [...FOURPX_IOSS_COUNTRIES],
 		sender: config.fourpx_sender
 			? {
@@ -4832,6 +6336,10 @@ app.get('/api/4px/products', async (req, res) => {
 				tier: 'recommended',
 				service_tier: p.tier,
 				recommended: true,
+				// Is this lane fast enough to honour a buyer-paid shipping upgrade?
+				// Decided by the same module that picks the express default, so the
+				// picker's "Express" marks and the pre-selection cannot disagree.
+				express: isExpressProduct(p),
 				fee: price?.fee ?? null,
 				currency: price?.currency ?? null,
 				estimated_time: price?.estimatedTime ?? null,
@@ -4853,11 +6361,17 @@ app.get('/api/4px/products', async (req, res) => {
 			seen.add(l.code.toUpperCase())
 			const price = { fee: Number.isFinite(l.fee) ? l.fee : null, currency: config.fourpx_settlement_currency || 'CNY', estimatedTime: l.eta }
 			const suffix = _fpxPriceSuffix(price)
+			const etaTier = _fpxTierFromEta(l.eta)
+			const name = nameByCode.get(l.code.toUpperCase()) || l.code
 			products.push({
 				logistics_product_code: l.code,
-				logistics_product_name: nameByCode.get(l.code.toUpperCase()) || l.code,
+				logistics_product_name: name,
 				description: suffix || undefined,
-				tier: _fpxTierFromEta(l.eta),
+				tier: etaTier,
+				// An uncurated lane qualifies as express on either signal: 4PX's own
+				// product naming, or a rate-card ETA fast enough to honour an upgrade
+				// (_fpxTierFromEta's 'express' band = 8 days or fewer).
+				express: etaTier === 'express' || isExpressProduct({ logistics_product_code: l.code, logistics_product_name: name }),
 				fee: price.fee,
 				currency: price.currency,
 				estimated_time: price.estimatedTime,
@@ -4908,6 +6422,14 @@ app.get('/api/4px/order/:receipt_id', (req, res) => {
 		.get(receipt_id)
 
 	if (!row) return res.status(404).json({ error: 'Receipt not found' })
+	if (row.fourpx_order_status === 'cancelled') {
+		return res.json({
+			exists: false,
+			cancelled: true,
+			previous_consignment_no: row.fourpx_consignment_no,
+			previous_tracking_no: row.fourpx_tracking_no,
+		})
+	}
 	if (!row.fourpx_consignment_no) {
 		return res.json({ exists: false })
 	}
@@ -5122,7 +6644,45 @@ function annotate4pxOrderError(err, receipt_id) {
 	return err
 }
 
-async function create4pxShipmentForReceipt({ appKey, appSecret, receipt_id, recipient, parcel, logistics_product_code, duty_type = 'U', mark_packaged = false }) {
+// Single-flight by receipt. A double-click, two tabs, or the bulk worker must
+// never pass the local preflight twice. Concurrent callers may carry different
+// shipping options, so reject the later request rather than silently returning
+// the first request's result as though its payload had been applied.
+const _fourpxCreateInFlight = new Map()
+const FOURPX_CREATE_LOCK_OWNER = `${os.hostname()}:${process.pid}`
+const FOURPX_CREATE_LOCK_TTL_SEC = 10 * 60
+
+async function create4pxShipmentForReceipt(input) {
+	const key = input && input.receipt_id != null ? String(input.receipt_id) : null
+	if (!key) return _create4pxShipmentForReceipt(input || {})
+	if (_fourpxCreateInFlight.has(key)) {
+		const e = new Error(`A 4PX shipment is already being created for receipt ${key}.`)
+		e.status = 409
+		e.code = 'FOURPX_CREATE_IN_FLIGHT'
+		throw e
+	}
+	const lockName = `fourpx_create:${key}`
+	if (!acquireLock(db, lockName, FOURPX_CREATE_LOCK_OWNER, FOURPX_CREATE_LOCK_TTL_SEC)) {
+		const e = new Error(`Another dashboard process is already creating a 4PX shipment for receipt ${key}.`)
+		e.status = 409
+		e.code = 'FOURPX_CREATE_LOCKED'
+		throw e
+	}
+	const pending = _create4pxShipmentForReceipt(input)
+	_fourpxCreateInFlight.set(key, pending)
+	try {
+		return await pending
+	} finally {
+		if (_fourpxCreateInFlight.get(key) === pending) _fourpxCreateInFlight.delete(key)
+		try {
+			releaseLock(db, lockName, FOURPX_CREATE_LOCK_OWNER)
+		} catch (err) {
+			console.warn(`[4px] could not release create lock for receipt ${key}: ${err.message}`)
+		}
+	}
+}
+
+async function _create4pxShipmentForReceipt({ appKey, appSecret, receipt_id, recipient, parcel, logistics_product_code, duty_type = 'U', mark_packaged = false }) {
 	if (!receipt_id) {
 		const e = new Error('receipt_id is required')
 		e.status = 400
@@ -5138,14 +6698,29 @@ async function create4pxShipmentForReceipt({ appKey, appSecret, receipt_id, reci
 		e.status = 400
 		throw e
 	}
+	// Did the buyer pay Etsy extra for faster shipping? Read from OUR row rather
+	// than from the request, because this decides which lane a paid label is
+	// booked on: a caller — bulk worker, retry job, API client — must not be able
+	// to downgrade an express parcel by omitting or spoofing a flag. Best-effort:
+	// a lookup failure means we ship exactly as before, never that we fail to ship.
+	let isExpedited = false
+	try {
+		isExpedited = db.prepare('SELECT is_expedited FROM receipts WHERE receipt_id = ?').get(receipt_id)?.is_expedited === 1
+	} catch (err) {
+		console.warn(`[4px] could not read express flag for receipt ${receipt_id}: ${err.message}`)
+	}
+
 	// Server-side default (defense in depth): when a caller omits the product,
 	// fall back to POSTLINK-LW (S5058) if the destination supports it, else QC —
 	// the same preference the drawer pre-selects. Keeps the default correct even
-	// for API clients / retry jobs that never went through the UI.
+	// for API clients / retry jobs that never went through the UI. On an EXPRESS
+	// order the express chain replaces that default, because POSTLINK-LW is the
+	// economy lane and would silently undo the upgrade the buyer paid for.
 	if (!logistics_product_code) {
 		logistics_product_code = resolveLogisticsProduct({
 			country: recipient?.country,
 			configDefault: config.fourpx_default_product ?? null,
+			expedited: isExpedited,
 		})
 	}
 	if (!logistics_product_code) {
@@ -5165,18 +6740,47 @@ async function create4pxShipmentForReceipt({ appKey, appSecret, receipt_id, reci
 	}
 
 	// Idempotency: never create a second 4PX order for the same receipt.
-	const order = db.prepare('SELECT receipt_id, shop_id, source, buyer_email, fourpx_consignment_no, fourpx_tracking_no FROM receipts WHERE receipt_id = ?').get(receipt_id)
+	const order = db
+		.prepare(
+			`
+		SELECT receipt_id, shop_id, source, buyer_email, packaged_at,
+		       fourpx_ref_no, fourpx_consignment_no, fourpx_tracking_no,
+		       fourpx_order_status
+		FROM receipts WHERE receipt_id = ?
+	`,
+		)
+		.get(receipt_id)
 	if (!order) {
 		const e = new Error(`Receipt ${receipt_id} not found`)
 		e.status = 404
 		throw e
 	}
-	if (order.fourpx_consignment_no) {
+	const referencePlan = planShipOrderReference({
+		source: order.source,
+		receiptId: receipt_id,
+		previousRef: order.fourpx_ref_no,
+		orderStatus: order.fourpx_order_status,
+		hasConsignment: !!order.fourpx_consignment_no,
+	})
+	const { refNo, replacingCancelled, retryingPendingRef } = referencePlan
+	if (order.fourpx_consignment_no && !replacingCancelled) {
 		const e = new Error(`A 4PX shipment was already created for receipt ${receipt_id}.`)
 		e.status = 409
 		e.consignment_no = order.fourpx_consignment_no
 		e.trackingNo = order.fourpx_tracking_no
 		throw e
+	}
+	// `mark_packaged` is the same physical seal action as the dedicated endpoint.
+	// Enforce the shared purchase/issue/exchange invariant before making any 4PX
+	// side effect. Existing packaged rows remain grandfathered and idempotent.
+	if (mark_packaged && !order.packaged_at) {
+		const reason = unsealableReasons([receipt_id]).get(Number(receipt_id))
+		if (reason) {
+			const e = new Error(`Can't mark this order packaged — it ${reason}. Finish it first.`)
+			e.status = 409
+			e.code = 'NOT_SEALABLE'
+			throw e
+		}
 	}
 
 	const destCountry = (recipient?.country || '').toUpperCase()
@@ -5201,16 +6805,22 @@ async function create4pxShipmentForReceipt({ appKey, appSecret, receipt_id, reci
 
 	const taxCompliance = {}
 	if (isEuDestination) {
-		if (config.fourpx_ioss_no) taxCompliance.ioss_no = config.fourpx_ioss_no
+		// The IOSS number the packing bench shows for this destination is the same
+		// one transmitted here: an install that never set fourpx_ioss_no now falls
+		// back to the reviewed registry value instead of shipping without one and
+		// having 4PX reject the order (IOSS号 required).
+		const ioss = destinationTax.resolveShipmentIoss(config)
+		if (ioss.value) taxCompliance.ioss_no = ioss.value
+		else console.warn(`[4px] receipt ${receipt_id} ships to EU country ${destCountry} but no IOSS number could be resolved — ` + 'set fourpx_ioss_no (or marketplace_tax_ids.EU_IOSS) in config.json; 4PX may reject the order.')
 		if (config.fourpx_vat_no) taxCompliance.vat_no = config.fourpx_vat_no
 		if (config.fourpx_eori_no) taxCompliance.eori_no = config.fourpx_eori_no
 	}
 	// Recipient tax id (e.g. MX RFC) is supplied at the order-level vat_no field.
+	// NB: non-EU marketplace identifiers (UK VAT, VOEC, …) are deliberately NOT
+	// written here. 4PX reads vat_no as the party tax id for the lane, and the
+	// destination guidance for those schemes is a customs-form entry rather than a
+	// field in this payload — see src/compliance/destination-tax.js.
 	if (recipientVatNo) taxCompliance.vat_no = recipientVatNo
-
-	if (isEuDestination && !config.fourpx_ioss_no) {
-		console.warn(`[4px] receipt ${receipt_id} ships to EU country ${destCountry} but fourpx_ioss_no ` + `is not set in config.json — 4PX may reject the order (IOSS号 required).`)
-	}
 
 	// ── Recipient enrichment ─────────────────────────────────────────────────────
 	// Email: 4PX requires recipient_info.email for all Etsy-sourced shipments and
@@ -5218,8 +6828,15 @@ async function create4pxShipmentForReceipt({ appKey, appSecret, receipt_id, reci
 	//   1. Caller-supplied recipient.email (e.g. from the UI form)
 	//   2. buyer_email stored in the receipts row (synced from Etsy at order time)
 	//   3. Explicit override from config (fourpx_default_recipient_email)
-	//   4. Hard fallback — the shop owner's contact address
-	const recipientEmail = (recipient.email || '').trim() || (order.buyer_email || '').trim() || (config.fourpx_default_recipient_email || '').trim() || 'w088studio@gmail.com'
+	//   4. The configured shop owner's contact address
+	const shopContact = getAllShops(config).find((shop) => String(shop.shop_id) === String(order.shop_id))?.owner_email
+	const recipientEmail = (recipient.email || '').trim() || (order.buyer_email || '').trim() || (config.fourpx_default_recipient_email || '').trim() || String(shopContact || '').trim()
+	if (!recipientEmail) {
+		const e = new Error('4PX requires a recipient email, but Etsy did not return one. ' + 'Enter it for this shipment or set fourpx_default_recipient_email in config.json.')
+		e.status = 422
+		e.code = 'RECIPIENT_EMAIL_REQUIRED'
+		throw e
+	}
 
 	const enrichedRecipient = {
 		...recipient,
@@ -5262,47 +6879,225 @@ async function create4pxShipmentForReceipt({ appKey, appSecret, receipt_id, reci
 		console.warn(`[4px] product validation skipped for receipt ${receipt_id}: ${err.message}`)
 	}
 
-	// Customer reference 4PX echoes back. Manual orders use a MANUAL- prefix with
-	// the absolute id (the raw id is negative) so the ref stays human-readable and
-	// never looks like a real Etsy receipt.
-	const refNo = order.source === 'manual' ? `MANUAL-${Math.abs(receipt_id)}` : `ETSY-${receipt_id}`
+	// ── Express downgrade trail ──────────────────────────────────────────────────
+	// The operator has already been warned in the drawer, and a lane can be chosen
+	// deliberately (weight, battery, cost), so this NEVER blocks the shipment — but
+	// booking a paid express order onto an economy lane is the failure this whole
+	// feature exists to prevent, so it must leave a trail somewhere a "why did this
+	// buyer get 20-day post?" question can be answered from.
+	if (isExpedited) {
+		const advisory = assessExpressChoice({ country: destCountry, selectedCode: logistics_product_code, expedited: true })
+		if (advisory.downgraded) {
+			console.warn(`[4px] receipt ${receipt_id} is EXPRESS (buyer paid to upgrade) but is being booked on "${logistics_product_code}", which is not an express lane` + (advisory.recommended ? `; recommended ${advisory.recommended}.` : '.'))
+		}
+	}
 
-	let result
-	try {
-		result = await createShipOrder(appKey, appSecret, {
-			ref_no: refNo,
-			logistics_product_code,
-			warehouse_code: config.fourpx_warehouse_code ?? undefined,
-			deliver_type: '3',
-			sender: config.fourpx_sender,
-			recipient: enrichedRecipient,
-			parcels: [parcel],
-			duty_type,
-			sales_platform: 'ETSY',
-			trade_id: receipt_id,
-			...taxCompliance,
+	// Persist the deterministic reference before the external side effect. If the
+	// process loses the response or crashes, the next attempt probes this exact
+	// reference instead of inventing a second order.
+	let activeRefNo = refNo
+	db.prepare('UPDATE receipts SET fourpx_ref_no = ? WHERE receipt_id = ?').run(activeRefNo, receipt_id)
+
+	let result = null
+	// The product we ultimately booked (may differ from the caller's choice when
+	// the US remote/island ZIP fallback kicks in — S5058 → S5118). Persisted below
+	// so freight pricing and the order card name the lane that actually shipped.
+	let bookedProductCode = String(logistics_product_code)
+	let productFallback = null
+	if (retryingPendingRef) {
+		try {
+			result = normalizeShipOrderResponse(await getShipOrder(appKey, appSecret, activeRefNo), activeRefNo)
+			if (result) {
+				console.warn(`[4px] receipt ${receipt_id} adopted pending order ${result.dsConsignmentNo || result.trackingNo}.`)
+			}
+		} catch {
+			// Not found (or temporarily unavailable): use the same persisted ref
+			// for the create call below, so 4PX remains the duplicate authority.
+		}
+	}
+
+	const shipOrderPayload = (productCode, useRef = activeRefNo) => ({
+		ref_no: useRef,
+		logistics_product_code: productCode,
+		warehouse_code: config.fourpx_warehouse_code ?? undefined,
+		deliver_type: '3',
+		sender: config.fourpx_sender,
+		recipient: enrichedRecipient,
+		parcels: [parcel],
+		duty_type,
+		sales_platform: 'ETSY',
+		trade_id: receipt_id,
+		...taxCompliance,
+	})
+
+	const persistActiveRef = (nextRef) => {
+		activeRefNo = nextRef
+		db.prepare('UPDATE receipts SET fourpx_ref_no = ? WHERE receipt_id = ?').run(activeRefNo, receipt_id)
+	}
+
+	// After a create failure, probe by our deterministic ref_no before giving up.
+	// A transport blip can leave the order committed on 4PX's side with no response
+	// reaching us; adopting it prevents a later retry from opening a second consignment.
+	const adoptExistingOrNull = async (context, probeRef = activeRefNo) => {
+		try {
+			const adopted = normalizeShipOrderResponse(await getShipOrder(appKey, appSecret, probeRef), probeRef)
+			if (adopted) {
+				console.warn(`[4px] receipt ${receipt_id} ${context}; adopted existing order ${adopted.dsConsignmentNo || adopted.trackingNo}.`)
+			}
+			return adopted || null
+		} catch (probeErr) {
+			console.warn(`[4px] receipt ${receipt_id} create reconciliation failed: ${probeErr.message}`)
+			return null
+		}
+	}
+
+	// DS000007 ("Ref_no in processing"): wait briefly and poll. The create may
+	// still commit; adopting beats inventing a second consignment. Used both for
+	// ambiguous first creates and for the island-ZIP S5118 retry.
+	const waitAndAdoptRef = async (probeRef = activeRefNo, { attempts = 4, delayMs = 1500 } = {}) => {
+		for (let i = 0; i < attempts; i++) {
+			if (i > 0) await complianceSleep(delayMs)
+			const adopted = await adoptExistingOrNull(`ref-in-processing poll ${i + 1}/${attempts}`, probeRef)
+			if (adopted) return adopted
+		}
+		return null
+	}
+
+	/** Book US-ISLAND-PH (S5118) on a FRESH ref after S5058 rejected an island ZIP
+	 *  AND the recipient address independently confirms an S5118 territory. */
+	const createWithIslandZipFallback = async (fallbackCode, fromCode) => {
+		// Fresh ref — a rejected S5058 create can leave the original ref "in
+		// processing" (DS000007) for several seconds even though no consignment
+		// was committed. Reusing that ref for S5118 is exactly the Failed row
+		// operators were seeing in bulk ("already being submitted to 4PX").
+		const islandRef = mintShipOrderFallbackRef(referencePlan.baseRef, 'ISL')
+		persistActiveRef(islandRef)
+		console.warn(`[4px] receipt ${receipt_id}: ${fromCode} rejected for remote/island ZIP — address confirmed S5118 territory — auto-retrying with ${fallbackCode} (US-ISLAND-PH) on ref ${islandRef}`)
+
+		const markFallback = () => {
+			productFallback = {
+				from: fromCode,
+				to: fallbackCode,
+				reason: 'remote_island_zip',
+			}
+			bookedProductCode = fallbackCode
+		}
+
+		try {
+			const created = await createShipOrder(appKey, appSecret, shipOrderPayload(fallbackCode))
+			markFallback()
+			return created
+		} catch (retryErr) {
+			let adopted = await adoptExistingOrNull('island-ZIP fallback response was ambiguous')
+			if (!adopted && isRefInProcessingRejection(retryErr)) {
+				console.warn(`[4px] receipt ${receipt_id}: S5118 create hit DS000007 on ${islandRef} — waiting for 4PX to release/commit the ref`)
+				adopted = await waitAndAdoptRef(islandRef)
+				if (!adopted) {
+					await complianceSleep(2000)
+					try {
+						const created = await createShipOrder(appKey, appSecret, shipOrderPayload(fallbackCode))
+						markFallback()
+						return created
+					} catch (retryErr2) {
+						adopted = (await waitAndAdoptRef(islandRef)) || (await adoptExistingOrNull('island-ZIP fallback second attempt ambiguous', islandRef))
+						if (!adopted) throw annotate4pxOrderError(retryErr2, receipt_id)
+					}
+				}
+			}
+			if (!adopted) throw annotate4pxOrderError(retryErr, receipt_id)
+			// Adopted an order that landed while we waited — still record the
+			// intended product switch so the wizard/audit trail stays honest.
+			markFallback()
+			return adopted
+		}
+	}
+
+	/** Resolve S5118 fallback only when error + address both qualify. */
+	const resolveIslandFallback = (err) =>
+		resolveUsIslandZipFallback({
+			country: destCountry,
+			selectedCode: bookedProductCode,
+			error: err,
+			postCode: enrichedRecipient.post_code || recipient.post_code || '',
+			state: enrichedRecipient.state || recipient.state || '',
 		})
+
+	try {
+		if (!result) result = await createShipOrder(appKey, appSecret, shipOrderPayload(bookedProductCode))
 	} catch (err) {
-		throw annotate4pxOrderError(err, receipt_id)
+		result = await adoptExistingOrNull('create response was ambiguous')
+		// DS000007 on the first attempt: poll before any product switch. A
+		// concurrent tab / prior bulk run may still be committing this ref.
+		if (!result && isRefInProcessingRejection(err)) {
+			console.warn(`[4px] receipt ${receipt_id}: ${bookedProductCode} hit DS000007 on ${activeRefNo} — waiting to adopt or free the ref`)
+			result = await waitAndAdoptRef(activeRefNo)
+			if (!result) {
+				// Ref stuck in processing with no order — mint a fresh ref and
+				// recreate. If the destination is a confirmed US island ZIP, this
+				// create surfaces 010109005 and the island fallback below takes over.
+				const freedRef = mintShipOrderFallbackRef(referencePlan.baseRef, 'P')
+				persistActiveRef(freedRef)
+				console.warn(`[4px] receipt ${receipt_id}: ref still processing with no order — recreating on ${freedRef}`)
+				try {
+					result = await createShipOrder(appKey, appSecret, shipOrderPayload(bookedProductCode))
+				} catch (err2) {
+					result = await adoptExistingOrNull('recreate after DS000007 was ambiguous')
+					if (!result) {
+						const fallbackCode = resolveIslandFallback(err2)
+						if (fallbackCode) {
+							result = await createWithIslandZipFallback(fallbackCode, bookedProductCode)
+						} else if (isRefInProcessingRejection(err2)) {
+							result = await waitAndAdoptRef(activeRefNo)
+							if (!result) throw annotate4pxOrderError(err2, receipt_id)
+						} else {
+							throw annotate4pxOrderError(err2, receipt_id)
+						}
+					}
+				}
+			}
+		}
+		if (!result) {
+			// US island / remote ZIP: S5058 rejects HI/AK/GU/PR/VI ZIPs with
+			// 010109005 — but only auto-retry on S5118 when the address itself
+			// confirms an S5118 territory (see resolveUsIslandZipFallback).
+			const fallbackCode = resolveIslandFallback(err)
+			if (fallbackCode) {
+				result = await createWithIslandZipFallback(fallbackCode, bookedProductCode)
+			} else {
+				throw annotate4pxOrderError(err, receipt_id)
+			}
+		}
 	}
 
 	// Persist immediately — tracking number is now available even before label fetch.
 	upsertFourpxShipment(db, receipt_id, {
+		refNo: activeRefNo,
 		consignmentNo: result.dsConsignmentNo,
 		trackingNo: result.trackingNo,
 		status: 'created',
+		replaceExisting: replacingCancelled,
 	})
 
 	// Capture the product + declared weight so the freight pass can price this order
 	// via ds.xms.estimated_cost.get (and reconcile to the billed cost later).
 	recordFourpxShipmentInputs(db, receipt_id, {
-		productCode: logistics_product_code || null,
+		productCode: bookedProductCode || null,
 		weightG: parcel && Number.isFinite(parcel.weight_g) ? parcel.weight_g : parcel && Number.isFinite(parcel.weight) ? parcel.weight : null,
+		replaceExisting: replacingCancelled,
 	})
 
 	// Mirror into the main tracking_code field so pre-transit detection picks it up.
 	if (result.trackingNo) {
-		db.prepare('UPDATE receipts SET tracking_code = ?, carrier_name = ? WHERE receipt_id = ? AND tracking_code IS NULL').run(result.trackingNo, '4PX', receipt_id)
+		db.prepare(
+			`
+			UPDATE receipts SET tracking_code = ?, carrier_name = ?
+			WHERE receipt_id = ?
+			  AND (
+			    tracking_code IS NULL
+			    OR (? = 1 AND (tracking_code = ? OR UPPER(COALESCE(carrier_name, '')) LIKE '4PX%'))
+			  )
+		`,
+		).run(result.trackingNo, '4PX', receipt_id, replacingCancelled ? 1 : 0, order.fourpx_tracking_no)
 	}
 
 	// ── Packaging is DECOUPLED from shipping ─────────────────────────────────────
@@ -5318,8 +7113,32 @@ async function create4pxShipmentForReceipt({ appKey, appSecret, receipt_id, reci
 		db.prepare('UPDATE receipts SET packaged_at = COALESCE(packaged_at, ?) WHERE receipt_id = ?').run(Math.floor(Date.now() / 1000), receipt_id)
 	}
 
-	console.log(`[4px] Created shipment for receipt ${receipt_id} — ` + `tracking: ${result.trackingNo}, consignment: ${result.dsConsignmentNo}` + `${mark_packaged ? ' (marked packaged)' : ' (not packaged — label only)'}`)
-	return result
+	// ── The label is real and paid — record the obligation to finish the job ────
+	// From here on the order MUST also be completed on Etsy, or it sits in
+	// Needs-shipping accruing a late-shipment strike while its parcel is already
+	// moving. The browser normally does that within a couple of seconds, but a
+	// browser is not a transaction coordinator: closing the tab, a sleeping
+	// laptop or an expired token used to strand the order permanently.
+	//
+	// Writing the intent HERE — immediately after the irreversible side effect,
+	// before anyone can navigate away — is what makes the second phase durable.
+	// The reconciler (runEtsyCompletionSweep) discharges it if the browser
+	// doesn't, after a short grace period so the fast path normally wins and
+	// exactly one Etsy call is made.
+	const completionTracking = result.trackingNo || result.dsConsignmentNo || ''
+	if (completionTracking) {
+		try {
+			etsyCompletion.enqueue(db, { receiptId: receipt_id, trackingCode: completionTracking, carrierName: '4PX', origin: 'fourpx' })
+			scheduleEtsyCompletionSweep(etsyCompletion.FIRST_ATTEMPT_GRACE_SEC + 10)
+		} catch (err) {
+			// The label exists; never fail the request over bookkeeping. The orphan
+			// sweep adopts this receipt on the next cycle.
+			console.error(`[4px] could not record the Etsy-completion intent for receipt ${receipt_id}: ${err.message}`)
+		}
+	}
+
+	console.log(`[4px] Created shipment for receipt ${receipt_id} — ` + `tracking: ${result.trackingNo}, consignment: ${result.dsConsignmentNo}` + `${productFallback ? ` (auto-switched ${productFallback.from} → ${productFallback.to} for remote/island ZIP)` : ''}` + `${mark_packaged ? ' (marked packaged)' : ' (not packaged — label only)'}`)
+	return productFallback ? { ...result, productFallback } : result
 }
 
 app.post('/api/4px/create-order', async (req, res) => {
@@ -5434,10 +7253,7 @@ async function resolve4pxLabelUrl(receiptId, { appKey, appSecret }) {
 		// ds.xms.label.get is a pure READ, so a transient transport reset
 		// ("socket hang up") on the 4PX gateway is safe to replay. Retry it with
 		// bounded exponential backoff before surfacing the failure.
-		const label = await withTransientRetry(
-			() => getShipLabel(appKey, appSecret, requestNo, { format: 'PDF' }),
-			{ label: 'ds.xms.label.get' }
-		)
+		const label = await withTransientRetry(() => getShipLabel(appKey, appSecret, requestNo, { format: 'PDF' }), { label: 'ds.xms.label.get' })
 		labelUrl = label.logisticsLabel ?? label.customLabel ?? null
 		if (labelUrl) {
 			upsertFourpxShipment(db, receiptId, {
@@ -5477,10 +7293,7 @@ function fetch4pxLabelBuffer(labelUrl, timeoutMs = 25_000) {
 		maxAttempts: 4,
 		label: '4PX shipping label',
 		onRetry: ({ attempt, maxAttempts, delayMs, error }) => {
-			console.warn(
-				`[4px] label download ${error.code || ''} (${error.message}) — ` +
-				`retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms`
-			)
+			console.warn(`[4px] label download ${error.code || ''} (${error.message}) — ` + `retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms`)
 		},
 	})
 }
@@ -5577,6 +7390,31 @@ app.get('/api/4px/label-download/:receipt_id', async (req, res) => {
 
 // Absolute path to the GDI image-print helper (repo-root/scripts).
 const LABEL_PRINT_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'print-label-image.ps1')
+const LABEL_PRINT_DEDUPE_MS = 10_000
+const _labelPrintInFlight = new Set()
+const _labelPrintedAt = new Map()
+
+/**
+ * Remember that something just printed, so a double-tap can be recognised, and
+ * forget it once the window has passed. The expiry is what keeps these maps from
+ * growing for the lifetime of a long-running server.
+ *
+ * @param {Map<string, number>} map
+ * @param {string} key
+ * @param {number} ttlMs dedupe window this map is keyed to
+ */
+function _recordPrinted(map, key, ttlMs) {
+	const printedAt = Date.now()
+	map.set(key, printedAt)
+	const timer = setTimeout(() => {
+		// Only expire our own stamp: a reprint inside the window replaces it.
+		if (map.get(key) === printedAt) map.delete(key)
+	}, ttlMs)
+	if (typeof timer.unref === 'function') timer.unref()
+}
+function _recordLabelPrinted(key) {
+	_recordPrinted(_labelPrintedAt, key, LABEL_PRINT_DEDUPE_MS)
+}
 
 /**
  * Open a file in the OS default application (detached so it outlives the request).
@@ -5602,7 +7440,7 @@ function _openInDefaultApp(fp) {
  * print path (Adobe "Fit", the browser's PDF print) resamples the 1-bit barcode
  * into fuzzy grey bars that print blurry and can be unscannable. Instead we
  * rasterize the label OURSELVES to a pure 1-bit bitmap at the printer's exact
- * native dot grid (e.g. 80 mm @ 203 dpi = 640×640 dots) and print it 1:1 via
+ * native dot grid (80 × 80 mm @ 203 dpi = 639 × 639 dots) and print it 1:1 via
  * GDI — every bar lands on a whole printer dot, so the barcode stays razor
  * sharp. See src/fourpx/label-print.js.
  *
@@ -5612,9 +7450,26 @@ function _openInDefaultApp(fp) {
  *   'silent' → always print directly (surfaces an error if the printer is gone).
  *   'open'   → always open the PDF in the OS default app (no direct print).
  *
- * Response: { ok, mode: 'printed' | 'opened', printer?, file? }
+ * Response: { ok, mode: 'printed' | 'opened', printer?, file?,
+ *             coverage_pct?, warnings?: string[] }
+ * `warnings` is non-fatal: the label DID print, but its geometry (configured
+ * stock shape, or the driver's printable area) is off and the operator should
+ * fix it before running a batch.
  */
 app.get('/api/4px/label-print/:receipt_id', async (req, res) => {
+	const printKey = String(req.params.receipt_id)
+	const lastPrintedAt = _labelPrintedAt.get(printKey) || 0
+	const remainingMs = LABEL_PRINT_DEDUPE_MS - (Date.now() - lastPrintedAt)
+	if (_labelPrintInFlight.has(printKey) || remainingMs > 0) {
+		const retryAfter = Math.max(1, Math.ceil(Math.max(remainingMs, 1000) / 1000))
+		res.setHeader('Retry-After', String(retryAfter))
+		return res.status(409).json({
+			error: `A label print for this order was just sent. Wait ${retryAfter}s before printing another copy.`,
+			code: 'LABEL_PRINT_DEDUPED',
+			retry_after: retryAfter,
+		})
+	}
+	_labelPrintInFlight.add(printKey)
 	try {
 		const { receipt_id } = req.params
 		const { appKey, appSecret } = get4pxCredentials()
@@ -5635,22 +7490,46 @@ app.get('/api/4px/label-print/:receipt_id', async (req, res) => {
 
 		if (wantDirect) {
 			try {
-				const { png, width, height } = await renderLabelBitmap(buf, {
+				const { png, width, height, coveragePct } = await renderLabelBitmap(buf, {
 					widthMm: config.label_width_mm,
 					heightMm: config.label_height_mm,
 					dpi: config.label_dpi,
 					threshold: config.label_print_threshold,
 				})
+				// Media-fit guard. The render letterboxes the label into the
+				// configured stock, so stock of the wrong SHAPE still prints — just
+				// silently shrunk, with a proportionally smaller (harder to scan)
+				// barcode and no error anywhere. Coverage makes that visible.
+				const mediaWarning = coveragePct < MIN_HEALTHY_COVERAGE_PCT ? `Label stock mismatch: the label only fills ${coveragePct}% of the configured ` + `${config.label_width_mm}×${config.label_height_mm} mm media, so it prints shrunk. ` + `4PX labels are square — set label_width_mm/label_height_mm in config.json to the stock you actually loaded.` : null
+				if (mediaWarning) console.warn(`[4px] ${mediaWarning}`)
+
 				const pngPath = writeTempLabelPng(png, baseName)
-				await printBitmapWindows(pngPath, {
+				const diag = await printBitmapWindows(pngPath, {
 					printerName: config.label_printer_name,
 					widthMm: config.label_width_mm,
 					heightMm: config.label_height_mm,
 					copies: config.label_print_copies,
+					dpi: config.label_dpi,
 					scriptPath: LABEL_PRINT_SCRIPT,
 				})
-				console.log(`[4px] printed label for receipt ${receipt_id} → "${config.label_printer_name}" (${width}×${height} dots)`)
-				return res.json({ ok: true, mode: 'printed', printer: config.label_printer_name })
+				// Past this point the label has PHYSICALLY printed, so nothing here
+				// may throw: the catch below degrades to opening the PDF, which would
+				// leave the operator with a printed label AND a manual-print prompt.
+				const geometryWarnings = Array.isArray(diag?.warnings) ? diag.warnings : []
+				console.log(`[4px] printed label for receipt ${receipt_id} → "${config.label_printer_name}" ` + `(${width}×${height} dots, ${coveragePct}% media fit` + `${diag?.paper ? `, paper ${diag.paper}` : ''}${diag?.resolution ? `, ${diag.resolution} dpi` : ''})`)
+				for (const w of geometryWarnings) console.warn(`[4px] print geometry: ${w}`)
+
+				_recordLabelPrinted(printKey)
+				return res.json({
+					ok: true,
+					mode: 'printed',
+					printer: config.label_printer_name,
+					coverage_pct: coveragePct,
+					// Surfaced so the operator learns about a stock/driver geometry
+					// problem on the very first print instead of after a batch of
+					// undersized or edge-clipped labels.
+					warnings: [mediaWarning, ...geometryWarnings].filter(Boolean),
+				})
 			} catch (printErr) {
 				console.error('[4px] direct label print failed:', printErr.message)
 				// A printer that is offline / out of labels / jammed is an actionable
@@ -5674,10 +7553,545 @@ app.get('/api/4px/label-print/:receipt_id', async (req, res) => {
 		const fp = path.join(dir, `${baseName}.pdf`)
 		fs.writeFileSync(fp, buf)
 		_openInDefaultApp(fp)
+		_recordLabelPrinted(printKey)
 		res.json({ ok: true, mode: 'opened', file: `${baseName}.pdf` })
 	} catch (err) {
 		console.error('[4px] GET /api/4px/label-print:', err.message)
 		if (!res.headersSent) res.status(err.status || 500).json({ error: err.message })
+	} finally {
+		_labelPrintInFlight.delete(printKey)
+	}
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4PX DOOR-TO-DOOR PICKUP (揽收预约)
+//
+// Closing the last manual step of the packing shift. Sealing a parcel used to be
+// the end of the line here: somebody still had to open b.4px.com, find
+// DSS → 揽收预约 → 新建预约, and book a driver for what the bench had just
+// finished. These routes put that same booking on the packing screen, driven by
+// the three methods 4PX publishes for it (create / cancel / print).
+//
+// THREE PROPERTIES THIS CODE HAS TO GUARANTEE
+//   1. Never double-dispatch. ds.xms.api.collect.create.order takes no client
+//      idempotency key, so a double-tap or two tabs must be stopped BEFORE the
+//      call: single-flight in this process, a cross-process DB lock, and a
+//      duplicate check against the day's existing appointment.
+//   2. Never lose a booking. The outbox row is written before the call, so a
+//      crash or timeout mid-flight leaves an auditable 'unknown' instead of a
+//      driver nobody knows about. See src/db/setup.js.
+//   3. Never invent 4PX state. There is no query method for appointments, so
+//      everything reported here is what WE submitted; driver assignment and
+//      collection progress stay in the portal, and the UI says so.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Config-resolved settings for the pickup calendar. */
+function pickupCalendarOptions() {
+	return {
+		timeZone: config.fourpx_pickup_timezone || FOURPX_DEFAULT_PICKUP_TIMEZONE,
+		maxDaysAhead: config.fourpx_pickup_max_days_ahead,
+	}
+}
+
+/**
+ * Which sealed parcels count as still waiting for a driver.
+ *
+ * Bounded by how recently they were sealed: an unscanned parcel from two months
+ * ago left long ago and only reads as unscanned because its tracking never
+ * resolved. See listParcelsAwaitingFourpxPickup in src/db/setup.js.
+ */
+function pickupAwaitingParcels() {
+	return listParcelsAwaitingFourpxPickup(db, { withinDays: config.fourpx_pickup_awaiting_days })
+}
+
+/**
+ * Credentials + feature gate for every pickup route.
+ * Throws a 501 with an actionable message when the feature cannot work.
+ */
+function get4pxPickupCredentials() {
+	if (config.fourpx_pickup_booking === false) {
+		const err = new Error('4PX pickup booking is turned off (fourpx_pickup_booking: false in config.json).')
+		err.status = 501
+		err.code = 'PICKUP_DISABLED'
+		throw err
+	}
+	return get4pxCredentials()
+}
+
+/** Shape one outbox row for the browser. */
+function serializePickupAppointment(row) {
+	if (!row) return null
+	return {
+		id: row.id,
+		collect_no: row.collect_no || null,
+		reserve_date: row.reserve_date,
+		status: row.status,
+		parcel_count: row.parcel_count ?? 0,
+		contact_name: row.contact_name || null,
+		contact_phone: row.contact_phone || null,
+		city: row.city || null,
+		district: row.district || null,
+		detail_address: row.detail_address || null,
+		error_message: row.error_message || null,
+		created_by: row.created_by || null,
+		created_at: row.created_at,
+		cancelled_at: row.cancelled_at || null,
+		// A form can only be printed once 4PX has issued an appointment number.
+		can_print: row.status === 'submitted' && !!row.collect_no,
+		can_cancel: row.status === 'submitted' && !!row.collect_no,
+		parcels: Array.isArray(row.parcels) ? row.parcels : undefined,
+	}
+}
+
+/**
+ * GET /api/4px/pickup/options
+ *
+ * Everything the booking dialog needs in one round trip: whether the feature is
+ * usable, the bookable dates, the pre-fill address, which sealed parcels are
+ * still waiting for a driver, and the recent bookings. One request rather than
+ * five keeps the dialog instant on the bench tablet.
+ */
+app.get('/api/4px/pickup/options', (_req, res) => {
+	try {
+		const enabled = !!(config.fourpx_app_key && config.fourpx_app_secret) && config.fourpx_pickup_booking !== false
+		// Reap anything a crash orphaned before reporting state, so a stale
+		// 'submitting' row can never present as an in-flight request forever.
+		if (enabled) pruneStaleFourpxPickupAppointments(db)
+
+		const calendar = pickupCalendarOptions()
+		const awaiting = enabled ? pickupAwaitingParcels() : []
+		const appointments = enabled ? listFourpxPickupAppointments(db, { limit: 12 }) : []
+		const dates = listReserveDateOptions(calendar)
+		// Mark the days already spoken for so the dialog can warn before the POST
+		// rather than after a 409.
+		const bookedDates = new Set(appointments.filter((a) => FOURPX_PICKUP_BLOCKING_STATUSES.includes(a.status)).map((a) => a.reserve_date))
+
+		res.json({
+			enabled,
+			timezone: calendar.timeZone,
+			today: fourpxCollect.todayInTimeZone(calendar.timeZone),
+			max_days_ahead: fourpxCollect.normalizeMaxDaysAhead(calendar.maxDaysAhead),
+			dates: dates.map((d) => ({ ...d, booked: bookedDates.has(d.date) })),
+			pickup: config.fourpx_pickup || null,
+			pickup_fields: FOURPX_PICKUP_FIELDS,
+			awaiting: {
+				count: awaiting.length,
+				oldest_packaged_at: awaiting.length ? awaiting[0].packaged_at : null,
+				// The lookback the count is scoped to, so the page can say what it
+				// counted instead of implying it knows about every parcel ever sealed.
+				within_days: fourpxCollect.normalizeAwaitingDays(config.fourpx_pickup_awaiting_days),
+				receipt_ids: awaiting.map((p) => p.receipt_id),
+			},
+			appointments: appointments.map(serializePickupAppointment),
+		})
+	} catch (err) {
+		console.error('[4px/pickup] GET options:', err.message)
+		res.status(err.status || 500).json({ error: err.message })
+	}
+})
+
+/**
+ * GET /api/4px/pickup/appointments
+ * The pickup history on its own, for a background refresh after an action.
+ */
+app.get('/api/4px/pickup/appointments', (req, res) => {
+	try {
+		pruneStaleFourpxPickupAppointments(db)
+		const limit = Number(req.query.limit) || 12
+		const rows = listFourpxPickupAppointments(db, { limit })
+		res.json({ appointments: rows.map(serializePickupAppointment) })
+	} catch (err) {
+		console.error('[4px/pickup] GET appointments:', err.message)
+		res.status(err.status || 500).json({ error: err.message })
+	}
+})
+
+// Single-flight by pickup DATE. Two packers (or one impatient double-tap) must
+// not both get past the duplicate check and book the same day twice — a second
+// driver is a real cost and a confusing hand-over. Keyed on the date rather than
+// globally so two different days can still be booked concurrently.
+const _pickupBookInFlight = new Map()
+const FOURPX_PICKUP_LOCK_OWNER = `${os.hostname()}:${process.pid}`
+const FOURPX_PICKUP_LOCK_TTL_SEC = 5 * 60
+
+/**
+ * POST /api/4px/pickup/appointments
+ * Body: { reserve_date, pickup: {...}, allow_duplicate?: boolean }
+ *
+ * Books a 4PX collection for the parcels currently sealed and waiting.
+ */
+app.post('/api/4px/pickup/appointments', async (req, res) => {
+	let lockKey = null
+	try {
+		const { appKey, appSecret } = get4pxPickupCredentials()
+		const body = req.body || {}
+
+		// Validate BOTH inputs before touching the network or the DB, so a bad
+		// address never leaves a reserved row behind.
+		const reserveDate = fourpxCollect.assertReserveDate(body.reserve_date, pickupCalendarOptions())
+		// The dialog pre-fills from config but the packer may correct it, so the
+		// submitted address wins and config is only the fallback.
+		const pickup = fourpxCollect.normalizePickupInfo(body.pickup && typeof body.pickup === 'object' && Object.keys(body.pickup).length ? body.pickup : config.fourpx_pickup)
+
+		pruneStaleFourpxPickupAppointments(db)
+
+		// ── Duplicate guards (in-process, then cross-process, then durable) ──
+		if (_pickupBookInFlight.has(reserveDate)) {
+			return res.status(409).json({
+				error: `A pickup for ${reserveDate} is already being booked. Wait for it to finish.`,
+				code: 'PICKUP_BOOK_IN_FLIGHT',
+			})
+		}
+		const existing = findActiveFourpxPickupAppointment(db, reserveDate)
+		if (existing && body.allow_duplicate !== true) {
+			return res.status(409).json({
+				error: existing.status === 'submitted' ? `4PX is already collecting on ${reserveDate} (appointment ${existing.collect_no}). Cancel that one first, or confirm you want a second driver.` : `A booking for ${reserveDate} was submitted but 4PX never confirmed it. Check 揽收预约 in the 4PX portal before booking again.`,
+				code: 'PICKUP_ALREADY_BOOKED',
+				appointment: serializePickupAppointment(existing),
+			})
+		}
+		lockKey = `fourpx_pickup:${reserveDate}`
+		if (!acquireLock(db, lockKey, FOURPX_PICKUP_LOCK_OWNER, FOURPX_PICKUP_LOCK_TTL_SEC)) {
+			lockKey = null
+			return res.status(409).json({
+				error: `Another dashboard process is already booking a 4PX pickup for ${reserveDate}.`,
+				code: 'PICKUP_BOOK_LOCKED',
+			})
+		}
+
+		// Snapshot what the driver is being booked for BEFORE the call, so the
+		// attachment reflects the bench at the moment of booking.
+		const awaiting = pickupAwaitingParcels()
+
+		// Reserve the outbox row, then call. From here on, every exit path
+		// resolves the row — there is no way to leave it dangling.
+		const appointmentId = openFourpxPickupAppointment(db, {
+			reserveDate,
+			pickup,
+			createdBy: (req.auth && req.auth.user) || null,
+		})
+
+		const pending = (async () => {
+			try {
+				const { collectNo } = await fourpxCollect.createCollectOrder(appKey, appSecret, { reserveDate, pickup })
+				resolveFourpxPickupAppointment(db, appointmentId, { status: 'submitted', collectNo })
+				attachFourpxPickupParcels(db, appointmentId, awaiting)
+				return collectNo
+			} catch (err) {
+				// A business rejection is definite (nothing booked); a transport
+				// failure is not, and must be recorded as such — see the module
+				// header in src/fourpx/collect.js.
+				const uncertain = err.code === 'PICKUP_CREATE_UNCERTAIN'
+				resolveFourpxPickupAppointment(db, appointmentId, {
+					status: uncertain ? 'unknown' : 'failed',
+					errorMessage: err.message,
+				})
+				throw err
+			}
+		})()
+		_pickupBookInFlight.set(reserveDate, pending)
+		let collectNo
+		try {
+			collectNo = await pending
+		} finally {
+			if (_pickupBookInFlight.get(reserveDate) === pending) _pickupBookInFlight.delete(reserveDate)
+		}
+
+		const row = getFourpxPickupAppointment(db, { id: appointmentId })
+		console.log(`[4px/pickup] booked ${reserveDate} → appointment ${collectNo} (${awaiting.length} sealed parcel(s))`)
+		res.json({
+			success: true,
+			appointment: serializePickupAppointment({ ...row, parcels: awaiting.map((p) => ({ receipt_id: p.receipt_id, tracking_no: p.tracking_no })) }),
+		})
+	} catch (err) {
+		console.error('[4px/pickup] POST appointments:', err.message)
+		const status = err.status || (err.code === 'PICKUP_CREATE_UNCERTAIN' ? 504 : 502)
+		res.status(status).json({
+			error: err.code === 'PICKUP_CREATE_UNCERTAIN' ? `4PX did not answer in time, so it is unclear whether the pickup was booked: ${err.message}. ` + `Check 揽收预约 in the 4PX portal before trying again.` : err.message,
+			code: err.code || 'PICKUP_CREATE_FAILED',
+			field: err.field || undefined,
+		})
+	} finally {
+		if (lockKey) {
+			try {
+				releaseLock(db, lockKey, FOURPX_PICKUP_LOCK_OWNER)
+			} catch (err) {
+				console.warn(`[4px/pickup] could not release ${lockKey}: ${err.message}`)
+			}
+		}
+	}
+})
+
+/**
+ * POST /api/4px/pickup/appointments/:id/cancel
+ * Body: { reason?: string }
+ *
+ * Cancels at 4PX first, and only then locally — a local row flipped to
+ * "cancelled" while the driver is still coming is the one outcome worth
+ * protecting against, so the API is the source of truth for the transition.
+ */
+app.post('/api/4px/pickup/appointments/:id/cancel', async (req, res) => {
+	try {
+		const { appKey, appSecret } = get4pxPickupCredentials()
+		const id = Number(req.params.id)
+		if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid appointment id' })
+
+		const row = getFourpxPickupAppointment(db, { id })
+		if (!row) return res.status(404).json({ error: 'Pickup appointment not found' })
+		if (row.status === 'cancelled') {
+			// Idempotent: re-cancelling an already-cancelled pickup is a no-op, not
+			// an error, so a retried click cannot fail.
+			return res.json({ success: true, already: true, appointment: serializePickupAppointment(row) })
+		}
+		if (!row.collect_no) {
+			return res.status(409).json({
+				error: '4PX never returned an appointment number for this booking, so there is nothing to cancel here. Check 揽收预约 in the 4PX portal.',
+				code: 'PICKUP_NO_COLLECT_NO',
+			})
+		}
+
+		await fourpxCollect.cancelCollectOrder(appKey, appSecret, row.collect_no, { reason: req.body?.reason })
+		cancelFourpxPickupAppointment(db, id, {
+			by: (req.auth && req.auth.user) || null,
+			reason: fourpxCollect.normalizeCancelReason(req.body?.reason),
+		})
+		console.log(`[4px/pickup] cancelled appointment ${row.collect_no} (${row.reserve_date})`)
+		res.json({ success: true, appointment: serializePickupAppointment(getFourpxPickupAppointment(db, { id })) })
+	} catch (err) {
+		console.error('[4px/pickup] POST cancel:', err.message)
+		res.status(err.status || 502).json({ error: err.message, code: err.code || 'PICKUP_CANCEL_FAILED' })
+	}
+})
+
+/**
+ * Resolve the appointment row and the PDF bytes of its form (打印预约单).
+ *
+ * Shared by the two things an operator can do with that sheet — read it in the
+ * browser, or send it straight to the printer — so both agree on what "the form
+ * for this appointment" means and neither can drift on error wording.
+ *
+ * The URL is cached on the row: 打印预约单 is a pure read, but it is still a
+ * billed API call, and a reprint should not spend one.
+ *
+ * @param {number} id
+ * @returns {Promise<{ row: object, buffer: Buffer }>}
+ * @throws {Error} with .status set (404 unknown/not ready, 409 no appointment number)
+ */
+async function loadPickupFormPdf(id) {
+	const { appKey, appSecret } = get4pxPickupCredentials()
+	const row = getFourpxPickupAppointment(db, { id })
+	if (!row) {
+		const err = new Error('Pickup appointment not found')
+		err.status = 404
+		throw err
+	}
+	if (!row.collect_no) {
+		const err = new Error('This booking has no 4PX appointment number yet, so no form exists.')
+		err.status = 409
+		err.code = 'PICKUP_NO_COLLECT_NO'
+		throw err
+	}
+
+	let formUrl = row.form_url
+	if (!formUrl) {
+		// A pure read, so a transient gateway reset is safe to replay.
+		const printed = await withTransientRetry(() => fourpxCollect.printCollectOrder(appKey, appSecret, row.collect_no), { label: 'ds.xms.api.collect.print.order' })
+		formUrl = printed.pdfUrl
+		if (formUrl) setFourpxPickupFormUrl(db, id, formUrl)
+	}
+	if (!formUrl) {
+		const err = new Error('The appointment form is not ready yet — try again in a few seconds.')
+		err.status = 404
+		throw err
+	}
+
+	const buffer = await downloadToBuffer(formUrl, { timeoutMs: 25_000, maxAttempts: 4, label: '4PX appointment form' })
+	return { row, buffer }
+}
+
+/** Reject an appointment id that is not a positive integer. */
+function parsePickupAppointmentId(raw) {
+	const id = Number(raw)
+	if (!Number.isInteger(id) || id < 1) {
+		const err = new Error('Invalid appointment id')
+		err.status = 400
+		throw err
+	}
+	return id
+}
+
+/**
+ * GET /api/4px/pickup/appointments/:id/form
+ *
+ * Streams the 4PX appointment form (打印预约单) as an inline PDF — the sheet the
+ * driver signs. Proxied rather than linked because 4PX serves these from a plain
+ * -HTTP host, which the browser blocks as mixed content from an HTTPS dashboard.
+ *
+ * This is the READ path (open it, check it, save it). The one-click print lives
+ * in the POST route below, because printing is a physical side effect.
+ */
+app.get('/api/4px/pickup/appointments/:id/form', async (req, res) => {
+	try {
+		const id = parsePickupAppointmentId(req.params.id)
+		const { row, buffer } = await loadPickupFormPdf(id)
+		res.setHeader('Content-Type', 'application/pdf')
+		res.setHeader('Content-Length', String(buffer.length))
+		res.setHeader('Content-Disposition', contentDisposition(`4px-pickup-${row.collect_no}.pdf`, { type: 'inline' }))
+		res.setHeader('Cache-Control', 'no-store')
+		res.end(buffer)
+	} catch (err) {
+		console.error('[4px/pickup] GET form:', err.message)
+		if (!res.headersSent) res.status(err.status || 502).json({ error: err.message, code: err.code || 'PICKUP_FORM_FAILED' })
+	}
+})
+
+// A second identical sheet within a few seconds is a double-tap, not a decision.
+// (Wanting two copies every time is what label_print_copies is for.)
+const PICKUP_FORM_PRINT_DEDUPE_MS = 8_000
+const _pickupFormPrintInFlight = new Set()
+const _pickupFormPrintedAt = new Map()
+
+/**
+ * POST /api/4px/pickup/appointments/:id/print
+ *
+ * One-click print of the 4PX appointment form (打印预约单) — the barcode the
+ * collecting driver scans when the parcels are handed over.
+ *
+ * WHY THIS IS NOT "OPEN THE PDF AND PRESS CTRL+P"
+ * The parcels, the driver and the label printer are all at the bench; the
+ * dashboard may be on a tablet. Handing the operator a PDF viewer means finding
+ * the print dialog, picking a printer and hoping the scaling is right, on the one
+ * artefact that has to exist before the van leaves. Printing it here makes it one
+ * tap, and — because the print script pre-flights the printer — a printer that is
+ * offline or out of labels is reported as such instead of a job silently piling
+ * up in the spooler.
+ *
+ * WHY THE LABEL PIPELINE
+ * 4PX issues this form as a 95 × 95 mm square whose content is a Code128 of the
+ * appointment number: the same artefact class as a shipping label, on the same
+ * stock. So it uses the same crisp 1-bit render at the printer's native dot grid
+ * (see src/fourpx/label-print.js) — a scaled/anti-aliased print would blur those
+ * bars, and an unscannable appointment barcode means a manual hand-over.
+ *
+ * Modes and hardware come from the label block in config.json
+ * (label_print_mode / label_printer_name / label_width_mm / label_height_mm /
+ * label_dpi / label_print_copies), so there is nothing extra to misconfigure.
+ *
+ * Response: { ok, mode: 'printed' | 'opened', printer?, coverage_pct?, file?,
+ *             warnings?: string[] }
+ */
+app.post('/api/4px/pickup/appointments/:id/print', async (req, res) => {
+	let printKey = null
+	try {
+		const id = parsePickupAppointmentId(req.params.id)
+		printKey = String(id)
+
+		// Double-tap guard, mirroring the shipping-label print path: the second
+		// tap of an impatient double-click must not put a second sheet on the
+		// printer, but it must also say so rather than appearing to do nothing.
+		const lastPrintedAt = _pickupFormPrintedAt.get(printKey) || 0
+		const remainingMs = PICKUP_FORM_PRINT_DEDUPE_MS - (Date.now() - lastPrintedAt)
+		if (_pickupFormPrintInFlight.has(printKey) || remainingMs > 0) {
+			const retryAfter = Math.max(1, Math.ceil(Math.max(remainingMs, 1000) / 1000))
+			res.setHeader('Retry-After', String(retryAfter))
+			printKey = null // nothing to release: this request never claimed it
+			return res.status(409).json({
+				error: `This appointment form was just sent to the printer. Wait ${retryAfter}s if you need another copy.`,
+				code: 'PICKUP_FORM_PRINT_DEDUPED',
+				retry_after: retryAfter,
+			})
+		}
+		_pickupFormPrintInFlight.add(printKey)
+
+		const { row, buffer } = await loadPickupFormPdf(id)
+		const baseName = `4px-pickup-${String(row.collect_no).replace(/[^\w.-]+/g, '_')}`
+
+		const mode = config.label_print_mode || 'auto'
+		const wantDirect = mode === 'silent' || (mode === 'auto' && process.platform === 'win32')
+		let shapeRefusal = null
+
+		if (wantDirect) {
+			try {
+				const { png, width, height, coveragePct } = await renderLabelBitmap(buffer, {
+					widthMm: config.label_width_mm,
+					heightMm: config.label_height_mm,
+					dpi: config.label_dpi,
+					threshold: config.label_print_threshold,
+				})
+				// Shape guard. The render letterboxes whatever 4PX sent into the
+				// loaded stock, so a form that is NOT label-shaped still "prints" —
+				// as shrunken content with a barcode nobody can scan. 4PX issues
+				// this form square today; if that ever changes, do not burn a label
+				// on it, and say why.
+				if (coveragePct < MIN_HEALTHY_COVERAGE_PCT) {
+					shapeRefusal = `4PX returned an appointment form that is not label-shaped: it would fill only ${coveragePct}% ` + `of the ${config.label_width_mm}×${config.label_height_mm} mm stock, too small to scan. ` + `Print the PDF on paper instead, or set label_width_mm/label_height_mm to the stock you actually loaded.`
+					console.warn(`[4px/pickup] ${shapeRefusal}`)
+					// 'silent' promised a printed label and cannot deliver one; that
+					// is a conflict with the media, not a server fault.
+					if (mode === 'silent') {
+						return res.status(409).json({ error: shapeRefusal, code: 'PICKUP_FORM_NOT_LABEL_SHAPED' })
+					}
+					// 'auto': fall through to opening the PDF, carrying the reason.
+				} else {
+					const pngPath = writeTempLabelPng(png, baseName)
+					const diag = await printBitmapWindows(pngPath, {
+						printerName: config.label_printer_name,
+						widthMm: config.label_width_mm,
+						heightMm: config.label_height_mm,
+						copies: config.label_print_copies,
+						dpi: config.label_dpi,
+						scriptPath: LABEL_PRINT_SCRIPT,
+					})
+					// Past this point the form has PHYSICALLY printed, so nothing here
+					// may throw: the catch below degrades to opening the PDF, which
+					// would leave the operator with a printed form AND a stray viewer.
+					const warnings = Array.isArray(diag?.warnings) ? diag.warnings : []
+					console.log(`[4px/pickup] printed appointment form ${row.collect_no} → "${config.label_printer_name}" ` + `(${width}×${height} dots, ${coveragePct}% media fit${diag?.paper ? `, paper ${diag.paper}` : ''})`)
+					for (const w of warnings) console.warn(`[4px/pickup] print geometry: ${w}`)
+
+					_recordPrinted(_pickupFormPrintedAt, printKey, PICKUP_FORM_PRINT_DEDUPE_MS)
+					return res.json({
+						ok: true,
+						mode: 'printed',
+						printer: config.label_printer_name,
+						coverage_pct: coveragePct,
+						warnings,
+					})
+				}
+			} catch (printErr) {
+				console.error('[4px/pickup] direct form print failed:', printErr.message)
+				// An offline / jammed / label-less printer is an actionable hardware
+				// fault: surface it in every mode instead of quietly opening a PDF
+				// the operator is not looking at.
+				if (printErr.printerNotReady) {
+					return res.status(503).json({ error: printErr.message, code: 'PRINTER_NOT_READY' })
+				}
+				if (mode === 'silent') {
+					return res.status(500).json({ error: `Direct print failed: ${printErr.message}`, code: 'PICKUP_FORM_PRINT_FAILED' })
+				}
+				// 'auto': fall through and open the PDF instead.
+			}
+		}
+
+		// Fallback / 'open' mode: drop the PDF next to the host's default viewer
+		// so the operator can print it by hand.
+		const dir = path.join(os.tmpdir(), 'ued-4px-pickup-forms')
+		fs.mkdirSync(dir, { recursive: true })
+		const fp = path.join(dir, `${baseName}.pdf`)
+		fs.writeFileSync(fp, buffer)
+		_openInDefaultApp(fp)
+		_recordPrinted(_pickupFormPrintedAt, printKey, PICKUP_FORM_PRINT_DEDUPE_MS)
+		res.json({
+			ok: true,
+			mode: 'opened',
+			file: `${baseName}.pdf`,
+			warnings: shapeRefusal ? [shapeRefusal] : [],
+		})
+	} catch (err) {
+		console.error('[4px/pickup] POST print:', err.message)
+		if (!res.headersSent) res.status(err.status || 502).json({ error: err.message, code: err.code || 'PICKUP_FORM_PRINT_FAILED' })
+	} finally {
+		if (printKey) _pickupFormPrintInFlight.delete(printKey)
 	}
 })
 
@@ -5769,6 +8183,12 @@ app.post('/api/4px/bulk-create-order', async (req, res) => {
 					trackingNo: result.trackingNo,
 					dsConsignmentNo: result.dsConsignmentNo,
 					odaResultSign: result.odaResultSign,
+					// Present when S5058 was rejected for a US remote/island ZIP and
+					// the server auto-retried on US-ISLAND-PH (S5118). The wizard
+					// surfaces this so the operator can see why the booked lane
+					// differs from what they selected.
+					productFallback: result.productFallback || null,
+					logistics_product_code: result.productFallback?.to || o.logistics_product_code || batchProduct || null,
 				}
 			} catch (err) {
 				if (err.apiBody) {
@@ -6027,22 +8447,84 @@ app.delete('/api/4px/order/:receipt_id', async (req, res) => {
  *
  * Response: { events: [{time, description, location, code}], status: string }
  */
+const _trackingTimelineCache = new Map()
+const _trackingTimelineInflight = new Map()
+const _trackingTimelineRate = new Map()
+const TRACKING_TIMELINE_TTL_MS = 60 * 1000
+const TRACKING_TIMELINE_MAX_CONCURRENCY = 4
+const TRACKING_TIMELINE_RATE_PER_MINUTE = 30
+
 app.get('/api/4px/track/:tracking_no', async (req, res) => {
 	try {
-		const { tracking_no } = req.params
-		if (!tracking_no || !/^4PX/i.test(tracking_no)) {
-			return res.status(400).json({ error: 'Invalid or unsupported tracking number — must begin with "4PX"' })
+		const trackingNo = normalizeFourpxLookupCode(req.params.tracking_no)
+		const known = db
+			.prepare(
+				`
+			SELECT receipt_id
+			FROM receipts
+			WHERE (
+			    tracking_code = @trackingNo COLLATE NOCASE
+			    OR fourpx_tracking_no = @trackingNo COLLATE NOCASE
+			  )
+			  AND (
+			    fourpx_consignment_no IS NOT NULL
+			    OR COALESCE(fourpx_tracking_no, '') != ''
+			    OR tracking_code LIKE '4PX%'
+			  )
+			LIMIT 1
+		`,
+			)
+			.get({ trackingNo })
+		if (!known) {
+			return res.status(404).json({ error: 'Tracking number is not attached to a dashboard order.' })
 		}
-		const result = await getFullTrackingEvents(tracking_no, {
-			appKey: config.fourpx_app_key ?? null,
-			appSecret: config.fourpx_app_secret ?? null,
-		})
-		// Attach stuck/delayed health analysis (customs-loop, no-movement, etc.) so the
-		// Shipping timeline drawer can surface actionable "why it's stuck" reasons.
-		res.json(_withHealth(result))
+
+		const rateKey = String(req.auth?.user || req.ip || 'local')
+		const now = Date.now()
+		const recent = (_trackingTimelineRate.get(rateKey) || []).filter((ts) => now - ts < 60_000)
+		if (recent.length >= TRACKING_TIMELINE_RATE_PER_MINUTE) {
+			const retryAfter = Math.max(1, Math.ceil((60_000 - (now - recent[0])) / 1000))
+			res.setHeader('Retry-After', String(retryAfter))
+			return res.status(429).json({ error: 'Too many live tracking lookups. Please wait a moment.', retry_after: retryAfter })
+		}
+		recent.push(now)
+		_trackingTimelineRate.set(rateKey, recent)
+		if (_trackingTimelineRate.size > 1000) {
+			const oldestKey = _trackingTimelineRate.keys().next().value
+			_trackingTimelineRate.delete(oldestKey)
+		}
+
+		const cached = _trackingTimelineCache.get(trackingNo)
+		if (cached && now - cached.cachedAt < TRACKING_TIMELINE_TTL_MS) {
+			return res.json({ ...cached.data, cached: true })
+		}
+
+		let lookup = _trackingTimelineInflight.get(trackingNo)
+		if (!lookup) {
+			if (_trackingTimelineInflight.size >= TRACKING_TIMELINE_MAX_CONCURRENCY) {
+				res.setHeader('Retry-After', '2')
+				return res.status(429).json({ error: 'Carrier lookup capacity is busy. Try again in a few seconds.', retry_after: 2 })
+			}
+			lookup = getFullTrackingEvents(trackingNo, {
+				appKey: config.fourpx_app_key ?? null,
+				appSecret: config.fourpx_app_secret ?? null,
+			})
+				.then((result) => _withHealth(result, { stuckDays: _stuckDays() }))
+				.then((data) => {
+					_trackingTimelineCache.set(trackingNo, { cachedAt: Date.now(), data })
+					if (_trackingTimelineCache.size > 500) {
+						const oldest = _trackingTimelineCache.keys().next().value
+						_trackingTimelineCache.delete(oldest)
+					}
+					return data
+				})
+				.finally(() => _trackingTimelineInflight.delete(trackingNo))
+			_trackingTimelineInflight.set(trackingNo, lookup)
+		}
+		res.json(await lookup)
 	} catch (err) {
 		console.error('[4px] GET /api/4px/track:', err.message)
-		res.status(500).json({ error: err.message })
+		res.status(err.status || 500).json({ error: err.message })
 	}
 })
 
@@ -6050,48 +8532,393 @@ app.get('/api/4px/track/:tracking_no', async (req, res) => {
 
 /** Resolve the configured "stuck" threshold in days (default 10). */
 function _stuckDays() {
-	return Number.isFinite(config.fourpx_stuck_days) && config.fourpx_stuck_days > 0 ? config.fourpx_stuck_days : 10
+	const value = Number(config.fourpx_stuck_days)
+	return Number.isFinite(value) ? Math.min(30, Math.max(3, Math.round(value))) : 10
 }
+
+const SHIPPING_STATUS_FILTERS = new Set(['all', 'stuck', 'label_only', 'delayed', 'disposed', 'pre_transit', 'in_transit', 'delivered', 'exception', 'unknown'])
+const SHIPPING_CLAIM_FILTERS = new Set(['all', 'open', ...SHIPPING_CLAIM_STATUSES])
+const SHIPPING_ALERT_STATE_FILTERS = new Set(['all', 'new'])
+const SHIPPING_OUTREACH_FILTERS = new Set(['all', 'needed', 'sent'])
+
+/** Normalize an optional shop scope to a trimmed id, or null for "all shops". */
+function _optionalShopId(value) {
+	if (value == null) return null
+	const trimmed = String(value).trim()
+	return trimmed === '' ? null : trimmed
+}
+
+/** Parse and bound the shared Shipping list/stats/export query contract. */
+function _shippingQueryFilters(req) {
+	const status = String(req.query.status || 'all')
+		.trim()
+		.toLowerCase()
+	const claimStatus = String(req.query.claim_status || 'all')
+		.trim()
+		.toLowerCase()
+	const alertState = String(req.query.alert_state || 'all')
+		.trim()
+		.toLowerCase()
+	const outreach = String(req.query.outreach || 'all')
+		.trim()
+		.toLowerCase()
+	if (!SHIPPING_STATUS_FILTERS.has(status)) {
+		throw Object.assign(new Error('Invalid shipping status filter.'), { status: 400 })
+	}
+	if (!SHIPPING_CLAIM_FILTERS.has(claimStatus)) {
+		throw Object.assign(new Error('Invalid claim status filter.'), { status: 400 })
+	}
+	if (!SHIPPING_ALERT_STATE_FILTERS.has(alertState)) {
+		throw Object.assign(new Error('Invalid alert state filter.'), { status: 400 })
+	}
+	if (!SHIPPING_OUTREACH_FILTERS.has(outreach)) {
+		throw Object.assign(new Error('Invalid buyer outreach filter.'), { status: 400 })
+	}
+	const parseEpoch = (name) => {
+		if (req.query[name] == null || req.query[name] === '') return undefined
+		const n = Number(req.query[name])
+		if (!Number.isFinite(n) || n < 0) throw Object.assign(new Error(`Invalid ${name} timestamp.`), { status: 400 })
+		return Math.floor(n)
+	}
+	const from = parseEpoch('from')
+	const to = parseEpoch('to')
+	if (from != null && to != null && from > to) {
+		throw Object.assign(new Error('"from" must be earlier than "to".'), { status: 400 })
+	}
+	const q = String(req.query.q || '').trim()
+	if (q.length > 200) throw Object.assign(new Error('Shipping search must be 200 characters or fewer.'), { status: 400 })
+	return {
+		status: status === 'all' ? undefined : status,
+		claimStatus: claimStatus === 'all' ? undefined : claimStatus,
+		alertState: alertState === 'all' ? undefined : alertState,
+		outreach: outreach === 'all' ? undefined : outreach,
+		shopId: req.query.shop_id ? String(req.query.shop_id).slice(0, 100) : undefined,
+		q: q || undefined,
+		from,
+		to,
+	}
+}
+
+/**
+ * Launch a 4PX tracking cycle and mirror lifecycle/progress over the existing
+ * sync SSE bus. The worker owns locking, pacing and durable telemetry; this
+ * adapter only makes the result visible to an open Shipping tab.
+ */
+function _startServerTrackingRefresh(trigger, options = {}) {
+	const { ignoreDisabled = false, ...workerOptions } = options
+	const publicTelemetry = (payload) => {
+		const { results: _results, ...safe } = payload || {}
+		return safe
+	}
+	const launch = startTrackingCycle(db, config, {
+		...workerOptions,
+		trigger,
+		ignoreDisabled,
+		onStart: (run) => {
+			broadcastSyncEvent({ type: 'tracking_sync_start', ...run, ts: Date.now() })
+		},
+		onProgress: (progress) => {
+			broadcastSyncEvent({ type: 'tracking_sync_progress', ...publicTelemetry(progress), ts: Date.now() })
+		},
+		onComplete: (summary) => {
+			broadcastSyncEvent({ type: 'tracking_sync_done', ...publicTelemetry(summary), ts: Date.now() })
+		},
+		onError: (failure) => {
+			broadcastSyncEvent({ type: 'tracking_sync_error', ...failure, ts: Date.now() })
+		},
+	})
+	if (launch.started) {
+		// The HTTP trigger returns immediately; own the promise here so a failed
+		// background request is logged rather than becoming an unhandled rejection.
+		launch.promise.catch((err) => {
+			console.error(`[tracking] ${trigger} refresh failed: ${err.message}`)
+		})
+	} else {
+		console.log(`[tracking] ${trigger} trigger skipped (${launch.reason || 'not started'})`)
+	}
+	return launch
+}
+
+/**
+ * GET /api/4px/tracking-sync/status — scheduler health, last run and due backlog.
+ */
+app.get('/api/4px/tracking-sync/status', (_req, res) => {
+	try {
+		res.json(getTrackingCycleStatus(db, config))
+	} catch (err) {
+		console.error('[4px] GET /api/4px/tracking-sync/status:', err.message)
+		res.status(500).json({ error: err.message })
+	}
+})
+
+/**
+ * POST /api/4px/tracking-sync/run — enqueue one due-parcel refresh now.
+ *
+ * Returns 202 immediately; progress is available from the status endpoint and
+ * the shared SSE stream. Manual runs remain available when automatic polling is
+ * disabled, but still obey the same lock, batch cap and request pacing.
+ */
+app.post('/api/4px/tracking-sync/run', (_req, res) => {
+	try {
+		const launch = _startServerTrackingRefresh('manual', { ignoreDisabled: true })
+		if (!launch.started) {
+			const status = getTrackingCycleStatus(db, config)
+			if (launch.reason === 'running') {
+				return res.status(409).json({ error: 'A tracking refresh is already running.', ...status })
+			}
+			return res.status(503).json({ error: 'Tracking refresh could not be started.', reason: launch.reason, ...status })
+		}
+		res.status(202).json({
+			accepted: true,
+			run_id: launch.runId,
+			message: 'Tracking refresh started.',
+		})
+	} catch (err) {
+		console.error('[4px] POST /api/4px/tracking-sync/run:', err.message)
+		res.status(500).json({ error: err.message })
+	}
+})
 
 /**
  * GET /api/4px/shipping-stats — summary counts for the Shipping tab cards.
  * Query: shop_id?
  */
+// Cached-snapshot deployment repairs. These rewrite rows whose stored
+// status/health predates a detector or age policy the classifier has learned.
+// They are write-heavy passes, so they run once per process rather than on every
+// dashboard poll.
+let _disposedBackfillDone = false
+function ensureDisposedTrackingFlags() {
+	if (_disposedBackfillDone) return
+	backfillDisposedTrackingFlags(db)
+	// Runs second on purpose: disposal is terminal, so it claims its rows before
+	// the delivery repair looks at anything.
+	backfillDeliveredTrackingFlags(db)
+	// Clears Stuck/Delayed customs-loop verdicts when the last event already
+	// shows destination-network / last-mile progress (the reported false positives).
+	backfillFalseCustomsStuckFlags(db)
+	// Queue label-only / long-silent candidates for a full-timeline carrier
+	// recheck. Do not publish severity from one lossy cached event.
+	queueOverdueTrackingRechecks(db, { stuckDays: _stuckDays() })
+	_disposedBackfillDone = true
+}
+
+/**
+ * Open/close/escalate incident rows so the parcel board can show how long each
+ * abnormal parcel has been waiting for attention.
+ *
+ * Advisory work, not request work: the "new" flag itself is derived from the
+ * review ledger and is correct with or without this, so a failure here costs a
+ * relative timestamp and nothing else. Never let it fail a dashboard read.
+ */
+function refreshShippingAlertLedger() {
+	try {
+		syncShippingAlertLedger(db)
+	} catch (err) {
+		console.warn('[4px] shipping alert ledger sync failed:', err.message)
+	}
+}
+
 app.get('/api/4px/shipping-stats', (req, res) => {
 	try {
+		// Soft-fix rows whose cached last event already says "disposal" but
+		// whose status/health were written before that detector existed. This is a
+		// legacy repair scan, not request work; run it once per process instead of
+		// issuing a write-heavy full-table UPDATE on every dashboard poll.
+		ensureDisposedTrackingFlags()
+		const filters = _shippingQueryFilters(req)
 		const stats = getShippingStats(db, {
-			shopId: req.query.shop_id || undefined,
-			from: req.query.from ? parseInt(req.query.from, 10) : undefined,
-			to: req.query.to ? parseInt(req.query.to, 10) : undefined,
+			shopId: filters.shopId,
+			q: filters.q,
+			from: filters.from,
+			to: filters.to,
 			stuckDays: _stuckDays(),
 		})
 		res.json({ ...stats, stuck_days: _stuckDays() })
 	} catch (err) {
 		console.error('[4px] GET /api/4px/shipping-stats:', err.message)
-		res.status(500).json({ error: err.message })
+		res.status(err.status || 500).json({ error: err.message })
+	}
+})
+
+/**
+ * GET /api/4px/shipping-alerts — open abnormal parcels for the morning-review
+ * alert banner. Ignores ship-date windows so long-silent stuck/disposed parcels
+ * still surface. Each alert carries `is_new` (never reviewed, or escalated since
+ * review) and the summary carries the matching `new_*` counts.
+ * Query: shop_id?
+ */
+app.get('/api/4px/shipping-alerts', (req, res) => {
+	try {
+		ensureDisposedTrackingFlags()
+		const shopId = _optionalShopId(req.query.shop_id)
+		const result = getShippingAlerts(db, { shopId })
+		res.json({ ...result, generated_at: Math.floor(Date.now() / 1000) })
+	} catch (err) {
+		console.error('[4px] GET /api/4px/shipping-alerts:', err.message)
+		res.status(err.status || 500).json({ error: err.message })
+	}
+})
+
+/**
+ * POST /api/4px/shipping-alerts/review — mark abnormal parcels as reviewed so
+ * they leave the "new" set until they escalate. This is the acknowledge half of
+ * the morning-review inbox; it deliberately does NOT resolve the parcel, which
+ * stays on the board (and in the claim workflow) until the carrier moves it.
+ *
+ * Body: { receipt_ids?: number[] }  — omit to review every currently-new alert.
+ * Returns the refreshed alert payload so the caller needs no second round trip.
+ */
+app.post('/api/4px/shipping-alerts/review', (req, res) => {
+	try {
+		const body = req.body || {}
+		let receiptIds
+		if (Object.prototype.hasOwnProperty.call(body, 'receipt_ids')) {
+			if (!Array.isArray(body.receipt_ids)) {
+				return res.status(400).json({ error: 'receipt_ids must be an array of order numbers' })
+			}
+			if (body.receipt_ids.length > 500) {
+				return res.status(400).json({ error: 'Review at most 500 parcels per request' })
+			}
+			const invalid = body.receipt_ids.some((id) => !Number.isInteger(Number(id)) || Number(id) <= 0)
+			if (invalid) return res.status(400).json({ error: 'receipt_ids must be positive order numbers' })
+			receiptIds = body.receipt_ids
+		}
+		ensureDisposedTrackingFlags()
+		const result = reviewShippingAlerts(db, { receiptIds, reviewedBy: req.auth?.user || null })
+		const shopId = _optionalShopId(body.shop_id ?? req.query.shop_id)
+		const refreshed = getShippingAlerts(db, { shopId })
+		res.json({
+			success: true,
+			reviewed: result.reviewed,
+			receipt_ids: result.receipt_ids,
+			...refreshed,
+			generated_at: Math.floor(Date.now() / 1000),
+		})
+	} catch (err) {
+		console.error('[4px] POST /api/4px/shipping-alerts/review:', err.message)
+		res.status(err.status || 500).json({ error: err.message })
 	}
 })
 
 /**
  * GET /api/4px/shipments — paginated list of 4PX parcels with cached tracking
  * snapshot + freight, and an is_stuck flag. Powers the Shipping tab table.
- * Query: status? (canonical or 'stuck'), shop_id?, q?, limit?, offset?
+ *
+ * Rows also carry the morning-review state (`is_new_alert`, `alert_kind`,
+ * `alert_flagged_at`) so every row can show for itself whether it is untriaged
+ * work — the alert banner above the board only ever lists the first handful.
+ *
+ * Query: status? (canonical or 'stuck'|'label_only'|'delayed'|'disposed'),
+ * alert_state? ('new'), shop_id?, q?, claim_status?, limit?, offset?
  */
 app.get('/api/4px/shipments', (req, res) => {
 	try {
+		ensureDisposedTrackingFlags()
+		refreshShippingAlertLedger()
+		const filters = _shippingQueryFilters(req)
 		const result = getShipments(db, {
-			status: req.query.status || undefined,
-			shopId: req.query.shop_id || undefined,
-			q: req.query.q || undefined,
-			from: req.query.from ? parseInt(req.query.from, 10) : undefined,
-			to: req.query.to ? parseInt(req.query.to, 10) : undefined,
+			...filters,
 			stuckDays: _stuckDays(),
-			limit: req.query.limit ? parseInt(req.query.limit, 10) : undefined,
-			offset: req.query.offset ? parseInt(req.query.offset, 10) : undefined,
+			limit: req.query.limit,
+			offset: req.query.offset,
 		})
 		res.json({ ...result, stuck_days: _stuckDays() })
 	} catch (err) {
 		console.error('[4px] GET /api/4px/shipments:', err.message)
+		res.status(err.status || 500).json({ error: err.message })
+	}
+})
+
+/**
+ * PUT /api/4px/shipments/:receipt_id/claim — save the Shipping-tab compensation
+ * claim note and/or status for one parcel. Dedicated storage (shipping_claim_*),
+ * separate from Orders/Route team_note.
+ * Body: { note?: string, status?: 'none'|'investigating'|'claimed'|'compensated'|'closed' }
+ */
+app.put('/api/4px/shipments/:receipt_id/claim', (req, res) => {
+	try {
+		const patch = {}
+		if (Object.prototype.hasOwnProperty.call(req.body || {}, 'note')) {
+			if (req.body.note != null && typeof req.body.note !== 'string') {
+				return res.status(400).json({ error: 'Claim note must be text' })
+			}
+			if (typeof req.body.note === 'string' && req.body.note.length > MAX_SHIPPING_CLAIM_NOTE_LENGTH) {
+				return res.status(400).json({ error: `Claim note must be ${MAX_SHIPPING_CLAIM_NOTE_LENGTH} characters or fewer` })
+			}
+			patch.note = req.body.note
+		}
+		if (Object.prototype.hasOwnProperty.call(req.body || {}, 'status')) {
+			if (req.body.status != null && typeof req.body.status !== 'string') {
+				return res.status(400).json({ error: 'Claim status must be text', allowed_statuses: SHIPPING_CLAIM_STATUSES })
+			}
+			patch.status = req.body.status
+		}
+		if (!Object.keys(patch).length) {
+			return res.status(400).json({ error: 'Provide note and/or status', allowed_statuses: SHIPPING_CLAIM_STATUSES })
+		}
+		const result = updateShippingClaim(db, req.params.receipt_id, patch)
+		if (!result.ok) {
+			const code = result.error === 'Order not found' ? 404 : 400
+			return res.status(code).json({ error: result.error, allowed_statuses: SHIPPING_CLAIM_STATUSES })
+		}
+		res.json({ success: true, ...result })
+	} catch (err) {
+		console.error('[4px] PUT /api/4px/shipments/:id/claim:', err.message)
+		res.status(500).json({ error: err.message })
+	}
+})
+
+/**
+ * GET /api/4px/shipments/:receipt_id/buyer-notice — draft + send attestation for
+ * a stuck/disposed parcel. Etsy has no messaging API; the operator copies the
+ * draft into the Etsy conversation, then POSTs to mark it sent.
+ */
+app.get('/api/4px/shipments/:receipt_id/buyer-notice', (req, res) => {
+	try {
+		ensureDisposedTrackingFlags()
+		refreshShippingAlertLedger()
+		const result = getShippingBuyerNotice(db, req.params.receipt_id)
+		if (!result.ok) return res.status(result.status || 400).json({ error: result.error })
+		res.json(result)
+	} catch (err) {
+		console.error('[4px] GET /api/4px/shipments/:id/buyer-notice:', err.message)
+		res.status(500).json({ error: err.message })
+	}
+})
+
+/**
+ * POST /api/4px/shipments/:receipt_id/buyer-notice — attest (or undo) that the
+ * operator messaged the buyer on Etsy about this stuck/disposed parcel.
+ * Body: { sent?: boolean, message?: string }
+ *   sent=true  (default) records the send with the draft or provided message
+ *   sent=false undoes the latest attestation for this incident
+ */
+app.post('/api/4px/shipments/:receipt_id/buyer-notice', (req, res) => {
+	try {
+		const body = req.body || {}
+		const sent = body.sent !== false
+		let result
+		if (sent) {
+			if (body.message != null && typeof body.message !== 'string') {
+				return res.status(400).json({ error: 'message must be text' })
+			}
+			if (typeof body.message === 'string' && body.message.length > MAX_SHIPPING_NOTICE_BODY_LENGTH) {
+				return res.status(400).json({ error: `Message must be ${MAX_SHIPPING_NOTICE_BODY_LENGTH} characters or fewer` })
+			}
+			result = recordShippingBuyerNotice(db, req.params.receipt_id, {
+				message: body.message,
+				notifiedBy: req.auth?.user || null,
+			})
+		} else {
+			result = clearShippingBuyerNotice(db, req.params.receipt_id)
+		}
+		if (!result.ok) {
+			return res.status(result.status || 400).json({ error: result.error, compliance: result.compliance })
+		}
+		res.json({ success: true, ...result })
+	} catch (err) {
+		console.error('[4px] POST /api/4px/shipments/:id/buyer-notice:', err.message)
 		res.status(500).json({ error: err.message })
 	}
 })
@@ -6100,36 +8927,64 @@ app.get('/api/4px/shipments', (req, res) => {
  * GET /api/4px/shipments/export.csv — download the filtered parcel list as CSV.
  *
  * Honours the SAME filters as GET /api/4px/shipments (status, shop_id, q, from,
- * to) so "what you see is what you download". The Shipping tab's "Download stuck"
- * button calls this with status=stuck, producing a ready-to-escalate sheet of the
- * tracking numbers currently held/looping in customs — the whole point of the
- * feature. Not paginated: every matching parcel is exported in one file.
+ * to, claim_status) so "what you see is what you download". The Shipping tab's
+ * "Download stuck" / "Download disposed" buttons call this with the matching
+ * status, producing a ready-to-escalate sheet for 4PX batch queries / claims.
+ * Not paginated: every matching parcel is exported in one file.
  *
  * The first column is the bare tracking number so the file doubles as a paste-list
  * for the 4PX portal's batch-query box; the remaining columns give an ops-desk the
- * context needed to file a complaint (buyer, destination, why it's stuck, how long).
+ * context needed to file a complaint (buyer, destination, why it's stuck, how long,
+ * and the operator's claim note/status).
  */
 app.get('/api/4px/shipments/export.csv', (req, res) => {
 	try {
+		// Export is a first-class read path: it must receive the same one-time
+		// cached disposal/delivery repairs as the interactive board.
+		ensureDisposedTrackingFlags()
+		// Once, before the first page: paging re-reads the same ordered query, so
+		// mutating the ledger between pages could shift a row across a page
+		// boundary and duplicate or drop it.
+		refreshShippingAlertLedger()
 		// Default to the stuck bucket (the feature's primary use) but respect an
 		// explicit status so the same endpoint can export any filtered view.
-		const status = req.query.status || 'stuck'
-		const { rows } = getShipments(db, {
-			status: status === 'all' ? undefined : status,
-			shopId: req.query.shop_id || undefined,
-			q: req.query.q || undefined,
-			from: req.query.from ? parseInt(req.query.from, 10) : undefined,
-			to: req.query.to ? parseInt(req.query.to, 10) : undefined,
-			stuckDays: _stuckDays(),
-			limit: 100000, // export everything that matches — no pagination
-			offset: 0,
-		})
+		const query = _shippingQueryFilters(req)
+		if (req.query.status == null) query.status = 'stuck'
+		query.stuckDays = _stuckDays()
+		const status = query.status || 'all'
+		// getShipments intentionally caps interactive pages at 1,000. Export all
+		// matching rows by paging that same query instead of silently truncating.
+		const MAX_EXPORT_ROWS = 50_000
+		const pageSize = 1000
+		const firstPage = getShipments(db, { ...query, limit: pageSize, offset: 0 })
+		if (firstPage.total > MAX_EXPORT_ROWS) {
+			return res.status(413).json({
+				error: `Export matches ${firstPage.total.toLocaleString()} parcels; narrow the filters below ${MAX_EXPORT_ROWS.toLocaleString()} rows.`,
+			})
+		}
+		const rows = [...firstPage.rows]
+		let offset = firstPage.rows.length
+		while (offset < firstPage.total) {
+			const page = getShipments(db, { ...query, limit: pageSize, offset })
+			rows.push(...page.rows)
+			offset += page.rows.length
+			if (page.rows.length < pageSize) break
+		}
 
 		const nowSec = Math.floor(Date.now() / 1000)
 		const iso = (ts) => (ts ? new Date(ts * 1000).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : '')
 		const daysSince = (ts) => (ts ? Math.floor((nowSec - ts) / 86400) : '')
-		const healthLabel = (h) => (h === 'critical' ? 'stuck' : h === 'warning' ? 'delayed' : h || 'ok')
-		const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`
+		// r.is_label_only carves the "never accepted by carrier" critical rows out
+		// of Stuck (see LABEL_ONLY_SQL) — mirror that split here so an exported
+		// sheet's Health column agrees with the board instead of re-merging them.
+		const healthLabel = (r) => (r.is_label_only ? 'label_only' : r.tracking_health === 'critical' ? 'stuck' : r.tracking_health === 'warning' ? 'delayed' : r.tracking_health || 'ok')
+		// Neutralize spreadsheet formulas in operator/buyer-controlled text before
+		// quoting. Excel still evaluates =,+,-,@ inside ordinary CSV quoted cells.
+		const esc = (v) => {
+			const raw = String(v ?? '')
+			const safe = /^\s*[=+\-@]/.test(raw) ? `'${raw}` : raw
+			return `"${safe.replace(/"/g, '""')}"`
+		}
 
 		const columns = [
 			['Tracking Number', (r) => r.tracking_no],
@@ -6138,15 +8993,28 @@ app.get('/api/4px/shipments/export.csv', (req, res) => {
 			['Buyer', (r) => r.buyer_name],
 			['Destination', (r) => r.shipping_country_iso],
 			['Status', (r) => r.tracking_status],
-			['Health', (r) => healthLabel(r.tracking_health)],
+			['Disposed', (r) => (r.is_disposed ? 'yes' : '')],
+			['Health', (r) => healthLabel(r)],
+			// Morning-review state, so an exported sheet distinguishes work nobody
+			// has looked at yet from a backlog already being chased.
+			['New (Unreviewed)', (r) => (r.is_new_alert ? 'yes' : '')],
+			['Flagged (UTC)', (r) => iso(r.alert_flagged_at)],
+			['Days Flagged', (r) => daysSince(r.alert_flagged_at)],
+			['Reviewed (UTC)', (r) => iso(r.alert_reviewed_at)],
 			['Reason', (r) => r.tracking_health_reason],
 			['Last Event', (r) => r.tracking_last_event],
 			['Last Location', (r) => r.tracking_last_location],
 			['Last Update (UTC)', (r) => iso(r.tracking_last_event_at)],
+			['Last Checked (UTC)', (r) => iso(r.tracking_checked_at)],
 			['Days Since Update', (r) => daysSince(r.tracking_last_event_at)],
 			['Ship Date (UTC)', (r) => iso(r.shipment_notified_at || r.etsy_created_at)],
 			['Days In Transit', (r) => daysSince(r.carrier_confirmed_at || r.shipment_notified_at || r.etsy_created_at)],
 			['Shipping Cost', (r) => (r.fourpx_freight_amount != null ? `${r.fourpx_freight_amount} ${r.fourpx_freight_currency || ''}`.trim() : '')],
+			['Claim Status', (r) => r.shipping_claim_status || ''],
+			['Claim Note', (r) => r.shipping_claim_note || ''],
+			['Buyer Messaged', (r) => (r.outreach_status === 'sent' ? 'yes' : r.outreach_needed ? 'needed' : r.outreach_status || '')],
+			['Buyer Messaged (UTC)', (r) => iso(r.shipping_buyer_notified_at)],
+			['Buyer Message Kind', (r) => r.shipping_buyer_notice_kind || ''],
 		]
 
 		const header = columns.map((c) => esc(c[0])).join(',')
@@ -6157,10 +9025,12 @@ app.get('/api/4px/shipments/export.csv', (req, res) => {
 		const fname = `4PX-${status}-tracking-${stamp}.csv`
 		res.setHeader('Content-Type', 'text/csv; charset=utf-8')
 		res.setHeader('Content-Disposition', contentDisposition(fname))
+		res.setHeader('X-Export-Row-Count', String(rows.length))
+		res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Export-Row-Count')
 		res.send(csv)
 	} catch (err) {
 		console.error('[4px] GET /api/4px/shipments/export.csv:', err.message)
-		res.status(500).json({ error: err.message })
+		res.status(err.status || 500).json({ error: err.message })
 	}
 })
 
@@ -6202,42 +9072,74 @@ app.post('/api/4px/balance', (req, res) => {
  * "refresh" action in the Shipping tab.
  */
 app.post('/api/4px/track/refresh/:receipt_id', async (req, res) => {
+	const receiptId = String(req.params.receipt_id)
 	try {
-		const receiptId = req.params.receipt_id
 		const row = db
 			.prepare(
 				`
-			SELECT COALESCE(CASE WHEN tracking_code LIKE '4PX%' THEN tracking_code END, fourpx_tracking_no) AS tracking_no
+			SELECT
+				COALESCE(
+					CASE WHEN fourpx_consignment_no IS NOT NULL AND fourpx_tracking_no LIKE '4PX%' THEN fourpx_tracking_no END,
+					CASE WHEN tracking_code LIKE '4PX%' THEN tracking_code END,
+					fourpx_tracking_no
+				) AS tracking_no,
+				tracking_checked_at
 			FROM receipts WHERE receipt_id = ?
 		`,
 			)
 			.get(receiptId)
 		if (!row || !row.tracking_no) return res.status(404).json({ error: 'No 4PX tracking number for this order' })
 
-		const snap = await getTrackingSnapshot(row.tracking_no, {
-			appKey: config.fourpx_app_key ?? null,
-			appSecret: config.fourpx_app_secret ?? null,
-		})
-		if (snap.ok) {
-			const firstScanAt = ['in_transit', 'delivered', 'exception'].includes(snap.status) ? (snap.firstScanAt ?? Math.floor(Date.now() / 1000)) : null
-			updateTrackingDetail(db, receiptId, {
-				status: snap.status,
-				firstScanAt,
-				lastEventAt: snap.lastEventAt,
-				lastEvent: snap.lastEvent,
-				lastLocation: snap.lastLocation,
-				deliveredAt: snap.deliveredAt,
-				health: snap.health,
+		const now = Math.floor(Date.now() / 1000)
+		const cooldownSec = 30
+		if (row.tracking_checked_at && now - row.tracking_checked_at < cooldownSec) {
+			const retryAfter = cooldownSec - (now - row.tracking_checked_at)
+			res.setHeader('Retry-After', String(retryAfter))
+			return res.status(429).json({
+				error: `This parcel was checked moments ago. Try again in ${retryAfter}s.`,
+				retry_after: retryAfter,
 			})
-		} else {
-			updateTrackingDetail(db, receiptId, {})
 		}
-		res.json({
+
+		// Route the one-row check through the SAME scheduler lock/pacing machinery
+		// as background runs. This prevents cross-process duplicates and avoids a
+		// manual click bypassing a live batch already contacting 4PX.
+		const launch = _startServerTrackingRefresh('parcel_manual', {
+			ignoreDisabled: true,
+			receiptIds: [Number(receiptId)],
+			includeResults: true,
+		})
+		if (!launch.started) {
+			return res.status(409).json({
+				error: 'A carrier refresh is already running. This parcel will update automatically if it is due.',
+				reason: launch.reason,
+			})
+		}
+		const cycle = await launch.promise
+		const result = cycle.results?.[0]
+		if (!result) return res.status(404).json({ error: 'No refreshable 4PX parcel was found for this order.' })
+		if (!result.ok) {
+			return res.status(502).json({
+				error: result.error || '4PX did not return tracking data. The previous status was preserved.',
+				tracking_no: result.tracking_no,
+				status: result.status,
+				source: result.source,
+			})
+		}
+
+		broadcastSyncEvent({
+			type: 'tracking_parcel_updated',
+			receipt_id: Number(receiptId),
 			tracking_no: row.tracking_no,
-			status: snap.status,
-			events: snap.events,
-			health: snap.health,
-			source: snap.source,
+			status: result.status,
+			ts: Date.now(),
+		})
+		res.json({
+			tracking_no: result.tracking_no,
+			status: result.status,
+			events: result.events,
+			health: result.health,
+			source: result.source,
 		})
 	} catch (err) {
 		console.error('[4px] POST /api/4px/track/refresh:', err.message)
@@ -6245,92 +9147,114 @@ app.post('/api/4px/track/refresh/:receipt_id', async (req, res) => {
 	}
 })
 
-// ─── Exchange rates (free, no-key API) ───────────────────────────────────────
-// Used to convert the receipt subtotal to the customs currency (EUR / GBP / etc.)
-// that sellers must declare on international packages.
-// Rates are cached for 6 hours to avoid hitting the free-tier limits.
+// ─── Exchange rates ──────────────────────────────────────────────────────────
+// Converts a receipt subtotal into the customs currency a packer declares on an
+// international parcel. src/compliance/exchange-rates.js owns the durability
+// this needs — a last-good table on disk, a VPN fallback route, and an honest
+// age on every answer — because a station that cannot reach the rate feed used
+// to show every order the same notice with no value in it.
 //
-// API: https://open.er-api.com/v6/latest/EUR  (no API key required)
-// All amounts relative to 1 EUR; we invert to get local→EUR.
-
-let _ratesCache = { ts: 0, rates: {}, error: null }
-
-function fetchRates() {
-	return new Promise((resolve) => {
-		const req = https.get('https://open.er-api.com/v6/latest/EUR', (res) => {
-			let raw = ''
-			res.on('data', (c) => (raw += c))
-			res.on('end', () => {
-				try {
-					const json = JSON.parse(raw)
-					if (json.result === 'success') {
-						_ratesCache = { ts: Date.now(), rates: json.rates, error: null }
-						resolve(json.rates)
-					} else {
-						_ratesCache.error = json.result
-						resolve(_ratesCache.rates)
-					}
-				} catch (e) {
-					_ratesCache.error = e.message
-					resolve(_ratesCache.rates)
-				}
-			})
-		})
-		req.on('error', (e) => {
-			_ratesCache.error = e.message
-			resolve(_ratesCache.rates)
-		})
-		req.setTimeout(5000, () => {
-			req.destroy()
-			resolve(_ratesCache.rates)
-		})
-	})
-}
-
-async function getRates() {
-	const SIX_HOURS = 6 * 60 * 60 * 1000
-	if (Date.now() - _ratesCache.ts < SIX_HOURS && Object.keys(_ratesCache.rates).length) {
-		return _ratesCache.rates
-	}
-	return fetchRates()
-}
+// The cache lives beside the database, so stations sharing a database directory
+// also share the last good table: one machine with egress supplies the rest.
+const rateStore = createRateStore({
+	cacheDir: path.dirname(path.resolve(config.db_path)),
+	vpnPort: config.vpn_local_port,
+})
 
 /**
- * Convert an amount in the shop currency (e.g. HKD) to a customs target currency
- * using the cached EUR-base exchange rates.
+ * Destination-currency amount to write on a customs form.
  *
- * @param {number} amountInShopCurrency  e.g. 175.05
- * @param {string} shopCurrency          e.g. 'HKD'
- * @param {string} targetCurrency        e.g. 'EUR'
- * @param {object} rates                 EUR-base rate map
- * @returns {number|null}
+ * Looks at the in-memory / on-disk table (no network on the orders path) so a
+ * list of 200 receipts cannot become 200 outbound FX calls. The boot refresh
+ * and 30-minute heartbeat keep that table warm.
  */
-function convertCurrency(amountInShopCurrency, shopCurrency, targetCurrency, rates) {
-	if (!rates[shopCurrency] || !rates[targetCurrency]) return null
-	// rates[X] = how many X per 1 EUR
-	// shopCurrency per EUR → amountInShopCurrency / shopRate = EUR amount
-	// EUR amount × targetRate = targetCurrency amount
-	const eur = amountInShopCurrency / rates[shopCurrency]
-	return eur * rates[targetCurrency]
+function customsDeclarationForReceipt(r, rateSnap = rateStore.snapshot()) {
+	const scheme = destinationTax.resolveDestinationTax(r.shipping_country_iso, config)
+	if (!scheme) return null
+	const converted = convertCurrencyAmount(Number(r.subtotal_amount), r.grandtotal_currency, scheme.customs_currency, rateSnap.rates || {})
+	const shaped = destinationTax.shapeCustomsDeclaration(scheme, converted)
+	if (!shaped) return null
+	shaped.stale = Boolean(rateSnap.stale)
+	if (rateSnap.fetched_at) shaped.rates_at = rateSnap.fetched_at
+	return shaped
+}
+
+/** EUR-base table for server-side conversions; {} when nothing is available. */
+async function getRates() {
+	return (await rateStore.get()).rates
 }
 
 /**
  * GET /api/exchange-rates
- * Returns current EUR-based rates. Frontend uses this to show customs amounts.
+ *
+ * The EUR-base table plus its provenance: when it was fetched, how it got here,
+ * and whether it is old enough that the bench must stop calling it today's rate.
+ * The dashboard renders customs values from this, so an empty `rates` is a real
+ * answer — it means "declare nothing you cannot read off the Etsy order page".
  */
 app.get('/api/exchange-rates', async (_req, res) => {
 	try {
-		const rates = await getRates()
-		res.json({ rates, cached_at: new Date(_ratesCache.ts).toISOString(), error: _ratesCache.error })
+		const snap = await rateStore.get()
+		res.json({ rates: snap.rates, cached_at: snap.fetched_at, age_ms: snap.age_ms, stale: snap.stale, source: snap.source, error: snap.error })
 	} catch (e) {
-		res.status(500).json({ error: e.message })
+		// Should be unreachable: the store swallows its own failures by design.
+		console.error('[rates] GET /api/exchange-rates:', e.message)
+		res.status(500).json({ error: e.message, rates: {} })
 	}
 })
 
-// Warm-up: fetch rates once at startup (non-blocking)
-getRates()
-	.then(() => console.log('[rates] Exchange rates loaded'))
-	.catch(() => {})
+// Warm-up at boot, and a heartbeat afterwards. Without the heartbeat a station
+// that boots offline stays without rates until someone reloads the page at the
+// exact moment the retry window is open.
+async function refreshRatesWithReport(context) {
+	const snap = await rateStore.get()
+	const count = Object.keys(snap.rates).length
+	if (!count) {
+		console.warn(`[rates] no exchange rates available (${snap.error || 'unknown reason'}) — the packing bench cannot show customs values. ` + `They are cached at ${rateStore.cachePath}; a station with internet access will populate it.`)
+		return
+	}
+	if (snap.source === 'cache' || snap.stale) {
+		console.warn(`[rates] using rates from ${snap.fetched_at} (${snap.source})${snap.error ? ` — last refresh failed: ${snap.error}` : ''}`)
+		return
+	}
+	if (context === 'boot') console.log(`[rates] Exchange rates loaded (${count} currencies, ${snap.source})`)
+}
+refreshRatesWithReport('boot').catch(() => {})
+setInterval(() => refreshRatesWithReport('heartbeat').catch(() => {}), 30 * 60 * 1000).unref()
+
+/**
+ * GET /api/compliance/destination-tax
+ *
+ * The marketplace import-tax registry: which destinations have VAT/GST collected
+ * by Etsy, the identifier that clears each one, whether that identifier may be
+ * written on the parcel, and the value ceiling above which the tax is collected
+ * at the border instead.
+ *
+ * The packing bench renders its customs notice entirely from this payload — no
+ * tax number is hard-coded in the browser — so an identifier change is a config
+ * edit, and the number the packer writes on the box is the same one the shipment
+ * transmits. Pairs with /api/exchange-rates, which supplies the conversion the
+ * declared value and the ceiling comparison need.
+ */
+app.get('/api/compliance/destination-tax', (_req, res) => {
+	const { reviewed_at, schemes, countries } = destinationTax.buildDestinationTaxRegistry(config)
+	// `problems` stays server-side: it names config mistakes, which are for the
+	// operator's log rather than a packer's screen. They are already warned about
+	// at load, and again at boot below.
+	res.setHeader('Cache-Control', 'private, max-age=300')
+	res.json({ reviewed_at, schemes, countries })
+})
+
+// Boot-time visibility: a destination whose identifier failed validation would
+// otherwise only show up as a notice quietly missing from the bench.
+{
+	const registry = destinationTax.buildDestinationTaxRegistry(config)
+	for (const problem of registry.problems) console.warn(`[tax] ${problem}`)
+	const missing = Object.values(registry.schemes)
+		.filter((s) => !s.identifier)
+		.map((s) => s.key)
+	if (missing.length) console.warn(`[tax] no identifier resolved for ${missing.join(', ')} — those destinations get no customs notice.`)
+}
 
 // ─── Listings ─────────────────────────────────────────────────────────────────
 
@@ -6508,13 +9432,19 @@ app.get('/api/listings/sync/:shop_name', async (req, res) => {
 		let synced = 0
 		let removed = 0
 		let variations = 0
+		const stateCounts = {}
 		for (const state of states) {
 			// Track which listing_ids Etsy returned for this state so we can prune
 			// the locally-cached rows it no longer lists once the full walk succeeds.
 			const seenIds = new Set()
 			for await (const batch of paginateListings(shopClient, numericShopId, { state, includeInventory: true })) {
 				for (const listing of batch) {
-					upsertListing(db, shopCfg.shop_id, listing)
+					// Listing sync is an operational cache refresh. Retain Etsy's
+					// view/favorite metrics only when the separate written-approval
+					// and catalog-analytics gates are both enabled.
+					upsertListing(db, shopCfg.shop_id, listing, {
+						analyticsMetrics: growthApiAnalyticsEnabled(),
+					})
 					variations += cacheListingInventory(listing.listing_id, listing.inventory)
 					seenIds.add(listing.listing_id)
 					synced++
@@ -6522,7 +9452,9 @@ app.get('/api/listings/sync/:shop_name', async (req, res) => {
 			}
 			// Guarded inside pruneStaleListings: an empty result never wipes the cache.
 			removed += pruneStaleListings(db, shopCfg.shop_id, state, seenIds)
+			stateCounts[`listing_${state}_count`] = seenIds.size
 		}
+		upsertShopHealthSnapshot(db, shopCfg.shop_id, stateCounts)
 
 		console.log(`[listings] Synced ${synced} listing(s) [${states.join(', ')}] for ${req.params.shop_name}; cached ${variations} variation(s); pruned ${removed} stale`)
 		res.json({ success: true, synced, variations, removed, shop: req.params.shop_name, state: requested })
@@ -6700,21 +9632,23 @@ app.get('/api/listings/style-prices', (req, res) => {
 	try {
 		const shopId = req.query.shop_id
 		if (!shopId) return res.status(400).json({ error: 'shop_id required' })
+		const productType = getProductType(req.query.product_type).id
+		const styleKeys = styleKeysFor(productType)
 
-		const shop = getShopCurrentStylePrices(db, shopId)
+		const shop = getShopCurrentStylePrices(db, shopId, productType)
 
-		// Fill gaps from the pricing master sheet (matched to the shop's currency).
+		// Fill gaps from the product line's price book, or the master sheet.
 		let sheetPrices = {}
 		if (shop.currency) {
 			try {
-				sheetPrices = getPricesForCurrency(shop.currency).prices || {}
+				sheetPrices = getPricesForCurrency(shop.currency, { productType }).prices || {}
 			} catch {
 				sheetPrices = {}
 			}
 		}
 		const merged = {}
 		const source = {}
-		for (const key of STYLE_KEYS) {
+		for (const key of styleKeys) {
 			if (Number.isFinite(shop.prices[key])) {
 				merged[key] = shop.prices[key]
 				source[key] = 'shop'
@@ -6725,7 +9659,7 @@ app.get('/api/listings/style-prices', (req, res) => {
 		}
 
 		res.json({
-			style_keys: STYLE_KEYS,
+			style_keys: styleKeys,
 			prices: merged,
 			source,
 			counts: shop.counts,
@@ -6740,14 +9674,14 @@ app.get('/api/listings/style-prices', (req, res) => {
 
 /**
  * POST /api/listings/reprice
- * Body: { shop_name, prices: { styleKey: amount }, state?, listing_ids? }
+ * Body: { shop_name, prices: { styleKey: amount }, state?, listing_ids?, product_type? }
  * Kicks off a background bulk reprice and returns a job_id to stream.
  */
 app.post('/api/listings/reprice', (req, res) => {
 	try {
-		const { shop_name, prices, state, listing_ids } = req.body || {}
+		const { shop_name, prices, state, listing_ids, product_type } = req.body || {}
 		if (!shop_name) return res.status(400).json({ error: 'shop_name required' })
-		const result = shopRepricer.start(shop_name, { prices, state, listingIds: listing_ids })
+		const result = shopRepricer.start(shop_name, { prices, state, listingIds: listing_ids, productType: getProductType(product_type).id })
 		res.json({ success: true, ...result })
 	} catch (err) {
 		res.status(err.status || 500).json({ error: err.message })
@@ -6769,15 +9703,15 @@ app.get('/api/listings/reprice/stream/:job_id', (req, res) => {
 
 /**
  * POST /api/listings/:listing_id/variation-prices
- * Body: { shop_name, prices: { styleKey: amount } }
+ * Body: { shop_name, prices: { styleKey: amount }, product_type? }
  * Synchronously sets per-style prices for ONE listing (used by the Edit modal).
  * Requires listings_w scope.
  */
 app.post('/api/listings/:listing_id/variation-prices', async (req, res) => {
 	try {
-		const { shop_name, prices } = req.body || {}
+		const { shop_name, prices, product_type } = req.body || {}
 		if (!shop_name) return res.status(400).json({ error: 'shop_name required' })
-		const result = await shopRepricer.repriceListingSync(shop_name, parseInt(req.params.listing_id, 10), prices)
+		const result = await shopRepricer.repriceListingSync(shop_name, parseInt(req.params.listing_id, 10), prices, getProductType(product_type).id)
 		res.json({ success: true, ...result })
 	} catch (err) {
 		console.error('[listings] Variation reprice error:', err.response?.data || err.message)
@@ -6867,31 +9801,29 @@ app.post('/api/bulk/scan', (req, res) => {
 app.get('/api/bulk/shop-settings/:shop_name', async (req, res) => {
 	try {
 		const { shopClient, numericShopId, shopCfg } = await getShopClientForShopName(req.params.shop_name)
+		const productType = getProductType(req.query.product_type).id
 		const settings = await getShopListingSettings({
 			db,
 			shopClient,
 			shopId: numericShopId,
 			shopKey: req.params.shop_name,
-			productType: req.query.product_type || 'iphone_case',
+			productType,
 			force: req.query.force === '1',
 		})
 		// Default variation prices = the shop's CURRENT prices (from cached live
-		// listings), with the master sheet filling any style the shop doesn't sell.
+		// listings), with the product line's own price book — or the master sheet —
+		// filling any value the shop doesn't already sell.
 		let sheetPrices = {}
 		try {
-			sheetPrices = getPricesForCurrency(settings.currency_code, { column: 'anchor' }).prices
+			sheetPrices = getPricesForCurrency(settings.currency_code, { column: 'anchor', productType }).prices
 		} catch {
 			sheetPrices = {}
 		}
-		const { prices, source, shop } = resolveDefaultPrices({ db, shopId: shopCfg.shop_id, sheetPrices })
-		// The price grid + variation editor only show the styles this product type
-		// actually offers (e.g. AirPods cases never offer a grip).
-		const styleKeys = Array.isArray(settings.style_keys) && settings.style_keys.length ? settings.style_keys : STYLE_KEYS
+		const { prices, source, shop } = resolveDefaultPrices({ db, shopId: shopCfg.shop_id, sheetPrices, productType })
 		res.json({
 			shop_key: shopCfg.shop_id,
 			...settings,
 			product_types: listProductTypes(),
-			style_keys: styleKeys,
 			default_prices: prices,
 			prices_source: source,
 			shop_current_prices: shop.prices,
@@ -6922,7 +9854,7 @@ app.post('/api/bulk/run', (req, res) => {
 			overrides: overrides || {},
 			brandTags: Array.isArray(brand_tags) ? brand_tags : undefined,
 			stylePrices: style_prices && typeof style_prices === 'object' ? style_prices : undefined,
-			productType: product_type || 'iphone_case',
+			productType: getProductType(product_type).id,
 		})
 		res.status(201).json({ success: true, job })
 	} catch (err) {
@@ -6968,7 +9900,14 @@ app.get('/api/bulk/jobs', (req, res) => {
 app.get('/api/bulk/jobs/:job_id', (req, res) => {
 	const job = bulkManager.getJob(req.params.job_id)
 	if (!job) return res.status(404).json({ error: 'Job not found' })
-	res.json({ job, items: bulkManager.getItems(req.params.job_id), is_active: bulkManager.isActive(job.job_id) })
+	res.json({
+		job,
+		// Reopening a run must restore ITS product line (models, priced values,
+		// axis names), not whatever the setup card happens to have selected.
+		product_meta: bulkManager.jobProductMeta(job.job_id),
+		items: bulkManager.listItemsForClient(req.params.job_id),
+		is_active: bulkManager.isActive(job.job_id),
+	})
 })
 
 /** DELETE /api/bulk/jobs/:job_id — remove a saved run (and its items). */
@@ -6991,7 +9930,7 @@ app.get('/api/bulk/stream/:job_id', (req, res) => {
 	res.write('\n')
 	const job = bulkManager.getJob(req.params.job_id)
 	if (job) {
-		res.write(`data: ${JSON.stringify({ type: 'snapshot', job, items: bulkManager.getItems(req.params.job_id), regenerating: bulkManager.activeRegenSeqs(req.params.job_id) })}\n\n`)
+		res.write(`data: ${JSON.stringify({ type: 'snapshot', job, items: bulkManager.listItemsForClient(req.params.job_id), regenerating: bulkManager.activeRegenSeqs(req.params.job_id) })}\n\n`)
 	}
 	bulkManager.subscribe(req.params.job_id, res)
 })
@@ -7082,23 +10021,56 @@ app.get('/api/bulk/jobs/:job_id/items/:seq/detail', (req, res) => {
 })
 
 /**
- * GET /api/bulk/jobs/:job_id/items/:seq/image/:rank
+ * GET /api/bulk/jobs/:job_id/items/:seq/image/:rank[?w=240]
  * Streams a product image (validated to live inside the job's input folder)
  * so the Inspector can show the real photos in upload order.
+ *
+ * `?w=` returns a cached WebP thumbnail instead of the original. Supplier
+ * photos are ~1 MB / 1750px each and the gallery paints them at ~72px, so the
+ * Inspector asks for thumbnails and only fetches full bytes on demand. The
+ * thumbnail's ETag is content-addressed (source mtime+size), which makes it
+ * safe to cache immutably — a replaced photo produces a different ETag.
  */
-app.get('/api/bulk/jobs/:job_id/items/:seq/image/:rank', (req, res) => {
+app.get('/api/bulk/jobs/:job_id/items/:seq/image/:rank', async (req, res) => {
+	let imgPath
+	let mime
 	try {
-		const { path: imgPath, mime } = bulkManager.resolveItemImage(req.params.job_id, req.params.seq, req.params.rank)
-		res.setHeader('Content-Type', mime || 'application/octet-stream')
-		res.setHeader('Cache-Control', 'private, max-age=300')
-		fs.createReadStream(imgPath)
-			.on('error', () => {
-				if (!res.headersSent) res.status(500).end()
-			})
-			.pipe(res)
+		const resolved = bulkManager.resolveItemImage(req.params.job_id, req.params.seq, req.params.rank)
+		imgPath = resolved.path
+		mime = resolved.mime
 	} catch (err) {
-		res.status(err.status || 500).json({ error: err.message })
+		return res.status(err.status || 500).json({ error: err.message })
 	}
+
+	try {
+		const width = thumbnails.normaliseWidth(req.query.w)
+		const thumb = width ? await thumbnails.getThumbnail(imgPath, width) : null
+		if (thumb) {
+			// Content-addressed → the bytes behind this ETag can never change.
+			res.setHeader('ETag', thumb.etag)
+			res.setHeader('Content-Type', thumb.mime)
+			res.setHeader('Cache-Control', 'private, max-age=31536000, immutable')
+			if (req.headers['if-none-match'] === thumb.etag) return res.status(304).end()
+			return fs
+				.createReadStream(thumb.path)
+				.on('error', () => {
+					if (!res.headersSent) res.status(500).end()
+				})
+				.pipe(res)
+		}
+	} catch (err) {
+		// Thumbnailing is an optimisation, never a hard dependency — fall through
+		// to the original bytes rather than showing the operator a broken tile.
+		console.warn('[bulk] thumbnail failed, serving original:', err.message)
+	}
+
+	res.setHeader('Content-Type', mime || 'application/octet-stream')
+	res.setHeader('Cache-Control', 'private, max-age=300')
+	fs.createReadStream(imgPath)
+		.on('error', () => {
+			if (!res.headersSent) res.status(500).end()
+		})
+		.pipe(res)
 })
 
 /** POST /api/bulk/jobs/:job_id/items/:seq/publish — publish one draft to Etsy. */
@@ -7125,7 +10097,13 @@ app.post('/api/bulk/jobs/:job_id/publish', (req, res) => {
 app.post('/api/bulk/jobs/:job_id/items/:seq/reviewed', (req, res) => {
 	try {
 		const reviewed = req.body?.reviewed !== false // default true
-		res.json({ success: true, ...bulkManager.setItemReviewed(req.params.job_id, req.params.seq, reviewed) })
+		res.json({
+			success: true,
+			...bulkManager.setItemReviewed(req.params.job_id, req.params.seq, reviewed, {
+				attestation: req.body?.attestation,
+				reviewedBy: req.auth?.user || 'owner',
+			}),
+		})
 	} catch (err) {
 		res.status(err.status || 500).json({ error: err.message })
 	}
@@ -7135,7 +10113,15 @@ app.post('/api/bulk/jobs/:job_id/items/:seq/reviewed', (req, res) => {
 app.post('/api/bulk/jobs/:job_id/reviewed', (req, res) => {
 	try {
 		const reviewed = req.body?.reviewed !== false
-		res.json({ success: true, ...bulkManager.setItemsReviewed(req.params.job_id, Array.isArray(req.body?.seqs) ? req.body.seqs : [], reviewed) })
+		res.json({
+			success: true,
+			...bulkManager.setItemsReviewed(
+				req.params.job_id,
+				Array.isArray(req.body?.seqs) ? req.body.seqs : [],
+				reviewed,
+				{ attestation: req.body?.attestation, reviewedBy: req.auth?.user || 'owner' },
+			),
+		})
 	} catch (err) {
 		res.status(err.status || 500).json({ error: err.message })
 	}
@@ -7195,6 +10181,37 @@ app.post('/api/bulk/jobs/:job_id/items/:seq/images/upload', express.json({ limit
 		}
 		if (!files.length) return res.status(400).json({ error: 'A valid image is required.' })
 		const result = await bulkManager.addItemImages(req.params.job_id, req.params.seq, files)
+		res.json({ success: true, ...result })
+	} catch (err) {
+		res.status(err.status || 500).json({ error: err.message })
+	}
+})
+
+/**
+ * POST /api/bulk/jobs/:job_id/items/:seq/images/:rank/crop
+ * Body: { left, top, width, height, rotate } — the rectangle in the pixel space
+ * of the EXIF-oriented photo AFTER `rotate` degrees, i.e. exactly the frame the
+ * operator dragged the crop box in.
+ *
+ * Rewrites the photo in place (same filename, same format) and keeps a pristine
+ * copy for the revert below. Dry-run preview only, before the Etsy draft exists.
+ */
+app.post('/api/bulk/jobs/:job_id/items/:seq/images/:rank/crop', async (req, res) => {
+	try {
+		const result = await bulkManager.cropItemImage(req.params.job_id, req.params.seq, req.params.rank, req.body || {})
+		res.json({ success: true, ...result })
+	} catch (err) {
+		res.status(err.status || 500).json({ error: err.message })
+	}
+})
+
+/**
+ * POST /api/bulk/jobs/:job_id/items/:seq/images/:rank/revert
+ * Restore a cropped photo to exactly the file the supplier shipped.
+ */
+app.post('/api/bulk/jobs/:job_id/items/:seq/images/:rank/revert', async (req, res) => {
+	try {
+		const result = await bulkManager.revertItemImage(req.params.job_id, req.params.seq, req.params.rank)
 		res.json({ success: true, ...result })
 	} catch (err) {
 		res.status(err.status || 500).json({ error: err.message })
@@ -7391,7 +10408,7 @@ app.post('/api/inventory/sync/:shop_name', async (req, res) => {
 			return res.json({ success: true, synced: 0, message: 'No active listings cached. Sync listings first.' })
 		}
 
-		const autoRestock = config.auto_restock_enabled !== false
+		const autoRestock = isAutoRestockEnabled(config)
 		const restockQty = config.restock_quantity ?? 3
 
 		let synced = 0,
@@ -7648,7 +10665,7 @@ app.get('/api/inventory/watch/status', (req, res) => {
 		.get(last24h)
 
 	res.json({
-		auto_restock_enabled: config.auto_restock_enabled !== false,
+		auto_restock_enabled: isAutoRestockEnabled(config),
 		restock_quantity: config.restock_quantity ?? 3,
 		inv_watch_interval_minutes: config.inv_watch_interval_minutes ?? 240,
 		embedded_sync: process.env.EMBEDDED_SYNC !== '0',
@@ -7663,6 +10680,73 @@ app.get('/api/inventory/watch/status', (req, res) => {
 			zero_stock_alerts: restockRow?.zero_count ?? 0,
 			syncs_completed: syncRow?.n ?? 0,
 		},
+	})
+})
+
+/**
+ * PATCH /api/inventory/auto-restock
+ * Owner-only. Persist auto_restock_enabled (and optional restock_quantity) to
+ * config.json, apply it to the running process, and when turning ON queue the
+ * same inventory-watch sweep the scheduler uses so currently-zero listings are
+ * restocked immediately instead of waiting for the next order or 4h watch.
+ *
+ * Body: { enabled: boolean, restock_quantity?: integer }
+ */
+app.patch('/api/inventory/auto-restock', (req, res) => {
+	if (!req.auth || req.auth.role !== 'owner') {
+		return res.status(403).json({ error: 'Only the owner can change auto-restock.', code: 'OWNER_REQUIRED' })
+	}
+
+	const body = req.body && typeof req.body === 'object' ? req.body : {}
+	if (!Object.prototype.hasOwnProperty.call(body, 'enabled') || typeof body.enabled !== 'boolean') {
+		return res.status(400).json({ error: 'Body must include enabled: true or false' })
+	}
+
+	const patch = { auto_restock_enabled: body.enabled }
+	if (Object.prototype.hasOwnProperty.call(body, 'restock_quantity')) {
+		const qty = Number(body.restock_quantity)
+		if (!Number.isInteger(qty) || qty < 1 || qty > 999) {
+			return res.status(400).json({ error: 'restock_quantity must be an integer from 1 to 999' })
+		}
+		patch.restock_quantity = qty
+	}
+
+	let next
+	try {
+		next = patchRuntimeSettings(patch)
+	} catch (err) {
+		console.error('[inventory] Failed to persist auto-restock setting:', err.message)
+		return res.status(500).json({ error: 'Could not save auto-restock setting', detail: err.message })
+	}
+
+	Object.assign(config, next)
+
+	const enabled = isAutoRestockEnabled(config)
+	const qty = config.restock_quantity ?? 3
+	const by = (req.auth && req.auth.user) || 'owner'
+
+	logEvent(db, {
+		event_type: 'CONFIG',
+		detail: enabled ? `Auto-restock enabled by ${by}. Zero-stock offerings will be raised to qty ${qty}.` : `Auto-restock disabled by ${by}. Zero-stock listings will alert only until restocked manually.`,
+		meta: { auto_restock_enabled: enabled, restock_quantity: qty, by },
+	})
+	console.log(`[inventory] Auto-restock ${enabled ? 'ENABLED' : 'DISABLED'} by ${by} (qty ${qty})`)
+
+	let sweep_queued = false
+	if (enabled) {
+		sweep_queued = true
+		setImmediate(() => {
+			runInventoryWatchCycle(config, tokenManager, db).catch((err) => {
+				console.error('[inventory] post-enable sweep failed:', err.message)
+			})
+		})
+	}
+
+	res.json({
+		success: true,
+		auto_restock_enabled: enabled,
+		restock_quantity: qty,
+		sweep_queued,
 	})
 })
 
@@ -7704,6 +10788,7 @@ app.get('/api/events', (req, res) => {
 app.get('/api/route/config', (req, res) => {
 	const engineRoot = enginePaths.engineDir(config)
 	const engineScript = enginePaths.engineScript(config)
+	const owner = req.auth && req.auth.role === 'owner'
 	let scriptExists = false
 	if (engineScript) {
 		try {
@@ -7719,11 +10804,11 @@ app.get('/api/route/config', (req, res) => {
 	res.json({
 		configured: !!engineRoot,
 		script_exists: scriptExists,
-		osp_project_dir: engineRoot,
-		osp_python: enginePaths.enginePython(config),
-		script_path: engineScript,
+		osp_project_dir: owner && engineRoot ? engineRoot : engineRoot ? path.basename(engineRoot) : null,
+		osp_python: owner ? enginePaths.enginePython(config) : path.basename(enginePaths.enginePython(config)),
+		script_path: owner && engineScript ? engineScript : engineScript ? path.basename(engineScript) : null,
 		charm_count: charmCount,
-		job: _routeJob,
+		job: owner ? _routeJob : { ..._routeJob, log: (_routeJob.log || []).filter((line) => !String(line).includes('[cmd]')) },
 	})
 })
 
@@ -7733,7 +10818,11 @@ app.get('/api/route/config', (req, res) => {
  * The browser polls this endpoint every 1.5 s while status === 'running'.
  */
 app.get('/api/route/status', (req, res) => {
-	res.json(_routeJob)
+	if (req.auth && req.auth.role === 'owner') return res.json(_routeJob)
+	res.json({
+		..._routeJob,
+		log: (_routeJob.log || []).filter((line) => !String(line).includes('[cmd]')),
+	})
 })
 
 /**
@@ -7759,6 +10848,7 @@ app.get('/api/route/dashboard', (req, res) => {
 			.map((s) => parseInt(s.trim(), 10))
 			.filter(Number.isInteger)
 
+		const routeBuildStarted = process.hrtime.bigint()
 		const rows = routeDashboard.buildRouteRows(db, config, {
 			date_from: req.query.date_from,
 			date_to: req.query.date_to,
@@ -7775,6 +10865,7 @@ app.get('/api/route/dashboard', (req, res) => {
 			receipt_ids: receiptIds.length ? receiptIds : undefined,
 			extra_receipt_ids: extraIds.length ? extraIds : undefined,
 		})
+		const routeBuildMs = Number(process.hrtime.bigint() - routeBuildStarted) / 1e6
 
 		// Headline counts for the dashboard summary bar.
 		//
@@ -7791,31 +10882,60 @@ app.get('/api/route/dashboard', (req, res) => {
 		// Removed (dismissed) lines never count toward shopping work — they are a
 		// separate, reviewable bucket surfaced via the "🗑 removed" pill.
 		const live = rows.filter((r) => !r.dismissed)
-		// A wrong-model exchange only holds its CASE in hand — the grip/charm on the
-		// SAME line still need buying, so an exchange line stays in the "to shop"
-		// active set whenever it has such pieces left (a pure case-only swap drops
-		// out, like a fully purchased line). Exchanges are also surfaced separately
-		// via `to_exchange`. Mirrors the client's _computeRouteSummary exactly.
+		// A SWAP model fix holds its generation-specific unit in hand (the case
+		// on iPhone; the case + attached charm on AirPods). A separately-sourced
+		// grip/charm on the SAME line still need buying, so it stays in the "to
+		// shop" active set whenever it has such pieces left (a pure unit swap
+		// drops out, like a fully purchased line) and is surfaced separately via
+		// `to_exchange`. A BUY model fix holds nothing at all, so it is ordinary
+		// shopping work that happens to carry a corrected model, and is counted
+		// here like any other line.
+		// Mirrors the client's _computeRouteSummary exactly.
 		const active = live.filter((r) => !r.excluded && !r.fully_purchased && (!r.needs_exchange || routeDashboard.rowHasShoppingWork(r)))
+		const isSwap = (r) => routeDashboard.exchangeIntent(r) === routeDashboard.EXCHANGE_INTENT_SWAP
+		const isBuyFix = (r) => routeDashboard.exchangeIntent(r) === routeDashboard.EXCHANGE_INTENT_BUY
 		const summary = {
 			orders: new Set(active.map((r) => r.receipt_id)).size,
 			items: active.length,
 			excluded: live.filter((r) => r.excluded).length,
 			fully_purchased: live.filter((r) => r.fully_purchased && !r.excluded && !r.needs_exchange).length,
-			to_exchange: live.filter((r) => r.needs_exchange && !r.excluded).length,
+			// Swaps owed at a stall — in hand, never re-bought.
+			to_exchange: live.filter((r) => isSwap(r) && !r.excluded).length,
+			// Lines whose model was corrected and must be BOUGHT. They are already
+			// inside `items`; this count exists so the operator can see (and filter
+			// to) the ones where buying the model on the order line would be a
+			// mistake. Never hidden from the buy queue.
+			to_buy_model: live.filter((r) => isBuyFix(r) && !r.excluded && !r.fully_purchased).length,
 			dismissed: rows.filter((r) => r.dismissed).length,
 			// Charm-code assignment progress. Integral (AirPods) charms are excluded:
 			// they ship attached to the case and need no code, so counting them would
 			// leave "assigned" permanently short of "needed".
 			charms_needed: active.filter((r) => r.has_charm && !r.charm_integral).length,
 			charms_assigned: active.filter((r) => r.has_charm && !r.charm_integral && r.charm_code).length,
-			supplier_matched: live.filter((r) => r.supplier_in_catalog).length,
-			supplier_missing: live.filter((r) => !r.supplier_in_catalog).length,
+			// Sourcing progress. "Missing" is every line with nowhere trustworthy to
+			// buy it — never catalogued, OR flagged Wrong Stall in person, since a
+			// stall that turned out to be wrong leaves the shopper exactly as stuck.
+			// `supplier_wrong_stall` breaks out that second group so the operator can
+			// see how much of the gap is a bad mapping rather than a missing one.
+			supplier_matched: live.filter((r) => !r.needs_sourcing).length,
+			supplier_missing: live.filter((r) => r.needs_sourcing).length,
+			supplier_wrong_stall: live.filter((r) => r.sourcing_reason === routeSourcing.REASON_WRONG_STALL).length,
 			total_orders: new Set(live.map((r) => r.receipt_id)).size,
 			total_items: live.length,
 		}
 
-		res.json({ rows, summary, statuses: routeDashboard.STATUS_OPTIONS })
+		const roundedRouteBuildMs = Number(routeBuildMs.toFixed(1))
+		res.set('Server-Timing', `route-build;dur=${roundedRouteBuildMs.toFixed(1)}`)
+		res.set('X-Route-Row-Count', String(rows.length))
+		res.json({
+			rows,
+			summary,
+			statuses: routeDashboard.STATUS_OPTIONS,
+			meta: {
+				row_count: rows.length,
+				route_build_ms: roundedRouteBuildMs,
+			},
+		})
 	} catch (err) {
 		console.error('[route] dashboard error:', err.message)
 		res.status(500).json({ error: err.message })
@@ -7825,28 +10945,80 @@ app.get('/api/route/dashboard', (req, res) => {
 /**
  * POST /api/route/assign
  * Body: { receipt_id, item_key, title?, charm_code?, charm_shop?,
- *         status_case?, status_grip?, status_charm?, excluded? }
+ *         status_case?, status_grip?, status_charm?, excluded?,
+ *         supplier_shop_override?, supplier_stall_override? }
  * Upserts one order line's assignment. Only provided fields change.
+ *
+ * Correcting a location also clears any Wrong Stall flag it answers (returned as
+ * `resolved_wrong_stall`) — see routeSourcing.componentsResolvedByCorrection.
+ * Product-level fan-out uses routeSourcing.locationMoved / productLocation so the
+ * "did this save move a stall?" check stays in one place with the rest of the
+ * wrong-stall policy.
  */
 app.post('/api/route/assign', express.json(), (req, res) => {
 	const b = req.body ?? {}
 	if (b.receipt_id == null || !b.item_key) {
 		return res.status(400).json({ error: 'receipt_id and item_key are required.' })
 	}
+	const validStatus = (value) => value == null || routeDashboard.STATUS_OPTIONS.includes(value)
+	if (!validStatus(b.status_case) || !validStatus(b.status_grip) || !validStatus(b.status_charm)) {
+		return res.status(400).json({ error: 'Invalid status value.' })
+	}
 	try {
-		const row = upsertRouteAssignment(db, {
-			receipt_id: Number(b.receipt_id),
-			item_key: String(b.item_key),
-			title: b.title,
-			charm_code: b.charm_code,
-			charm_shop: b.charm_shop,
-			status_case: b.status_case,
-			status_grip: b.status_grip,
-			status_charm: b.status_charm,
-			excluded: b.excluded,
-			supplier_shop_override: b.supplier_shop_override,
-			supplier_stall_override: b.supplier_stall_override,
-		})
+		let row
+		let settledFixes = []
+		let resolvedWrongStall = []
+		let catalogChanged = false
+		const hasStatusChange = b.status_case != null || b.status_grip != null || b.status_charm != null
+		// Keep the assignment, verification gate, issue bridge, model-fix settlement
+		// and order rollup atomic — the same invariant enforced by Shopping Mode.
+		db.transaction(() => {
+			// What the line looked like BEFORE this write, so we can tell whether the
+			// operator actually moved a location (and not merely re-saved the same one).
+			const before = getRouteAssignment(db, Number(b.receipt_id), String(b.item_key))
+			row = upsertRouteAssignment(db, {
+				receipt_id: Number(b.receipt_id),
+				item_key: String(b.item_key),
+				title: b.title,
+				charm_code: b.charm_code,
+				charm_shop: b.charm_shop,
+				status_case: b.status_case,
+				status_grip: b.status_grip,
+				status_charm: b.status_charm,
+				excluded: b.excluded,
+				supplier_shop_override: b.supplier_shop_override,
+				supplier_stall_override: b.supplier_stall_override,
+			})
+
+			// Recording a NEW location answers the "wrong stall" report about the old
+			// one: those pieces go back to Pending, now aimed at the corrected stall.
+			// Without this the flag would outlive its own answer — the line would stay
+			// in the unmatched bucket and keep being exported for re-sourcing forever.
+			// Statuses the caller set explicitly in THIS request always win, so an
+			// operator marking Wrong Stall and a supplier in one go is never undone.
+			const moved = {
+				supplier: routeSourcing.locationMoved(before, row, ['supplier_shop_override', 'supplier_stall_override']),
+				charm: routeSourcing.locationMoved(before, row, ['charm_code', 'charm_shop']),
+			}
+			resolvedWrongStall = routeSourcing.componentsResolvedByCorrection(row, moved).filter((comp) => b[routeSourcing.STATUS_FIELD[comp]] == null)
+			if (resolvedWrongStall.length) {
+				const patch = { receipt_id: row.receipt_id, item_key: row.item_key }
+				for (const comp of resolvedWrongStall) patch[routeSourcing.STATUS_FIELD[comp]] = routeSourcing.RESOLVED_STATUS
+				row = upsertRouteAssignment(db, patch)
+			}
+
+			// An auto-resolved Wrong Stall is a status change like any other, so it
+			// goes through the same side effects rather than assuming Wrong Stall and
+			// Pending happen to classify identically downstream.
+			if (hasStatusChange || resolvedWrongStall.length) {
+				if (resolvedWrongStall.length || [b.status_case, b.status_grip, b.status_charm].some((status) => status != null && status !== 'Purchased')) {
+					clearRouteVerified(db, row.receipt_id, row.item_key)
+				}
+				syncAssignmentIssue(row.receipt_id, row.item_key)
+				settledFixes = settleBoughtModelFixes(row.receipt_id, row.item_key)
+				recomputeNeedsPurchaseRollup(Number(b.receipt_id))
+			}
+		})()
 
 		// ── Persist supplier + charm at product level so every future order
 		//    with the same product title gets the same defaults automatically.
@@ -7869,7 +11041,10 @@ app.post('/api/route/assign', express.json(), (req, res) => {
 			const sub = getSubstitutionForLine(db, Number(b.receipt_id), String(b.item_key))
 			const productKey = routeDashboard.productDefaultsKey(String(b.item_key), sub)
 			const effectiveTitle = sub && sub.new_title ? sub.new_title : b.title
-			if (productKey) {
+			const catalogEntry = getProductMapRow(db, { title: effectiveTitle })
+			// An order-level override on a discontinued product is allowed, but it
+			// must not recreate a global default or silently restore catalog status.
+			if (productKey && catalogEntry?.status !== 'retired') {
 				const productPatch = { item_key: productKey, title: effectiveTitle }
 				if (hasSupplierChange) {
 					productPatch.supplier_shop = b.supplier_shop_override ?? ''
@@ -7879,7 +11054,12 @@ app.post('/api/route/assign', express.json(), (req, res) => {
 					productPatch.charm_code = b.charm_code ?? ''
 					productPatch.charm_shop = b.charm_shop ?? ''
 				}
-				upsertProductAssignment(db, productPatch)
+				// Where every OTHER order of this product was being sent before this
+				// save: its product default, or the catalog entry behind it. Compared
+				// against the default actually stored (upsertProductAssignment keeps a
+				// previous value rather than blanking it) so only a real move counts.
+				const productBefore = routeSourcing.productLocation(getProductAssignment(db, productKey), getProductMapRow(db, { title: effectiveTitle }))
+				const productAfter = routeSourcing.productLocation(upsertProductAssignment(db, productPatch), null)
 
 				// Write-through to the Product Catalog (product_map) so a supplier/charm
 				// edited HERE in the Orders Sorting Dashboard is immediately reflected in
@@ -7897,27 +11077,29 @@ app.post('/api/route/assign', express.json(), (req, res) => {
 						mapPatch.charm_code = b.charm_code ?? ''
 						mapPatch.charm_shop = b.charm_shop ?? ''
 					}
-					mergeProductMapSupplierCharm(db, mapPatch)
+					catalogChanged = !!mergeProductMapSupplierCharm(db, mapPatch)?.changed
 				} catch (e) {
 					console.warn('[route] product-map write-through failed:', e.message)
 				}
-			}
-		}
 
-		// If a component status changed here in the Route, bridge it to the Orders-tab
-		// fulfilment-issue workflow (mark Out of Production / Model Unavailable → the
-		// line goes on hold and appears in Issues, exactly like the mobile route), then
-		// re-roll the order's purchasing flag. Done in ONE transaction so the hold and
-		// the rollup can never disagree. Without this, a terminal status set here would
-		// silently never surface as an issue.
-		if (b.status_case != null || b.status_grip != null || b.status_charm != null) {
-			try {
-				db.transaction(() => {
-					syncAssignmentIssue(row.receipt_id, row.item_key)
-					recomputeNeedsPurchaseRollup(Number(b.receipt_id))
-				})()
-			} catch (e) {
-				console.warn('[route] issue sync failed:', e.message)
+				// The edit just re-pointed every OTHER order of this product too, so it
+				// answers their Wrong Stall reports as much as this line's. Only lines
+				// that inherit the default are touched (resolveWrongStallForProduct) —
+				// an order pinned to its own stall is still standing at the wrong one.
+				// Best-effort, like the write-through above: the operator's save must
+				// stand even if the fan-out fails.
+				try {
+					_closeWrongStallForProduct(
+						effectiveTitle,
+						{
+							supplier: hasSupplierChange && routeSourcing.locationMoved(productBefore, productAfter, ['supplier_shop', 'supplier_stall']),
+							charm: hasCharmChange && routeSourcing.locationMoved(productBefore, productAfter, ['charm_code', 'charm_shop']),
+						},
+						'product-supplier',
+					)
+				} catch (e) {
+					console.warn('[route] wrong-stall fan-out failed:', e.message)
+				}
 			}
 		}
 
@@ -7936,25 +11118,25 @@ app.post('/api/route/assign', express.json(), (req, res) => {
 			updated_at: row.updated_at,
 			by: (req.auth && req.auth.user) || 'owner',
 		})
+		if (catalogChanged) broadcastCatalogRefresh('product-default-updated')
+		// A settled model fix disappears from the correction list on every device,
+		// so live clients need the same nudge the manual "done" action gives them.
+		for (const exchangeId of settledFixes) {
+			broadcastRouteEvent({
+				type: 'exchange',
+				exchange_id: exchangeId,
+				receipt_id: row.receipt_id,
+				status: 'done',
+				by: (req.auth && req.auth.user) || 'owner',
+			})
+		}
 
-		res.json({ ok: true, assignment: row })
+		res.json({ ok: true, assignment: row, settled_model_fixes: settledFixes, resolved_wrong_stall: resolvedWrongStall })
 	} catch (err) {
 		console.error('[route] assign error:', err.message)
 		res.status(500).json({ error: err.message })
 	}
 })
-
-// Rewrite an Etsy CDN image URL to a small thumbnail variant so the mobile
-// shopping route loads fast. The cards show ~104px images, so a 300px variant is
-// plenty even on a retina phone — versus the full-resolution image (often
-// 1000s of px / hundreds of KB) that was being downloaded before. Etsy serves
-// fixed-size variants named il_<W>x<H> in the filename; non-Etsy URLs (e.g. a
-// manual upload served from our own endpoint) or already-small ones pass through.
-function etsyThumb(url) {
-	if (!url || typeof url !== 'string') return url
-	if (!/i\.etsystatic\.com/i.test(url)) return url
-	return url.replace(/il_[0-9a-zA-Z]+x[0-9a-zA-Z]+\./, 'il_300x300.')
-}
 
 // ─── Online Shopping Route (mobile) API ───────────────────────────────────────
 //
@@ -7962,7 +11144,7 @@ function etsyThumb(url) {
 // generates as Excel. It reads the exact same source of truth (buildRouteRows +
 // route_assignments), so the mobile view, the desktop dashboard, and the Excel
 // export can never disagree. Employees with the `shopper` role reach ONLY these
-// endpoints (see SHOPPER_ALLOW in src/auth/access.js). Real-time collaboration
+// endpoints (the `shopper` role in src/auth/policy.js). Real-time collaboration
 // rides the _routeSseClients bus: every status change is pushed to all devices.
 
 // ── Canonical product identity across shops (perceptual image hash) ──────────
@@ -8017,6 +11199,18 @@ function computeDesignHash(buf) {
 // Compute + persist a listing's perceptual hash from its cached image bytes.
 // Skips work when already up-to-date. Returns the phash, or null if no image.
 async function ensureListingPhash(listingId) {
+	const id = Number(listingId)
+	if (!id) return null
+	if (_listingPhashInflight.has(id)) return _listingPhashInflight.get(id)
+	const promise = _ensureListingPhash(id).finally(() => {
+		if (_listingPhashInflight.get(id) === promise) _listingPhashInflight.delete(id)
+	})
+	_listingPhashInflight.set(id, promise)
+	return promise
+}
+
+const _listingPhashInflight = new Map()
+async function _ensureListingPhash(listingId) {
 	if (!listingId) return null
 	let img
 	try {
@@ -8036,9 +11230,7 @@ async function ensureListingPhash(listingId) {
 	} catch (e) {
 		return existing ? existing.phash : null
 	}
-	db.prepare(
-		"INSERT INTO listing_phash (listing_id, phash, design_phash, sha, algo, canonical_key, computed_at) VALUES (?,?,?,?,?,NULL,strftime('%s','now')) ON CONFLICT(listing_id) DO UPDATE SET phash=excluded.phash, design_phash=excluded.design_phash, sha=excluded.sha, algo=excluded.algo, canonical_key=NULL, computed_at=excluded.computed_at",
-	).run(listingId, phash, designPhash, sha, PRODUCT_HASH_ALGO)
+	db.prepare("INSERT INTO listing_phash (listing_id, phash, design_phash, sha, algo, canonical_key, computed_at) VALUES (?,?,?,?,?,NULL,strftime('%s','now')) ON CONFLICT(listing_id) DO UPDATE SET phash=excluded.phash, design_phash=excluded.design_phash, sha=excluded.sha, algo=excluded.algo, canonical_key=NULL, computed_at=excluded.computed_at").run(listingId, phash, designPhash, sha, PRODUCT_HASH_ALGO)
 	return phash
 }
 
@@ -8052,15 +11244,18 @@ async function backfillPhashes() {
 			.prepare('SELECT d.listing_id AS id FROM listing_image_data d LEFT JOIN listing_phash p ON p.listing_id = d.listing_id WHERE p.listing_id IS NULL OR p.algo IS NULL OR p.algo <> ?')
 			.all(PRODUCT_HASH_ALGO)
 			.map((r) => r.id)
-		for (const id of ids) {
+		for (const [index, id] of ids.entries()) {
 			try {
 				await ensureListingPhash(id)
 			} catch {
 				/* keep going */
 			}
+			// Sharp work is CPU-heavy; yield between bounded batches so boot-time
+			// hashing never monopolizes the HTTP event loop.
+			if ((index + 1) % 10 === 0) await new Promise((resolve) => setImmediate(resolve))
 		}
 		if (ids.length) console.log(`[phash] computed ${ids.length} product image hash(es)`)
-		reconcileCanonicalProductKeys()
+		if (ids.length) _productIdentityCoordinator.schedule('backfill', 750)
 	} catch (e) {
 		console.warn('[phash] backfill failed:', e.message)
 	} finally {
@@ -8092,7 +11287,9 @@ async function hydrateMissingProductIdentities(batchSize = 40) {
 			const images = new Map(rows.map((r) => [r.listing_id, r.url]))
 			await batchFetchRouteImages(db, images)
 			for (const row of rows) await ensureListingPhash(row.listing_id)
-			reconcileCanonicalProductKeys()
+			// Trailing debounce spans adjacent 3-second hydration batches, so a long
+			// boot hydration produces one full O(n²) reconciliation, not one per batch.
+			_productIdentityCoordinator.schedule('hydration', 5000)
 			console.log(`[phash] hydrated ${rows.length} missing catalog image identity/identities`)
 		}
 	} catch (e) {
@@ -8170,7 +11367,7 @@ function reconcileCanonicalProductKeys() {
 		if (!rows.length) return { groups: 0, updated: 0 }
 
 		const productByTitle = new Map()
-		db.prepare('SELECT title_norm, stall FROM product_map')
+		db.prepare("SELECT title_norm, stall FROM product_map WHERE status = 'active'")
 			.all()
 			.forEach((r) =>
 				productByTitle.set(
@@ -8264,7 +11461,11 @@ function reconcileCanonicalProductKeys() {
 		// Reconcile shared catalog facts across title aliases of one physical
 		// product. Fill blanks only — never silently overwrite an operator's
 		// explicit conflicting supplier/charm/cost choice.
-		const aliases = db.prepare('SELECT id, canonical_product_key, shop_name, stall, charm_shop, charm_code, cost_case, cost_grip FROM product_map WHERE canonical_product_key IS NOT NULL').all()
+		const aliases = db
+			.prepare(
+				"SELECT id, canonical_product_key, shop_name, stall, charm_shop, charm_code, cost_case, cost_grip FROM product_map WHERE canonical_product_key IS NOT NULL AND status = 'active'",
+			)
+			.all()
 		const byCanonical = new Map()
 		for (const row of aliases) {
 			if (!byCanonical.has(row.canonical_product_key)) byCanonical.set(row.canonical_product_key, [])
@@ -8305,6 +11506,16 @@ function reconcileCanonicalProductKeys() {
 	}
 }
 
+const _productIdentityCoordinator = new ProductIdentityCoordinator({
+	reconcile: () => reconcileCanonicalProductKeys(),
+	onResult: (result, reasons) => {
+		const hasBackgroundReason = reasons.some((reason) => !String(reason).startsWith('operator-'))
+		if (result.updated && hasBackgroundReason) {
+			broadcastCatalogRefresh('identity-reconciled')
+		}
+	},
+})
+
 /**
  * GET /api/shop/route
  * The active shopping list. Returns every line that still needs attention
@@ -8326,12 +11537,14 @@ app.get('/api/shop/route', (req, res) => {
 			include_dismissed: false,
 		})
 
-		// Lines a shopper can act on: not operator-excluded. A wrong-model exchange
-		// only holds its CASE out of buying (we already have it — it's carried back
-		// and swapped in person, and surfaced separately in `exchanges` below); the
+		// Lines a shopper can act on: not operator-excluded. A SWAP model fix holds
+		// only its CASE out of buying (we already have it — it's carried back and
+		// swapped in person, and surfaced separately in `exchanges` below); the
 		// grip/charm on the SAME line still have to be bought, so we PROJECT the row
 		// down to just its still-buyable pieces instead of dropping the whole line.
 		// A pure case-only swap projects to null (nothing left to buy) and drops out.
+		// A BUY model fix keeps every piece and the projection rewrites `phone_model`
+		// to the CORRECTED model, so the card on the floor names the case to get.
 		const live = rows
 			.filter((r) => !r.excluded)
 			.map((r) => routeDashboard.rowShoppingProjection(r))
@@ -8411,8 +11624,9 @@ app.get('/api/shop/route', (req, res) => {
 
 		// Send ONLY the fields the mobile page uses — a much smaller payload than the
 		// full desktop row (drops buyer/notes/exchange/issue/supplier-price/etc.),
-		// so it loads noticeably faster over cellular. Product images are downsized
-		// to a small CDN thumbnail here so the phone never pulls full-res photos.
+		// so it loads noticeably faster over cellular. Product images are proxied
+		// through /api/route/listing-image (same-origin) so the service worker can
+		// cache them without tripping connect-src.
 		const lean = live.map((r) => {
 			const cs = String(r.charm_shop || '').trim()
 			const charmStall = cs ? charmLoc.get(cs.toLowerCase()) || '' : ''
@@ -8426,7 +11640,13 @@ app.get('/api/shop/route', (req, res) => {
 			// Canonical product key: same product IMAGE across shops → same key
 			// (unifies cross-shop duplicates whose titles differ). Falls back to the
 			// normalised title until the image is cached + hashed (self-healed below).
-			const canonicalKey = r.listing_id ? phashMap.get(r.listing_id) : null
+			//
+			// Keyed by the listing this line is BOUGHT as. Using the ORDERED listing
+			// would hand a switched line the identity of the design it was switched
+			// AWAY from whenever the replacement isn't hashed yet, merging it onto
+			// that product's card — exactly the mix-up buildRouteRows works to
+			// prevent (a custom switch has no listing, so it merges by title).
+			const canonicalKey = r.product_listing_id ? phashMap.get(r.product_listing_id) : null
 			const productKey = r.product_key || canonicalKey || (pc && pc.canonical_product_key) || 't:' + tn
 			const sharedCost = canonicalCost.get(productKey)
 			return {
@@ -8439,10 +11659,20 @@ app.get('/api/shop/route', (req, res) => {
 				// when two shops photographed one product differently and no automatic
 				// signal can link them.
 				listing_id: r.listing_id,
+				// The listing whose design/image is actually being purchased. This can
+				// differ from listing_id after a catalog design switch and is captured
+				// in the employee's activity snapshot so it keeps the correct product
+				// identity instead of falling back to the design that was replaced.
+				product_listing_id: r.product_listing_id,
 				quantity: r.quantity,
+				// Already the CORRECTED model when a model fix applies (the projection
+				// above rewrote it), so the card on the floor always names the case to
+				// actually buy. `ordered_phone_model` is sent only when the two differ,
+				// so the shopper can see WHY it disagrees with the Etsy order.
 				phone_model: r.phone_model,
+				ordered_phone_model: r.ordered_phone_model && r.ordered_phone_model !== r.phone_model ? r.ordered_phone_model : '',
 				style: r.style,
-				image_url: etsyThumb(r.image_url),
+				image_url: shopRouteImageUrl(r),
 				has_case: r.has_case,
 				has_grip: r.has_grip,
 				has_charm: r.has_charm,
@@ -8470,16 +11700,24 @@ app.get('/api/shop/route', (req, res) => {
 			}
 		})
 
-		// ── Open exchanges (wrong-model swaps still owed) ──────────────────────
-		// These are the cases/grips we already HAVE but in the wrong model and must
-		// carry back to the stall to swap. Pulled from the exchange table (all OPEN,
+		// ── Open swaps (wrong-model items still owed at a stall) ───────────────
+		// These are the cases we already HAVE but in the wrong model and must carry
+		// back to the stall to swap. Pulled from the model-fix table (all OPEN,
 		// regardless of order date). An item is exchanged WHERE IT WAS BOUGHT, so we
 		// resolve each one's supplier the SAME way the buy list does — by enriching
 		// the underlying order lines (route override → product default → product map
-		// → catalog). This fixes exchanges landing under "Supplier not set".
+		// → catalog). This fixes swaps landing under "Supplier not set".
+		//
+		// Restricted to SWAPs. A BUY model fix has nothing to carry: it is already
+		// in `rows` above as an ordinary purchase naming the corrected model, and
+		// listing it here too would show the shopper the same case twice — once to
+		// buy, once to "swap" an item they do not have.
 		let exchanges = []
 		try {
-			const openEx = db.prepare("SELECT * FROM order_exchanges WHERE status = 'open'").all()
+			const openEx = db
+				.prepare("SELECT * FROM order_exchanges WHERE status = 'open'")
+				.all()
+				.filter((e) => routeDashboard.exchangeRecordIntent(e) === routeDashboard.EXCHANGE_INTENT_SWAP)
 
 			// Enrich the underlying order lines to learn each product's supplier.
 			let enriched = []
@@ -8524,6 +11762,11 @@ app.get('/api/shop/route', (req, res) => {
 			}
 			exchanges = openEx.map((e) => {
 				const enr = findEnriched(e)
+				// Prefer the enriched order line's photo: it is design-switch aware, so a
+				// swap on a switched line shows the REPLACEMENT — which is the item the
+				// shopper is physically carrying back to the stall. Only when the line
+				// can't be enriched do we fall back to the exchange record's own listing.
+				const swapImage = enr && enr.image_url ? { product_listing_id: enr.product_listing_id, image_url: enr.image_url } : { product_listing_id: e.listing_id || null, image_url: e.listing_id ? exImg[e.listing_id] || null : null }
 				// Prefer an explicit exchange location, else the product's supplier.
 				const shop = e.supplier_shop || (enr && enr.supplier_shop) || ''
 				const stall = e.supplier_stall || (enr && enr.supplier_stall) || ''
@@ -8539,11 +11782,17 @@ app.get('/api/shop/route', (req, res) => {
 					have_model: e.have_model || '',
 					need_model: e.need_model || (enr && enr.phone_model) || '',
 					components: e.components || '',
+					// Lets the swap card name "Case + attached charm" on AirPods instead
+					// of always printing "Case" (correct for iPhone, wrong when the charm
+					// ships attached and is part of the same physical swap).
+					charm_integral: !!(enr && enr.charm_integral),
+					has_case: enr ? !!enr.has_case : true,
+					has_charm: enr ? !!enr.has_charm : false,
 					note: e.note || '',
 					supplier_shop: shop,
 					supplier_stall: stall,
 					supplier_floor: floor,
-					image_url: etsyThumb(e.listing_id ? exImg[e.listing_id] || null : enr ? enr.image_url || null : null),
+					image_url: shopRouteImageUrl(swapImage),
 				}
 			})
 		} catch (e) {
@@ -8583,9 +11832,19 @@ app.get('/api/shop/route', (req, res) => {
 			const needImg = new Map()
 			const needHash = []
 			for (const r of live) {
-				if (!r.listing_id) continue
-				if (!cachedImg.has(r.listing_id) && r.image_url) needImg.set(r.listing_id, r.image_url)
-				else if (!phashMap.has(r.listing_id)) needHash.push(r.listing_id)
+				// Cache and hash the listing whose photo this row actually SHOWS. On a
+				// switched line that is the REPLACEMENT, not the ordered listing —
+				// keying by the latter filed the replacement's bytes under the original
+				// listing, poisoning its thumbnail and its perceptual hash for every
+				// other order of that design.
+				const lid = r.product_listing_id
+				if (!lid) continue
+				// Only a CDN url is fetchable. Rows already served from one of our own
+				// /api/route/* endpoints (uploaded switch photo, operator Fix Image,
+				// style-variation photo) have no remote source to download.
+				const cdnUrl = typeof r.image_url === 'string' && /^https?:\/\//i.test(r.image_url) ? r.image_url : null
+				if (!cachedImg.has(lid) && cdnUrl) needImg.set(lid, cdnUrl)
+				else if (!phashMap.has(lid)) needHash.push(lid)
 			}
 			if (needImg.size || needHash.length) {
 				;(async () => {
@@ -8601,7 +11860,7 @@ app.get('/api/shop/route', (req, res) => {
 							/* keep going */
 						}
 					}
-					reconcileCanonicalProductKeys()
+					_productIdentityCoordinator.schedule('shop-self-heal', 750)
 				})()
 			}
 		} catch (e) {
@@ -8667,6 +11926,17 @@ app.post('/api/shop/assign', express.json(), (req, res) => {
 	if (b.receipt_id == null || !b.item_key) {
 		return res.status(400).json({ error: 'receipt_id and item_key are required.' })
 	}
+	const receiptId = Number(b.receipt_id)
+	if (!Number.isInteger(receiptId)) {
+		return res.status(400).json({ error: 'receipt_id must be an integer.' })
+	}
+	// A queued offline write may have been minted by an older page that still held
+	// a pre-variant alias. Canonicalise before EVERY side effect so the purchase,
+	// issue bridge, model-fix settlement, SSE event and audit snapshot all address
+	// the same durable order line rather than creating an invisible ghost row.
+	const itemKey = lineIdentity.canonicalLineKey(db, receiptId, b.item_key)
+	b.receipt_id = receiptId
+	b.item_key = itemKey
 	const validStatus = (v) => v == null || routeDashboard.STATUS_OPTIONS.includes(v)
 	if (!validStatus(b.status_case) || !validStatus(b.status_grip) || !validStatus(b.status_charm)) {
 		return res.status(400).json({ error: 'Invalid status value.' })
@@ -8675,34 +11945,33 @@ app.post('/api/shop/assign', express.json(), (req, res) => {
 		return res.status(400).json({ error: 'Provide at least one status to update.' })
 	}
 	try {
-		const row = upsertRouteAssignment(db, {
-			receipt_id: Number(b.receipt_id),
-			item_key: String(b.item_key),
-			title: b.title,
-			status_case: b.status_case,
-			status_grip: b.status_grip,
-			status_charm: b.status_charm,
-		})
-
-		// Mirror Discontinued / No-model into the Orders-tab fulfilment-issue
-		// workflow, then keep the purchasing rollup in sync (a line held as an
-		// issue is on hold, so it must not also read as "still to buy"). Done in
-		// ONE transaction so the flag and the rollup can never disagree.
+		let row
 		let issueSync = null
-		try {
-			db.transaction(() => {
-				// If the shopper moved any component OFF 'Purchased', a prior packer
-				// verification of this line is now stale — clear it so the two-person
-				// gate can't pass on out-of-hand stock.
-				if ([b.status_case, b.status_grip, b.status_charm].some((s) => s != null && s !== 'Purchased')) {
-					clearRouteVerified(db, row.receipt_id, row.item_key)
-				}
-				issueSync = syncAssignmentIssue(row.receipt_id, row.item_key)
-				recomputeNeedsPurchaseRollup(Number(b.receipt_id))
-			})()
-		} catch (e) {
-			console.warn('[shop] issue sync failed:', e.message)
-		}
+		let settledFixes = []
+		// Persist the status, issue bridge, model-fix settlement and order rollup as
+		// one atomic unit. A failed auxiliary update now leaves the durable queue in
+		// place for retry instead of acknowledging a partially-applied tap.
+		db.transaction(() => {
+			row = upsertRouteAssignment(db, {
+				receipt_id: receiptId,
+				item_key: itemKey,
+				title: b.title,
+				status_case: b.status_case,
+				status_grip: b.status_grip,
+				status_charm: b.status_charm,
+			})
+			// If the shopper moved any component OFF 'Purchased', a prior packer
+			// verification of this line is now stale — clear it so the two-person
+			// gate can't pass on out-of-hand stock.
+			if ([b.status_case, b.status_grip, b.status_charm].some((s) => s != null && s !== 'Purchased')) {
+				clearRouteVerified(db, row.receipt_id, row.item_key)
+			}
+			issueSync = syncAssignmentIssue(row.receipt_id, row.item_key)
+			// Mobile purchasing must settle BUY-shaped model fixes exactly like the
+			// desktop Route and Orders component-status paths.
+			settledFixes = settleBoughtModelFixes(row.receipt_id, row.item_key)
+			recomputeNeedsPurchaseRollup(receiptId)
+		})()
 		if (issueSync) {
 			console.log(`[shop] issue ${issueSync.action}${issueSync.issue_type ? ' (' + issueSync.issue_type + ')' : ''} for receipt ${row.receipt_id} line ${row.item_key}`)
 		}
@@ -8720,8 +11989,17 @@ app.post('/api/shop/assign', express.json(), (req, res) => {
 			updated_at: row.updated_at,
 			by: (req.auth && req.auth.user) || 'shopper',
 		})
+		for (const exchangeId of settledFixes) {
+			broadcastRouteEvent({
+				type: 'exchange',
+				exchange_id: exchangeId,
+				receipt_id: row.receipt_id,
+				status: 'done',
+				by: (req.auth && req.auth.user) || 'shopper',
+			})
+		}
 
-		res.json({ ok: true, assignment: row })
+		res.json({ ok: true, assignment: row, settled_model_fixes: settledFixes })
 	} catch (err) {
 		console.error('[shop] assign error:', err.message)
 		res.status(500).json({ error: err.message })
@@ -8766,6 +12044,7 @@ app.post('/api/shop/cost', express.json(), (req, res) => {
 			cost: kind === 'product' ? (part === 'grip' ? result.cost_grip : result.cost_case) : result.cost,
 			by: (req.auth && req.auth.user) || 'shopper',
 		})
+		broadcastCatalogRefresh(kind === 'product' ? 'product-cost-updated' : 'charm-cost-updated')
 		res.json({ ok: true, ...result })
 	} catch (err) {
 		console.error('[shop] cost error:', err.message)
@@ -8939,18 +12218,27 @@ app.get('/api/route/order/:receiptId', (req, res) => {
 
 /**
  * GET /api/route/products
- * The "product database" that powers the Add-Order product picker: every
- * distinct product seen across orders, with its cached thumbnail and the set
- * of phone-model / style variations observed. Also returns the global lists of
- * known phone models + styles so the picker can offer them for custom products.
+ * Active Product Catalog read model shared by Add Order and Design Switch.
+ * Membership/supplier/location come from product_map; order history only enriches
+ * cards with observed models/styles/counts and can never resurrect retired rows.
  *
- * Optional ?q= filters products by title / shop (case-insensitive substring).
+ * Optional ?q= filters title, aliases, supplier, stall or charm.
  */
 app.get('/api/route/products', (req, res) => {
 	try {
 		const cat = routeDashboard.buildProductCatalog(db)
 		const q = typeof req.query.q === 'string' ? req.query.q.trim().toLowerCase() : ''
-		const products = q ? cat.products.filter((p) => (p.title || '').toLowerCase().includes(q) || (p.shop_name || '').toLowerCase().includes(q)) : cat.products
+		const products = q
+			? cat.products.filter(
+					(p) =>
+						(p.title || '').toLowerCase().includes(q) ||
+						(p.alias_titles || []).some((title) => String(title || '').toLowerCase().includes(q)) ||
+						(p.shop_name || '').toLowerCase().includes(q) ||
+						(p.stall || '').toLowerCase().includes(q) ||
+						(p.charm_shop || '').toLowerCase().includes(q) ||
+						(p.charm_code || '').toLowerCase().includes(q),
+				)
+			: cat.products
 		res.json({ ok: true, products, phone_models: cat.phone_models, styles: cat.styles })
 	} catch (err) {
 		console.error('[route] products error:', err.message)
@@ -8960,9 +12248,16 @@ app.get('/api/route/products', (req, res) => {
 
 /**
  * POST /api/route/manual-order
- * Add an operator-created line-item to the Orders Sorting Dashboard.
+ * Add an operator-created order to the Orders Sorting Dashboard. A buyer may
+ * order several products, so the body accepts either:
  *
- * Body:
+ *   { items: [ { title, phone_model, style, quantity, ... }, ... ] }
+ *
+ * or the legacy single-product shape (title at the top level), which is treated
+ * as a one-item cart. Either way this creates ONE receipts row (one buyer, one
+ * shipment) plus one route sidecar per product.
+ *
+ * Each item:
  *   source       'catalog' | 'custom'
  *   title        required
  *   phone_model  optional
@@ -8973,109 +12268,136 @@ app.get('/api/route/products', (req, res) => {
  *   image_url    optional (catalog CDN thumbnail)
  *   image_b64    optional (custom upload — raw or data: URL)
  *   image_mime   optional (custom upload mime, e.g. image/png)
+ *   charm_code / charm_shop  optional per-line charm
  *
- * Returns the freshly-built route row so the client can insert it instantly.
+ * Returns the freshly-built route rows so the client can insert them instantly.
  */
 app.post('/api/route/manual-order', express.json({ limit: '25mb' }), (req, res) => {
 	const b = req.body ?? {}
-	const title = String(b.title || '').trim()
-	if (!title) return res.status(400).json({ error: 'Product title is required.' })
+	const rawItems = Array.isArray(b.items) && b.items.length ? b.items : String(b.title || '').trim() ? [b] : []
+	if (!rawItems.length) return res.status(400).json({ error: 'At least one product is required.' })
+	if (rawItems.length > MAX_ROUTE_MANUAL_ITEMS) {
+		return res.status(400).json({ error: `A manual order can contain at most ${MAX_ROUTE_MANUAL_ITEMS} products.` })
+	}
 
 	try {
-		const listingId = b.listing_id != null && String(b.listing_id).trim() !== '' ? Number(b.listing_id) : null
-
-		// Decode an optional base64 custom-product image (accepts data: URLs).
-		let imageData = null
-		let imageMime = String(b.image_mime || '').trim()
-		if (b.image_b64 && typeof b.image_b64 === 'string') {
-			let raw = b.image_b64.trim()
-			const m = /^data:([^;]+);base64,(.*)$/i.exec(raw)
-			if (m) {
-				imageMime = imageMime || m[1]
-				raw = m[2]
+		const usedKeys = new Set()
+		const items = rawItems.map((it, idx) => {
+			const title = String(it.title || '').trim()
+			if (!title) {
+				const e = new Error(`Product ${idx + 1} is missing a title.`)
+				e.code = 'REQUIRED'
+				throw e
 			}
-			try {
-				const buf = Buffer.from(raw, 'base64')
-				if (buf.length > 0) imageData = buf
-			} catch {
-				/* ignore malformed image; item still added without a photo */
+			const source = it.source === 'catalog' ? 'catalog' : 'custom'
+			const catalogId = Number(it.catalog_id)
+			const catalogProduct =
+				source === 'catalog'
+					? getProductMapRow(
+							db,
+							Number.isInteger(catalogId) && catalogId > 0 ? { id: catalogId } : { title },
+						)
+					: null
+			if (
+				source === 'catalog' &&
+				(!catalogProduct ||
+					catalogProduct.status === 'retired' ||
+					catalogProduct.title_norm !== routeDashboard.normalizeTitle(title))
+			) {
+				throw Object.assign(
+					new Error(`“${title}” is no longer active in Product Catalog. Refresh and choose a replacement.`),
+					{ code: 'CATALOG_PRODUCT_UNAVAILABLE' },
+				)
 			}
-		}
+			const listingId = it.listing_id != null && String(it.listing_id).trim() !== '' ? Number(it.listing_id) : null
+			const phoneModel = String(it.phone_model || '').trim()
+			const style = String(it.style || '').trim()
+			let itemKey = routeDashboard.lineItemKeyWithVariant(title, listingId, phoneModel, style)
+			if (usedKeys.has(itemKey)) {
+				let n = 2
+				let candidate = `${itemKey}~${n}`
+				while (usedKeys.has(candidate)) {
+					n += 1
+					candidate = `${itemKey}~${n}`
+				}
+				itemKey = candidate
+			}
+			usedKeys.add(itemKey)
 
-		const itemKey = routeDashboard.lineItemKey(title, listingId)
+			let imageData = null
+			let imageMime = String(it.image_mime || '').trim()
+			if (it.image_b64 && typeof it.image_b64 === 'string') {
+				let raw = it.image_b64.trim()
+				const m = /^data:([^;]+);base64,(.*)$/i.exec(raw)
+				if (m) {
+					imageMime = imageMime || m[1]
+					raw = m[2]
+				}
+				try {
+					const buf = Buffer.from(raw, 'base64')
+					if (buf.length > 0) imageData = buf
+				} catch {
+					/* ignore malformed image; item still added without a photo */
+				}
+			}
 
-		// Create the companion manual ORDER first (a real `receipts` row) so this
-		// Route-tab entry AUTOMATICALLY appears in the Orders tab, where the operator
-		// fills in the buyer name + shipping address. The order and the route sidecar
-		// share ONE receipt_id, so they are the same order in both tabs and a delete
-		// from either side tears down both. Product model/style ride along as order
-		// line-item variations (shown in the Orders tab + used by 4PX weight detection).
-		const phoneModel = String(b.phone_model || '').trim()
-		const style = String(b.style || '').trim()
-		const variations = []
-		if (phoneModel) variations.push({ formatted_name: 'Phone Model', formatted_value: phoneModel })
-		if (style) variations.push({ formatted_name: 'Style', formatted_value: style })
-		const order = insertManualOrder(db, {
-			shop_id: MANUAL_SHOP_ID,
-			items: [{ title, quantity: b.quantity, listing_id: listingId, variations }],
+			return {
+				source,
+				title,
+				phone_model: phoneModel,
+				style,
+				quantity: it.quantity,
+				shop_name: catalogProduct ? catalogProduct.shop_name || '' : it.shop_name,
+				listing_id: listingId,
+				image_url: String(it.image_url || '').trim(),
+				image_data: imageData,
+				image_mime: imageMime,
+				charm_code: it.charm_code,
+				charm_shop: it.charm_shop,
+				item_key: itemKey,
+			}
 		})
 
-		const created = insertManualItem(db, {
-			receipt_id: order.receipt_id, // LINK the sidecar to the manual order
-			item_key: itemKey,
-			title,
-			phone_model: b.phone_model,
-			style: b.style,
-			quantity: b.quantity,
-			shop_name: b.shop_name,
-			listing_id: listingId,
-			image_url: String(b.image_url || '').trim(),
-			image_data: imageData,
-			image_mime: imageMime,
-			source: b.source,
-		})
+		const created = createRouteManualOrder(db, { shop_id: MANUAL_SHOP_ID, items })
 
-		// If a charm was pre-selected, persist it as a route assignment immediately
-		// so it shows on the dashboard without requiring a separate assignment step.
-		const charmCode = String(b.charm_code || '').trim()
-		if (charmCode) {
-			try {
-				upsertRouteAssignment(db, {
-					receipt_id: created.receipt_id,
-					item_key: itemKey,
-					title,
-					charm_code: charmCode,
-					charm_shop: String(b.charm_shop || '').trim(),
-				})
-			} catch (e) {
-				// Non-fatal; the order is still created, charm can be set from the dashboard.
-				console.warn('[route] manual-order charm assignment warning:', e.message)
-			}
-		}
-
-		// Build the matching dashboard row so the UI can render it immediately.
-		let row = null
+		let rows = []
 		try {
-			const rows = routeDashboard.buildRouteRows(db, config, { enrich_supplier: true })
-			row = rows.find((r) => r.receipt_id === created.receipt_id) || null
+			rows = routeDashboard.buildRouteRows(db, config, {
+				enrich_supplier: true,
+				receipt_id: created.receipt_id,
+			})
 		} catch {
 			/* non-fatal — client can reload */
 		}
 
-		res.status(201).json({ ok: true, ...created, row })
+		res.status(201).json({
+			ok: true,
+			receipt_id: created.receipt_id,
+			items: created.items,
+			rows,
+			row: rows[0] || null, // legacy single-item clients
+		})
 	} catch (err) {
 		console.error('[route] manual-order create error:', err.message)
-		res.status(err.code === 'REQUIRED' ? 400 : 500).json({ error: err.message })
+		const status = err.code === 'REQUIRED' ? 400 : err.code === 'CATALOG_PRODUCT_UNAVAILABLE' ? 409 : 500
+		res.status(status).json({ error: err.message, code: err.code })
 	}
 })
 
 /**
  * DELETE /api/route/manual-order
- * Body: { receipt_id }  (the synthetic negative id)
- * Removes a manual line-item and any route assignment attached to it.
+ * Body: { receipt_id, item_key? }  (the synthetic negative id)
+ *
+ * With an item_key, removes just THAT product from the order — a manual order
+ * can carry several, and deleting one must not take the buyer's other products
+ * (or the order itself) with it. Removing the last remaining product tears the
+ * whole order down, since an order with no products is not an order. Without an
+ * item_key the whole order is removed, as before.
  */
 app.delete('/api/route/manual-order', express.json(), (req, res) => {
-	const rid = Number((req.body ?? {}).receipt_id)
+	const b = req.body ?? {}
+	const rid = Number(b.receipt_id)
+	const itemKey = String(b.item_key || '').trim()
 	if (!Number.isInteger(rid)) return res.status(400).json({ error: 'receipt_id is required.' })
 	try {
 		// Block deletion while a 4PX shipment exists — the manual order may have been
@@ -9084,9 +12406,9 @@ app.delete('/api/route/manual-order', express.json(), (req, res) => {
 		if (linked?.fourpx_consignment_no && linked.fourpx_order_status !== 'cancelled') {
 			return res.status(409).json({ error: 'This manual order has a 4PX shipment. Cancel the 4PX shipment in the Orders tab first, then delete it.' })
 		}
-		const removed = deleteManualItemByReceipt(db, rid)
-		if (!removed) return res.status(404).json({ error: 'Manual item not found.' })
-		res.json({ ok: true })
+		const result = deleteManualOrderLine(db, rid, itemKey)
+		if (!result.removed) return res.status(404).json({ error: 'Manual item not found.' })
+		res.json({ ok: true, purged: result.purged, remaining: result.remaining })
 	} catch (err) {
 		console.error('[route] manual-order delete error:', err.message)
 		res.status(500).json({ error: err.message })
@@ -9142,9 +12464,7 @@ app.get('/api/route/manual-image/:id', (req, res) => {
 	try {
 		const img = getManualItemImage(db, id)
 		if (!img) return res.status(404).end()
-		res.setHeader('Content-Type', img.mime || 'image/png')
-		res.setHeader('Cache-Control', 'private, max-age=300')
-		res.send(img.data)
+		return sendStoredImage(res, img)
 	} catch (err) {
 		console.error('[route] manual-image error:', err.message)
 		if (!res.headersSent) res.status(404).end()
@@ -9166,6 +12486,8 @@ function _supplierPayload() {
 // Map a thrown CRUD error code to an HTTP status.
 function _supplierErrStatus(err) {
 	if (err && err.code === 'DUPLICATE') return 409
+	if (err && err.code === 'IN_USE') return 409
+	if (err && (err.code === 'CONFLICT' || err.code === 'IMMUTABLE')) return 409
 	if (err && err.code === 'REQUIRED') return 400
 	if (err && err.code === 'NOT_FOUND') return 404
 	return 500
@@ -9189,9 +12511,10 @@ app.post('/api/route/suppliers', express.json(), (req, res) => {
 	const b = req.body ?? {}
 	try {
 		insertSupplierDirectoryRow(db, b)
+		broadcastCatalogRefresh('supplier-created')
 		res.json({ ok: true, ..._supplierPayload() })
 	} catch (err) {
-		res.status(_supplierErrStatus(err)).json({ error: err.message })
+		res.status(_supplierErrStatus(err)).json({ error: err.message, code: err.code })
 	}
 })
 
@@ -9203,24 +12526,32 @@ app.put('/api/route/suppliers', express.json(), (req, res) => {
 	const b = req.body ?? {}
 	try {
 		updateSupplierDirectoryRow(db, b)
+		broadcastCatalogRefresh('supplier-updated')
 		res.json({ ok: true, ..._supplierPayload() })
 	} catch (err) {
-		res.status(_supplierErrStatus(err)).json({ error: err.message })
+		res.status(_supplierErrStatus(err)).json({ error: err.message, code: err.code })
 	}
 })
 
 /**
  * DELETE /api/route/suppliers — remove a supplier by composite key.
- * Body: { shop_name, stall }
+ * Body: { shop_name, stall, retire_products? }
+ * Active products protect the supplier unless the caller explicitly confirms
+ * that all products at this booth should be retired atomically.
  */
 app.delete('/api/route/suppliers', express.json(), (req, res) => {
 	const b = req.body ?? {}
 	try {
-		const removed = deleteSupplierDirectoryRow(db, b)
-		if (!removed) return res.status(404).json({ error: 'Supplier not found.' })
-		res.json({ ok: true, ..._supplierPayload() })
+		const result = deleteSupplierDirectoryRow(db, {
+			...b,
+			retire_products: b.retire_products === true,
+			retired_by: (req.auth && req.auth.user) || '',
+		})
+		if (!result.removed) return res.status(404).json({ error: 'Supplier not found.' })
+		broadcastCatalogRefresh('supplier-deleted', { retired_products: result.retired_products })
+		res.json({ ok: true, impact: result, ..._supplierPayload() })
 	} catch (err) {
-		res.status(_supplierErrStatus(err)).json({ error: err.message })
+		res.status(_supplierErrStatus(err)).json({ error: err.message, code: err.code, product_count: err.product_count })
 	}
 })
 
@@ -9232,6 +12563,7 @@ app.post('/api/route/charm-shops', express.json(), (req, res) => {
 	const b = req.body ?? {}
 	try {
 		insertCharmShopDirectoryRow(db, b)
+		broadcastCatalogRefresh('charm-supplier-created')
 		res.json({ ok: true, ..._supplierPayload() })
 	} catch (err) {
 		res.status(_supplierErrStatus(err)).json({ error: err.message })
@@ -9246,6 +12578,7 @@ app.put('/api/route/charm-shops', express.json(), (req, res) => {
 	const b = req.body ?? {}
 	try {
 		updateCharmShopDirectoryRow(db, b)
+		broadcastCatalogRefresh('charm-supplier-updated')
 		res.json({ ok: true, ..._supplierPayload() })
 	} catch (err) {
 		res.status(_supplierErrStatus(err)).json({ error: err.message })
@@ -9261,6 +12594,7 @@ app.delete('/api/route/charm-shops', express.json(), (req, res) => {
 	try {
 		const removed = deleteCharmShopDirectoryRow(db, b)
 		if (!removed) return res.status(404).json({ error: 'Charm shop not found.' })
+		broadcastCatalogRefresh('charm-supplier-deleted')
 		res.json({ ok: true, ..._supplierPayload() })
 	} catch (err) {
 		res.status(_supplierErrStatus(err)).json({ error: err.message })
@@ -9269,20 +12603,26 @@ app.delete('/api/route/charm-shops', express.json(), (req, res) => {
 
 /**
  * POST /api/route/import-suppliers
- * Force a re-import of supplier_catalog.xlsx (replaces the directory with the
- * Excel "Suppliers" sheet — use this to pull edits made in OSP).
+ * Merge supplier_catalog.xlsx's Product Map into the active catalog.
+ * Supplier and charm-shop directories are app-owned master data after initial
+ * seeding; this route never replaces them behind lifecycle protections.
  */
 app.post('/api/route/import-suppliers', (req, res) => {
 	try {
-		const r = supplierImport.importSupplierCatalog(db, config, { force: true })
+		const r = supplierImport.importSupplierCatalog(db, config, {
+			force: true,
+			skipSuppliers: true,
+			skipCharmShops: true,
+		})
 		if (!r.ok) return res.status(400).json(r)
-		// The import fully replaces product_map, so re-apply the catalog backfill to
+		// The import merges product_map, so re-apply the catalog backfill to
 		// keep empty supplier/charm cells populated from the route-engine catalog.
 		try {
 			routeDashboard.reconcileProductMap(db, config)
 		} catch {
 			/* non-fatal */
 		}
+		broadcastCatalogRefresh('catalog-imported')
 		res.json({ ...r, ..._supplierPayload() })
 	} catch (err) {
 		console.error('[route] import-suppliers error:', err.message)
@@ -9331,7 +12671,58 @@ function _sourcingUnlink(absPath) {
 
 // Static taxonomy (categories + workflow statuses) for the UI to render labels.
 app.get('/api/sourcing/meta', (req, res) => {
-	res.json({ categories: sourcingLib.CATEGORIES, statuses: sourcingLib.STATUSES })
+	res.json({
+		categories: sourcingLib.CATEGORIES,
+		statuses: sourcingLib.STATUSES,
+		product_types: sourcingCatalog.PRODUCT_TYPES,
+		gap_types: sourcingCatalog.GAP_TYPES,
+	})
+})
+
+// ─── Sourcing Catalog (a PROJECTION, not a second copy) ─────────────────────
+//
+// One read model over the master data the Route tab and the Python route
+// generator already own: product_map (what we sell + its unit costs),
+// supplier_directory (who sells it + where), charm_shop_directory / charm_library
+// (the charm leg), and the listings/order-history image corpus (the photos).
+//
+// Reads come from here so the whole page loads in one round trip. WRITES go to
+// the endpoints that already own each entity — /api/route/product-map,
+// /api/route/suppliers, /api/route/charm-shops — so there is exactly one write
+// path per table and the two pages can never disagree. See
+// src/sourcing/catalog-view.js for the reasoning in full.
+
+app.get('/api/sourcing/catalog', (req, res) => {
+	try {
+		res.json(sourcingCatalogView.buildCatalog(db))
+	} catch (err) {
+		console.error('[sourcing] catalog GET error:', err.message)
+		res.status(500).json({ error: err.message })
+	}
+})
+
+/**
+ * GET /api/sourcing/catalog/export.csv
+ * The catalog as a UTF-8 CSV, with everything the page shows: product type,
+ * supplier, resolved building/floor, charm, and per-component prices.
+ *
+ * Deliberately a SEPARATE export from /api/route/product-map/export.csv, which
+ * mirrors the "Product Map" sheet of supplier_catalog.xlsx column-for-column and
+ * therefore has to keep its shape for the Excel round-trip to work.
+ */
+app.get('/api/sourcing/catalog/export.csv', (req, res) => {
+	try {
+		const { products } = sourcingCatalogView.buildCatalog(db)
+		const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`
+		const header = ['Product Title', 'Product Type', 'Type Source', 'Supplier', 'Stall', 'Building', 'Floor', 'In Directory', 'Charm Shop', 'Charm Stall', 'Charm Code', 'Case Cost', 'Grip Cost', 'Charm Cost', 'Unit Cost', 'Needs Attention', 'Canonical Product ID'].map(cell).join(',')
+		const body = products.map((p) => [p.title, sourcingCatalog.productTypeLabel(p.product_type, 'en'), p.product_type_source, p.shop_name, p.stall_effective, p.location.located ? p.location.building_label.en : '', p.location.floor && p.location.floor !== sourcingCatalog.UNKNOWN_FLOOR_SENTINEL ? p.location.floor : '', p.supplier_in_directory === null ? '' : p.supplier_in_directory ? 'yes' : 'no', p.charm_shop, p.charm_stall, p.charm_code, p.cost_case, p.cost_grip, p.charm_cost, p.cost_total, p.gaps.join(' '), p.canonical_product_key].map(cell).join(',')).join('\r\n')
+		res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+		res.setHeader('Content-Disposition', `attachment; filename="sourcing_catalog_${new Date().toISOString().slice(0, 10)}.csv"`)
+		res.send(`\uFEFF${header}\r\n${body}`) // BOM so Excel detects UTF-8
+	} catch (err) {
+		console.error('[sourcing] catalog export error:', err.message)
+		res.status(500).json({ error: err.message })
+	}
 })
 
 // ─── Suppliers ──────────────────────────────────────────────────────────────
@@ -9628,6 +13019,9 @@ app.get('/api/route/product-map', (req, res) => {
 app.post('/api/route/product-map/reconcile', (req, res) => {
 	try {
 		const r = routeDashboard.reconcileProductMap(db, config)
+		if ((r.supplier_filled || 0) + (r.charm_filled || 0) > 0) {
+			broadcastCatalogRefresh('catalog-reconciled')
+		}
 		res.json({ ...r, rows: _withProductImages(getProductMap(db)) })
 	} catch (err) {
 		console.error('[route] product-map reconcile error:', err.message)
@@ -9636,62 +13030,187 @@ app.post('/api/route/product-map/reconcile', (req, res) => {
 })
 
 /**
+ * Reject a product-type value the taxonomy does not know, so a typo can never
+ * be persisted as a permanent override that renders as a dead badge. '' is
+ * legal and means "clear the override, derive it from the title again".
+ * @returns {string|null} an error message, or null when the body is acceptable
+ */
+function _productTypeError(body) {
+	const v = body.product_type
+	if (v == null || v === '') return null
+	if (sourcingCatalog.isValidProductType(v)) return null
+	return `Unknown product type "${String(v).slice(0, 40)}". Expected one of: ${sourcingCatalog.PRODUCT_TYPE_IDS.join(', ')}.`
+}
+
+/**
+ * Apply the optional per-component purchase prices that may ride along with a
+ * catalog write, and return the resulting costs (or null when the caller sent
+ * none).
+ *
+ * Prices are NOT written by the product_map accessors on purpose: setProductCost
+ * owns them because it also records price history and fans a change out to every
+ * catalog title that is the same physical product. So it runs AFTER the mapping
+ * row exists, keyed on the title the row now has, and only for the cost fields
+ * actually present in the body — `undefined` means "leave this price alone",
+ * which is exactly how setProductCost reads a missing key.
+ *
+ * @param {string} title the row's FINAL title (a PUT may have just changed it)
+ * @param {object} body the request body
+ */
+function _applyCatalogPrices(title, body) {
+	const patch = {}
+	if ('cost_case' in body) patch.cost_case = sourcingCatalog.normalizePrice(body.cost_case)
+	if ('cost_grip' in body) patch.cost_grip = sourcingCatalog.normalizePrice(body.cost_grip)
+	if (!Object.keys(patch).length) return null
+	return setProductCost(db, { title, ...patch })
+}
+
+/**
+ * Close the Wrong Stall reports a PRODUCT-level location correction answers, on
+ * every order line that inherits that location, and tell live clients.
+ *
+ * A per-product location is written from two places — the Product Catalog modal
+ * and a supplier/charm edit in the Route tab (which saves the product default) —
+ * and both must settle the reports they answer, or lines whose stall is now
+ * correct would keep being exported for re-sourcing forever.
+ *
+ * @param {string} title - the product whose recorded location changed
+ * @param {{ supplier?: boolean, charm?: boolean }} moved - locations that changed
+ * @param {string} reason - SSE refresh reason, for the client log
+ * @returns {object[]} the route_assignments rows whose flag was cleared
+ */
+function _closeWrongStallForProduct(title, moved, reason) {
+	if (!moved || (!moved.supplier && !moved.charm)) return []
+
+	let rows = []
+	db.transaction(() => {
+		rows = resolveWrongStallForProduct(db, title, moved)
+		for (const row of rows) syncAssignmentIssue(row.receipt_id, row.item_key)
+		for (const receiptId of new Set(rows.map((r) => r.receipt_id))) recomputeNeedsPurchaseRollup(receiptId)
+	})()
+	if (!rows.length) return rows
+
+	// The stall AND the status both moved, which a per-line 'assign' patch can't
+	// express — live clients (the shopper still on the market floor) re-fetch so
+	// they get the corrected location, not just a status flip on a stale stall.
+	for (const receiptId of new Set(rows.map((r) => r.receipt_id))) {
+		broadcastRouteRefresh(receiptId, reason)
+	}
+	console.log(`[route] ${reason} cleared ${rows.length} wrong-stall flag(s) for "${title}"`)
+	return rows
+}
+
+/**
+ * Close the Wrong Stall reports a Product-Catalog location edit answers.
+ *
+ * The modal PUTs the whole row on every save, so a correction is recognised by
+ * comparing against the catalog row as it stood BEFORE the write — re-saving the
+ * same shop / stall must never close an open report.
+ *
+ * @param {object|null} before - the catalog row before the write
+ * @param {object} after - the values that were saved
+ * @returns {number} order lines whose flag was cleared
+ */
+function _closeWrongStallFromCatalogEdit(before, after) {
+	const moved = {
+		supplier: routeSourcing.locationMoved(before, after, ['shop_name', 'stall']),
+		charm: routeSourcing.locationMoved(before, after, ['charm_code', 'charm_shop']),
+	}
+	return _closeWrongStallForProduct(after.title, moved, 'catalog-supplier').length
+}
+
+/**
  * POST /api/route/product-map
  * Create a new product→supplier/charm mapping.
- * Body: { title, shop_name?, stall?, charm_shop?, charm_code? }
+ * Body: { title, shop_name?, stall?, charm_shop?, charm_code?, product_type?,
+ *         cost_case?, cost_grip? }
  */
 app.post('/api/route/product-map', express.json(), (req, res) => {
 	try {
-		const result = upsertProductMapRow(db, req.body ?? {})
-		// Keep the Route tab consistent with the catalog: push this product-level
-		// supplier/charm onto any existing per-product route assignments so the
-		// edit takes effect immediately on route rows (where product_assignments
-		// outranks product_map).
+		const b = req.body ?? {}
+		const typeError = _productTypeError(b)
+		if (typeError) return res.status(400).json({ error: typeError, code: 'REQUIRED' })
+		const write = db.transaction(() => {
+			const before = getProductMapRow(db, { title: b.title })
+			const result = upsertProductMapRow(db, b)
+			_applyCatalogPrices(b.title, b)
+			// Keep the Route tab consistent with the catalog: push this product-level
+			// supplier/charm onto defaults for every canonical title alias moved
+			// by the same supplier-offer fan-out.
+			for (const title of new Set([b.title, ...(result.affected_titles || [])])) {
+				syncProductMapToAssignments(db, { ...b, title })
+			}
+			return { before, result }
+		})
+		const { before, result } = write()
 		try {
-			syncProductMapToAssignments(db, req.body ?? {})
+			_closeWrongStallFromCatalogEdit(before, b)
 		} catch (e) {
-			console.warn('[route] catalog→assignments sync failed:', e.message)
+			console.warn('[route] wrong-stall fan-out failed after catalog save:', e.message)
 		}
+		broadcastCatalogRefresh(before && before.status === 'retired' ? 'product-restored' : 'product-created')
 		res.status(201).json({ ok: true, ...result, rows: _withProductImages(getProductMap(db)) })
 	} catch (err) {
-		res.status(_supplierErrStatus(err)).json({ error: err.message })
+		res.status(_supplierErrStatus(err)).json({ error: err.message, code: err.code })
 	}
 })
 
 /**
  * PUT /api/route/product-map
- * Update an existing mapping by id (title can be changed safely).
- * Body: { id, title, shop_name?, stall?, charm_shop?, charm_code? }
+ * Update an existing active mapping by id. Product title is immutable; POST a
+ * corrected title and retire the old row instead.
+ * Body: { id, title, shop_name?, stall?, charm_shop?, charm_code?, product_type?,
+ *         cost_case?, cost_grip? }
+ *
+ * `product_type` and the cost fields are optional and tri-state: omit the key to
+ * leave the value alone, send '' to clear it, send a value to set it.
  */
 app.put('/api/route/product-map', express.json(), (req, res) => {
 	const b = req.body ?? {}
 	if (!b.id) return res.status(400).json({ error: 'id is required.' })
+	const typeError = _productTypeError(b)
+	if (typeError) return res.status(400).json({ error: typeError, code: 'REQUIRED' })
 	try {
-		updateProductMapRowById(db, b)
-		// Mirror the edit onto matching per-product route assignments (see POST above).
+		const write = db.transaction(() => {
+			const before = getProductMapRow(db, { id: b.id })
+			const result = updateProductMapRowById(db, b)
+			_applyCatalogPrices(b.title, b)
+			for (const title of new Set([b.title, ...(result.affected_titles || [])])) {
+				syncProductMapToAssignments(db, { ...b, title })
+			}
+			return before
+		})
+		const before = write()
 		try {
-			syncProductMapToAssignments(db, b)
+			_closeWrongStallFromCatalogEdit(before, b)
 		} catch (e) {
-			console.warn('[route] catalog→assignments sync failed:', e.message)
+			console.warn('[route] wrong-stall fan-out failed after catalog edit:', e.message)
 		}
+		broadcastCatalogRefresh('product-updated')
 		res.json({ ok: true, rows: _withProductImages(getProductMap(db)) })
 	} catch (err) {
-		res.status(_supplierErrStatus(err)).json({ error: err.message })
+		res.status(_supplierErrStatus(err)).json({ error: err.message, code: err.code })
 	}
 })
 
 /**
  * DELETE /api/route/product-map
- * Delete a mapping by id.
- * Body: { id }
+ * Retire a mapping by id. Canonical title aliases retire together so one
+ * physical discontinued product cannot remain selectable under another listing
+ * title. Historical orders and substitutions are retained.
+ * Body: { id, reason? }
  */
 app.delete('/api/route/product-map', express.json(), (req, res) => {
 	const b = req.body ?? {}
 	if (!b.id) return res.status(400).json({ error: 'id is required.' })
 	try {
-		const removed = deleteProductMapRow(db, b.id)
-		if (!removed) return res.status(404).json({ error: 'Entry not found.' })
-		res.json({ ok: true, rows: _withProductImages(getProductMap(db)) })
+		const result = deleteProductMapRow(db, b.id, {
+			reason: b.reason,
+			by: (req.auth && req.auth.user) || '',
+		})
+		if (!result.removed) return res.status(404).json({ error: 'Active catalog entry not found.' })
+		broadcastCatalogRefresh('product-retired', { retired_products: result.removed })
+		res.json({ ok: true, impact: result, rows: _withProductImages(getProductMap(db)) })
 	} catch (err) {
 		res.status(_supplierErrStatus(err)).json({ error: err.message })
 	}
@@ -9712,11 +13231,11 @@ app.post('/api/route/product-merges', express.json(), (req, res) => {
 			note: b.note,
 			createdBy: (req.auth && req.auth.user) || '',
 		})
-		const identity = reconcileCanonicalProductKeys()
+		const identity = _productIdentityCoordinator.runNow('operator-merge')
 		// Product identity changed, so the route's CARD grouping changed — a
 		// per-line patch can't express that. Tell every connected device to pull a
 		// fresh route so the merge appears on the shop floor instantly.
-		if (inserted) broadcastRouteRefresh(null, 'product-merged')
+		if (inserted) broadcastCatalogRefresh('product-merged')
 		res.status(201).json({ ok: true, inserted, groups: identity.groups })
 	} catch (err) {
 		res.status(err.status || 500).json({ error: err.message })
@@ -9742,8 +13261,8 @@ app.delete('/api/route/product-merges', express.json(), (req, res) => {
 		} else {
 			return res.status(400).json({ error: 'Provide listing_id, listing_ids, or listing_a and listing_b.' })
 		}
-		const identity = reconcileCanonicalProductKeys()
-		if (removed) broadcastRouteRefresh(null, 'product-unmerged')
+		const identity = _productIdentityCoordinator.runNow('operator-unmerge')
+		if (removed) broadcastCatalogRefresh('product-unmerged')
 		res.json({ ok: true, removed, groups: identity.groups })
 	} catch (err) {
 		res.status(err.status || 500).json({ error: err.message })
@@ -9803,7 +13322,6 @@ function _charmsPayload() {
 	const imgVer = charmLibrary.charmImageVersionMap(db, config)
 	const charms = getCharmLibrary(db).map((c) => ({
 		code: c.code,
-		sku: c.sku || '',
 		default_charm_shop: c.default_charm_shop || '',
 		default_charm_shop_stall: stallByShop[c.default_charm_shop] || '',
 		notes: c.notes || '',
@@ -9835,7 +13353,7 @@ app.get('/api/route/charms', (req, res) => {
 
 /**
  * POST /api/route/charms — add a new charm.
- * Body: { code?, sku?, default_charm_shop?, notes?, image_base64?, image_ext? }
+ * Body: { code?, default_charm_shop?, notes?, image_base64?, image_ext? }
  * A code is auto-allocated (CH-#####) when not provided.
  */
 app.post('/api/route/charms', express.json({ limit: '20mb' }), (req, res) => {
@@ -9850,11 +13368,11 @@ app.post('/api/route/charms', express.json({ limit: '20mb' }), (req, res) => {
 		if (b.image_base64) imageFile = charmLibrary.saveCharmImage(config, code, b.image_base64, b.image_ext)
 		insertCharmLibraryRow(db, {
 			code,
-			sku: b.sku,
 			default_charm_shop: b.default_charm_shop,
 			notes: b.notes,
 			image_file: imageFile,
 		})
+		broadcastCatalogRefresh('charm-created')
 		res.json({ ok: true, code, ..._charmsPayload() })
 	} catch (err) {
 		res.status(_supplierErrStatus(err)).json({ error: err.message })
@@ -9863,7 +13381,7 @@ app.post('/api/route/charms', express.json({ limit: '20mb' }), (req, res) => {
 
 /**
  * PUT /api/route/charms — update a charm (incl. renaming its code).
- * Body: { orig_code, code, sku?, default_charm_shop?, notes?, image_base64?, image_ext? }
+ * Body: { orig_code, code, default_charm_shop?, notes?, image_base64?, image_ext? }
  */
 app.put('/api/route/charms', express.json({ limit: '20mb' }), (req, res) => {
 	const b = req.body ?? {}
@@ -9889,7 +13407,6 @@ app.put('/api/route/charms', express.json({ limit: '20mb' }), (req, res) => {
 		updateCharmLibraryRow(db, {
 			orig_code: origCode,
 			code: newCode,
-			sku: b.sku,
 			default_charm_shop: b.default_charm_shop,
 			notes: b.notes,
 			image_file: imageFile,
@@ -9898,9 +13415,8 @@ app.put('/api/route/charms', express.json({ limit: '20mb' }), (req, res) => {
 		// so a supplier (or code) change here changes what every already-assigned
 		// order line resolves to. Tell all live Route/Shopping clients to refetch so
 		// the new supplier + stall show up immediately instead of the stale snapshot.
-		const shopChanged = b.default_charm_shop != null &&
-			String(b.default_charm_shop).trim() !== (cur.default_charm_shop || '')
-		if (shopChanged || newCode !== origCode) broadcastRouteRefresh(null, 'charm-updated')
+		const shopChanged = b.default_charm_shop != null && String(b.default_charm_shop).trim() !== (cur.default_charm_shop || '')
+		if (shopChanged || newCode !== origCode || b.image_base64) broadcastCatalogRefresh('charm-updated')
 		res.json({ ok: true, code: newCode, ..._charmsPayload() })
 	} catch (err) {
 		res.status(_supplierErrStatus(err)).json({ error: err.message })
@@ -9921,7 +13437,7 @@ app.delete('/api/route/charms', express.json(), (req, res) => {
 		} catch {}
 		// Order lines still referencing this code now fall back to their stored
 		// snapshot — refetch live views so that resolution change is reflected.
-		broadcastRouteRefresh(null, 'charm-deleted')
+		broadcastCatalogRefresh('charm-deleted')
 		res.json({ ok: true, ..._charmsPayload() })
 	} catch (err) {
 		res.status(_supplierErrStatus(err)).json({ error: err.message })
@@ -9987,7 +13503,10 @@ app.post('/api/route/charm-from-supplier', express.json({ limit: '20mb' }), (req
 		// A mere SUGGESTION is deliberately never adopted: it names a specific charm
 		// that usually belongs to a different shop, and re-pointing it would move
 		// that charm for every product using it.
-		let code = String(b.code || '').trim().toUpperCase() || String(line.charm_code || '').trim()
+		let code =
+			String(b.code || '')
+				.trim()
+				.toUpperCase() || String(line.charm_code || '').trim()
 		if (!code) code = charmLibrary.allocateNextCode(db)
 		if (!/^[A-Za-z0-9_-]+$/.test(code)) {
 			return res.status(400).json({ error: 'Charm code may only contain letters, digits, "-" and "_".' })
@@ -10040,7 +13559,9 @@ app.post('/api/route/charm-from-supplier', express.json({ limit: '20mb' }), (req
 			updated_at: assignment.updated_at,
 			by: (req.auth && req.auth.user) || 'owner',
 		})
-		if (out.created_charm || prevShop !== shopName || imageSaved) broadcastRouteRefresh(null, 'charm-from-supplier')
+		if (out.created_charm || out.created_shop || prevShop !== shopName || imageSaved) {
+			broadcastCatalogRefresh('charm-from-supplier')
+		}
 
 		console.log(`[route] charm ${code} → supplier "${shopName}"${supplierStall ? ' · ' + supplierStall : ''}` + `${out.created_charm ? ' (charm created)' : ''}${out.created_shop ? ' (charm shop created)' : ''}${imageSaved ? ' (photo saved)' : ''}`)
 
@@ -10067,7 +13588,7 @@ app.post('/api/route/charms/resync', (req, res) => {
 		if (!r.ok) return res.status(400).json(r)
 		// The whole library was replaced from the manifest — code → supplier
 		// mappings may have changed, so refetch all live Route/Shopping views.
-		broadcastRouteRefresh(null, 'charm-resynced')
+		broadcastCatalogRefresh('charm-resynced')
 		res.json({ ok: true, ..._charmsPayload() })
 	} catch (err) {
 		res.status(500).json({ error: err.message })
@@ -10273,9 +13794,7 @@ app.post('/api/route/generate', express.json(), async (req, res) => {
 	// already have it, to swap in person); its grip/charm must still be sourced.
 	// We therefore keep exchange lines here and let rowsToImportOrders project them
 	// down to just the still-buyable pieces (a pure case-only swap drops out there).
-	const shoppingRows = rows.filter(
-		(r) => !r.excluded && (r.needs_exchange ? routeDashboard.rowHasShoppingWork(r) : !routeDashboard.rowFullyPurchased(r)),
-	)
+	const shoppingRows = rows.filter((r) => !r.excluded && (r.needs_exchange ? routeDashboard.rowHasShoppingWork(r) : !routeDashboard.rowFullyPurchased(r)))
 	const exportedOrders = routeDashboard.rowsToImportOrders(shoppingRows)
 
 	if (exportedOrders.length === 0) {
@@ -10407,10 +13926,9 @@ app.post('/api/route/generate', express.json(), async (req, res) => {
 	//   shopping_route.xlsx · shopping_route_simple.xlsx · shopping_route_zh.xlsx
 	// (--chinese adds the _zh file; the full + simple files are always written.)
 	//
-	// --project-dir is REQUIRED: it tells the generator to use the OSP's
-	// organized layout (data/supplier_catalog.xlsx, data/charm_images, cache/),
-	// which is where the catalog actually lives. Without it the script looks for
-	// "supplier_catalog.xlsx" in the cwd root and fails with "Catalog not found".
+	// --project-dir selects the vendored engine code/layout. --data-dir keeps the
+	// mutable catalog DB/workbook/images independently relocatable outside a
+	// cloud-synced source tree.
 	// --output redirects the three route files into THIS dashboard's folder.
 	//
 	// --reset makes the dashboard the SINGLE SOURCE OF TRUTH: the route is built
@@ -10431,7 +13949,7 @@ app.post('/api/route/generate', express.json(), async (req, res) => {
 	// --reset: build the route purely from THIS export — never merged with any
 	// previously cached orders — so the Excel contains exactly the orders in the
 	// current Orders Sorting Dashboard and nothing carried over from prior runs.
-	const pyArgs = [ospScript, '--project-dir', ospDir, '--import-json', tmpFile, '--output', outputXlsx, '--reset', '--no-catalog-update', '--chinese']
+	const pyArgs = [ospScript, '--project-dir', ospDir, '--data-dir', enginePaths.engineDataDir(config), '--import-json', tmpFile, '--output', outputXlsx, '--reset', '--no-catalog-update', '--chinese']
 
 	// ── Mirror the dashboard's authoritative charm mappings into the engine DB ─
 	// The generator reads charm code → shop (charm_library) and shop → stall
@@ -10755,14 +14273,21 @@ app.post('/api/route/import-status', express.json({ limit: '60mb' }), (req, res)
 				}
 			})
 	}
-	// Manual route entries (synthetic non-positive receipt ids).
-	const manualMeta = new Map()
+	// Manual route entries (synthetic non-positive receipt ids). A manual order
+	// can carry several products, so the sidecars are keyed PER LINE — keying
+	// them by receipt_id alone would make every line of the order inherit the
+	// last sidecar's photo. `manualOrderMeta` keeps the first sidecar per order
+	// purely for the order-level shop name.
+	const manualByLine = new Map()
+	const manualOrderMeta = new Map()
 	try {
 		for (const m of getManualItems(db)) {
-			manualMeta.set(m.receipt_id, m)
-			titleByLine.set(`${m.receipt_id}\u0000${m.item_key}`, m.title || '')
+			const lk = `${m.receipt_id}\u0000${m.item_key}`
+			manualByLine.set(lk, m)
+			if (!manualOrderMeta.has(m.receipt_id)) manualOrderMeta.set(m.receipt_id, m)
+			titleByLine.set(lk, m.title || '')
 			const lid = m.listing_id != null ? Number(m.listing_id) : null
-			if (Number.isInteger(lid)) listingByLine.set(`${m.receipt_id}\u0000${m.item_key}`, lid)
+			if (Number.isInteger(lid)) listingByLine.set(lk, lid)
 		}
 	} catch {
 		/* manual items optional */
@@ -10849,7 +14374,7 @@ app.post('/api/route/import-status', express.json({ limit: '60mb' }), (req, res)
 		let entry = reportByOrder.get(o.receipt_id)
 		if (!entry) {
 			const meta = metaById.get(o.receipt_id)
-			const man = manualMeta.get(o.receipt_id)
+			const man = manualOrderMeta.get(o.receipt_id)
 			entry = {
 				order_number: String(o.receipt_id),
 				is_manual: o.receipt_id <= 0,
@@ -10862,10 +14387,11 @@ app.post('/api/route/import-status', express.json({ limit: '60mb' }), (req, res)
 			reportByOrder.set(o.receipt_id, entry)
 		}
 		const lid = listingByLine.has(lk) ? listingByLine.get(lk) : null
+		const manLine = manualByLine.get(lk)
 		entry.lines.push({
 			title: titleByLine.get(lk) || o.item_key,
 			listing_id: lid,
-			image_url: lid ? `/api/route/listing-image/${lid}` : o.receipt_id <= 0 && manualMeta.has(o.receipt_id) && manualMeta.get(o.receipt_id).has_image_data ? `/api/route/manual-image/${manualMeta.get(o.receipt_id).id}?v=${manualMeta.get(o.receipt_id).updated_at || manualMeta.get(o.receipt_id).created_at || 0}` : null,
+			image_url: lid ? `/api/route/listing-image/${lid}` : manLine && manLine.has_image_data ? `/api/route/manual-image/${manLine.id}?v=${manLine.updated_at || manLine.created_at || 0}` : null,
 			changes,
 		})
 	}
@@ -10994,32 +14520,79 @@ app.post('/api/route/import-status', express.json({ limit: '60mb' }), (req, res)
 })
 
 /**
- * GET /api/route/listing-image/:id
- * Serves a product photo for the purchase-sync report. Prefers locally cached
- * JPEG/PNG bytes (listing_image_data); falls back to redirecting the browser to
- * the cached Etsy CDN thumbnail URL. Returns 404 when neither is available.
+ * GET /api/route/listing-image/:id[?w=300]
+ * Serves a product photo for the shopping route and purchase-sync report.
+ * Prefers locally cached JPEG/PNG bytes (listing_image_data); on a cache miss
+ * fetches from the Etsy CDN server-side, persists, then streams the bytes.
+ * Optional ?w= resizes for card thumbnails. Returns 404 when no image exists.
  */
-app.get('/api/route/listing-image/:id', (req, res) => {
+app.get('/api/route/listing-image/:id', async (req, res) => {
 	const id = parseInt(req.params.id, 10)
 	if (!Number.isInteger(id)) return res.status(400).end()
 	try {
-		const data = getListingImageData(db, id)
-		if (data && data.length) {
-			const mime = data[0] === 0x89 && data[1] === 0x50 ? 'image/png' : 'image/jpeg'
-			res.setHeader('Content-Type', mime)
-			res.setHeader('Cache-Control', 'private, max-age=86400')
-			return res.send(data)
+		const data = await ensureListingImageBytes(db, id)
+		if (!data || !data.length) return res.status(404).end()
+
+		const width = thumbnails.normaliseWidth(req.query.w)
+		if (width) {
+			try {
+				const resized = await sharp(data).rotate().resize(width, width, { fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 82 }).toBuffer()
+				res.setHeader('Content-Type', 'image/jpeg')
+				res.setHeader('Cache-Control', 'private, max-age=86400')
+				return res.send(resized)
+			} catch (err) {
+				console.warn(`[route] listing-image ${id} resize failed, serving original:`, err.message)
+			}
 		}
-	} catch {
-		/* fall through to URL redirect */
+
+		const mime = data[0] === 0x89 && data[1] === 0x50 ? 'image/png' : 'image/jpeg'
+		res.setHeader('Content-Type', mime)
+		res.setHeader('Cache-Control', 'private, max-age=86400')
+		return res.send(data)
+	} catch (err) {
+		console.warn(`[route] listing-image ${req.params.id} failed:`, err.message)
+		if (!res.headersSent) res.status(404).end()
 	}
+})
+
+/**
+ * GET /api/route/variation-image/:listingId?k=<style>[&v=cached_at][&w=300]
+ *
+ * Serves the Etsy photo linked to a Styles value (e.g. "Case 1 + Grip 1").
+ * Only URLs already cached in listing_variation_images are fetched — the
+ * style query is a lookup key, never an open URL proxy.
+ */
+app.get('/api/route/variation-image/:id', async (req, res) => {
+	const id = parseInt(req.params.id, 10)
+	const style = String(req.query.k == null ? '' : req.query.k).trim()
+	if (!Number.isInteger(id) || !style) return res.status(400).end()
 	try {
-		const row = db.prepare('SELECT url FROM listing_images WHERE listing_id = ?').get(id)
-		if (row && row.url) return res.redirect(302, row.url)
-	} catch {
-		/* no cached url */
+		const map = getListingVariationImageMap(db, [id])
+		const hit = lookupVariationImage(map, id, { style })
+		if (!hit || !hit.url) return res.status(404).end()
+		const data = await fetchImageBuffer(hit.url)
+		if (!data || !data.length) return res.status(404).end()
+
+		const width = thumbnails.normaliseWidth(req.query.w)
+		if (width) {
+			try {
+				const resized = await sharp(data).rotate().resize(width, width, { fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 82 }).toBuffer()
+				res.setHeader('Content-Type', 'image/jpeg')
+				res.setHeader('Cache-Control', 'private, max-age=86400')
+				return res.send(resized)
+			} catch (err) {
+				console.warn(`[route] variation-image ${id} resize failed, serving original:`, err.message)
+			}
+		}
+
+		const mime = data[0] === 0x89 && data[1] === 0x50 ? 'image/png' : 'image/jpeg'
+		res.setHeader('Content-Type', mime)
+		res.setHeader('Cache-Control', 'private, max-age=86400')
+		return res.send(data)
+	} catch (err) {
+		console.warn(`[route] variation-image ${req.params.id} failed:`, err.message)
+		if (!res.headersSent) res.status(404).end()
 	}
-	return res.status(404).end()
 })
 
 /**
@@ -11185,11 +14758,14 @@ app.get('/api/route/download', (req, res) => {
 
 /**
  * GET /api/route/download-unmatched-images
- * ZIP of product thumbnails for items with no supplier/location yet.
+ * ZIP of product photos for every line nobody can buy yet — never catalogued, or
+ * flagged Wrong Stall in person — plus a manifest naming the ask behind each one.
+ * These are the images the operator forwards to the market contacts.
  * Uses the same date/shop/receipt scope as GET /api/route/dashboard.
  *
  * Query: date_from, date_to, shop_id, receipt_ids (comma-separated).
- * Response: application/zip; X-Images-Added / X-Images-Requested headers.
+ * Response: application/zip; X-Images-Requested / X-Images-Not-In-Catalog /
+ *           X-Images-Wrong-Stall headers (all set before the stream opens).
  */
 app.get('/api/route/download-unmatched-images', async (req, res) => {
 	try {
@@ -11215,19 +14791,24 @@ app.get('/api/route/download-unmatched-images', async (req, res) => {
 		const items = unmatchedImages.collectUnmatchedImageItems(rows)
 		if (!items.length) {
 			return res.status(404).json({
-				error: 'No unmatched products with cached images in this date range. Try widening dates or run npm run fetch-images.',
+				error: 'Nothing to source in this date range — every line has a supplier and none are flagged Wrong Stall. Try widening the dates, or run npm run fetch-images if photos are missing.',
 			})
 		}
 
 		const stamp = new Date().toISOString().slice(0, 10)
 		const zipName = `unmatched-products-${stamp}.zip`
+		const byReason = unmatchedImages.countItemsByReason(items)
 
+		// Every header goes out BEFORE the archive starts streaming: once the first
+		// chunk is written the headers are flushed and any later setHeader throws.
 		res.setHeader('Content-Type', 'application/zip')
 		res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`)
 		res.setHeader('X-Images-Requested', String(items.length))
+		res.setHeader('X-Images-Not-In-Catalog', String(byReason[routeSourcing.REASON_NOT_IN_CATALOG]))
+		res.setHeader('X-Images-Wrong-Stall', String(byReason[routeSourcing.REASON_WRONG_STALL]))
 
-		const { added, failed } = await unmatchedImages.streamUnmatchedImagesZip(res, items)
-		console.log(`[route] unmatched images zip: ${added}/${items.length} (${failed.length} failed)`)
+		const { added, failed } = await unmatchedImages.streamUnmatchedImagesZip(res, db, items)
+		console.log(`[route] sourcing images zip: ${added}/${items.length} ` + `(${byReason[routeSourcing.REASON_WRONG_STALL]} wrong stall, ${failed.length} failed)`)
 	} catch (err) {
 		console.error('[route] download-unmatched-images:', err.message)
 		if (!res.headersSent) {
@@ -11237,6 +14818,16 @@ app.get('/api/route/download-unmatched-images', async (req, res) => {
 })
 
 // ─── Dashboard HTML ───────────────────────────────────────────────────────────
+
+// The checklist is split out of the already-large dashboard document so its
+// controller and styles can be syntax/DOM tested independently. Explicit routes
+// preserve the dashboard's deny-by-default static surface (no broad public dir).
+app.get('/operations-checklist.css', (_req, res) => {
+	res.type('text/css').set('Cache-Control', 'no-cache').sendFile(path.resolve(__dirname, '../../public/operations-checklist.css'))
+})
+app.get('/operations-checklist.js', (_req, res) => {
+	res.type('application/javascript').set('Cache-Control', 'no-cache').sendFile(path.resolve(__dirname, '../../public/operations-checklist.js'))
+})
 
 app.get('/', (req, res) => {
 	res.sendFile(path.resolve(__dirname, '../../public/index.html'))
@@ -11263,6 +14854,12 @@ app.get('/sourcing', (req, res) => {
 // immediately (the byte-identical SW re-registers when this changes too).
 app.get('/shop-sync.js', (_req, res) => {
 	res.type('application/javascript').set('Cache-Control', 'no-cache').sendFile(path.resolve(__dirname, '../../public/shop-sync.js'))
+})
+
+// Supplier WeChat prep-list builder (pure payload + canvas PNG). Shared with the
+// shopping page and a Node regression test — same pattern as shop-sync.js.
+app.get('/shop-supplier-prep.js', (_req, res) => {
+	res.type('application/javascript').set('Cache-Control', 'no-cache').sendFile(path.resolve(__dirname, '../../public/shop-supplier-prep.js'))
 })
 
 // PWA manifest — makes the shopping route installable to a phone home screen.
@@ -11295,7 +14892,7 @@ app.get('/shop-sw.js', (_req, res) => {
 // flushes. Wrapped so a fetch failure (e.g. first install offline) can't abort SW
 // installation; the 'sync' handler defensively re-checks self.ShopSync.
 try { importScripts('/shop-sync.js'); } catch (e) {}
-const SHELL = 'shopping-route-shell-v37';
+const SHELL = 'shopping-route-shell-v40';
 // v3: ALL of our own image endpoints (charm, substitution/switched-design, style
 // variant, manual) are now content-addressed (…?v=TOKEN / …&v=TOKEN) — the token
 // moves whenever the underlying photo is replaced, so the URL changes and this
@@ -11303,14 +14900,16 @@ const SHELL = 'shopping-route-shell-v37';
 // evicts entries cached under the OLD un-versioned URLs (e.g. a switched-design
 // photo that kept showing the original image on the shopping floor).
 const IMG = 'shopping-route-img-v3';
-const ASSETS = ['/shop', '/shop.webmanifest', '/shop-icon.svg', '/shop-sync.js'];
-// Anything that is an image we serve or proxy: product photos on the Etsy CDN,
-// and our own charm / listing / switched-design / variant / manual endpoints.
+const ASSETS = ['/shop', '/shop.webmanifest', '/shop-icon.svg', '/shop-sync.js', '/shop-supplier-prep.js'];
+// Anything that is an image we serve: charm / listing / switched-design / variant /
+// manual endpoints. Direct Etsy CDN URLs are intentionally NOT intercepted —
+// CSP connect-src is 'self', so a service-worker fetch to etsystatic.com would
+// fail; listing photos are proxied through /api/route/listing-image instead.
 function isImage(url, req) {
   return req.destination === 'image'
-    || /(^|\\.)etsystatic\\.com$/.test(url.hostname)
     || url.pathname.startsWith('/api/route/charm-image')
     || url.pathname.startsWith('/api/route/listing-image')
+    || url.pathname.startsWith('/api/route/variation-image')
     || url.pathname.startsWith('/api/route/style-image')
     || url.pathname.startsWith('/api/route/substitution-image')
     || url.pathname.startsWith('/api/route/manual-image');
@@ -11390,7 +14989,39 @@ app.use((err, req, res, next) => {
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
+// Build/deploy fingerprint, logged once at boot. This is a pm2-managed long-
+// running process — code on disk only takes effect after a restart (`npm run
+// auto:restart` / `pm2 restart etsy-dashboard`), so "did my fix actually ship?"
+// is a real, recurring question here. Printing the commit + boot time removes
+// the guesswork: compare it against `git log -1` to confirm what's live.
+function bootFingerprint() {
+	try {
+		const commit = execSync('git rev-parse --short HEAD', { cwd: __dirname, stdio: ['ignore', 'pipe', 'ignore'] })
+			.toString()
+			.trim()
+		const commitTime = execSync('git log -1 --format=%cd --date=iso-strict', { cwd: __dirname, stdio: ['ignore', 'pipe', 'ignore'] })
+			.toString()
+			.trim()
+		const dirty =
+			execSync('git status --porcelain', { cwd: __dirname, stdio: ['ignore', 'pipe', 'ignore'] })
+				.toString()
+				.trim().length > 0
+		return `${commit}${dirty ? '+dirty' : ''} (committed ${commitTime})`
+	} catch {
+		return 'unknown (not a git checkout or git unavailable)'
+	}
+}
+// Git subprocesses are synchronous and `/api/health` is polled aggressively while
+// restarting. Compute once at boot instead of blocking the event loop per probe.
+const BOOT_FINGERPRINT = bootFingerprint()
+
 const PORT = Number(process.env.PORT) || 4000
+const allowOpenNetwork = process.env.DASHBOARD_ALLOW_UNAUTHENTICATED_NETWORK === '1' || process.env.DASHBOARD_ALLOW_UNAUTHENTICATED_NETWORK === 'true'
+const LISTEN_HOST = resolveListenHost({
+	authEnabled: auth.enabled,
+	allowUnauthenticatedNetwork: allowOpenNetwork,
+	requestedHost: process.env.HOST,
+})
 // Precompute perceptual hashes for already-cached product images shortly after
 // boot, so the shopping route can unify same-image products across shops on the
 // first open (rather than waiting for the per-request self-heal).
@@ -11400,7 +15031,10 @@ setTimeout(() => {
 setTimeout(() => {
 	hydrateMissingProductIdentities().catch(() => {})
 }, 8000)
-const httpServer = app.listen(PORT, () => {
+// Reconcile model fixes left in a contradictory state by an older build (open,
+// but with the corrected model already bought) so no order sits in limbo.
+setTimeout(settleAlreadyBoughtModelFixes, 6000)
+const httpServer = app.listen(PORT, LISTEN_HOST, () => {
 	const allShops = getAllShops(config)
 	const authedN = allShops.filter((s) => tokenManager.hasTokens(s.shop_id)).length
 	const groups = config.groups
@@ -11420,12 +15054,11 @@ const httpServer = app.listen(PORT, () => {
 		const shopCount = allShops.filter((s) => s.api_key === key).length
 		const callsPerDay = shopCount * callsPerShopPerCycle * cyclesPerDay
 		const pct = ((callsPerDay / 5000) * 100).toFixed(1)
-		return `      ${key.slice(0, 16)}…  ${shopCount} shops → ~${callsPerDay} calls/day  (${pct}% of 5K QPD)`
+		return `      ${key.slice(0, 6)}…  ${shopCount} shops → ~${callsPerDay} calls/day  (${pct}% of 5K QPD)`
 	})
 
-	// Discover this machine's LAN IPv4 address(es) so the owner knows exactly what
-	// URL to open on the employee's computer. app.listen(PORT) binds all interfaces,
-	// so any of these reaches the dashboard from another device on the same network.
+	// Discover this machine's LAN IPv4 address(es) when the configured bind permits
+	// remote access, so the owner knows what to open on the employee's computer.
 	const lanAddrs = []
 	try {
 		const nets = os.networkInterfaces()
@@ -11452,10 +15085,13 @@ const httpServer = app.listen(PORT, () => {
 	console.log('═'.repeat(60))
 	console.log('  Unified Dashboard')
 	console.log('═'.repeat(60))
-	console.log(`\n  Local URL   : http://localhost:${PORT}   (this computer)`)
-	if (lanUrls.length) {
+	console.log(`\n  Build       : ${BOOT_FINGERPRINT}  ·  pid ${process.pid}  ·  booted ${new Date().toISOString()}`)
+	console.log(`  Local URL   : http://localhost:${PORT}   (this computer)`)
+	if (LISTEN_HOST !== '127.0.0.1' && LISTEN_HOST !== '::1' && lanUrls.length) {
 		console.log(`  Network URL : ${lanUrls[0]}   ← open THIS on your employee's laptop`)
 		lanUrls.slice(1).forEach((u) => console.log(`                ${u}`))
+	} else if (LISTEN_HOST === '127.0.0.1' || LISTEN_HOST === '::1') {
+		console.log('  Network URL : disabled (auth is off; localhost-only safety bind)')
 	} else {
 		console.log('  Network URL : (no LAN address found — connect to Wi-Fi/Ethernet)')
 	}
@@ -11483,7 +15119,7 @@ const httpServer = app.listen(PORT, () => {
 		console.log('  API endpoint  : GET /api/admin/suspension-risk\n')
 	}
 
-	console.log(`  Open http://localhost:${PORT} here, or the Network URL on another computer.\n`)
+	console.log(LISTEN_HOST === '127.0.0.1' || LISTEN_HOST === '::1' ? `  Open http://localhost:${PORT} on this computer.\n` : `  Open http://localhost:${PORT} here, or the Network URL on another computer.\n`)
 
 	// ── Embedded order + inventory sync ────────────────────────────────────────
 	// Runs the SAME receipt sync + order-triggered auto-restock that the standalone
@@ -11497,6 +15133,7 @@ const httpServer = app.listen(PORT, () => {
 	//     catches zero-stock not tied to a recent order (logs AUTO_RESTOCK).
 	//
 	// Disable with EMBEDDED_SYNC=0 if you prefer to run `npm run sync` separately.
+	const trackingSettings = getTrackingPollSettings(config)
 	if (process.env.EMBEDDED_SYNC === '0') {
 		console.log('  Embedded sync: DISABLED (EMBEDDED_SYNC=0) — run `npm run sync` in a separate terminal\n')
 	} else {
@@ -11537,21 +15174,86 @@ const httpServer = app.listen(PORT, () => {
 		console.log(`  Embedded sync: ON — receipts "${receiptCron}" (every ${syncIntervalMin}m), inventory watch "${invCron}" (every ${invWatchMin}m)`)
 		console.log('                 Auto-restock + order sync run automatically while the dashboard is open.\n')
 
-		// Kick off receipt sync shortly after boot; defer inventory sweep to avoid a
-		// startup burst of GET+PUT inventory writes on top of the boot order sync.
+		// A restart is not a business event. If every authenticated shop completed
+		// a receipt sync within the configured interval, wait for cron instead of
+		// repeating the same Etsy reads eight seconds after deployment.
+		const latestSuccessfulSync = db.prepare(
+			`SELECT MAX(completed_at) AS completed_at
+			 FROM sync_log
+			 WHERE shop_id = ? AND status = 'success'`
+		)
+		const authenticatedShopIds = allShops
+			.filter((shop) => tokenManager.hasTokens(shop.shop_id))
+			.map((shop) => shop.shop_id)
+		const startupCutoff = Math.floor(Date.now() / 1000) - syncIntervalMin * 60
+		const allShopsFresh =
+			authenticatedShopIds.length > 0 &&
+			authenticatedShopIds.every((shopId) => {
+				const completedAt = Number(latestSuccessfulSync.get(shopId)?.completed_at) || 0
+				return completedAt >= startupCutoff
+			})
+
+		// Kick off receipt sync shortly after boot only when data is genuinely
+		// stale; defer inventory sweep to avoid a startup GET+PUT burst.
 		setTimeout(() => {
+			if (allShopsFresh) {
+				console.log(`[sync] Startup sync skipped — all ${authenticatedShopIds.length} authenticated shop(s) synced within the last ${syncIntervalMin}m.`)
+				return
+			}
 			runGuarded('sync', () => runSyncCycle(config, tokenManager, db))
 		}, 8000)
 		setTimeout(() => {
 			runGuarded('inventory-watch', () => runInventoryWatchCycle(config, tokenManager, db))
 		}, INV_WATCH_STARTUP_DELAY_MS)
-
 		cron.schedule(receiptCron, () => {
 			runGuarded('sync', () => runSyncCycle(config, tokenManager, db))
 		})
 		cron.schedule(invCron, () => {
 			runGuarded('inventory-watch', () => runInventoryWatchCycle(config, tokenManager, db))
 		})
+	}
+
+	// ── Etsy-completion reconciler ─────────────────────────────────────────────
+	// Independent of EMBEDDED_SYNC and of the QPD budget: an order holding a paid
+	// 4PX label that was never completed on Etsy is a live late-shipment strike,
+	// and finishing it is always the right call. The startup pass is what heals
+	// anything stranded while the dashboard was down. Cross-process safe — the
+	// ledger leases each order, so a second runner cannot double-ship one.
+	const completionSweepMin = Math.max(1, config.etsy_completion_sweep_minutes ?? 5)
+	console.log(`  Ship recovery: every ${completionSweepMin}m — completes 4PX-labelled orders that were never finished on Etsy\n`)
+	setTimeout(() => {
+		runEtsyCompletionSweep('startup').catch((err) => console.error('[completion] startup sweep failed:', err.message))
+	}, 20_000)
+	setInterval(
+		() => {
+			runEtsyCompletionSweep('scheduled').catch((err) => console.error('[completion] scheduled sweep failed:', err.message))
+		},
+		completionSweepMin * 60 * 1000,
+	)
+
+	// 4PX tracking is independent of Etsy's embedded-sync switch and QPD budget.
+	// Keep parcel status current even when EMBEDDED_SYNC=0; a standalone worker
+	// sharing this DB is harmless because the cross-process tracking lock elects
+	// exactly one runner.
+	if (trackingSettings.enabled) {
+		// Run one-time cached repairs before the startup carrier cycle builds its
+		// due queue. This avoids a first-tab race where deployment rechecks would
+		// otherwise wait for the next 15-minute scheduler tick.
+		try {
+			ensureDisposedTrackingFlags()
+		} catch (err) {
+			console.warn(`[tracking] Cached tracking repair failed: ${err.message}`)
+		}
+		console.log(`  4PX tracking : every ${trackingSettings.intervalMinutes}m (pre-transit ${trackingSettings.preRecheckHours}h, moving ${trackingSettings.transitRecheckHours}h cache TTL)\n`)
+		setTimeout(() => {
+			_startServerTrackingRefresh('startup')
+		}, 15_000)
+		setInterval(
+			() => {
+				_startServerTrackingRefresh('scheduled')
+			},
+			trackingSettings.intervalMinutes * 60 * 1000,
+		)
 	}
 })
 
@@ -11578,8 +15280,8 @@ httpServer.on('error', (err) => {
 // shows "API unknown" (the in-memory Etsy budget is only learned from live sync
 // response headers) until the next top-of-hour cron. Releasing on the way out
 // lets the new process sync and re-learn the budget within seconds of boot.
-// releaseSyncLock is owner-scoped, so a genuinely separate live worker holding
-// the lock is never disturbed. better-sqlite3 is synchronous, so this is safe to
+// Both release helpers are owner-scoped, so a genuinely separate live worker
+// holding either lock is never disturbed. better-sqlite3 is synchronous, so this is safe to
 // run inside the 'exit' handler (the catch-all that also covers process.exit).
 let _locksReleased = false
 function releaseOwnedLocks() {
@@ -11587,6 +15289,10 @@ function releaseOwnedLocks() {
 	_locksReleased = true
 	try {
 		releaseSyncLock(db)
+		releaseTrackingLock(db)
+		for (const receiptId of _fourpxCreateInFlight.keys()) {
+			releaseLock(db, `fourpx_create:${receiptId}`, FOURPX_CREATE_LOCK_OWNER)
+		}
 	} catch {
 		/* best effort — never throw from a shutdown path */
 	}
@@ -11601,29 +15307,34 @@ process.on('SIGTERM', () => {
 	process.exit(0)
 })
 
-// ── Last-resort crash guards — keep operator-initiated work alive ─────────────
-// A single stray async rejection anywhere in the process (background sync worker,
-// tracking poller, inventory watch, a webhook, etc.) would otherwise take down
-// Node's default and kill the WHOLE server — severing any long-running request in
-// flight. That is exactly what turned a paced /api/4px/bulk-complete run into a
-// browser "Failed to fetch": a background task rejected, the process died, PM2
-// (autorestart) revived it, and the operator's completion was cut off mid-batch.
-//
-// These handlers log with full context and DELIBERATELY keep the process running.
-// Rationale for this app specifically:
-//   • Every HTTP handler is self-contained and persists to synchronous SQLite as
-//     it goes, so there is no shared in-memory state to corrupt across requests.
-//   • Fulfilment (shipping/completing real, already-labelled orders) must never be
-//     aborted by an unrelated background hiccup — that ships orders late, a worse
-//     Etsy signal than the original error.
-//   • Genuinely fatal, unrecoverable conditions (e.g. port already in use) still
-//     exit through their own explicit paths (see httpServer 'error' above).
-// The bulk-complete flow is additionally idempotent + resumable, so even in the
-// rare case a crash IS unavoidable, no work is lost or duplicated on retry.
+// ── Last-resort crash guards ──────────────────────────────────────────────────
+// Continuing after an uncaught exception leaves Node in an undefined state.
+// Stop accepting new work, give active requests a short grace period, release
+// advisory locks, and let PM2 restart a clean process. Mutation paths are
+// checkpointed/idempotent, so retrying is safer than running corrupted state.
+let _fatalShutdownStarted = false
+function shutdownAfterFatal(kind, detail) {
+	if (_fatalShutdownStarted) return
+	_fatalShutdownStarted = true
+	console.error(`[fatal] ${kind} — shutting down for a clean PM2 restart:\n${detail}`)
+	process.exitCode = 1
+	const finish = () => {
+		releaseOwnedLocks()
+		process.exit(1)
+	}
+	try {
+		httpServer.close(finish)
+	} catch {
+		finish()
+		return
+	}
+	const timer = setTimeout(finish, 10_000)
+	if (typeof timer.unref === 'function') timer.unref()
+}
 process.on('unhandledRejection', (reason) => {
 	const detail = reason instanceof Error ? reason.stack || reason.message : JSON.stringify(reason)
-	console.error(`[fatal-guard] Unhandled promise rejection — logged; server kept alive:\n${detail}`)
+	shutdownAfterFatal('Unhandled promise rejection', detail)
 })
 process.on('uncaughtException', (err) => {
-	console.error(`[fatal-guard] Uncaught exception — logged; server kept alive:\n${err?.stack || err}`)
+	shutdownAfterFatal('Uncaught exception', err?.stack || err)
 })

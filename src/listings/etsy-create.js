@@ -19,15 +19,17 @@
 const fs = require('fs');
 const {
   createDraftListingForm,
+  findMatchingDraftListing,
   uploadListingImage,
   uploadListingVideo,
+  getListingVideos,
   putListingInventory,
   getListingInventory,
   updateVariationImages,
   updateListing,
   updateListingProperty,
 } = require('../etsy/client');
-const { buildInventory, buildVariationImages, buildCustomVariationImages, normaliseCustomStyles, PROP_STYLES } = require('./variation-builder');
+const { buildInventory, buildVariationImages, buildCustomVariationImages, normaliseCustomStyles } = require('./variation-builder');
 const { getTaxonomyAttributes, resolveAttributes } = require('./attributes');
 const productTypes = require('./product-types');
 
@@ -41,6 +43,24 @@ function dedupeByValueId(list) {
     out.push(v);
   }
   return out;
+}
+
+/**
+ * Map each priced-axis value label to the value_id Etsy assigned it, read back
+ * from getListingInventory after the inventory PUT. Etsy re-issues these ids on
+ * every PUT, so variation images must always be linked from a fresh read.
+ */
+function readStyleValueIds(inventory, productType) {
+  const propId = productTypes.stylePropertyFor(productType).id;
+  const map = new Map();
+  for (const p of inventory.products || []) {
+    for (const pv of p.property_values || []) {
+      if (pv.property_id === propId && (pv.values || []).length && (pv.value_ids || []).length) {
+        map.set(pv.values[0], pv.value_ids[0]);
+      }
+    }
+  }
+  return map;
 }
 
 /** Build the createDraftListing request body from copy + resolved settings. */
@@ -144,6 +164,10 @@ async function createListingForProduct(ctx) {
     characterEvidence: copy.characterEvidence || '',
     characterAlternatives: copy.characterAlternatives || [],
     characterLowConfidence: copy.characterLowConfidence || false,
+    // Design fingerprint + the title's quality score, so the Inspector can show
+    // the operator WHY the copy says what it says and flag weak titles for review.
+    designAnalysis: copy.designAnalysis || null,
+    titleQuality: copy.titleQuality || null,
     accessory: copy.accessory || null,
     aiAttributes: copy.aiAttributes || null,
     currency: options.currency || '',
@@ -192,9 +216,34 @@ async function createListingForProduct(ctx) {
   // ── 1. Create draft listing ────────────────────────────────────────────────
   let listingId = checkpoint.listing_id || null;
   if (!listingId) {
-    const created = await createDraftListingForm(shopClient, shopId, createBody, { legacy: true });
+    const acceptListing = (listing) =>
+      typeof ctx.isListingClaimed !== 'function'
+      || !ctx.isListingClaimed(listing?.listing_id);
+    // Persist intent BEFORE the non-idempotent POST. If the process dies after
+    // Etsy commits but before the response/checkpoint arrives, the next resume
+    // can adopt the exact recent draft instead of creating another one.
+    if (!checkpoint.create_attempted_at) {
+      checkpoint.create_attempted_at = Math.floor(Date.now() / 1000);
+      onStep('create_start', { created_after: checkpoint.create_attempted_at });
+    } else {
+      const existing = await findMatchingDraftListing(shopClient, shopId, createBody, {
+        createdAfter: checkpoint.create_attempted_at,
+        acceptListing,
+      });
+      if (existing?.listing_id) {
+        listingId = existing.listing_id;
+      }
+    }
+
+    const created = listingId
+      ? { listing_id: listingId }
+      : await createDraftListingForm(shopClient, shopId, createBody, {
+          createdAfter: checkpoint.create_attempted_at,
+          acceptListing,
+        });
     listingId = created.listing_id;
     checkpoint.listing_id = listingId;
+    delete checkpoint.create_attempted_at;
     onStep('created', { listing_id: listingId });
   }
 
@@ -209,6 +258,9 @@ async function createListingForProduct(ctx) {
       filename: img.filename,
       rank: img.rank,
       altText: copy.title ? copy.title.slice(0, 250) : undefined,
+      // Rank is the idempotency key for a new draft's gallery. A transport retry
+      // replaces that rank rather than appending a duplicate image.
+      overwrite: true,
     });
     if (res && res.listing_image_id) {
       uploadedRanks.set(img.rank, res.listing_image_id);
@@ -220,14 +272,46 @@ async function createListingForProduct(ctx) {
   // ── 3. Upload video (optional, best-effort) ────────────────────────────────
   if (product.video && !checkpoint.video_done) {
     try {
-      onStep('video_start', {});
-      const buffer = fs.readFileSync(product.video.path);
-      await uploadListingVideo(shopClient, shopId, listingId, {
-        buffer,
-        filename: product.video.filename,
-      });
-      checkpoint.video_done = true;
-      onStep('video', { ok: true });
+      let baselineVideoIds = Array.isArray(checkpoint.video_baseline_ids)
+        ? checkpoint.video_baseline_ids.map(String)
+        : null;
+      if (checkpoint.video_attempted) {
+        const existingVideos = await getListingVideos(shopClient, listingId);
+        const baseline = new Set(baselineVideoIds || []);
+        if ((existingVideos.results || []).some((video) =>
+          video.video_state !== 'deleted'
+          && !baseline.has(String(video.video_id ?? ''))
+        )) {
+          checkpoint.video_done = true;
+          delete checkpoint.video_attempted;
+          delete checkpoint.video_baseline_ids;
+          onStep('video', { ok: true, reconciled: true });
+        }
+      }
+      if (checkpoint.video_done) {
+        // Reconciled a prior ambiguous upload; do not send the binary again.
+      } else {
+        if (!checkpoint.video_attempted) {
+          const before = await getListingVideos(shopClient, listingId);
+          baselineVideoIds = (before.results || [])
+            .map((video) => String(video.video_id ?? ''))
+            .filter(Boolean);
+          checkpoint.video_baseline_ids = baselineVideoIds;
+          checkpoint.video_attempted = true;
+        }
+        onStep('video_start', {});
+        onStep('video_checkpoint', {});
+        const buffer = fs.readFileSync(product.video.path);
+        await uploadListingVideo(shopClient, shopId, listingId, {
+          buffer,
+          filename: product.video.filename,
+          baselineVideoIds: baselineVideoIds || [],
+        });
+        checkpoint.video_done = true;
+        delete checkpoint.video_attempted;
+        delete checkpoint.video_baseline_ids;
+        onStep('video', { ok: true });
+      }
     } catch (err) {
       onStep('video_warning', { error: err.response?.data?.error || err.message });
     }
@@ -278,15 +362,8 @@ async function createListingForProduct(ctx) {
     try {
       onStep('variation_images_start', {});
       const inv = await getListingInventory(shopClient, listingId);
-      const styleLabelToValueId = new Map();
-      for (const p of inv.products || []) {
-        for (const pv of p.property_values || []) {
-          if (pv.property_id === PROP_STYLES && (pv.values || []).length && (pv.value_ids || []).length) {
-            styleLabelToValueId.set(pv.values[0], pv.value_ids[0]);
-          }
-        }
-      }
-      // Canonical bundles use the AI-derived style→image mapping; custom values
+      const styleLabelToValueId = readStyleValueIds(inv, productType);
+      // Canonical values use the AI-derived style→image mapping; custom values
       // carry their own per-value image. Custom variations are ADDED on top, so
       // link both sets (distinct value_ids, deduped for safety).
       const variationImages = dedupeByValueId([
@@ -294,8 +371,9 @@ async function createListingForProduct(ctx) {
           styleImageMapping: copy.styleImageMapping || {},
           rankToImageId: uploadedRanks,
           styleLabelToValueId,
+          productType,
         }),
-        ...(customStyles.length ? buildCustomVariationImages({ customStyles, rankToImageId: uploadedRanks, styleLabelToValueId }) : []),
+        ...(customStyles.length ? buildCustomVariationImages({ customStyles, rankToImageId: uploadedRanks, styleLabelToValueId, productType }) : []),
       ]);
       if (variationImages.length) {
         await updateVariationImages(shopClient, shopId, listingId, variationImages);
@@ -360,17 +438,10 @@ async function repriceListing(ctx) {
       : new Map(Object.entries(rankToImageId || {}).map(([k, v]) => [Number(k), v]));
     if (map.size) {
       const inv = await getListingInventory(shopClient, listingId);
-      const styleLabelToValueId = new Map();
-      for (const p of inv.products || []) {
-        for (const pv of p.property_values || []) {
-          if (pv.property_id === PROP_STYLES && (pv.values || []).length && (pv.value_ids || []).length) {
-            styleLabelToValueId.set(pv.values[0], pv.value_ids[0]);
-          }
-        }
-      }
+      const styleLabelToValueId = readStyleValueIds(inv, productType);
       const variationImages = dedupeByValueId([
-        ...buildVariationImages({ styleImageMapping, rankToImageId: map, styleLabelToValueId }),
-        ...(customStyles.length ? buildCustomVariationImages({ customStyles, rankToImageId: map, styleLabelToValueId }) : []),
+        ...buildVariationImages({ styleImageMapping, rankToImageId: map, styleLabelToValueId, productType }),
+        ...(customStyles.length ? buildCustomVariationImages({ customStyles, rankToImageId: map, styleLabelToValueId, productType }) : []),
       ]);
       if (variationImages.length) await updateVariationImages(shopClient, shopId, listingId, variationImages);
     }

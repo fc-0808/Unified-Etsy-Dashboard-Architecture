@@ -63,8 +63,11 @@ function enginePython(config) {
   return (config && config.osp_python) || 'python';
 }
 
-/** Engine data directory (<engineDir>/data), or null. */
+/** Engine data directory (explicit mutable-data override, else <engineDir>/data). */
 function engineDataDir(config) {
+  if (config && config.route_engine_data_dir && String(config.route_engine_data_dir).trim()) {
+    return path.resolve(String(config.route_engine_data_dir).trim());
+  }
   const dir = engineDir(config);
   return dir ? path.join(dir, 'data') : null;
 }

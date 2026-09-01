@@ -18,11 +18,19 @@
  *
  * A stall WITHOUT a name is one we don't usually shop at; it's shown faint, for
  * orientation only. Codes are transcribed exactly as recorded on-site.
+ *
+ * `mall` names the market a floor was surveyed in, matching a building id from
+ * stall-location.js. Only the home market has been surveyed, which is why
+ * Shopping Mode offers "locate on map" for its stalls alone: a code like
+ * 康乐5A17 belongs to a different building and must never light up the home
+ * market's 5A17.
  */
+
+const { HOME_BUILDING_ID } = require('./stall-location')
 
 const FLOOR_MAPS = [
 	{
-		mall: '',
+		mall: HOME_BUILDING_ID,
 		floor: 2,
 		label: { en: '2F', zh: '2楼' },
 		// Landmarks live in the central walkway between the two corridors. The
@@ -100,7 +108,7 @@ const FLOOR_MAPS = [
 		],
 	},
 	{
-		mall: '',
+		mall: HOME_BUILDING_ID,
 		floor: 5,
 		label: { en: '5F', zh: '5楼' },
 		// The elevator core is vertically aligned across the building, so it sits in

@@ -26,9 +26,11 @@ const { getProductType } = require('../src/listings/product-types');
 
 const iphone = getProductType('iphone_case');
 const airpods = getProductType('airpods_case');
+const ipad = getProductType('ipad_case');
 
 const IP = { shop_section_id: 57228761, title: 'iPhone Cases' };
 const AP = { shop_section_id: 99900001, title: 'AirPods Cases' };
+const PAD = { shop_section_id: 77700001, title: 'iPad Cases' };
 const BEST = { shop_section_id: 12345, title: 'Best Sellers' };
 
 let failures = 0;
@@ -64,6 +66,16 @@ eq('airpods stale id -> auto AirPods Cases', reconcileShopSection(88888888, [IP,
 
 // No sections at all → none.
 eq('no sections -> none', reconcileShopSection(57228761, [], airpods), null);
+
+// iPad is the same shape of defect: every section shares the word "case", so an
+// iPad run that landed on "iPhone Cases" must move to "iPad Cases" the moment
+// that section exists — and must NOT fall back to the iPhone section when it
+// does not. The reverse (iPhone falling into "iPad Cases") is the quieter twin.
+eq('ipad run pinned to iPhone section corrects to iPad Cases', reconcileShopSection(57228761, [IP, PAD], ipad), 77700001);
+eq('ipad run, no ipad section yet -> none', reconcileShopSection(57228761, [IP], ipad), null);
+eq('ipad auto (no choice) -> iPad Cases', reconcileShopSection(null, [IP, PAD], ipad), 77700001);
+eq('iphone auto never picks iPad Cases', reconcileShopSection(null, [IP, PAD], iphone), 57228761);
+eq('iphone run pinned to iPad section corrects to iPhone Cases', reconcileShopSection(77700001, [IP, PAD], iphone), 57228761);
 
 if (failures) {
   console.error(`\n${failures} assertion(s) failed.`);

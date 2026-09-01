@@ -1,8 +1,9 @@
 'use strict'
 
 /**
- * Curated reference catalog of the kawaii / Y2K characters that show up on the
- * phone cases this tool lists. It exists to make AI character identification
+ * Curated reference catalog of third-party characters that may appear on source
+ * images. Identification does NOT imply a license or permission to list them.
+ * It exists to make AI character identification
  * accurate and auditable: the vision model is given these *distinguishing
  * visual cues* so it discriminates between look-alikes (e.g. a white-and-blue
  * Tamagotchi device vs. Cinnamoroll the puppy) instead of guessing from colour

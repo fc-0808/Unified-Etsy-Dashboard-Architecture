@@ -1,6 +1,6 @@
 ---
 description: Use Etsy Dev MCP for Open API v3 spec, scopes, and schema questions
-globs: src/etsy/**,src/auth/**,scripts/oauth-setup.js,src/workers/**,src/db/**
+globs: src/etsy/**,src/auth/**,src/growth/**,src/listings/**,src/compliance/**,scripts/oauth-setup.js,src/workers/**,src/db/**
 alwaysApply: false
 ---
 
@@ -11,7 +11,10 @@ When implementing or debugging Etsy API integration in this project:
 1. **Prefer the `etsy` MCP server** (Etsy Dev MCP) for endpoint parameters, response schemas, required OAuth scopes, and rate-limit rules — it mirrors the live OpenAPI spec.
 2. **Do not guess** operationIds, field names, or scopes; call `search_etsy_api` or `get_endpoint` first.
 3. **This MCP does not call Etsy** — it is documentation only. Runtime calls go through `src/etsy/client.js` and the per-group proxy chain in `src/proxy/factory.js`.
-4. **Personal Access constraints** for this dashboard: 5 shops per app key, scopes `transactions_r`, `shops_r`, `listings_r`; respect 5 QPS / 5,000 QPD per key documented in `src/etsy/client.js`.
-5. **OpSec**: OAuth authorization must originate from the shop's AdsPower profile IP; sync/token refresh must use the matching group proxy — never bypass proxy for API traffic.
+4. **Personal Access constraints**: enforce the shop allocation and rate budget shown in the Developer Portal, but never create duplicate apps/keys to bypass a limit. Etsy API Terms assign one designated key per application; a multi-key dashboard requires Etsy's written approval.
+5. **Compliance**: network/proxy separation is transport configuration, not policy authorization. OAuth must be completed by the authorized shop owner through Etsy's documented flow. Never use browser automation or profiles to conceal ownership or evade platform controls.
+6. Use only the minimum scopes needed by enabled features. This dashboard's write features require their documented `*_w` scopes; do not request unused scopes.
+7. **Analytics approval**: Etsy API Terms §§5(24)–(25) (updated Aug 18, 2026) broadly restrict automated analysis of Etsy data and prohibit requesting API content for analytics unless Etsy expressly authorizes it in writing. Keep Growth manual-first and never claim that zero API calls create contractual permission; retain Etsy's written scope confirmation for the lowest risk. API catalog analytics requires both `etsy_api_analytics_approved: true` (written approval retained) and `catalog_health_sync: true`; there is no override for the approval gate.
+8. **Listing eligibility**: character/franchise identification is a rights-review signal, never proof of a license. Generated listings must remain local previews until an owner attests original design or documented authorization, Creativity Standards eligibility, production-partner disclosure, and compliant images/claims.
 
 Official docs: https://developers.etsy.com/documentation/mcp_server/devmcpserver/
