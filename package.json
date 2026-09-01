@@ -168,7 +168,7 @@
     "axios": "^1.16.1",
     "better-sqlite3": "^12.10.0",
     "compression": "^1.8.1",
-    "content-disposition": "^1.1.0",
+    "content-disposition": "^3.0.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "exceljs": "^4.4.0",
