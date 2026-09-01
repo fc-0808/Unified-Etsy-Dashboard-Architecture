@@ -183,7 +183,7 @@
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
-    "jsdom": "^29.1.1",
+    "jsdom": "^30.0.1",
     "pm2": "^7.0.1"
   },
   "overrides": {
