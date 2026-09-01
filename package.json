@@ -166,7 +166,7 @@
     "@hyzyla/pdfium": "^2.1.13",
     "archiver": "^8.0.0",
     "axios": "^1.16.1",
-    "better-sqlite3": "^12.10.0",
+    "better-sqlite3": "^13.0.3",
     "compression": "^1.8.1",
     "content-disposition": "^1.1.0",
     "cors": "^2.8.6",
