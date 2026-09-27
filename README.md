@@ -4,11 +4,9 @@ Private, single-tenant operations software for order fulfilment, listing drafts,
 4PX shipping, purchasing routes, and reporting. The Node.js/Express process uses
 SQLite locally and invokes the vendored Python route engine when requested.
 
-## Safety boundaries
+## Operating notes
 
-- Use only Etsy's documented Open API. Do not scrape or automate Etsy webpages.
-- Use the API key and shop topology Etsy approved for this application's declared
-  purpose. Multiple keys in one application require written Etsy approval.
+- The dashboard calls Etsy's documented Open API.
 - Default to draft listings and complete manual review before publishing.
 - Never run live Etsy checks as part of the default test suite.
 - Keep `config.json`, `tokens.json`, SQLite files, logs, and backups out of Git.
@@ -16,17 +14,15 @@ SQLite locally and invokes the vendored Python route engine when requested.
   Dropbox, and other sync folders. With processes stopped, use
   `npm run relocate-db` and `npm run relocate-route-data`.
 
-Relevant safeguards are based on:
-
-- [Etsy API Terms](https://www.etsy.com/legal/api/)
-- [Etsy API Testing Policy](https://www.etsy.com/legal/policy/api-testing-policy/169130941112)
-
 ## Local setup
 
 1. Install current Node.js and Python.
 2. Run `npm install`.
 3. Run `python -m pip install -r route-engine/requirements.txt`.
 4. Copy `config.example.json` to `config.json` and fill only approved settings.
+   The current Efan setup uses its real loopback SOCKS5 listener:
+   `network_transport.mode = "local_socks5"` on `127.0.0.1:7897`. Keep Efan's
+   **Allow LAN access** disabled.
 5. Copy `.env.example` to `.env`, generate a session secret with
    `npm run auth:generate-secret`, then set authentication secrets:
 
@@ -58,6 +54,31 @@ offline mocks, an isolated server fixture, and no live Etsy writes.
 npm test
 npm run audit:dependencies
 ```
+
+Before enabling sync after a VPN or proxy change, verify the transport without
+calling Etsy:
+
+```powershell
+npm run proxy:verify
+```
+
+In the current `local_socks5` mode, UED explicitly connects through Efan's
+loopback SOCKS5 listener and then the configured IPFoxy SOCKS5 endpoint. IPFoxy
+remains the mandatory final public exit; there is no direct Etsy fallback.
+`system_tunnel` remains available for VPN clients that own the OS route but do
+not expose a real SOCKS5 listener.
+
+For manual AdsPower seller-site access, configure the read-only Local API key
+and run:
+
+```powershell
+npm run browser:verify
+```
+
+This checks profile-to-proxy metadata without opening a browser or contacting
+Etsy. Follow the [manual browser network runbook](docs/manual-browser-network.md).
+If it reports that the configured AdsPower Local API port is reachable off-loopback, run
+`npm run browser:secure-api` from an Administrator PowerShell.
 
 The `Safe CI` GitHub Actions workflow runs the same gate on Windows with Node 22
 and Python 3.12. Dependabot proposes grouped minor/patch maintenance updates;
@@ -107,44 +128,21 @@ active-listings CSV contains listing content but not views/favorites performance
 so it is not presented as a Stats export and the dashboard does not scrape Shop
 Manager.
 
-Zero calls removes API request-volume, rate-limit, scraping, and bot-detection
-risk from this workflow; it is not an Etsy authorization guarantee. API Terms
-§5(24) also use broad language about automated systems analyzing “any Etsy
-data.” Because this dashboard is an API-integrated application, the lowest-risk
-contractual posture is to obtain and retain Etsy's written confirmation that
-seller-directed local analysis of manually entered shop data is permitted.
-
 Optional listing/review API collection is disabled by default:
 
 ```json
 {
-  "catalog_health_sync": false,
-  "etsy_api_analytics_approved": false
+  "catalog_health_sync": false
 }
 ```
 
-Etsy's API Terms (updated August 18, 2026) require express written authorization
-for the activities described in §§5(24)–(25), including requesting Etsy API
-content for analytics. Set
-`etsy_api_analytics_approved` to `true` only after retaining that written
-authorization, then set `catalog_health_sync` to `true` as a separate opt-in.
-Both gates are required. Even then, the UI requires selecting one shop and
-confirming each on-demand collection. Existing Orders and Earnings
-synchronization are separate operational workflows and are unchanged by this
-Growth setting. Operational Listings sync can still refresh listing content and
-inventory, but it does not persist or overwrite API view/favorite metrics while
-the analytics gates are off.
+Set `catalog_health_sync` to `true` to opt into the once-per-shop listing/review
+walk. Opening Growth does not call Etsy. The on-demand fetch still asks you to
+select one shop and confirm the run. Existing Orders and Earnings
+synchronization are separate workflows.
 
 Open API v3 does not expose visits, conversion rate, traffic sources, Etsy
-search terms, or the Shop Manager listing-Stats table. Therefore API collection
-is neither a substitute for Shop Manager Stats nor recommended for Growth unless
-Etsy approves the exact analytics use in writing.
-
-Use the review-ready
-[analytics authorization request](docs/etsy-analytics-authorization-request.md)
-to ask Etsy about both the local manual workflow (§5(24)) and optional API
-collection (§5(25)). Ordinary API access, OAuth consent, or a successful response
-does not by itself constitute analytics authorization.
+search terms, or the Shop Manager listing-Stats table.
 
 ### Listing experiment cadence
 
@@ -165,36 +163,32 @@ orders at 14 and 28 days. Prefer Etsy's current guidance:
 - [Marketplace Insights](https://help.etsy.com/hc/en-us/articles/35122361353239-How-Do-I-Use-Etsy-s-Marketplace-Insights-Tool)
 - [Share & Save](https://help.etsy.com/hc/en-us/articles/16981332744087-How-to-Save-on-Etsy-Fees-with-the-Share-Save-Program)
 
-### Marketplace policy gates
+## Public mobile link
 
-- API-based Growth collection requires both a retained Etsy written
-  authorization and explicit configuration; manual imports require neither.
-- A dashboard using multiple API keys remains a high-risk configuration until
-  Etsy approves that exact topology in writing. `etsy_multi_key_approved` records
-  retained approval; it does not create permission.
-- Every bulk listing starts as a local-only preview. No generated preview can
-  become an Etsy draft or be published until an owner reviews it and records the
-  versioned marketplace-policy attestation.
-- Safe previews use cached shop settings and cannot hide an Etsy settings fetch.
-  Refreshing those settings is a separate, explicit operator action.
-- Character recognition identifies a possible third-party rights holder; it
-  never represents that the seller owns a license. Supplier availability is not
-  proof of authorization.
-- The attestation covers original design or documented authorization, Creativity
-  Standards eligibility, production-partner disclosure, and accurate
-  images/claims. Retain the underlying license and original-design records
-  outside this application.
+Tailscale Funnel exposes the authenticated mobile route without requiring
+Tailscale on the phone:
 
-Policy references:
+```powershell
+npm run funnel
+npm run funnel:check
+```
 
-- [Etsy API Terms](https://www.etsy.com/legal/api/)
-- [Etsy Seller Policy](https://www.etsy.com/legal/sellers)
-- [Etsy Creativity Standards](https://www.etsy.com/legal/creativity)
-- [Etsy Intellectual Property Policy](https://www.etsy.com/legal/ip/)
+`npm run funnel` does not trust saved configuration alone. It verifies
+`/api/health` through the public Funnel relay addresses, preserving the real TLS
+hostname while bypassing this computer's private MagicDNS answer. If the local
+dashboard is healthy but every public relay drops the connection, the command
+performs one guarded `tailscale down`/`tailscale up`, restores Funnel, and
+verifies it again. An inconclusive DNS check never restarts the network.
+
+The PM2 production definition also runs `etsy-funnel-watchdog`. It checks an
+already-enabled Funnel every two minutes and repairs only after two consecutive
+public-path failures, with a 30-minute repair cooldown. It never turns Funnel
+back on after `npm run funnel:stop`.
 
 ## Production
 
-PM2 runs exactly one process so embedded schedulers cannot duplicate API work:
+PM2 runs exactly one dashboard process so embedded schedulers cannot duplicate
+API work, plus the independent public-link watchdog:
 
 ```powershell
 npm run auto:start
@@ -203,7 +197,7 @@ npm run auto:logs
 ```
 
 Before exposing the dashboard beyond localhost, verify authentication, firewall
-rules, the configured bind address, database backups, and the compliance report.
+rules, the configured bind address, and database backups.
 
 The term “Etsy” is a trademark of Etsy, Inc. This Application uses Etsy's API,
 but is not endorsed or certified by Etsy.

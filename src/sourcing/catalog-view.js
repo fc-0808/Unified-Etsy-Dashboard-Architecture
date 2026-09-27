@@ -57,8 +57,9 @@
 const stallLocation = require('../route/stall-location')
 const routeDashboard = require('../route/dashboard')
 const productSimilarity = require('../route/product-similarity')
+const charmLibrary = require('../route/charm-library')
 const catalog = require('./catalog')
-const { getProductMap, getSupplierDirectory, getCharmShopDirectory, getCharmLibrary } = require('../db/setup')
+const { getProductMap, getSupplierDirectory, getCharmShopDirectory, getCharmLibrary, loadProductMapTitleAliasesByProductId } = require('../db/setup')
 
 /** Case-insensitive, whitespace-collapsed key for matching a shop name. */
 function shopKey(name) {
@@ -66,6 +67,33 @@ function shopKey(name) {
 		.trim()
 		.replace(/\s+/g, ' ')
 		.toLowerCase()
+}
+
+/**
+ * Listing photos are keyed by the Etsy title. After a catalog rename the live
+ * title_norm no longer matches, so try previous titles before accepting a
+ * fuzzy fallback (or dropping the row).
+ */
+function _resolveCatalogImage(resolver, row, aliases) {
+	const resolve = (titleNorm, title) => {
+		try {
+			return resolver.resolve(titleNorm, title)
+		} catch {
+			return null
+		}
+	}
+	const live = resolve(row.title_norm, row.title)
+	if (live && live.url && !live.approx) return live
+	for (const alias of aliases || []) {
+		const image = resolve(alias.title_norm, alias.title)
+		if (image && image.url && !image.approx) return image
+	}
+	if (live && live.url) return live
+	for (const alias of aliases || []) {
+		const image = resolve(alias.title_norm, alias.title)
+		if (image && image.url) return image
+	}
+	return live || null
 }
 
 /**
@@ -307,11 +335,22 @@ function resolveLocation(stall, shop) {
  */
 function buildCatalog(db, opts = {}) {
 	const resolver = opts.imageResolver || _safeImageResolver(db)
+	// One folder pass for content-addressed charm thumbs so the supplier drawer
+	// can show the charm photo next to the case without a second round-trip.
+	let charmImageVersions = opts.charmImageVersions
+	if (!charmImageVersions) {
+		try {
+			charmImageVersions = opts.config ? charmLibrary.charmImageVersionMap(db, opts.config) : new Map()
+		} catch {
+			charmImageVersions = new Map()
+		}
+	}
 
 	const supplierRows = getSupplierDirectory(db)
 	const charmShopRows = getCharmShopDirectory(db)
 	const charmRows = getCharmLibrary(db)
 	const productRows = getProductMap(db)
+	const titleAliasesByProduct = loadProductMapTitleAliasesByProductId(db)
 
 	// ── Supplier lookups ─────────────────────────────────────────────────────
 	// `byShop` maps a shop name to every directory entry under that name. A shop
@@ -384,7 +423,8 @@ function buildCatalog(db, opts = {}) {
 			supplierRef = supplierKey(owner.shop_name, owner.stall)
 		}
 
-		const image = resolver.resolve(r.title_norm, r.title)
+		const aliases = titleAliasesByProduct.get(Number(r.id)) || []
+		const image = _resolveCatalogImage(resolver, r, aliases)
 		// The Sourcing catalog is a visual buying aid: a row without a photo is
 		// useless on the floor and clutters every filter. Drop it here — before
 		// rollups — so the page, the CSV export and the supplier counts all agree
@@ -398,10 +438,22 @@ function buildCatalog(db, opts = {}) {
 		const canonicalProductKey = String(
 			r.canonical_product_key || (!image.approx && image.canonical_product_key ? image.canonical_product_key : '') || '',
 		).trim()
+		// Exact-title image hits carry a listing id; fuzzy thumbs do not — the
+		// merge API never trusts those for product_merges edges.
+		const listingId =
+			!image.approx && image.listing_id != null && Number.isSafeInteger(Number(image.listing_id))
+				? Number(image.listing_id)
+				: null
 
 		const charmCode = String(r.charm_code || '').trim()
 		const charmShop = String(r.charm_shop || '').trim()
 		const charm = charmCode ? charmByCode.get(charmCode.toUpperCase()) : null
+		const charmCodeKey = charmCode.toUpperCase()
+		const charmImageVersion = charmCodeKey && charmImageVersions.has(charmCodeKey)
+			? charmImageVersions.get(charmCodeKey)
+			: charmCode && charmImageVersions.has(charmCode)
+				? charmImageVersions.get(charmCode)
+				: ''
 		// A charm's stall comes from the charm-shop directory, keyed on whichever
 		// shop the row names, falling back to the charm code's default shop.
 		const charmShopEffective = charmShop || (charm ? String(charm.default_charm_shop || '').trim() : '')
@@ -410,6 +462,7 @@ function buildCatalog(db, opts = {}) {
 			id: r.id,
 			title: r.title || '',
 			title_norm: r.title_norm,
+			title_aliases: aliases.map((alias) => alias.title).filter(Boolean),
 			product_type: type.id,
 			product_type_source: type.source,
 			shop_name: shop,
@@ -429,9 +482,12 @@ function buildCatalog(db, opts = {}) {
 			charm_stall: charmShopEffective ? charmStallByShop.get(shopKey(charmShopEffective)) || '' : '',
 			charm_cost: charm && charm.cost != null ? charm.cost : null,
 			charm_known: charmCode ? !!charm : null,
+			has_charm_image: !!(charmImageVersion || (charmCodeKey && charmImageVersions.has(charmCodeKey)) || (charmCode && charmImageVersions.has(charmCode))),
+			charm_image_version: String(charmImageVersion || ''),
 			cost_case: r.cost_case == null ? null : r.cost_case,
 			cost_grip: r.cost_grip == null ? null : r.cost_grip,
 			canonical_product_key: canonicalProductKey,
+			listing_id: listingId,
 			alias_count: 1,
 			image_url: image.url,
 			image_approx: !!image.approx,
@@ -550,13 +606,17 @@ function buildCatalog(db, opts = {}) {
 	// here would mean two upload paths for one file.
 	const charms = charmRows.map((c) => {
 		const shop = String(c.default_charm_shop || '').trim()
+		const code = String(c.code || '').trim()
+		const imageVersion = charmImageVersions.get(code) || charmImageVersions.get(code.toUpperCase()) || ''
 		return {
-			code: c.code,
+			code,
 			charm_shop: shop,
 			charm_stall: shop ? charmStallByShop.get(shopKey(shop)) || '' : '',
 			cost: c.cost == null ? null : c.cost,
 			notes: c.notes || '',
-			product_count: charmUsage.get(String(c.code || '').trim().toUpperCase()) || 0,
+			product_count: charmUsage.get(code.toUpperCase()) || 0,
+			has_image: !!imageVersion,
+			image_version: imageVersion,
 		}
 	})
 

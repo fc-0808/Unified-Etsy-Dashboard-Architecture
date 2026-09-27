@@ -255,12 +255,15 @@ test('no other line\'s listings can price an iPad variation, or be priced by one
 		prepare: () => ({
 			all: () => [
 				{ price_amount: 88, price_currency: 'HKD', listing_id: 1, property_values: JSON.stringify([{ property_id: productTypes.PROP_CHOICE, property_name: 'Styles', values: ['Case Only'] }]) },
-				{ price_amount: 77, price_currency: 'HKD', listing_id: 2, property_values: JSON.stringify([{ property_id: productTypes.PROP_CHOICE, property_name: 'Band Size', values: ['38/40/41mm'] }]) },
+				{ price_amount: 77, price_currency: 'HKD', listing_id: 2, property_values: JSON.stringify([
+					{ property_id: productTypes.PROP_DEVICE, property_name: 'Band Size', values: ['38/40/41mm'] },
+					{ property_id: productTypes.PROP_CHOICE, property_name: 'Band Style', values: ['Band 1'] },
+				]) },
 			],
 		}),
 	}
-	assert.deepStrictEqual(getShopCurrentStylePrices(db, 'ShopA', IPAD).prices, {}, 'a bundle or a band size is not an iPad model')
-	assert.deepStrictEqual(getShopCurrentStylePrices(db, 'ShopA', 'apple_watch_band').prices, { '38/40/41mm': 77 }, 'and the band line still reads its own')
+	assert.deepStrictEqual(getShopCurrentStylePrices(db, 'ShopA', IPAD).prices, {}, 'a bundle or band style is not an iPad model')
+	assert.deepStrictEqual(getShopCurrentStylePrices(db, 'ShopA', 'apple_watch_band').prices, { 'As Shown': 77 }, 'and numbered bands map to the band price key')
 })
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -401,10 +404,22 @@ test('the older lines\' copy is unchanged', () => {
 	assert.ok(casePrompt.includes('Case Only'))
 	assert.ok(!casePrompt.includes('NEVER describe this product as'), 'a phone case has no confusable noun to ban')
 
-	const bandPrompt = aiGenerator.buildPhase2System('Y2KASE', ['y2kase'], true, { '38/40/41mm': true }, {}, {}, {}, 'apple_watch_band', null, null)
-	assert.ok(bandPrompt.includes('Strap for Apple Watch'))
+	const bandPrompt = aiGenerator.buildPhase2System(
+		'Y2KASE',
+		['y2kase'],
+		true,
+		{ 'As Shown': false },
+		Object.fromEntries(['38/40/41mm', '42mm [Series 10/11]', '42/44/45/46/49mm'].map((size) => [size, true])),
+		{},
+		{},
+		'apple_watch_band',
+		[{ label: 'Band 1' }],
+		null,
+	)
+	assert.ok(bandPrompt.includes('exact item/compatibility phrase "Apple Watch Band"'))
 	assert.ok(bandPrompt.includes('NEVER describe this product as a phone case, AirPods case, cover or shell'))
-	assert.ok(bandPrompt.includes('NEVER present the sizes as separate included items'), 'a band still has sizes, not models')
+	assert.ok(bandPrompt.includes('NEVER present the band styles as separate included items'), 'band styles are choices, not extra items')
+	assert.ok(bandPrompt.includes('one "Band Size" and one "Band Style"'), 'both buyer choices are required')
 })
 
 // ════════════════════════════════════════════════════════════════════════════

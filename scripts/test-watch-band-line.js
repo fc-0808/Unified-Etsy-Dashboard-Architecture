@@ -1,32 +1,31 @@
 'use strict'
 
 /**
- * Tests for the Apple Watch band product line — the shop's first SINGLE-AXIS
- * product.
+ * Tests for the Apple Watch band product line — fixed buyer-required sizes plus
+ * per-listing, vision-grouped and photo-linked Band 1 / Band 2 options.
  *
  * WHY THIS FILE EXISTS
  * ----------------------------------------------------------------------------
- * Every earlier product (iPhone case, AirPods case) shares one shape: a device
- * model axis crossed with an accessory-bundle axis, priced from the 4-currency
- * master workbook. A watch band breaks all three assumptions at once — it has
- * NO model axis, its priced axis is a FIT (the band size) rather than a bundle,
- * and its price is a fixed figure the workbook has never heard of. Anything that
- * silently assumed the old shape is a real defect with a physical cost, so each
- * assumption is pinned here:
+ * An Apple Watch band uses the same two-dimensional inventory shape as an
+ * iPhone case, but with different semantics: all three Band Size values are a
+ * locked fit catalogue, while Band Style values are grouped from this listing's
+ * photos and carry price + variation images. Anything that silently swaps those
+ * roles can sell an unavailable band or let a buyer omit a size,
+ * so each invariant is pinned here:
  *
- *   · THE REGISTRY IS THE ONLY PLACE THE LINE IS DECLARED. The sizes, their
- *     spelling, the property name Etsy sees and the price book are asserted
- *     against the descriptor, so a second copy anywhere else shows up as drift.
+ *   · BAND SIZE IS FIXED. The three values are emitted on property 513 for every
+ *     style even when a stale or hostile payload tries to turn them off.
+ *   · BAND STYLE IS VISUAL. A focused classifier groups duplicate photo angles,
+ *     supports multicolour designs and materialises only confident options.
  *   · THE PRICE BOOK WINS FOR THIS LINE. A case takes the shop's own current
  *     prices (the truest statement of what it charges) and only falls back to a
  *     sheet. A band's price is a curated decision, so a median inferred from
  *     whatever else the shop lists must never override it.
- *   · THE MATRIX IS SINGLE-AXIS. Three offerings on property 514 named "Band
- *     Size", no property 513 anywhere, and a listing with no priced value fails
- *     with a sentence an operator can act on instead of an Etsy API error.
+ *   · THE MATRIX IS TWO-AXIS. Fixed Band Size (513) × numbered Band Style (514),
+ *     with price and photos attached only to Style.
  *   · THE COPY SPEAKS ABOUT A BAND. The sizes are a compatibility statement, not
- *     a bundle; no grip, charm or MagSafe paragraph; and the title says "Strap
- *     for", not "Cover for".
+ *     a bundle; no grip, charm or MagSafe paragraph; and the title uses the
+ *     exact high-intent phrase "Apple Watch Band" without noun stacking.
  *   · FULFILMENT READS A BAND ORDER. "Band Size" is the line's fit, the band is
  *     the one physical unit to buy (a line with no components is invisible to
  *     the shopping route — the item would never be bought), the family guard
@@ -46,8 +45,10 @@ const path = require('path')
 
 const productTypes = require('../src/listings/product-types')
 const variationBuilder = require('../src/listings/variation-builder')
+const bandVariantAnalyzer = require('../src/listings/band-variant-analyzer')
 const { getPricesForCurrency } = require('../src/listings/pricing')
 const { resolveDefaultPrices, getShopCurrentStylePrices } = require('../src/listings/shop-prices')
+const { BulkJobManager } = require('../src/listings/bulk-runner')
 const aiGenerator = require('../src/listings/ai-generator')
 const routeDashboard = require('../src/route/dashboard')
 const inventoryHelpers = require('../src/inventory/helpers')
@@ -62,6 +63,8 @@ const test = (name, fn) => queue.push({ name, fn })
 
 const WATCH = 'apple_watch_band'
 const SIZES = ['38/40/41mm', '42mm [Series 10/11]', '42/44/45/46/49mm']
+const STYLE_FALLBACK = 'As Shown'
+const BANDS = ['Band 1', 'Band 2', 'Band 3', 'Band 4']
 const HKD_PRICE = 350.11
 const CAD_PRICE = 63.15
 
@@ -70,20 +73,21 @@ const CAD_PRICE = 63.15
 // ════════════════════════════════════════════════════════════════════════════
 group('The product line is declared once, in the registry')
 
-test('the three band sizes are spelled exactly as the storefront shows them', () => {
-	// These strings are the buyer-facing Etsy variation values AND the keys the
-	// price map, the saved run and the order variations are matched on. A stray
-	// space would silently orphan every saved price.
-	assert.deepStrictEqual(productTypes.styleKeysFor(WATCH), SIZES)
-	assert.deepStrictEqual(productTypes.stylesFor(WATCH).map((s) => s.label), SIZES)
+test('the three mandatory band sizes are spelled exactly as the storefront shows them', () => {
+	// These values are the buyer-facing Etsy Band Size dropdown. A stray space
+	// would split fulfilment identity and compatibility copy.
+	assert.deepStrictEqual(productTypes.getProductType(WATCH).models, SIZES)
+	assert.deepStrictEqual(productTypes.canonicalModelsForFamily(productTypes.FAMILY_WATCH), SIZES)
 })
 
-test('the line is single-axis: a band size, and nothing else', () => {
-	assert.strictEqual(productTypes.hasDeviceAxis(WATCH), false, 'no device-model axis')
-	assert.deepStrictEqual(productTypes.getProductType(WATCH).models, [], 'and therefore no models')
-	assert.strictEqual(productTypes.stylePropertyFor(WATCH).id, productTypes.PROP_CHOICE)
-	assert.strictEqual(productTypes.stylePropertyFor(WATCH).name, 'Band Size')
-	assert.strictEqual(productTypes.styleAxisOf(WATCH), 'size', 'the choice axis is a fit, not a bundle')
+test('the line has a fixed Band Size axis and a priced Band Style axis', () => {
+	const pt = productTypes.getProductType(WATCH)
+	assert.strictEqual(productTypes.hasDeviceAxis(WATCH), true)
+	assert.strictEqual(productTypes.isDeviceAxisFixed(WATCH), true)
+	assert.deepStrictEqual(pt.deviceProperty, { id: productTypes.PROP_DEVICE, name: 'Band Size' })
+	assert.deepStrictEqual(productTypes.stylePropertyFor(WATCH), { id: productTypes.PROP_CHOICE, name: 'Band Style' })
+	assert.strictEqual(productTypes.styleAxisOf(WATCH), 'variant')
+	assert.strictEqual(pt.visionStyle, 'band_variant')
 })
 
 test('a band sells no accessories, so nothing can offer one', () => {
@@ -94,24 +98,36 @@ test('a band sells no accessories, so nothing can offer one', () => {
 	assert.ok(productTypes.includedItemsFor(WATCH).length, 'the fixed contents are declared instead')
 })
 
-test('every size is offered by default — a photo cannot confirm a size', () => {
-	// A case only offers a grip bundle when a grip was photographed. Nothing in
-	// an image says which watch a band fits, so all three are always on.
-	const enabled = productTypes.defaultEnabledStyles(WATCH, { hasGrip: false, hasCharm: false })
-	assert.deepStrictEqual(enabled, { [SIZES[0]]: true, [SIZES[1]]: true, [SIZES[2]]: true })
+test('the fixed size catalogue ignores any attempt to disable a size', () => {
+	const hostile = { [SIZES[0]]: false, [SIZES[1]]: true, [SIZES[2]]: false, 'iPhone 17': true }
+	assert.deepStrictEqual(
+		productTypes.normaliseEnabledModels(WATCH, hostile),
+		Object.fromEntries(SIZES.map((size) => [size, true])),
+	)
 })
 
-test('the UI contract names the axis, the sizes and what is unsupported', () => {
+test('"As Shown" is the safe style fallback when vision is unavailable', () => {
+	assert.deepStrictEqual(productTypes.styleKeysFor(WATCH), [STYLE_FALLBACK])
+	assert.deepStrictEqual(productTypes.defaultEnabledStyles(WATCH), { [STYLE_FALLBACK]: true })
+	assert.strictEqual(productTypes.fallbackStyleKey(WATCH), STYLE_FALLBACK)
+})
+
+test('the UI contract marks sizes fixed and names the visual axis Band Style', () => {
 	// One payload describes the line to the setup card, the inspector and the
 	// saved-run reopen path, so those three can never disagree.
 	const meta = productTypes.productMeta(WATCH)
 	assert.strictEqual(meta.product_type, WATCH)
-	assert.strictEqual(meta.has_device_axis, false)
-	assert.deepStrictEqual(meta.models, [])
-	assert.strictEqual(meta.style_property_name, 'Band Size')
-	assert.strictEqual(meta.style_axis, 'size')
-	assert.deepStrictEqual(meta.style_keys, SIZES)
-	assert.deepStrictEqual(meta.styles.map((s) => s.key), SIZES)
+	assert.strictEqual(meta.has_device_axis, true)
+	assert.strictEqual(meta.fixed_device_axis, true)
+	assert.strictEqual(meta.device_property_name, 'Band Size')
+	assert.deepStrictEqual(meta.models, SIZES)
+	assert.strictEqual(meta.style_property_name, 'Band Style')
+	assert.strictEqual(meta.style_axis, 'variant')
+	assert.strictEqual(meta.vision_style, 'band_variant')
+	assert.strictEqual(meta.replace_fallback_with_vision_styles, true)
+	assert.strictEqual(meta.fallback_style_key, STYLE_FALLBACK)
+	assert.deepStrictEqual(meta.style_keys, [STYLE_FALLBACK])
+	assert.strictEqual(meta.styles[0].price_label, 'All detected bands')
 	assert.strictEqual(meta.supports_grip, false)
 	assert.strictEqual(meta.supports_charm, false)
 	assert.strictEqual(meta.supports_magsafe, false)
@@ -121,9 +137,10 @@ test('the UI contract names the axis, the sizes and what is unsupported', () => 
 test('the line is offered to the operator in the Bulk Listings dropdown', () => {
 	const listed = productTypes.listProductTypes().find((p) => p.id === WATCH)
 	assert.ok(listed, 'the registry lists it')
-	assert.strictEqual(listed.hasDeviceAxis, false)
-	assert.strictEqual(listed.styleProperty, 'Band Size')
-	assert.deepStrictEqual(listed.styles.map((s) => s.key), SIZES)
+	assert.strictEqual(listed.hasDeviceAxis, true)
+	assert.strictEqual(listed.fixedDeviceAxis, true)
+	assert.strictEqual(listed.styleProperty, 'Band Style')
+	assert.deepStrictEqual(listed.styles.map((s) => s.key), [STYLE_FALLBACK])
 })
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -131,22 +148,22 @@ test('the line is offered to the operator in the Bulk Listings dropdown', () => 
 // ════════════════════════════════════════════════════════════════════════════
 group('Prices come from the line\'s own book')
 
-test('an HKD shop is priced at 350.11 and a CAD shop at 63.15, on every size', () => {
+test('an HKD shop is priced at 350.11 and a CAD shop at 63.15 for every detected band', () => {
 	for (const [currency, expected] of [['HKD', HKD_PRICE], ['CAD', CAD_PRICE]]) {
 		const got = getPricesForCurrency(currency, { productType: WATCH })
 		assert.strictEqual(got.source, 'product_type', `${currency} never opens the workbook`)
-		assert.deepStrictEqual(got.missing, [], `${currency} prices every size`)
-		for (const size of SIZES) assert.strictEqual(got.prices[size], expected, `${currency} · ${size}`)
+		assert.deepStrictEqual(got.missing, [], `${currency} has a standard band price`)
+		assert.strictEqual(got.prices[STYLE_FALLBACK], expected, currency)
 	}
 })
 
 test('a currency the book does not cover asks the operator instead of guessing', () => {
 	// Silently inventing a USD price would publish real listings at a made-up
-	// figure. Every size is reported missing so the Variation Prices card asks.
+	// figure. The one standard band-price field is reported missing.
 	const got = getPricesForCurrency('USD', { productType: WATCH })
 	assert.strictEqual(got.source, 'product_type')
 	assert.deepStrictEqual(got.prices, {})
-	assert.deepStrictEqual(got.missing, SIZES)
+	assert.deepStrictEqual(got.missing, [STYLE_FALLBACK])
 })
 
 test('the cases still price from the master workbook, not from a book', () => {
@@ -159,16 +176,19 @@ test('the book beats a price inferred from the shop\'s other listings', () => {
 	// The shop's own median is the best source for a CASE, and the worst for a
 	// brand-new line: it would drift with whatever happens to be listed. A stub
 	// stands in for the cache because the rule under test is the precedence.
-	const shopRows = SIZES.map((size) => ({
+	const shopRows = BANDS.map((band) => ({
 		price_amount: 999.99,
 		price_currency: 'HKD',
 		listing_id: 1,
-		property_values: JSON.stringify([{ property_id: productTypes.PROP_CHOICE, property_name: 'Band Size', values: [size] }]),
+		property_values: JSON.stringify([
+			{ property_id: productTypes.PROP_DEVICE, property_name: 'Band Size', values: [SIZES[0]] },
+			{ property_id: productTypes.PROP_CHOICE, property_name: 'Band Style', values: [band] },
+		]),
 	}))
 	const db = { prepare: () => ({ all: () => shopRows }) }
 
 	const shopSeen = getShopCurrentStylePrices(db, 'ShopA', WATCH)
-	assert.strictEqual(shopSeen.prices[SIZES[0]], 999.99, 'the cache IS read (so this is a real contest)')
+	assert.strictEqual(shopSeen.prices[STYLE_FALLBACK], 999.99, 'dynamic labels collapse to the standard-price key')
 
 	const resolved = resolveDefaultPrices({
 		db,
@@ -176,10 +196,8 @@ test('the book beats a price inferred from the shop\'s other listings', () => {
 		sheetPrices: getPricesForCurrency('HKD', { productType: WATCH }).prices,
 		productType: WATCH,
 	})
-	for (const size of SIZES) {
-		assert.strictEqual(resolved.prices[size], HKD_PRICE, size)
-		assert.strictEqual(resolved.source[size], 'sheet', `${size} is sourced from the book`)
-	}
+	assert.strictEqual(resolved.prices[STYLE_FALLBACK], HKD_PRICE)
+	assert.strictEqual(resolved.source[STYLE_FALLBACK], 'sheet', 'the curated book wins')
 })
 
 test('a case still takes the shop\'s own price over the sheet', () => {
@@ -213,7 +231,19 @@ test('one line\'s listings can never price the other line\'s variations', () => 
 			}],
 		}),
 	}
-	assert.deepStrictEqual(getShopCurrentStylePrices(db, 'ShopA', WATCH).prices, {}, 'a case bundle is not a band size')
+	assert.deepStrictEqual(getShopCurrentStylePrices(db, 'ShopA', WATCH).prices, {}, 'a case bundle is not a band style')
+})
+
+test('changing the standard band price rebases every detected numbered style', () => {
+	const mgr = Object.create(BulkJobManager.prototype)
+	const preview = {
+		enabledStyles: { [STYLE_FALLBACK]: false },
+		stylePrices: { [STYLE_FALLBACK]: HKD_PRICE },
+		customStyles: detectedBands.map((style, i) => ({ ...style, price: 300 + i })),
+	}
+	mgr._applyVisionStylePrice(preview, { [STYLE_FALLBACK]: 399.25 }, WATCH)
+	assert.deepStrictEqual(preview.customStyles.map((style) => style.price), BANDS.map(() => 399.25))
+	assert.strictEqual(mgr._effectiveMinPrice(preview), 399.25, 'a disabled fallback cannot lower the advertised price')
 })
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -221,55 +251,65 @@ test('one line\'s listings can never price the other line\'s variations', () => 
 // ════════════════════════════════════════════════════════════════════════════
 group('The variation matrix Etsy receives')
 
-const bandPrices = Object.fromEntries(SIZES.map((s) => [s, HKD_PRICE]))
+const bandPrices = { [STYLE_FALLBACK]: HKD_PRICE }
+const detectedBands = BANDS.map((label, i) => ({
+	id: `band-${i + 1}`,
+	label,
+	price: HKD_PRICE,
+	imageRank: i + 1,
+}))
+const fallbackOff = { [STYLE_FALLBACK]: false }
 
-test('three offerings, priced on "Band Size", with no model axis at all', () => {
+test('fixed sizes cross every numbered band, with price carried by Band Style', () => {
 	const { body, minPrice, listingQuantity } = variationBuilder.buildInventory({
 		productType: WATCH,
 		prices: bandPrices,
+		enabledStyles: fallbackOff,
+		customStyles: detectedBands,
 		restockQuantity: 3,
 	})
-	assert.strictEqual(body.products.length, 3, 'one product per size')
+	assert.strictEqual(body.products.length, SIZES.length * BANDS.length, 'one product per size × band')
 	assert.deepStrictEqual(body.price_on_property, [productTypes.PROP_CHOICE])
 	assert.deepStrictEqual(body.quantity_on_property, [productTypes.PROP_CHOICE])
-	assert.deepStrictEqual(body.products.map((p) => p.property_values[0].values[0]), SIZES, 'in registry order')
+	const combinations = body.products.map((p) => p.property_values.map((pv) => pv.values[0]).join('|'))
+	assert.deepStrictEqual(
+		combinations,
+		SIZES.flatMap((size) => BANDS.map((band) => `${size}|${band}`)),
+		'in deterministic size-major / band-minor order',
+	)
 	for (const p of body.products) {
-		assert.strictEqual(p.property_values.length, 1, 'exactly one variation dimension')
-		assert.strictEqual(p.property_values[0].property_id, productTypes.PROP_CHOICE)
+		assert.strictEqual(p.property_values.length, 2, 'exactly two variation dimensions')
+		assert.strictEqual(p.property_values[0].property_id, productTypes.PROP_DEVICE)
 		assert.strictEqual(p.property_values[0].property_name, 'Band Size')
+		assert.strictEqual(p.property_values[1].property_id, productTypes.PROP_CHOICE)
+		assert.strictEqual(p.property_values[1].property_name, 'Band Style')
 		assert.strictEqual(p.offerings[0].price, HKD_PRICE)
 		assert.strictEqual(p.offerings[0].is_enabled, true)
 		assert.strictEqual(p.offerings[0].quantity, 3)
 	}
-	assert.ok(!JSON.stringify(body).includes(String(productTypes.PROP_DEVICE)), 'property 513 appears nowhere')
 	assert.strictEqual(minPrice, HKD_PRICE)
-	assert.strictEqual(listingQuantity, 9)
+	assert.strictEqual(listingQuantity, SIZES.length * BANDS.length * 3)
 })
 
-test('a size the operator turned off is offered to nobody', () => {
+test('inventory ignores both enabledModels and explicit models overrides for fixed sizes', () => {
 	const { body } = variationBuilder.buildInventory({
 		productType: WATCH,
 		prices: bandPrices,
-		enabledStyles: { [SIZES[0]]: true, [SIZES[1]]: false, [SIZES[2]]: true },
+		enabledModels: Object.fromEntries(SIZES.map((size) => [size, false])),
+		models: [SIZES[0]],
 	})
-	const disabled = body.products.find((p) => p.property_values[0].values[0] === SIZES[1])
-	assert.ok(disabled, 'the value still exists in the dropdown structure')
-	assert.strictEqual(disabled.offerings[0].is_enabled, false)
-	assert.strictEqual(disabled.offerings[0].quantity, 0)
+	assert.deepStrictEqual(body.products.map((p) => p.property_values[0].values[0]), SIZES)
+	assert.ok(body.products.every((p) => p.offerings[0].is_enabled), 'all fixed sizes remain buyer-visible')
 })
 
-test('turning every size off falls back to a band size, never to "Case Only"', () => {
-	// The old fallback was hard-coded to "Case Only" — a value this line does not
-	// have, which would have produced a listing with zero offerings.
+test('when vision has no confident groups, every size uses the safe As Shown fallback', () => {
 	const { body } = variationBuilder.buildInventory({
 		productType: WATCH,
 		prices: bandPrices,
-		enabledStyles: Object.fromEntries(SIZES.map((s) => [s, false])),
 	})
-	const enabled = body.products.filter((p) => p.offerings[0].is_enabled)
-	assert.strictEqual(enabled.length, 1, 'exactly one value is re-enabled')
-	assert.strictEqual(enabled[0].property_values[0].values[0], SIZES[0])
-	assert.strictEqual(productTypes.fallbackStyleKey(WATCH), SIZES[0])
+	assert.strictEqual(body.products.length, SIZES.length)
+	assert.deepStrictEqual(body.products.map((p) => p.property_values[1].values[0]), SIZES.map(() => STYLE_FALLBACK))
+	assert.ok(body.products.every((p) => p.offerings[0].is_enabled))
 	assert.strictEqual(productTypes.fallbackStyleKey('iphone_case'), 'Case Only', 'the cases keep their own fallback')
 })
 
@@ -282,19 +322,98 @@ test('an unpriced line fails with a sentence, not with an Etsy API error', () =>
 		(err) => {
 			assert.strictEqual(err.status, 400)
 			assert.ok(/Apple Watch Band/.test(err.message), 'names the line')
-			assert.ok(/Band Size/.test(err.message), 'names the axis')
+			assert.ok(/Band Style/.test(err.message), 'names the priced axis')
 			assert.ok(/Variation Prices/.test(err.message), 'names where to fix it')
 			return true
 		},
 	)
 })
 
-test('a band size carries no variation photo — nothing in a photo shows a size', () => {
+test('the generic style mapper never links a photo to Band Size or Band Style', () => {
 	const mapping = aiGenerator.deriveStyleMapping(
 		[{ index: 1, has_grip: false, has_charm: true, thumbnail_quality: 9 }, { index: 2, has_grip: false, has_charm: true, thumbnail_quality: 8 }],
 		WATCH,
 	)
 	assert.deepStrictEqual(mapping, {})
+})
+
+test('the focused vision normalizer groups duplicate views and supports multicolor bands', () => {
+	const analysis = bandVariantAnalyzer.normaliseBandVariantAnalysis({
+		variants: [
+			{ visual_signature: 'White enamel cross and heart links with gold hardware', image_indexes: [1, 2], primary_image_index: 2, confidence: 96, evidence: 'Same white and gold band from two angles.' },
+			{ visual_signature: 'WHITE ENAMEL CROSS AND HEART LINKS WITH GOLD HARDWARE', image_indexes: [3], primary_image_index: 3, confidence: 80, evidence: 'Same band from the clasp side.' },
+			{ visual_signature: 'unknown', image_indexes: [4], primary_image_index: 4, confidence: 30, evidence: 'Only the watch face is visible.' },
+			{ visual_signature: 'Pink blue and cream checker links with silver clasp', image_indexes: [5, 99], primary_image_index: 5, confidence: 91, evidence: 'One multicolor band, not three color options.' },
+		],
+		overall_confidence: 94,
+		reasoning: 'Two physical variants are shown.',
+	}, 5)
+	assert.deepStrictEqual(
+		analysis.variants.map((v) => v.visualSignature),
+		['White enamel cross and heart links with gold hardware', 'Pink blue and cream checker links with silver clasp'],
+	)
+	assert.deepStrictEqual(analysis.variants[0].imageIndexes, [1, 2, 3], 'alternate views collapse')
+	assert.strictEqual(analysis.overallConfidence, 94)
+})
+
+test('the vision model cannot invent buyer-facing option names', () => {
+	const fields = bandVariantAnalyzer.BAND_VARIANT_SCHEMA.schema.properties.variants.items.properties
+	assert.strictEqual(Object.prototype.hasOwnProperty.call(fields, 'label'), false)
+	assert.strictEqual(Object.prototype.hasOwnProperty.call(fields, 'band_color'), false)
+	assert.ok(fields.visual_signature, 'vision still returns internal grouping evidence')
+})
+
+test('only confident groups become sequential, photo-linked Etsy values', () => {
+	const styles = bandVariantAnalyzer.materialiseBandVariants({
+		variants: [
+			{ visualSignature: 'first', imageIndexes: [1, 2], primaryImageIndex: 2, confidence: 95 },
+			{ visualSignature: 'uncertain', imageIndexes: [3], primaryImageIndex: 3, confidence: 59 },
+			{ visualSignature: 'third accepted', imageIndexes: [4], primaryImageIndex: 4, confidence: 90 },
+		],
+	}, {
+		price: HKD_PRICE,
+		imageAnalysis: [{ index: 1, thumbnail_quality: 9 }, { index: 2, thumbnail_quality: 8 }],
+	})
+	assert.deepStrictEqual(styles.map((s) => s.label), ['Band 1', 'Band 2'], 'the 59% guess is removed without leaving a numbering gap')
+	assert.deepStrictEqual(styles.map((s) => s.id), ['band-1', 'band-2'])
+	assert.strictEqual(styles[0].price, HKD_PRICE)
+	assert.strictEqual(styles[0].imageRank, 2, 'the classifier-selected dedicated image wins')
+})
+
+test('direct inventory input is renumbered and any unlinked band is rejected', () => {
+	const { customStyles, body } = variationBuilder.buildInventory({
+		productType: WATCH,
+		prices: bandPrices,
+		enabledStyles: fallbackOff,
+		customStyles: [
+			{ id: 'keep-a', label: 'Rainbow Gold', price: HKD_PRICE, imageRank: 8 },
+			{ id: 'drop', label: 'Blue', price: HKD_PRICE, imageRank: null },
+			{ id: 'keep-b', label: 'Pink Silver', price: HKD_PRICE, imageRank: 4 },
+		],
+	})
+	assert.deepStrictEqual(customStyles.map((style) => style.label), ['Band 1', 'Band 2'])
+	assert.deepStrictEqual(customStyles.map((style) => style.imageRank), [8, 4], 'each buyer value retains its linked image')
+	assert.deepStrictEqual(
+		[...new Set(body.products.map((product) => product.property_values[1].values[0]))],
+		['Band 1', 'Band 2'],
+	)
+})
+
+test('each numbered band links its Etsy value id to the selected product image', () => {
+	const links = variationBuilder.buildCustomVariationImages({
+		customStyles: detectedBands,
+		rankToImageId: new Map([[1, 9101], [2, 9102], [3, 9103], [4, 9104]]),
+		styleLabelToValueId: new Map([['Band 1', 8101], ['Band 2', 8102], ['Band 3', 8103], ['Band 4', 8104]]),
+		productType: WATCH,
+	})
+	assert.deepStrictEqual(
+		links,
+		BANDS.map((_, index) => ({
+			property_id: productTypes.PROP_CHOICE,
+			value_id: 8101 + index,
+			image_id: 9101 + index,
+		})),
+	)
 })
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -303,11 +422,23 @@ test('a band size carries no variation photo — nothing in a photo shows a size
 group('The copy speaks about a band, not about a case')
 
 const enabledAllSizes = Object.fromEntries(SIZES.map((s) => [s, true]))
-const watchPrompt = aiGenerator.buildPhase2System('Y2KASE', ['y2kase'], true, enabledAllSizes, {}, {}, { isGeneric: true, motifs: ['cherry'] }, WATCH, null, null)
+const watchPrompt = aiGenerator.buildPhase2System(
+	'Y2KASE',
+	['y2kase'],
+	true,
+	fallbackOff,
+	enabledAllSizes,
+	{},
+	{ isGeneric: true, motifs: ['cherry'] },
+	WATCH,
+	detectedBands,
+	null,
+)
 
-test('the title states the fit as a strap, not as a cover', () => {
-	assert.ok(watchPrompt.includes('Strap for Apple Watch'), 'the title template uses the line\'s own fit phrase')
-	assert.ok(!watchPrompt.includes('Cover for Apple Watch'))
+test('the title uses the strongest item query once instead of stacking synonyms', () => {
+	assert.ok(watchPrompt.includes('exact item/compatibility phrase "Apple Watch Band"'))
+	assert.ok(watchPrompt.includes('repeated product synonyms'))
+	assert.ok(!watchPrompt.includes('exact item/compatibility phrase "Strap for Apple Watch"'))
 })
 
 test('the sizes are a compatibility statement, never a bundle', () => {
@@ -315,8 +446,28 @@ test('the sizes are a compatibility statement, never a bundle', () => {
 	// the box. The sizes belong in the compatibility section; the contents are
 	// the fixed list the descriptor declares.
 	assert.ok(watchPrompt.includes('Apple Watch 38mm, 40mm & 41mm'), 'the sizes are advertised as fit')
-	assert.ok(watchPrompt.includes('NEVER present the sizes as separate included items'))
+	assert.ok(watchPrompt.includes('NEVER present the band styles as separate included items'))
 	for (const item of productTypes.includedItemsFor(WATCH)) assert.ok(watchPrompt.includes(item), item)
+})
+
+test('Band Style is required and numbered values point buyers to their photos', () => {
+	assert.ok(watchPrompt.includes('"🎨 Band Style"'))
+	for (const band of BANDS) assert.ok(watchPrompt.includes(band), band)
+	assert.ok(watchPrompt.includes('use its variation photo'))
+	assert.ok(watchPrompt.includes('one "Band Size" and one "Band Style"'))
+	assert.ok(watchPrompt.includes('Neither selection is optional'))
+})
+
+test('the SEO brief treats field limits as ceilings and optimizes every surface', () => {
+	assert.ok(watchPrompt.includes('between 110 and 140 characters'))
+	assert.ok(watchPrompt.includes('first 50-60 characters'))
+	assert.ok(watchPrompt.includes('usually 250-450 words'))
+	assert.ok(!watchPrompt.includes('minimum 500 words'))
+	assert.ok(watchPrompt.includes('EXACTLY 13 tags'))
+	assert.ok(watchPrompt.includes('Do not cut a word in half'))
+	assert.ok(watchPrompt.includes('ATTRIBUTES'))
+	assert.ok(watchPrompt.includes('COLORS'))
+	assert.ok(watchPrompt.includes('Never say "ready to ship"'))
 })
 
 test('no grip, no charm bundle and no MagSafe can be promised', () => {
@@ -326,17 +477,18 @@ test('no grip, no charm bundle and no MagSafe can be promised', () => {
 	assert.ok(watchPrompt.includes('NEVER describe this product as a phone case'))
 })
 
-test('a size the operator turned off is never advertised as compatible', () => {
+test('a caller cannot suppress a mandatory size from copy or post-processing', () => {
 	const oneSize = { [SIZES[0]]: true, [SIZES[1]]: false, [SIZES[2]]: false }
-	const prompt = aiGenerator.buildPhase2System('Y2KASE', ['y2kase'], false, oneSize, {}, {}, {}, WATCH, null, null)
+	const prompt = aiGenerator.buildPhase2System('Y2KASE', ['y2kase'], false, fallbackOff, oneSize, {}, {}, WATCH, detectedBands, null)
 	assert.ok(prompt.includes('Apple Watch 38mm, 40mm & 41mm'))
-	assert.ok(!prompt.includes('list EXACTLY these compatible models as bullets and NO others: Apple Watch 38mm, 40mm & 41mm, Apple Watch 42mm (Series 10 & 11)'))
+	assert.ok(prompt.includes('Apple Watch 42mm (Series 10 & 11)'), 'fixed size was restored')
+	assert.ok(prompt.includes('Apple Watch 42mm, 44mm, 45mm, 46mm & 49mm'), 'all fixed sizes are present')
 
-	// And the post-process filter strips the bullet even if the model ignores it.
+	// The post-process filter likewise retains every mandatory compatibility row.
 	const description = ['• Apple Watch 38mm, 40mm & 41mm', '• Apple Watch 42mm (Series 10 & 11)', 'Ships in 3-5 business days.'].join('\n')
-	const filtered = aiGenerator.filterModelsInDescription(description, {}, WATCH, oneSize)
+	const filtered = aiGenerator.filterModelsInDescription(description, oneSize, WATCH, fallbackOff)
 	assert.ok(filtered.includes('Apple Watch 38mm, 40mm & 41mm'), 'the offered size stays')
-	assert.ok(!filtered.includes('Series 10 & 11'), 'the unoffered size goes')
+	assert.ok(filtered.includes('Series 10 & 11'), 'the fixed size cannot be filtered out')
 	assert.ok(filtered.includes('Ships in 3-5 business days.'), 'ordinary prose is untouched')
 })
 
@@ -353,13 +505,18 @@ test('the case copy is unchanged — bundles are still bundles', () => {
 group('A band order flows through fulfilment')
 
 const BAND_TITLE = 'Colorful Button Charm Apple Watch Band, Cute Strap for Apple Watch'
-const bandVariations = [{ formatted_name: 'Band Size', formatted_value: '42mm [Series 10/11]' }]
+const bandVariations = [
+	{ property_id: productTypes.PROP_DEVICE, formatted_name: 'Band Size', formatted_value: '42mm [Series 10/11]' },
+	{ property_id: productTypes.PROP_CHOICE, formatted_name: 'Band Style', formatted_value: BANDS[0] },
+]
 
-test('"Band Size" is read as the line\'s fit — what a shopper matches at the stall', () => {
+test('"Band Size" is the fit and "Band Style" is the selected appearance', () => {
 	const parsed = routeDashboard.parseVariations(bandVariations)
 	assert.strictEqual(parsed.phoneModel, '42mm [Series 10/11]')
-	assert.strictEqual(parsed.style, '', 'a band has no bundle')
+	assert.strictEqual(parsed.style, BANDS[0])
 	assert.strictEqual(productTypes.variationPropertyRole('Band Size'), 'fit')
+	assert.strictEqual(productTypes.variationPropertyRole('Band Style'), 'choice')
+	assert.strictEqual(productTypes.variationPropertyRole('Band Color'), 'choice', 'prior drafts remain readable')
 	assert.strictEqual(productTypes.variationPropertyRole('Styles'), 'choice')
 	assert.strictEqual(productTypes.variationPropertyRole('Phone Model'), 'fit')
 	assert.strictEqual(productTypes.variationPropertyRole('Gift wrap'), null)
@@ -377,7 +534,7 @@ test('the band is the one unit to buy, so the line reaches the shopping route', 
 	// A line with no components is invisible to rowHasShoppingWork — it would
 	// never be bought, and the parcel would wait forever for an item nobody was
 	// ever told to get.
-	const comps = routeDashboard.styleComponents('', { phoneModel: '42mm [Series 10/11]', title: BAND_TITLE })
+	const comps = routeDashboard.styleComponents(BANDS[0], { phoneModel: '42mm [Series 10/11]', title: BAND_TITLE })
 	assert.deepStrictEqual(comps, { hasCase: true, hasGrip: false, hasCharm: false })
 	const row = { has_case: true, has_grip: false, has_charm: false, status_case: 'Pending' }
 	assert.strictEqual(routeDashboard.rowHasShoppingWork(row), true)
@@ -390,8 +547,7 @@ test('a band is never mistaken for a charm just because its title says "Charm"',
 	assert.strictEqual(sourcingCatalog.deriveProductType(BAND_TITLE), WATCH)
 })
 
-test('a style string still wins wherever there is one', () => {
-	// The family fallback only ever fires when the style says nothing at all.
+test('component-bearing bundle strings still win over family fallback', () => {
 	assert.deepStrictEqual(
 		routeDashboard.styleComponents('Case+Grip+Charm', { phoneModel: 'iPhone 16 Pro', title: 'Cherry Case' }),
 		{ hasCase: true, hasGrip: true, hasCharm: true },
@@ -426,12 +582,25 @@ test('the fix covers the band itself — there is nothing else on the line', () 
 	assert.strictEqual(productTypes.primaryComponentLabel(productTypes.FAMILY_IPHONE), 'Case')
 })
 
-test('a restock groups by band size, the way it groups by style on a case', () => {
-	// The priced dimension is what a restock is about. On a band that is the size.
+test('a restock groups by Band Style and retains Band Size as its secondary fit', () => {
 	const labels = inventoryHelpers.deriveVariationLabels([
 		{ property_name: 'Band Size', values: ['38/40/41mm'] },
+		{ property_name: 'Band Style', values: [BANDS[0]] },
 	])
-	assert.deepStrictEqual(labels, { styleVal: '38/40/41mm', secondaryVal: null })
+	assert.deepStrictEqual(labels, { styleVal: BANDS[0], secondaryVal: '38/40/41mm' })
+	assert.deepStrictEqual(
+		inventoryHelpers.deriveVariationLabels([
+			{ property_name: 'Band Size', values: ['38/40/41mm'] },
+			{ property_name: 'Band Color', values: ['White + Gold Metal'] },
+		]),
+		{ styleVal: 'White + Gold Metal', secondaryVal: '38/40/41mm' },
+		'the prior schema still groups restocks correctly',
+	)
+	assert.deepStrictEqual(
+		inventoryHelpers.deriveVariationLabels([{ property_name: 'Band Size', values: ['38/40/41mm'] }]),
+		{ styleVal: '38/40/41mm', secondaryVal: null },
+		'legacy single-axis watch listings remain readable',
+	)
 	assert.deepStrictEqual(
 		inventoryHelpers.deriveVariationLabels([
 			{ property_name: 'Phone Model', values: ['iPhone 16 Pro'] },
@@ -463,6 +632,20 @@ test('the page reads a Band Size variation as the line\'s fit', () => {
 	assert.ok(!re.test('Styles'), 'and without swallowing the bundle axis')
 })
 
+test('the Inspector hides fixed size rows but explains the required Etsy choice', () => {
+	assert.ok(page.includes('fixed_device_axis'))
+	assert.ok(page.includes('is added automatically with all ${BULK_MODELS.length} required buyer options'))
+	assert.ok(page.includes('these fixed values cannot be removed here'))
+	assert.ok(page.includes("vision_style === 'band_variant'"))
+	assert.ok(page.includes('+ Add band'))
+	assert.ok(page.includes('readonly aria-label="Automatically assigned band option"'))
+	assert.ok(page.includes('Every numbered band needs a variation photo'))
+	assert.ok(page.includes('no color naming is needed'))
+	assert.ok(page.includes('function bulkTitleMetricsText'))
+	assert.ok(page.includes('Etsy-recommended length'))
+	assert.ok(page.includes('SEO QA passed'))
+})
+
 test('the page classifies a watch line the same way the server does', () => {
 	// The two patterns are asserted byte-for-byte against the registry's source,
 	// so a tweak on one side fails here instead of silently splitting the client
@@ -491,7 +674,7 @@ test('the model-fix modal asks for a band size, not for a phone model', () => {
 })
 
 // ── Runner ──────────────────────────────────────────────────────────────────
-console.log(`\n${BOLD}Apple Watch band — a single-axis product line, end to end${RESET}\n`)
+console.log(`\n${BOLD}Apple Watch band — locked sizes × photo-linked numbered bands, end to end${RESET}\n`)
 for (const item of queue) {
 	if (item.group) {
 		console.log(`${DIM}${item.group}${RESET}`)

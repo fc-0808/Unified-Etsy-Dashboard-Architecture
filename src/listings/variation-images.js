@@ -112,6 +112,29 @@ function lookupVariationImage(map, listingId, { valueId = null, style = null } =
 }
 
 /**
+ * Image stored on a Route-tab manual-order sidecar (`route_manual_items`).
+ *
+ * Catalog picks capture a URL at create time. Custom products store uploaded
+ * bytes and are served from GET /api/route/manual-image/:id. Callers that also
+ * have a listing hero pass this as the preferred listingUrl so a custom upload
+ * is never dropped just because the line has no Etsy listing_id.
+ *
+ * @param {{id?:number, image_url?:string|null, has_image_data?:number|boolean,
+ *          created_at?:number, updated_at?:number}|null} row
+ * @returns {string|null}
+ */
+function manualSidecarImageUrl(row) {
+  if (!row) return null;
+  const stored = row.image_url != null ? String(row.image_url).trim() : '';
+  if (stored) return stored;
+  if (!row.has_image_data) return null;
+  const id = Number(row.id);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const version = Number(row.updated_at || row.created_at || 0) || 0;
+  return `/api/route/manual-image/${id}?v=${version}`;
+}
+
+/**
  * Image for an unswitched order line.
  *
  * Priority: operator Fix Image → Etsy variation photo → listing hero.
@@ -131,6 +154,40 @@ function resolveUnswitchedLineImage({ styleImg = null, variationUrl = null, list
   if (variation) return variation;
   const listing = listingUrl != null ? String(listingUrl).trim() : '';
   return listing || null;
+}
+
+/**
+ * Image for one Orders-tab transaction, including Route-created manual lines.
+ *
+ * A design switch still wins and never falls back to the original sidecar —
+ * that photo is the product the buyer left. Unswitched lines prefer the sidecar
+ * (uploaded bytes or the catalog URL captured at add-order time) over a listing
+ * hero, because a custom product has no listing_id and therefore no listing
+ * cache row. Operator Fix Image and Etsy variation photos still outrank both.
+ *
+ * @param {object} args
+ * @param {boolean} [args.switched=false]
+ * @param {string|null} [args.switchedImageUrl]
+ * @param {{id:number, updated_at?:number}|null} [args.styleImg]
+ * @param {string|null} [args.variationUrl]
+ * @param {string|null} [args.listingHeroUrl]
+ * @param {object|null} [args.sidecar] route_manual_items row for this line
+ * @returns {string|null}
+ */
+function resolveOrderLineImageUrl({
+  switched = false,
+  switchedImageUrl = null,
+  styleImg = null,
+  variationUrl = null,
+  listingHeroUrl = null,
+  sidecar = null,
+} = {}) {
+  if (switched) return switchedImageUrl || null;
+  return resolveUnswitchedLineImage({
+    styleImg,
+    variationUrl,
+    listingUrl: manualSidecarImageUrl(sidecar) || listingHeroUrl || null,
+  });
 }
 
 /**
@@ -247,8 +304,10 @@ module.exports = {
   lookupStyleKeyed,
   parseStyleValueId,
   lookupVariationImage,
+  manualSidecarImageUrl,
   resolveUnswitchedLineImage,
   resolveSwitchedLineImage,
+  resolveOrderLineImageUrl,
   variationImageApiUrl,
   buildVariationImageRows,
 };

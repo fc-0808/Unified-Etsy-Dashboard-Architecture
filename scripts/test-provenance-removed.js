@@ -149,7 +149,7 @@ try {
   `);
   legacy.prepare(`
     INSERT INTO bulk_jobs (job_id, shop_key, shop_name, input_path, state, target_state, dry_run, total, supplier_name)
-    VALUES ('job-1', 'Y2KASEofficial', 'Y2KASEofficial', 'C:/Downloads/0720_Y2KASEofficial', 'done', 'draft', 0, 3, 'wrong chat')
+    VALUES ('job-1', 'Y2KiPhoneCases', 'Y2KiPhoneCases', 'C:/Downloads/0720_Y2KiPhoneCases', 'done', 'draft', 0, 3, 'wrong chat')
   `).run();
   legacy.prepare("INSERT INTO listing_provenance (listing_id, supplier_name) VALUES (1, 'wrong chat')").run();
   legacy.close();
@@ -163,8 +163,8 @@ try {
     check('migrating a pre-removal database preserves the run history itself', () => {
       const job = migrated.prepare("SELECT shop_name, input_path, total FROM bulk_jobs WHERE job_id = 'job-1'").get();
       assert.deepEqual(job, {
-        shop_name: 'Y2KASEofficial',
-        input_path: 'C:/Downloads/0720_Y2KASEofficial',
+        shop_name: 'Y2KiPhoneCases',
+        input_path: 'C:/Downloads/0720_Y2KiPhoneCases',
         total: 3,
       });
     });

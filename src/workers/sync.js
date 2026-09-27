@@ -9,7 +9,7 @@
  *
  * Safety controls built in:
  *   - Per-group network path verified before any shop in that group is synced (fail-closed)
- *     Proxied groups: VPN → IPFoxy chain must be reachable
+ *     Proxied groups: configured transport + IPFoxy route must be reachable
  *     Direct groups: plain internet connectivity confirmed via ipify
  *   - Per-shop deterministic offset + random jitter so shops never call Etsy in lock-step
  *   - Network client bound per group — groups never share HTTP state or proxy chains
@@ -46,7 +46,11 @@ let _trackingCyclePromise = null;
 
 const { loadConfig, getAllShops, isAutoRestockEnabled, refreshConfigInPlace } = require('../config/schema');
 const { TokenManager, TokenExpiredError } = require('../auth/token-manager');
-const { createGroupProxyClient, verifyGroupProxy } = require('../proxy/factory');
+const {
+  createGroupProxyClient,
+  getVerifiedGroupClient,
+  verifyGroupProxy,
+} = require('../proxy/factory');
 const { usesGroupProxy } = require('../config/schema');
 const {
   buildShopClient,
@@ -243,7 +247,7 @@ const _lastListingCountRefresh = new Map();
 /**
  * Stable per-shop offset derived from a hash of the shop_id.
  * Same shop always gets the same relative phase within a sync window,
- * so Y2KASEofficial always runs earlier and Y2KASEshop always runs a
+ * so one shop always runs earlier and another always runs a
  * bit later — but the exact second varies due to jitter.
  *
  * @param {string} shopId
@@ -282,26 +286,6 @@ function safeTrackingHook(fn, payload, label) {
   } catch (err) {
     console.warn(`[tracking] ${label} callback failed: ${err.message}`);
   }
-}
-
-/**
- * OpSec egress-IP allowlist (opt-in). When a group declares `expected_egress_ip`
- * in config.json (a string or an array of strings), the observed exit IP from
- * verifyGroupProxy MUST match one of them or the group is skipped for the cycle.
- * This is the strongest guard against a silent proxy/VPN leak exposing a shop on
- * an unexpected IP — the footprint Etsy uses to link/flag related shops. Groups
- * without the field are unaffected (returns true).
- *
- * @param {object} group
- * @param {string} ip
- * @returns {boolean}
- */
-function egressIpAllowed(group, ip) {
-  const raw = group?.expected_egress_ip;
-  if (raw == null || raw === '') return true; // not configured → no enforcement
-  const allow = (Array.isArray(raw) ? raw : [raw]).map((s) => String(s).trim()).filter(Boolean);
-  if (!allow.length) return true;
-  return allow.includes(String(ip).trim());
 }
 
 /**
@@ -570,23 +554,19 @@ async function syncShop(shop, group, config, proxyClient, tokenManager, db, egre
       accessToken,
       getToken,
       // Fail closed: a proxied group must never egress on the server's own IP.
-      { requireProxy: usesGroupProxy(group) },
+      { requireProxy: usesGroupProxy(group), shopId: shop.shop_id },
     );
 
     // ── 3. Resolve shop name → numeric ID (cached after first call) ───────────
     const numericId = await resolveShopId(shopClient, shop.shop_id);
 
     // ── 3b. Refresh the persisted active-listing count (THROTTLED) ────────────
-    // The Etsy Shop object exposes listing_active_count directly, but it's a
-    // cosmetic figure that barely moves. It is analytics metadata under Etsy's
-    // Aug 2026 API Terms, so we fetch it only under the same written-approval +
-    // collection opt-ins as catalog health, and then at most once per TTL.
+    // The Etsy Shop object exposes listing_active_count directly. Refresh it
+    // only when catalog collection is opted in, and then at most once per TTL.
     // Non-fatal: a failure here must never abort the receipt sync.
     const lastCount = _lastListingCountRefresh.get(shop.shop_id) ?? 0;
-    const optionalAnalyticsApproved =
-      config.catalog_health_sync === true &&
-      config.etsy_api_analytics_approved === true;
-    if (optionalAnalyticsApproved && Date.now() - lastCount >= LISTING_COUNT_TTL_MS) {
+    const optionalCatalogMetrics = config.catalog_health_sync === true;
+    if (optionalCatalogMetrics && Date.now() - lastCount >= LISTING_COUNT_TTL_MS) {
       try {
         const shopData = await getShop(shopClient, shop.shop_id);
         if (shopData) {
@@ -771,9 +751,7 @@ async function syncShop(shop, group, config, proxyClient, tokenManager, db, egre
     // ── 5b. Catalog health (views / reviews / expired counts) ────────────────
     // Non-fatal except QPD exhaustion, which the outer handler uses to skip the
     // rest of this API key. Default cadence is once per shop per 24h.
-    // Fail closed: Etsy API Terms §5(25) require express written authorization
-    // for API analytics. A sync opt-in alone is never enough.
-    if (config.catalog_health_sync === true && config.etsy_api_analytics_approved === true) {
+    if (config.catalog_health_sync === true) {
       try {
         heartbeat?.();
         await maybeSyncShopCatalogHealth({
@@ -782,7 +760,6 @@ async function syncShop(shop, group, config, proxyClient, tokenManager, db, egre
           numericShopId: numericId,
           shopId: shop.shop_id,
           shopName: shop.shop_name,
-          analyticsApproved: config.etsy_api_analytics_approved,
           intervalHours: config.catalog_health_interval_hours,
           heartbeat,
         });
@@ -855,6 +832,7 @@ async function syncLedgerForShop(shop, group, config, proxyClient, tokenManager,
   };
   const shopClient = buildShopClient(proxyClient, shop.api_key, shop.shared_secret, accessToken, getToken, {
     requireProxy: usesGroupProxy(group), // fail closed for proxied groups
+    shopId: shop.shop_id,
   });
   await resolveShopId(shopClient, shop.shop_id);
 
@@ -951,29 +929,18 @@ async function syncGroup(group, shopsInGroup, config, tokenManager, db, options 
   const label = `[sync] group:${group.group_id}`;
 
   // Verify network path before touching any shops — fail closed regardless of routing type.
-  // createGroupProxyClient / verifyGroupProxy both dispatch on usesGroupProxy() internally,
-  // so the same call works for both VPN→IPFoxy chains and direct (no-proxy) groups.
+  // createGroupProxyClient / verifyGroupProxy both dispatch on usesGroupProxy()
+  // internally, so the same call works for proxied and direct groups.
   let proxyClient;
   let egressIp;
   const isDirect = !usesGroupProxy(group);
   try {
-    egressIp = await verifyGroupProxy(group, config.vpn_local_port);
-    proxyClient = createGroupProxyClient(group, config.vpn_local_port);
+    egressIp = await verifyGroupProxy(group, config.network_transport);
+    proxyClient = createGroupProxyClient(group, config.network_transport);
     if (isDirect) {
       console.log(`${label} Direct connection confirmed — egress IP: ${egressIp}`);
     } else {
       console.log(`${label} Proxy verified — exit IP: ${egressIp}`);
-    }
-    // OpSec: if the operator pinned the group's expected egress IP, refuse to sync
-    // when the observed exit IP doesn't match — a proxy rotation or VPN leak would
-    // otherwise expose these shops on an unexpected IP.
-    if (!egressIpAllowed(group, egressIp)) {
-      console.error(
-        `${label} EGRESS IP MISMATCH — expected ${JSON.stringify(group.expected_egress_ip)}, ` +
-        `observed ${egressIp}. Skipping all shops in this group this cycle (fail-closed). ` +
-        `Fix the proxy/VPN or update expected_egress_ip in config.json.`
-      );
-      return;
     }
   } catch (err) {
     if (isDirect) {
@@ -985,7 +952,7 @@ async function syncGroup(group, shopsInGroup, config, tokenManager, db, options 
       console.error(
         `${label} PROXY VERIFICATION FAILED — skipping all shops in this group this cycle.\n` +
         `  Reason: ${err.message}\n` +
-        `  Fix: ensure VPN is connected and IPFoxy proxy is active before next sync.`
+        `  Fix: ensure the configured network transport and IPFoxy proxy are active before next sync.`
       );
     }
     return;
@@ -1081,6 +1048,9 @@ const TRACKING_SHIP_DATE_SQL = 'COALESCE(r.shipment_notified_at, r.fourpx_create
 // neither is contractually required to start with "4PX". The dedicated
 // fourpx_tracking_no column or a 4PX consignment proves carrier ownership.
 const TRACKING_LOOKUP_NO_SQL = `COALESCE(
+  CASE
+    WHEN r.tracking_code LIKE '4PX%' THEN NULLIF(TRIM(r.tracking_code), '')
+  END,
   NULLIF(TRIM(r.fourpx_tracking_no), ''),
   CASE
     WHEN r.fourpx_consignment_no IS NOT NULL OR r.tracking_code LIKE '4PX%'
@@ -1205,6 +1175,8 @@ async function runTrackingCheckPass(db, config, options = {}) {
     SELECT
       r.receipt_id,
       ${TRACKING_LOOKUP_NO_SQL} AS tracking_no,
+      r.tracking_code,
+      r.fourpx_tracking_no,
       r.carrier_name,
       r.shop_id,
       r.carrier_confirmed_at,
@@ -1289,6 +1261,7 @@ async function runTrackingCheckPass(db, config, options = {}) {
         appKey:    config.fourpx_app_key    ?? null,
         appSecret: config.fourpx_app_secret ?? null,
         stuckDays: config.fourpx_stuck_days ?? 10,
+        alternateCodes: [order.tracking_code, order.fourpx_tracking_no],
       });
 
       if (!snap?.ok) {
@@ -1824,12 +1797,16 @@ async function runInventoryWatchCycleBody(config, tokenManager, db, heartbeat) {
     }
 
     try {
-      const proxyClient = createGroupProxyClient(groupCfg, config.vpn_local_port);
+      const { client: proxyClient } = await getVerifiedGroupClient(
+        groupCfg,
+        config.network_transport
+      );
       const accessToken = await tokenManager.getAccessToken(
         shopCfg.shop_id, shopCfg.api_key, shopCfg.refresh_token ?? null, proxyClient
       );
       const shopClient  = buildShopClient(proxyClient, shopCfg.api_key, shopCfg.shared_secret, accessToken, null, {
         requireProxy: usesGroupProxy(groupCfg), // fail closed for proxied groups
+        shopId: shopCfg.shop_id,
       });
       await resolveShopId(shopClient, shopCfg.shop_id);
 

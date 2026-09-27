@@ -12,7 +12,7 @@
  *   · a station with no egress still converts from that last-good copy
  *   · a bad payload cannot overwrite a good copy
  *   · a failed lookup is retried in minutes, not at the next process restart
- *   · the VPN hop is tried when a direct connection fails
+ *   · local-SOCKS and OS-tunnel transport modes are selected correctly
  *
  *     npm run test:exchange-rates
  */
@@ -190,14 +190,19 @@ test('a failed lookup is retried after RETRY_MS, not held until restart', async 
 	assert.strictEqual(calls, 2, 'a retry was not scheduled after the backoff')
 })
 
-group('The VPN hop is the same first hop the rest of the app uses')
+group('The network transport matches the rest of the app')
 
 test('a failed direct connection falls through to the configured SOCKS port', async () => {
 	const dir = tmpDir()
 	const seen = []
 	const store = rates.createRateStore({
 		cacheDir: dir,
-		vpnPort: 7897,
+		networkTransport: {
+			mode: 'local_socks5',
+			provider: 'Efan VPN',
+			local_host: '127.0.0.1',
+			local_port: 7897,
+		},
 		request: async (_url, opts) => {
 			seen.push(Boolean(opts && opts.agent))
 			if (!opts || !opts.agent) throw new Error('ENETUNREACH')
@@ -207,8 +212,29 @@ test('a failed direct connection falls through to the configured SOCKS port', as
 	})
 	const snap = await store.get()
 	assert.deepStrictEqual(seen, [false, true], `routes tried: ${JSON.stringify(seen)}`)
-	assert.strictEqual(snap.source, 'vpn:7897')
+	assert.strictEqual(snap.source, 'Efan VPN SOCKS5 127.0.0.1:7897')
 	assert.strictEqual(snap.rates.GBP, 0.85)
+})
+
+test('a system tunnel uses the normal OS route without dialing its UI port', async () => {
+	const dir = tmpDir()
+	const seen = []
+	const store = rates.createRateStore({
+		cacheDir: dir,
+		networkTransport: {
+			mode: 'system_tunnel',
+			provider: 'System VPN',
+			interface_name: 'VPN',
+		},
+		request: async (_url, opts) => {
+			seen.push(Boolean(opts && opts.agent))
+			return { result: 'success', rates: table() }
+		},
+		log: silent,
+	})
+	const snap = await store.get()
+	assert.deepStrictEqual(seen, [false])
+	assert.strictEqual(snap.source, 'System VPN system tunnel')
 })
 
 group('Shipped wiring')

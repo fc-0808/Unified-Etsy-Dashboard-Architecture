@@ -23,6 +23,8 @@ const {
   lookupVariationImage,
   parseStyleValueId,
   resolveUnswitchedLineImage,
+  resolveOrderLineImageUrl,
+  manualSidecarImageUrl,
   variationImageApiUrl,
   buildVariationImageRows,
 } = require('../src/listings/variation-images');
@@ -111,6 +113,49 @@ test('image priority: operator Fix Image > Etsy variation > listing hero', () =>
     HERO,
   );
   assert.equal(resolveUnswitchedLineImage({}), null);
+});
+
+test('a Route-created custom product uses the uploaded sidecar photo', () => {
+  const sidecar = { id: 12, has_image_data: 1, created_at: 1700000000, image_url: '' };
+  assert.equal(manualSidecarImageUrl(sidecar), '/api/route/manual-image/12?v=1700000000');
+  assert.equal(
+    resolveOrderLineImageUrl({ sidecar, listingHeroUrl: HERO }),
+    '/api/route/manual-image/12?v=1700000000',
+    'uploaded bytes beat a listing hero the custom line does not have',
+  );
+  assert.equal(
+    resolveOrderLineImageUrl({
+      sidecar,
+      listingHeroUrl: HERO,
+      variationUrl: CASE1,
+    }),
+    CASE1,
+    'an Etsy style photo still outranks the sidecar on a catalog line',
+  );
+  assert.equal(
+    resolveOrderLineImageUrl({
+      switched: true,
+      switchedImageUrl: CASE2,
+      sidecar,
+      listingHeroUrl: HERO,
+    }),
+    CASE2,
+    'a design switch never falls back to the original sidecar photo',
+  );
+  assert.equal(manualSidecarImageUrl(null), null);
+  assert.equal(manualSidecarImageUrl({ id: 1, has_image_data: 0, image_url: '  ' }), null);
+  assert.equal(
+    manualSidecarImageUrl({ id: 9, image_url: CASE1, has_image_data: 1 }),
+    CASE1,
+    'a catalog pick keeps the URL captured at add-order time',
+  );
+  assert.equal(
+    resolveOrderLineImageUrl({
+      sidecar: { id: 9, image_url: CASE1, has_image_data: 0 },
+      listingHeroUrl: HERO,
+    }),
+    CASE1,
+  );
 });
 
 test('same-origin variation URL encodes the Styles label', () => {

@@ -98,9 +98,9 @@ async function main() {
 
     let proxyClient;
     try {
-      const exitIp = await verifyGroupProxy(group, config.vpn_local_port);
+      const exitIp = await verifyGroupProxy(group, config.network_transport);
       console.log(`[${groupId}] proxy verified — exit IP ${exitIp}`);
-      proxyClient = createGroupProxyClient(group, config.vpn_local_port);
+      proxyClient = createGroupProxyClient(group, config.network_transport);
     } catch (err) {
       console.error(`[${groupId}] proxy verification failed: ${err.message} — skipping group`);
       continue;
@@ -126,6 +126,7 @@ async function main() {
         const accessToken = await tokenManager.getAccessToken(shop.shop_id, shop.api_key, null, proxyClient);
         shopClient = buildShopClient(proxyClient, shop.api_key, shop.shared_secret, accessToken, null, {
           requireProxy: usesGroupProxy(group),
+          shopId: shop.shop_id,
         });
         numericId = await resolveShopId(shopClient, shop.shop_id);
       } catch (err) {

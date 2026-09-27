@@ -27,6 +27,26 @@ function safeStoredImageMime(value) {
 }
 
 /**
+ * Apply the passive-image response headers used for operator-uploaded bytes.
+ * Use this when streaming a file instead of buffering it through sendStoredImage.
+ *
+ * @param {import('express').Response} res
+ * @param {string} [mime]
+ * @param {string} [cacheControl]
+ * @returns {string|null} the normalised MIME, or null when the type is not safe
+ */
+function applyStoredImageHeaders(res, mime, cacheControl = 'private, max-age=300') {
+	const safe = safeStoredImageMime(mime)
+	if (!safe) return null
+	res.setHeader('Content-Type', safe)
+	res.setHeader('X-Content-Type-Options', 'nosniff')
+	res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox")
+	res.setHeader('Cross-Origin-Resource-Policy', 'same-origin')
+	if (cacheControl) res.setHeader('Cache-Control', cacheControl)
+	return safe
+}
+
+/**
  * Send uploaded bytes through a passive-image-only response.
  *
  * @param {import('express').Response} res
@@ -40,11 +60,7 @@ function sendStoredImage(res, image, cacheControl = 'private, max-age=300') {
 		res.status(415).end()
 		return false
 	}
-	res.setHeader('Content-Type', mime)
-	res.setHeader('X-Content-Type-Options', 'nosniff')
-	res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox")
-	res.setHeader('Cross-Origin-Resource-Policy', 'same-origin')
-	res.setHeader('Cache-Control', cacheControl)
+	applyStoredImageHeaders(res, mime, cacheControl)
 	res.send(image.data)
 	return true
 }
@@ -52,5 +68,6 @@ function sendStoredImage(res, image, cacheControl = 'private, max-age=300') {
 module.exports = {
 	SAFE_MIME,
 	safeStoredImageMime,
+	applyStoredImageHeaders,
 	sendStoredImage,
 }

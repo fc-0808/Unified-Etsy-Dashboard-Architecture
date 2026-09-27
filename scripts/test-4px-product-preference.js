@@ -26,6 +26,7 @@ const {
 	resolveLogisticsProduct,
 	isRemoteIslandZipRejection,
 	resolveUsIslandZipFallback,
+	prefersUsIslandPhLane,
 	isUsIslandPhAddress,
 	normalizeUsZip5,
 	extractPostCodeFrom4pxError,
@@ -185,18 +186,49 @@ console.log('4PX default logistics-product selection test\n');
 		'remote ZIP error alone (no ZIP/state evidence) does NOT auto-switch',
 	);
 
-	// Wiring: the shared create path (single-order + bulk) must actually call it.
-	// A classifier that nothing invokes is a silent regression waiting to happen.
+	assert(resolveLogisticsProduct({ country: 'US', postCode: '00912', state: 'PR' }) === S5118,
+		'Puerto Rico ZIP defaults to S5118 on the first create (no S5058 attempt)');
+	assert(resolveLogisticsProduct({ country: 'US', postCode: '96817', state: 'HI' }) === S5118,
+		'Hawaii ZIP defaults to S5118 on the first create');
+	assert(resolveLogisticsProduct({ country: 'US', postCode: '90210', state: 'CA' }) === S5058,
+		'continental US ZIP still defaults to S5058');
+	assert(resolveLogisticsProduct({ country: 'US' }) === S5058,
+		'US with no ZIP/state still defaults to S5058');
+	assert(resolveLogisticsProduct({ country: 'US', postCode: '00912', availableProducts: [{ logistics_product_code: 'QC' }, { logistics_product_code: 'S5058' }] }) === S5118,
+		'island ZIP books S5118 even when the live catalogue only lists S5058');
+	assert(prefersUsIslandPhLane({ country: 'US', selectedCode: S5058, postCode: '00912', state: 'PR' }),
+		'prefersUsIslandPhLane is true for PR + S5058');
+	assert(prefersUsIslandPhLane({ country: 'US', selectedCode: '', postCode: '', state: 'HI' }),
+		'…and for an unset product on a HI address');
+	assert(!prefersUsIslandPhLane({ country: 'US', selectedCode: 'S5063', postCode: '00912', state: 'PR' }),
+		'…but a deliberately chosen express lane is left alone');
+	assert(!prefersUsIslandPhLane({ country: 'US', selectedCode: S5058, postCode: '90210', state: 'CA' }),
+		'…and continental US is left on POSTLINK-LW');
+	assert(resolveLogisticsProduct({
+		country: 'US', postCode: '00912', expedited: true,
+		availableProducts: [{ logistics_product_code: 'S5063' }, { logistics_product_code: 'S5058' }],
+	}) === 'S5063', 'expedited island ZIP still honours a bookable express lane');
+
 	const fs = require('fs');
 	const path = require('path');
 	const serverSrc = fs.readFileSync(path.join(__dirname, '../src/server/index.js'), 'utf8');
 	assert(/resolveUsIslandZipFallback/.test(serverSrc), 'server imports resolveUsIslandZipFallback');
 	assert(/auto-retrying with \$\{fallbackCode\}/.test(serverSrc) || /auto-retrying with/.test(serverSrc),
 		'…and retries the create on US-ISLAND-PH inside create4pxShipmentForReceipt');
-	assert(/mintShipOrderFallbackRef/.test(serverSrc) && /createWithIslandZipFallback/.test(serverSrc),
-		'…on a FRESH ref (not the rejected S5058 ref) so DS000007 cannot strand the row');
+	assert(/mintShipOrderFallbackRef/.test(serverSrc) && /createWithIslandZipFallback/.test(serverSrc) && /existingTaggedRef/.test(serverSrc),
+		'…retrying S5118 on a tagged ISL ref (reused if already minted) so DS000007 cannot strand the row');
 	assert(/isRefInProcessingRejection/.test(serverSrc) && /waitAndAdoptRef/.test(serverSrc),
 		'…and DS000007 waits/adopts before surfacing "already being submitted"');
+  assert(/isRefAlreadyExistsRejection/.test(serverSrc) && /duplicateRefUnrecoverableError/.test(serverSrc),
+    '…and DS000056 recovers the committed consignment instead of minting a second ref');
+  assert(/prefersUsIslandPhLane/.test(serverSrc) && /remote_island_zip_preflight/.test(serverSrc),
+    '…and pre-selects S5118 for island addresses before the first 4PX create');
+  assert(/existingTaggedRef/.test(serverSrc) && /isTransientFourpxTransportError/.test(serverSrc),
+    '…and reuses an existing ISL/P ref / adopts on transport faults instead of minting');
+  assert(/adoptStrandedFourpxRefs/.test(serverSrc) && /stranded-ref sweep/.test(serverSrc),
+    '…and a background sweep adopts receipts that stored a 4PX ref with no consignment');
+  assert(/FOURPX_CREATE_LOCKED/.test(serverSrc) && /joining that attempt/.test(serverSrc),
+    '…and concurrent creates join or wait instead of 409-ing immediately');
 	assert(/postCode: enrichedRecipient\.post_code/.test(serverSrc) && /resolveIslandFallback/.test(serverSrc),
 		'…and passes the recipient ZIP/state so continental US cannot auto-flip');
 	assert(/productFallback/.test(serverSrc), '…and surfaces the switch on the create / bulk result');

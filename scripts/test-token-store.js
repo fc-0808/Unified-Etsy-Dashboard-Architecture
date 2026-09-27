@@ -6,6 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { TokenManager } = require('../src/auth/token-manager');
+const { shopUserAgent } = require('../src/etsy/user-agent');
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ued-token-store-'));
 let passed = 0;
@@ -144,6 +145,31 @@ try {
     assert.equal(manager._store['shop-1'].refresh_token, 'new.refresh');
     assert.equal(manager.getStoreHealth().persisted, false);
     assert.equal(manager.getStatus(['shop-1'])[0].status, 'token_store_unpersisted');
+  });
+
+  await test('token refresh identifies the shop in User-Agent', async () => {
+    const file = path.join(tempRoot, 'refresh-ua.json');
+    const manager = new TokenManager(file);
+    manager.storeTokens('CuteCasesMore', {
+      access_token: 'old.access',
+      refresh_token: 'old.refresh',
+      expires_in: 0,
+    });
+    let sent = null;
+    await manager.getAccessToken('CuteCasesMore', 'key', null, {
+      post: async (_url, _body, config) => {
+        sent = config?.headers?.['User-Agent'];
+        return {
+          data: {
+            access_token: 'new.access',
+            refresh_token: 'new.refresh',
+            expires_in: 3600,
+          },
+        };
+      },
+    });
+    assert.equal(sent, shopUserAgent('CuteCasesMore'));
+    assert.notEqual(sent, shopUserAgent('Y2KiPhoneCases'));
   });
 } finally {
   try { fs.rmSync(tempRoot, { recursive: true, force: true }); } catch {}

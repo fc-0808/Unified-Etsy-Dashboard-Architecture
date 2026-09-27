@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Y2KASE Galaxy models</title>
+  <style>
+    @font-face { font-family: Fredoka; src: url("fonts/Fredoka-variable.ttf") format("truetype"); font-weight: 300 700; }
+    html, body { margin: 0; width: 2000px; height: 2000px; overflow: hidden; font-family: Fredoka, sans-serif; font-variant-ligatures: none; color: #4a1848; background: linear-gradient(180deg, #ffe6f8, #ead9ff 50%, #d4f3ff); -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    
+    .frame { box-sizing: border-box; width: 2000px; height: 2000px; padding: 36px 48px 40px; display: flex; flex-direction: column; }
+    .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .top img { height: 100px; width: auto; object-fit: contain; }
+    .meta { font-size: 18px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: #ff2f9f; }
+    h1 { font-size: 48px; font-weight: 700; color: #ff2f9f; margin: 0 0 8px; letter-spacing: -0.02em; }
+    .lede { font-size: 22px; font-weight: 500; margin: 0 0 12px; color: #5a2458; line-height: 1.35; }
+    .note { background: #fff; border: 2px solid #ff2f9f; color: #4a1848; padding: 12px 18px; font-size: 20px; font-weight: 600; border-radius: 14px; margin-bottom: 16px; text-align: center; flex-shrink: 0; }
+    .body { display: grid; grid-template-columns: 1.22fr 0.98fr; gap: 16px; flex: 1; min-height: 0; }
+    .models { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+    .group { background: #fff; border: 2px solid #ffc2e4; border-radius: 18px; padding: 14px 18px; display: grid; grid-template-columns: 160px 1fr; gap: 12px; align-items: center; min-height: 0; flex: 1; }
+    h2 { font-size: 16px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #ff2f9f; margin: 0; }
+    .list { display: flex; flex-wrap: wrap; gap: 8px; }
+    .model { background: #fff5fb; border: 2px solid #ffc2e4; border-radius: 999px; padding: 7px 14px; font-size: 20px; font-weight: 600; color: #4a1848; }
+    .help { background: #fff5fb; border: 2px solid #ff2f9f; border-radius: 18px; padding: 18px 20px; flex: 1.2; display: flex; flex-direction: column; justify-content: center; gap: 8px; }
+    .help b { font-size: 16px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #ff2f9f; }
+    .help p { margin: 0; font-size: 20px; font-weight: 500; line-height: 1.35; color: #5a2458; }
+    .index { background: #fff; border: 2px solid #ffc2e4; border-radius: 18px; padding: 18px 20px 20px; display: flex; flex-direction: column; min-height: 0; }
+    .index h2 { margin-bottom: 12px; flex-shrink: 0; }
+    .index ol { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr; gap: 8px; flex: 0 0 auto; min-height: 0; grid-auto-rows: auto; }
+    .index li { font-size: 20px; font-weight: 550; color: #4a1848; display: flex; align-items: flex-start; gap: 10px; background: #fff5fb; border: 2px solid #ffc2e4; border-radius: 16px; padding: 12px 14px; }
+    .idx-copy { min-width: 0; }
+    .idx-copy b { display: block; font-size: 22px; font-weight: 650; }
+    .sub { display: block; margin-top: 4px; font-size: 16px; font-weight: 500; color: #7a4aa0; line-height: 1.3; }
+    .index-example { flex: 1; display: flex; flex-direction: column; justify-content: center; margin-top: 10px; background: #fff5fb; border: 2px solid #ff2f9f; border-radius: 16px; padding: 20px 22px; }
+    .index-example b { display: block; font-size: 16px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #ff2f9f; margin-bottom: 10px; }
+    .index-example p { margin: 0; font-size: 30px; font-weight: 650; line-height: 1.35; color: #4a1848; }
+    .index-example p + p { margin-top: 10px; }
+    .color-note { margin-top: 12px !important; font-size: 18px !important; font-weight: 550 !important; color: #7a4aa0 !important; }
+    em { font-style: normal; color: #ff2f9f; }
+    .sku { min-width: 36px; height: 24px; padding: 0 7px; border-radius: 7px; background: #ff2f9f; color: #fff; font-size: 14px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; letter-spacing: 0.04em; flex-shrink: 0; margin-top: 4px; }
+    .ms { display: inline-block; margin-left: 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #fff; background: #4a1848; border-radius: 5px; padding: 2px 6px; vertical-align: middle; }
+  
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <div class="top"><img src="logo.jpg" alt="Y2KASE"><div class="meta">Galaxy · models</div></div>
+    <h1>Galaxy phones we print</h1>
+    <p class="lede">S-series on this menu. Flip, Fold, A-series, and Pixel are not included unless the listing names them.</p>
+    <div class="note">MagSafe is No. 05 only. Dual-wrap is S21 through S26 Ultra only.</div>
+    <div class="body">
+      <div class="models">
+      <div class="group"><h2>Galaxy S26</h2><div class="list"><span class="model">Samsung Galaxy S26</span><span class="model">Samsung Galaxy S26+</span><span class="model">Samsung Galaxy S26 Ultra</span></div></div>
+      <div class="group"><h2>Galaxy S25</h2><div class="list"><span class="model">Samsung Galaxy S25</span><span class="model">Samsung Galaxy S25+</span><span class="model">Samsung Galaxy S25 Ultra</span><span class="model">Samsung Galaxy S25 FE</span><span class="model">Samsung Galaxy S25 Edge</span></div></div>
+      <div class="group"><h2>Galaxy S24</h2><div class="list"><span class="model">Samsung Galaxy S24</span><span class="model">Samsung Galaxy S24+</span><span class="model">Samsung Galaxy S24 Ultra</span><span class="model">Samsung Galaxy S24 FE</span></div></div>
+      <div class="group"><h2>Galaxy S23</h2><div class="list"><span class="model">Samsung Galaxy S23</span><span class="model">Samsung Galaxy S23+</span><span class="model">Samsung Galaxy S23 Ultra</span><span class="model">Samsung Galaxy S23 FE</span></div></div>
+      <div class="group"><h2>Galaxy S22</h2><div class="list"><span class="model">Samsung Galaxy S22</span><span class="model">Samsung Galaxy S22+</span><span class="model">Samsung Galaxy S22 Ultra</span></div></div>
+        <div class="help"><b>How to write it</b><p>Copy the chip text, not a nickname. S-series only unless the listing names Flip, Fold, A-series, or Pixel.</p></div>
+      </div>
+      <div class="index few">
+        <h2>Style index</h2>
+        <ol><li><span class="sku">01</span><span class="idx-copy"><b>Clear soft</b><span class="sub">Flexible clear TPU. Bright print on the back.</span></span></li><li><span class="sku">02</span><span class="idx-copy"><b>Full-wrap film</b><span class="sub">The thinnest wrap. Print continues around the edges.</span></span></li><li><span class="sku">03</span><span class="idx-copy"><b>Glass back</b><span class="sub">Poster look on hard glass.</span></span></li><li><span class="sku">04</span><span class="idx-copy"><b>Stepped camera</b><span class="sub">Raised camera bumper for extra protection on Galaxy.</span></span></li><li><span class="sku">05</span><span class="idx-copy"><b>MagSafe clear <span class="ms">MagSafe</span></b><span class="sub">Clear MagSafe case. Galaxy S-series only.</span></span></li><li><span class="sku">06</span><span class="idx-copy"><b>Dual-layer wrap</b><span class="sub">Glossy wrap. Galaxy S21 through S26 Ultra only.</span></span></li></ol>
+        <div class="index-example"><b>Example reply</b><p>1. Samsung Galaxy S24 Ultra</p><p>2. <em>No. 02</em> Full-wrap film, gloss</p><p>3. PNG or JPG attached</p><p class="color-note">Add a color if the card lists one.</p></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

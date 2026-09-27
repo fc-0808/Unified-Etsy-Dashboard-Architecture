@@ -1,7 +1,7 @@
 const Database = require('better-sqlite3');
 const db = new Database('data/etsy_dashboard.db');
 
-const shop = db.prepare("SELECT shop_id FROM shops WHERE shop_name='Y2KASEshop'").get();
+const shop = db.prepare("SELECT shop_id FROM shops WHERE shop_name='Y2KiPhoneCases'").get();
 if (!shop) { console.log('Shop not found'); process.exit(1); }
 
 const now = Math.floor(Date.now() / 1000);
@@ -19,7 +19,7 @@ const rows = db.prepare(`
   LIMIT 30
 `).all(shop.shop_id);
 
-console.log(`\nY2KASEshop — shipped orders with tracking (latest 30 by update date):\n`);
+console.log(`\nY2KiPhoneCases — shipped orders with tracking (latest 30 by update date):\n`);
 for (const r of rows) {
   const daysAgoUpdated = ((now - r.etsy_updated_at) / day).toFixed(1);
   const daysAgoCreated = ((now - r.etsy_created_at) / day).toFixed(1);

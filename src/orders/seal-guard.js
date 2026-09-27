@@ -6,6 +6,7 @@
  */
 const buyQueue = require('./buy-queue');
 const packQueue = require('./pack-queue');
+const addressReview = require('./address-review');
 
 /**
  * @param {import('better-sqlite3').Database} db
@@ -60,10 +61,22 @@ function unsealableReasons(db, receiptIds, config = {}) {
   } catch {
     // Additive table may not exist on a partially initialized fixture.
   }
+  const openAddressReview = new Set();
+  try {
+    db.prepare(
+      `SELECT r.receipt_id FROM receipts r
+       WHERE r.receipt_id IN (${placeholders})
+         AND ${addressReview.openSql('r')}`
+    ).all(...ids).forEach((row) => openAddressReview.add(Number(row.receipt_id)));
+  } catch {
+    // Columns may be missing on a partial fixture.
+  }
 
   for (const id of ids) {
     if (missingLineItems.has(id)) {
       reasons.set(id, 'has no complete line-item data to verify');
+    } else if (openAddressReview.has(id)) {
+      reasons.set(id, 'is held for address review (military or Australia) until an owner confirms the destination');
     } else if (openIssue.has(id)) {
       reasons.set(id, 'is on hold (a product is out of production or the model is unavailable)');
     } else if (openSwap.has(id)) {

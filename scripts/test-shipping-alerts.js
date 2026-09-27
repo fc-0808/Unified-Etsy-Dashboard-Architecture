@@ -13,7 +13,7 @@
  *   · de-escalation does not;
  *   · recovery clears the acknowledgement, so a relapse is a fresh incident.
  *
- * It also covers the two surfaces that answer the question: the banner, and the
+ * It also covers the remaining surfaces that answer the question: the tab badge / New-only chrome, and the
  * per-row NEW mark on the parcel board (the table the operator actually reads,
  * where the banner's capped list runs out), plus the incident ledger that lets
  * a row say "flagged 5h ago" on OUR clock rather than the carrier's back-dated
@@ -403,39 +403,33 @@ check('acknowledging a parcel drops it from the new board without removing it', 
   assert.ok(row.alert_flagged_at > 0, 'and it still knows how long it has been waiting');
 });
 
-console.log('Banner rendering (shipped code, real markup)');
+console.log('Inbox chrome (badge + New only, shipped code)');
 {
   const { JSDOM, VirtualConsole } = require('jsdom');
   const html = fs.readFileSync(path.resolve(__dirname, '../public/index.html'), 'utf8');
 
-  // Run the SHIPPED renderer against the SHIPPED markup, so these assertions
-  // break if either half drifts — a banner test that rebuilds its own DOM would
-  // keep passing after the real one was renamed out from under it.
   const jsStart = html.indexOf('// ══ SHIPPING ALERTS ══');
   const jsEnd = html.indexOf('// ══ END SHIPPING ALERTS ══');
   assert.ok(jsStart > 0 && jsEnd > jsStart, 'shipping alert script sentinels missing from public/index.html');
   const moduleSource = html.slice(jsStart, jsEnd);
 
-  const markupStart = html.indexOf('<section class="ship-alert-banner"');
-  const markupEnd = html.indexOf('</section>', markupStart) + '</section>'.length;
-  assert.ok(markupStart > 0, 'shipping alert banner markup missing from public/index.html');
-  const bannerMarkup = html.slice(markupStart, markupEnd);
-
   const virtualConsole = new VirtualConsole();
   virtualConsole.on('jsdomError', () => {});
-  // The real "New only" control ships in the toolbar, so lift it from the page
-  // too rather than hand-rolling a stand-in that cannot drift with it.
   const toggleStart = html.indexOf('<button type="button" class="ship-new-toggle"');
   const toggleEnd = html.indexOf('</button>', toggleStart) + '</button>'.length;
   assert.ok(toggleStart > 0, '"New only" toggle markup missing from public/index.html');
   const toggleMarkup = html.slice(toggleStart, toggleEnd);
+  const reviewStart = html.indexOf('id="shipAlertReviewAll"');
+  assert.ok(reviewStart > 0, 'Mark all reviewed control missing from the toolbar');
+  const reviewBtnStart = html.lastIndexOf('<button', reviewStart);
+  const reviewBtnEnd = html.indexOf('</button>', reviewStart) + '</button>'.length;
+  const reviewMarkup = html.slice(reviewBtnStart, reviewBtnEnd);
 
   const dom = new JSDOM(
-    `<!doctype html><html><body><div class="tabs"><div class="tab" id="tab-btn-shipping">Shipping<span class="tab-alert-badge" id="shipTabAlertBadge"></span></div></div>${bannerMarkup}${toggleMarkup}<div id="shipTableWrap"></div></body></html>`,
+    `<!doctype html><html><body><div class="tabs"><div class="tab" id="tab-btn-shipping">Shipping<span class="tab-alert-badge" id="shipTabAlertBadge"></span></div></div>${toggleMarkup}${reviewMarkup}<div id="shipTableWrap"></div></body></html>`,
     { pretendToBeVisual: true, runScripts: 'dangerously', virtualConsole },
   );
   const { window } = dom;
-  // Collaborators the module reaches for, stubbed to the real contracts.
   window.eval(`
     const API = ''
     const toasts = []
@@ -447,8 +441,6 @@ console.log('Banner rendering (shipped code, real markup)');
     function fetchJson() { return Promise.reject(new Error('offline')) }
     window.__statusFilter = null
     function setShipStatusFilter(v) { window.__statusFilter = v }
-    // Board-side collaborators. The banner and the board are separate sections
-    // of the page; only their contract is exercised here.
     window.__boardReloads = 0
     window.__clearedMarkers = []
     function _shipNewOnlyActive() { return document.getElementById('shipNewOnly')?.getAttribute('aria-pressed') === 'true' }
@@ -456,18 +448,17 @@ console.log('Banner rendering (shipped code, real markup)');
     function _clearShipRowNewMarkers(ids) { window.__clearedMarkers.push(ids) }
     ${moduleSource}
     window.renderShippingAlerts = renderShippingAlerts
-    window.toggleShippingAlertList = toggleShippingAlertList
     window._shipAlertKey = _shipAlertKey
   `);
 
   const doc = window.document;
-  const banner = doc.getElementById('shipAlertBanner');
   const badge = doc.getElementById('shipTabAlertBadge');
   const newOnly = doc.getElementById('shipNewOnly');
+  const reviewAll = doc.getElementById('shipAlertReviewAll');
 
   const alert = (over = {}) => ({
     receipt_id: 1,
-    shop_name: 'Y2KASEshop',
+    shop_name: 'Y2KiPhoneCases',
     buyer_name: 'Elisabeth Johnson',
     tracking_no: '4PX3003001181713CN',
     abnormal_kind: 'disposed',
@@ -478,11 +469,11 @@ console.log('Banner rendering (shipped code, real markup)');
     ...over,
   });
 
-  check('an empty inbox renders no banner and no badge', () => {
+  check('an empty inbox renders no badge and disables New only', () => {
     window.renderShippingAlerts({ alerts: [], summary: { total: 0, new_total: 0 } });
-    assert.strictEqual(banner.hasAttribute('hidden'), true);
     assert.strictEqual(badge.classList.contains('is-visible'), false);
-    assert.strictEqual(doc.getElementById('shipAlertList').innerHTML, '');
+    assert.strictEqual(newOnly.disabled, true);
+    assert.strictEqual(reviewAll.hidden, true);
   });
 
   check('a standing backlog with nothing new stays silent', () => {
@@ -490,87 +481,27 @@ console.log('Banner rendering (shipped code, real markup)');
       alerts: [alert({ is_new: false })],
       summary: { total: 1, disposed: 1, new_total: 0, last_reviewed_at: now - 3600 },
     });
-    assert.strictEqual(banner.hasAttribute('hidden'), true, 'already-reviewed work must not re-alert');
+    assert.strictEqual(badge.classList.contains('is-visible'), false, 'already-reviewed work must not re-alert');
+    assert.strictEqual(reviewAll.hidden, true);
   });
 
-  check('new parcels raise the banner, the badge and the kind chips', () => {
+  check('new parcels raise the badge, enable New only, and offer Mark all reviewed', () => {
     window.renderShippingAlerts({
       alerts: [alert(), alert({ receipt_id: 2, abnormal_kind: 'stuck', severity_rank: 3, tracking_no: '4PX3003024171982CN' })],
       summary: { total: 5, disposed: 1, stuck: 1, new_total: 2, new_disposed: 1, new_stuck: 1, last_reviewed_at: null, returned: 2 },
     });
-    assert.strictEqual(banner.hasAttribute('hidden'), false);
-    assert.match(doc.getElementById('shipAlertTitle').textContent, /^2 new abnormal parcels need action$/);
     assert.strictEqual(badge.textContent, '2');
     assert.strictEqual(badge.classList.contains('is-visible'), true);
     assert.match(doc.getElementById('tab-btn-shipping').getAttribute('title'), /2 abnormal parcels need action/);
-    const chips = [...doc.querySelectorAll('.ship-alert-kind')].map((c) => c.dataset.alertKind);
-    assert.deepStrictEqual(chips, ['disposed', 'stuck'], 'only non-zero kinds get a chip, most severe first');
-    assert.strictEqual(doc.querySelectorAll('.ship-alert-row').length, 2);
-    assert.match(doc.getElementById('shipAlertSub').textContent, /No parcels reviewed yet/);
-  });
-
-  check('one new parcel reads as singular', () => {
-    window.renderShippingAlerts({ alerts: [alert()], summary: { total: 1, disposed: 1, new_total: 1, new_disposed: 1 } });
-    assert.strictEqual(doc.getElementById('shipAlertTitle').textContent, '1 new abnormal parcel needs action');
-  });
-
-  check('tracking numbers become delegated buttons carrying the number as data', () => {
-    window.renderShippingAlerts({ alerts: [alert()], summary: { total: 1, disposed: 1, new_total: 1, new_disposed: 1 } });
-    const link = doc.querySelector('.ship-alert-track[data-tracking]');
-    assert.strictEqual(link.tagName, 'BUTTON');
-    assert.strictEqual(link.dataset.tracking, '4PX3003001181713CN');
-    const done = doc.querySelector('.ship-alert-done[data-alert-receipt]');
-    assert.strictEqual(done.dataset.alertReceipt, '1');
-  });
-
-  check('a non-4PX identifier is plain text, never a tracking button', () => {
-    window.renderShippingAlerts({ alerts: [alert({ tracking_no: 'MANUAL-123' })], summary: { total: 1, new_total: 1, disposed: 1, new_disposed: 1 } });
-    assert.strictEqual(doc.querySelector('button.ship-alert-track'), null);
-  });
-
-  check('a server-verified numeric 4PX identifier remains trackable', () => {
-    window.renderShippingAlerts({
-      alerts: [alert({ tracking_no: '1234567890123', tracking_lookup_supported: true })],
-      summary: { total: 1, new_total: 1, disposed: 1, new_disposed: 1 },
-    });
-    assert.strictEqual(doc.querySelector('button.ship-alert-track').dataset.tracking, '1234567890123');
-  });
-
-  check('hostile shop, buyer and reason text is escaped, not executed', () => {
-    window.renderShippingAlerts({
-      alerts: [alert({
-        shop_name: '<img src=x onerror=alert(1)>',
-        buyer_name: '"><script>alert(2)</script>',
-        tracking_health_reason: '</span><script>alert(3)</script>',
-      })],
-      summary: { total: 1, disposed: 1, new_total: 1, new_disposed: 1 },
-    });
-    assert.strictEqual(doc.querySelectorAll('#shipAlertList script, #shipAlertList img').length, 0, 'no markup escaped the escaper');
-    assert.ok(doc.getElementById('shipAlertList').textContent.includes('<img src=x onerror=alert(1)>'), 'the hostile value survives as visible text');
-  });
-
-  check('the overflow line counts from the true total, not the rendered page', () => {
-    const many = Array.from({ length: 20 }, (_, i) => alert({ receipt_id: 10 + i, tracking_no: `4PX000000000${i}CN` }));
-    window.renderShippingAlerts({ alerts: many, summary: { total: 400, disposed: 400, new_total: 350, new_disposed: 350, returned: 20 } });
-    assert.strictEqual(doc.querySelectorAll('.ship-alert-row').length, 8, 'the inline list is capped');
-    assert.match(doc.querySelector('.ship-alert-more').textContent, /\+ 342 more new parcels/);
-    assert.strictEqual(badge.textContent, '99+', 'the badge stays narrow past three digits');
-  });
-
-  check('a kind chip opens the board on that queue with the scope cleared', () => {
-    window.renderShippingAlerts({ alerts: [alert()], summary: { total: 1, disposed: 1, new_total: 1, new_disposed: 1 } });
-    doc.querySelector('.ship-alert-kind[data-alert-kind="disposed"]').click();
-    assert.strictEqual(window.__statusFilter, 'disposed', 'the delegated handler drove the real filter');
-    // The chip is labelled with a NEW count, so the board it opens must be the
-    // new set — otherwise the number the operator just read stops matching the
-    // table they land on.
-    assert.strictEqual(newOnly.getAttribute('aria-pressed'), 'true');
-  });
-
-  check('the board filter mirrors the inbox count and is offered only when usable', () => {
-    window.renderShippingAlerts({ alerts: [alert(), alert({ receipt_id: 2 })], summary: { total: 9, disposed: 9, new_total: 2, new_disposed: 2 } });
     assert.strictEqual(doc.getElementById('shipNewOnlyCount').textContent, '2');
     assert.strictEqual(newOnly.disabled, false);
+    assert.strictEqual(reviewAll.hidden, false);
+    assert.strictEqual(reviewAll.disabled, false);
+  });
+
+  check('the overflow badge stays narrow past three digits', () => {
+    window.renderShippingAlerts({ alerts: [alert()], summary: { total: 400, disposed: 400, new_total: 350, new_disposed: 350 } });
+    assert.strictEqual(badge.textContent, '99+');
   });
 
   check('finishing the queue disables the filter and releases it', () => {
@@ -579,69 +510,7 @@ console.log('Banner rendering (shipped code, real markup)');
     assert.strictEqual(newOnly.disabled, true, 'a filter that would empty the board is not offered');
     assert.strictEqual(newOnly.getAttribute('aria-pressed'), 'false', 'and it must not stay latched on an empty set');
     assert.strictEqual(doc.getElementById('shipNewOnlyCount').textContent, '0');
-  });
-
-  check('the banner leads with when the newest incident landed', () => {
-    window.renderShippingAlerts({ alerts: [alert()], summary: { total: 1, disposed: 1, new_total: 1, new_disposed: 1, newest_flagged_at: now - 3600 } });
-    assert.match(doc.getElementById('shipAlertSub').textContent, /^Newest flagged 3d ago\./, 'the overnight/backlog question is answered first');
-  });
-
-  // Layout regression. The banner once rendered each status pill as a giant
-  // empty oval spanning the whole column, with the reason pushed onto the line
-  // below, because a `.ship-alert-why span` rule applied the two-line clamp to
-  // BOTH children — and -webkit-box is block-level, so the pill stopped hugging
-  // its label. JSDOM has no layout engine, so these pin the structure and the
-  // selector scope that decide the layout rather than measuring pixels.
-  check('the status pill hugs its label instead of being stretched by the reason clamp', () => {
-    window.renderShippingAlerts({ alerts: [alert()], summary: { total: 1, disposed: 1, new_total: 1, new_disposed: 1 } });
-    const why = doc.querySelector('.ship-alert-why');
-    const status = why.querySelector('.ship-alert-status');
-    const pill = why.querySelector('.ship-chip');
-    const reason = why.querySelector('.ship-alert-reason');
-    assert.ok(status && pill && reason, 'status rail, pill and reason are separate elements');
-    assert.strictEqual(pill.classList.contains('ship-alert-reason'), false, 'the pill must never carry the clamp');
-    assert.strictEqual(pill.textContent, 'Disposed');
-    assert.strictEqual(reason.textContent, 'Parcel disposed or destroyed by carrier — review 4PX claim eligibility.');
-    assert.strictEqual(why.children.length, 2, 'exactly two grid cells: status + reason');
-    assert.strictEqual(status.nextElementSibling, reason, 'no stray node between the status rail and the reason');
-  });
-
-  check('the clamp is scoped to the reason, so no rule can catch the pill again', () => {
-    assert.ok(/\.ship-alert-reason\s*\{[^}]*-webkit-line-clamp/.test(html), 'the clamp lives on the reason');
-    assert.ok(!/\.ship-alert-why\s+span\s*\{/.test(html), 'no descendant-span rule may reach the pill');
-    assert.ok(/\.ship-alert-why\s*\{[^}]*grid-template-columns:\s*5\.5rem/.test(html), 'status pills sit in a fixed-width rail so left edges align');
-    assert.ok(/\.ship-alert-why\s+\.ship-chip\s*\{[^}]*flex:\s*0 0 auto/.test(html), 'the pill is pinned to its intrinsic width');
-  });
-
-  check('the filter chip separates count from label with gap, not a text node', () => {
-    window.renderShippingAlerts({ alerts: [alert()], summary: { total: 1, disposed: 1, new_total: 1, new_disposed: 1 } });
-    const chip = doc.querySelector('.ship-alert-kind');
-    assert.strictEqual(chip.childNodes.length, 2, 'exactly two flex items, nothing between them');
-    assert.strictEqual(chip.childNodes[0].tagName, 'STRONG');
-    assert.strictEqual(chip.childNodes[0].textContent, '1');
-    assert.strictEqual(chip.childNodes[1].tagName, 'SPAN', 'the label is an explicit item, not anonymous text');
-    assert.strictEqual(chip.childNodes[1].textContent, 'Disposed');
-  });
-
-  check('the parcel preview list is collapsed by default and expands on demand', () => {
-    window.renderShippingAlerts({
-      alerts: [alert(), alert({ receipt_id: 2, abnormal_kind: 'stuck', severity_rank: 3, tracking_no: '4PX3003024171982CN' })],
-      summary: { total: 5, disposed: 1, stuck: 1, new_total: 2, new_disposed: 1, new_stuck: 1 },
-    });
-    const details = doc.getElementById('shipAlertDetails');
-    const toggle = doc.getElementById('shipAlertToggleList');
-    assert.ok(details && toggle, 'expand control and details region ship with the banner');
-    assert.strictEqual(details.hidden, true, 'the tall row list stays closed until asked for');
-    assert.strictEqual(toggle.getAttribute('aria-expanded'), 'false');
-    assert.match(toggle.textContent, /Show 2 parcels/);
-    assert.strictEqual(doc.querySelectorAll('.ship-alert-row').length, 2, 'rows are still rendered for expand');
-    window.toggleShippingAlertList();
-    assert.strictEqual(details.hidden, false);
-    assert.strictEqual(toggle.getAttribute('aria-expanded'), 'true');
-    assert.strictEqual(toggle.textContent, 'Hide list');
-    window.toggleShippingAlertList();
-    assert.strictEqual(details.hidden, true);
-    assert.strictEqual(toggle.getAttribute('aria-expanded'), 'false');
+    assert.strictEqual(reviewAll.hidden, true);
   });
 
   check('the alert fingerprint changes only when the new set changes', () => {
@@ -689,7 +558,7 @@ console.log('Parcel-activity rendering (shipped renderer, real markup)');
   const doc = window.document;
   const parcel = (over = {}) => ({
     receipt_id: 7001,
-    shop_name: 'Y2KASEshop',
+    shop_name: 'Y2KiPhoneCases',
     buyer_name: 'Maggie Smith',
     tracking_no: '4PX3003006517302CN',
     tracking_status: 'exception',
@@ -823,15 +692,20 @@ console.log('Dashboard wiring');
 {
   const html = fs.readFileSync(path.resolve(__dirname, '../public/index.html'), 'utf8');
 
-  check('tracking numbers in the banner are data, never generated inline JavaScript', () => {
-    assert.ok(/class="ship-alert-track" data-tracking="\$\{safeTracking\}"/.test(html));
-    assert.ok(!/open4pxTrackModal\('\$\{(?:a\.tracking_no|no)\}'\)/.test(html));
-    assert.ok(html.includes('.ship-alert-track[data-tracking]'), 'banner links reuse the delegated tracking handler');
+  check('the morning-review banner and 4PX balance card are gone from the Shipping tab', () => {
+    assert.ok(!html.includes('id="shipAlertBanner"'), 'the abnormal-parcel banner is removed');
+    assert.ok(!html.includes('id="shipBalanceCard"'), 'the recorded-balance card is removed');
+    assert.ok(!html.includes('promptShipBalance'), 'balance prompts are gone with the card');
   });
 
-  check('the banner and tab badge are hidden until something is actually new', () => {
-    assert.ok(html.includes('id="shipAlertBanner"') && html.includes('hidden'), 'banner starts hidden');
-    assert.ok(html.includes("banner.hidden = true"), 'banner hides when nothing is new');
+  check('the compensation desk is the working list of 4PX tracking numbers', () => {
+    assert.ok(html.includes('id="shipCompDesk"'), 'the desk ships on the Shipping tab');
+    assert.ok(html.includes('id="shipCompPaste"'), 'operators can paste tracking numbers');
+    assert.ok(html.includes('/api/4px/compensation-cases'), 'the desk talks to the compensation API');
+    assert.ok(html.includes('data-comp-tracking='), 'abnormal parcel rows can add a tracking number without inline JS');
+  });
+
+  check('the tab badge is hidden until something is actually new', () => {
     assert.ok(html.includes("badge.classList.toggle('is-visible', n > 0)"), 'badge hides at zero');
   });
 
@@ -841,17 +715,17 @@ console.log('Dashboard wiring');
     assert.ok(/tracking_parcel_updated'\)\s*\{\s*\n\s*loadShippingAlerts\(\)/.test(html) || html.includes('loadShippingAlerts()'), 'sync events refresh the inbox');
   });
 
-  check('review actions post to the acknowledge endpoint', () => {
+  check('review actions post to the acknowledge endpoint from the toolbar', () => {
     assert.ok(html.includes("/api/4px/shipping-alerts/review"));
-    assert.ok(html.includes('data-alert-receipt='), 'per-row acknowledge uses a data attribute');
+    assert.ok(html.includes('id="shipAlertReviewAll"'), 'Mark all reviewed remains next to New only');
+    assert.ok(!html.includes('data-alert-receipt='), 'per-row banner acknowledge is gone with the banner');
   });
 
-  check('the parcel board is a first-class morning-review surface, not a second copy of the banner', () => {
+  check('the parcel board is the morning-review surface', () => {
     assert.ok(html.includes('id="shipNewOnly"'), 'a New-only control isolates untriaged rows');
     assert.ok(html.includes("p.set('alert_state', 'new')"), 'the control is a real server filter, not a client hide');
     assert.ok(html.includes('ship-row-new'), 'untriaged rows are highlighted in the table');
     assert.ok(html.includes('class="ship-chip ship-new"'), 'and carry a NEW badge');
-    assert.ok(html.includes('.ship-alert-done[data-alert-receipt]'), 'banner parcels still acknowledge through the delegated handler');
     assert.ok(!html.includes('ship-row-ack'), 'the board no longer duplicates Reviewed on every row');
     assert.ok(html.includes('_clearShipRowNewMarkers'), 'acknowledging a row does not reload the whole table');
     assert.ok(html.includes('Flagged ${_relTime(flaggedAt)}'), 'rows state when WE flagged them, next to the carrier event age');
@@ -859,7 +733,7 @@ console.log('Dashboard wiring');
     assert.ok(html.includes('ship-status-stack'), 'Status chips share one horizontal stack');
     assert.ok(html.includes('_toggleShipBuyerNotice'), 'Message buyer is a one-click attestation');
     assert.ok(!html.includes('id="shipBuyerNoticeModal"'), 'the draft modal is gone');
-    assert.ok(html.includes('id="shipAlertToggleList"') && html.includes('id="shipAlertDetails"'), 'the morning-review list is expandable rather than always tall');
+    assert.ok(!html.includes('id="shipAlertToggleList"') && !html.includes('id="shipAlertDetails"'), 'the expandable banner list is gone');
   });
 }
 

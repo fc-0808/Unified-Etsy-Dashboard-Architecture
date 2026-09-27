@@ -6,10 +6,11 @@
  * keeps fresh). These become the default variation prices for new bulk listings
  * so they match what the shop already charges — no spreadsheet guesswork.
  *
- * The cached offerings carry the full property_values JSON, including the
- * "Styles" custom property (id 514) whose value (e.g. "Case+Charm") maps 1:1 to
- * our internal style keys. Prices are aggregated per style with a median (robust
- * to the odd outlier / mispriced listing).
+ * The cached offerings carry the full property_values JSON, including custom
+ * property 514 ("Styles", "Band Style", etc.). Static values map 1:1 to registry
+ * keys. A vision-driven axis maps all of its per-listing labels back to its one
+ * standard-price fallback key, so "Band 1" and "Band 2" share the curated band
+ * price without becoming global vocabulary.
  */
 
 const { normaliseStyleLabel } = require('./pricing');
@@ -27,7 +28,7 @@ function median(nums) {
  * and resolve it to `productType`'s style key.
  *
  * The priced axis is always Etsy custom property 514, but its NAME differs per
- * product line ("Styles" for a case, "Band Size" for a watch band), so the id
+ * product line ("Styles" for a case, "Band Style" for a watch band), so the id
  * is matched first and the name only as a legacy fallback. Resolution is scoped
  * to the product type, which is what stops a shop that sells both lines from
  * pricing one line's variations off the other's listings.
@@ -41,12 +42,28 @@ function styleKeyFromProps(propsJson, productType) {
     props.find((p) => p.property_id === propId) ||
     props.find((p) => p.property_name && /^styles?$/i.test(p.property_name));
   const label = styleProp?.values?.[0];
-  return label ? normaliseStyleLabel(label, productType) : null;
+  if (!label) return null;
+  const matched = normaliseStyleLabel(label, productType);
+  if (matched) return matched;
+
+  // A numbered Band Style's labels are intentionally per listing, so they cannot be in
+  // the global registry. Collapse one to the standard-price key only when the
+  // property NAME also matches this product type. Property 514 alone is not
+  // enough: every case listing uses that id too, and treating "Case Only" as a
+  // band style would let a watch reprice operation touch unrelated products.
+  const pt = productTypes.getProductType(productType);
+  const propertyName = String(styleProp.property_name || '').trim().toLowerCase();
+  const acceptedNames = [
+    productTypes.stylePropertyFor(pt).name,
+    ...(pt.legacyStylePropertyNames || []),
+  ].map((name) => String(name).trim().toLowerCase());
+  const exactAxis = acceptedNames.includes(propertyName);
+  return pt.visionStyle && exactAxis ? productTypes.fallbackStyleKey(pt) : null;
 }
 
 /**
  * @param {import('better-sqlite3').Database} db
- * @param {string} shopId   config/listings shop_id (e.g. "Y2KASEofficial")
+ * @param {string} shopId   config/listings shop_id (e.g. "Y2KiPhoneCases")
  * @param {string|object} [productType]  defaults to the iPhone case line
  * @returns {{ prices: Record<string,number>, counts: Record<string,number>,
  *             currency: string|null, listingCount: number, hasData: boolean }}

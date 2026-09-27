@@ -265,6 +265,25 @@ function generateRecipientPhone(country, seed) {
   return build(digits);
 }
 
+/**
+ * 4PX US postcodes must be 5–10 digits with no hyphen. Etsy often stores ZIP+4
+ * (`96367-0059`); sending that is rejected (010105005) even when the 5-digit
+ * ZIP would have been accepted. Island detection also needs the 5-digit form.
+ *
+ * @param {string} [country]
+ * @param {string} [postCode]
+ * @returns {string}
+ */
+function sanitizeRecipientPostCode(country, postCode) {
+  const raw = String(postCode == null ? '' : postCode).trim();
+  if (!raw) return '';
+  const cc = String(country || '').trim().toUpperCase();
+  if (!['US', 'PR', 'GU', 'VI', 'AS', 'MP'].includes(cc)) return raw;
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length >= 5) return digits.slice(0, 5);
+  return digits || raw;
+}
+
 // Destinations where 4PX mandates a non-empty consignee province
 // (recipient_info.state) yet Etsy frequently omits it. The United Kingdom is the
 // canonical case: British addressing treats the county as OPTIONAL (the postcode
@@ -671,6 +690,7 @@ async function createShipOrder(appKey, appSecret, input) {
   // given/surname into its print slots to keep the label in natural order ("Julia
   // Norton" rather than "Norton Julia"). See orderConsigneeNameFor4px for the full why.
   const consigneeFields = orderConsigneeNameFor4px(consignee);
+  const recipientZip = sanitizeRecipientPostCode(recipient.country, recipient.post_code);
   const recipientPayload = {
     first_name:  consigneeFields.first_name,   // surname (4PX prints 2nd)
     last_name:   consigneeFields.last_name,    // given name (4PX prints 1st); always present per 010101005
@@ -690,7 +710,7 @@ async function createShipOrder(appKey, appSecret, input) {
     city:        decodeHtml(recipient.city),
     street:      decodeHtml(recipient.street),
     ...(recipient.district  && { district:   decodeHtml(recipient.district)  }),
-    ...(recipient.post_code && { post_code:  recipient.post_code }),
+    ...(recipientZip && { post_code: recipientZip }),
   };
 
   // ── Parcels ─────────────────────────────────────────────────────────────────
@@ -753,7 +773,7 @@ async function createShipOrder(appKey, appSecret, input) {
     ...(sales_platform && { sales_platform }),
     ...(trade_id       && { trade_id:  String(trade_id)  }),
     ...(buyer_id       && { buyer_id:  String(buyer_id)  }),
-    // EU compliance identifiers. ioss_no is required by 4PX for EU destinations
+    // EU tax identifiers. ioss_no is required by 4PX for EU destinations
     // with a declared value ≤ €150 (marketplace-collected VAT, e.g. Etsy); vat_no
     // and eori_no are sent when the caller supplies them. Strip any whitespace and
     // an accidental "IOSS" prefix so customs EDI accepts the bare identifier.
@@ -762,24 +782,132 @@ async function createShipOrder(appKey, appSecret, input) {
     ...(eori_no && { eori_no: String(eori_no).trim() }),
   };
 
-  const data = await callApi(appKey, appSecret, 'ds.xms.order.create', payload);
+  const data = coerceFourpxData(await callApi(appKey, appSecret, 'ds.xms.order.create', payload));
   return normalizeShipOrderResponse(data, ref_no) || {
-    dsConsignmentNo:    data.ds_consignment_no,
-    trackingNo:         data['4px_tracking_no'],
-    labelBarcode:       data.label_barcode,
-    refNo:              data.ref_no,
-    logisticsChannelNo: data.logistics_channel_no,
-    odaResultSign:      data.oda_result_sign,
+    dsConsignmentNo:    nonemptyText(data && data.ds_consignment_no),
+    trackingNo:         nonemptyText(data && data['4px_tracking_no']),
+    labelBarcode:       nonemptyText(data && data.label_barcode),
+    refNo:              nonemptyText(data && data.ref_no) || nonemptyText(ref_no),
+    logisticsChannelNo: nonemptyText(data && data.logistics_channel_no),
+    odaResultSign:      nonemptyText(data && data.oda_result_sign),
+    logisticsProductCode: nonemptyText(data && data.logistics_product_code),
   };
+}
+
+const SHIP_ORDER_CONSIGNMENT_KEYS = [
+  'ds_consignment_no', 'dsConsignmentNo', 'consignment_no', 'consignmentNo', 'oc_id', 'ocId',
+];
+const SHIP_ORDER_TRACKING_KEYS = [
+  '4px_tracking_no', '4pxTrackingNo', 'trackingNo', 'tracking_no', 'tracking_code', 'trackingCode',
+];
+const SHIP_ORDER_REF_KEYS = [
+  'ref_no', 'refNo', 'reference_no', 'reference_code', 'customer_ref_no', 'customerRefNo',
+];
+
+/** Trimmed non-empty string, else null. */
+function nonemptyText(value) {
+  if (value == null) return null;
+  const s = String(value).trim();
+  return s ? s : null;
+}
+
+/**
+ * 4PX sometimes returns `data` as a JSON string (the Open Platform envelope
+ * types `data` as String). Parse it so order.get/create/label.get share one
+ * identity extractor.
+ *
+ * @param {*} data
+ * @returns {*}
+ */
+function coerceFourpxData(data) {
+  if (typeof data !== 'string') return data;
+  const trimmed = data.trim();
+  if (!trimmed) return {};
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return data;
+  }
+}
+
+/**
+ * De-duplicate lookup keys (customer ref, island fallback, error reference_code)
+ * without dropping the original casing 4PX stored.
+ *
+ * @param {...(string|string[]|null|undefined)} lists
+ * @returns {string[]}
+ */
+function uniqueLookupKeys(...lists) {
+  const seen = new Set();
+  const out = [];
+  for (const list of lists) {
+    const values = Array.isArray(list) ? list : [list];
+    for (const raw of values) {
+      const s = nonemptyText(raw);
+      if (!s) continue;
+      const id = s.toUpperCase();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push(s);
+    }
+  }
+  return out;
+}
+
+function wantedRefSet(requestNo) {
+  const values = Array.isArray(requestNo) ? requestNo : [requestNo];
+  return new Set(uniqueLookupKeys(values).map((s) => s.toUpperCase()));
+}
+
+/**
+ * Official `ds.xms.order.get` bodies.
+ *
+ * Docs: single query by ticket number (`request_no` = 4PX / customer / carrier
+ * no.) or batch query by time and status. Some accounts also resolve the
+ * customer reference on `ref_no`; we try both, never both at once (XOR).
+ *
+ * @param {string} requestNo
+ * @returns {object[]}
+ */
+function shipOrderGetPayloads(requestNo) {
+  const no = nonemptyText(requestNo);
+  if (!no) return [];
+  return [
+    { request_no: no },
+    { ref_no: no },
+  ];
+}
+
+/**
+ * Batch-query bodies for the "by time and status" form of ds.xms.order.get.
+ * Timestamps are milliseconds, matching the Open Platform request `timestamp`.
+ *
+ * @param {{ startMs?: number, endMs?: number }} [opts]
+ * @returns {object[]}
+ */
+function shipOrderSearchPayloads({ startMs, endMs } = {}) {
+  const end = Number.isFinite(endMs) ? Number(endMs) : Date.now();
+  const start = Number.isFinite(startMs) ? Number(startMs) : end - 7 * 24 * 60 * 60 * 1000;
+  return [
+    { start_time_of_search: start, end_time_of_search: end },
+    { start_time: start, end_time: end },
+  ];
+}
+
+function isUsableShipOrder(order) {
+  return !!(order && (nonemptyText(order.dsConsignmentNo) || nonemptyText(order.trackingNo)));
 }
 
 /**
  * Normalize the flat/list/nested shapes returned by 4PX order.create/order.get.
+ * @param {*} data
+ * @param {string|string[]} [requestNo]
  * @returns {object|null}
  */
 function normalizeShipOrderResponse(data, requestNo = '') {
-  if (!data || typeof data !== 'object') return null;
-  const queue = [{ value: data, depth: 0 }];
+  const parsed = coerceFourpxData(data);
+  if (!parsed || typeof parsed !== 'object') return null;
+  const queue = [{ value: parsed, depth: 0 }];
   const seen = new Set();
   const candidates = [];
   while (queue.length) {
@@ -790,11 +918,9 @@ function normalizeShipOrderResponse(data, requestNo = '') {
       if (depth < 5) value.forEach((item) => queue.push({ value: item, depth: depth + 1 }));
       continue;
     }
-    const consignment =
-      value.ds_consignment_no ?? value.dsConsignmentNo ?? value.consignment_no ?? null;
-    const tracking =
-      value['4px_tracking_no'] ?? value.trackingNo ?? value.tracking_no ?? null;
-    const refNo = value.ref_no ?? value.refNo ?? value.reference_no ?? null;
+    const consignment = firstNonempty(value, SHIP_ORDER_CONSIGNMENT_KEYS);
+    const tracking = firstNonempty(value, SHIP_ORDER_TRACKING_KEYS);
+    const refNo = firstNonempty(value, SHIP_ORDER_REF_KEYS);
     if (consignment || tracking) {
       candidates.push({
         raw: value,
@@ -810,20 +936,35 @@ function normalizeShipOrderResponse(data, requestNo = '') {
     }
   }
   if (!candidates.length) return null;
-  const wanted = String(requestNo || '');
+  const wanted = wantedRefSet(requestNo);
+  const rank = (candidate) => {
+    const both = candidate.consignment && candidate.tracking ? 2 : 1;
+    const match = wanted.size && candidate.refNo && wanted.has(String(candidate.refNo).toUpperCase()) ? 10 : 0;
+    return both + match;
+  };
+  candidates.sort((a, b) => rank(b) - rank(a));
   const chosen =
-    candidates.find((candidate) => wanted && String(candidate.refNo || '') === wanted)
+    (wanted.size && candidates.find((candidate) => candidate.refNo && wanted.has(String(candidate.refNo).toUpperCase())))
     || candidates[0];
   const value = chosen.raw;
   return {
     dsConsignmentNo: chosen.consignment,
     trackingNo: chosen.tracking,
-    labelBarcode: value.label_barcode ?? value.labelBarcode ?? null,
+    labelBarcode: firstNonempty(value, ['label_barcode', 'labelBarcode']),
     refNo: chosen.refNo,
-    logisticsChannelNo:
-      value.logistics_channel_no ?? value.logisticsChannelNo ?? null,
-    odaResultSign: value.oda_result_sign ?? value.odaResultSign ?? null,
+    logisticsChannelNo: firstNonempty(value, ['logistics_channel_no', 'logisticsChannelNo']),
+    odaResultSign: firstNonempty(value, ['oda_result_sign', 'odaResultSign']),
+    logisticsProductCode: firstNonempty(value, ['logistics_product_code', 'logisticsProductCode']),
   };
+}
+
+function firstNonempty(obj, keys) {
+  if (!obj || typeof obj !== 'object') return null;
+  for (const key of keys) {
+    const v = nonemptyText(obj[key]);
+    if (v) return v;
+  }
+  return null;
 }
 
 function planShipOrderReference({
@@ -879,6 +1020,46 @@ function mintShipOrderFallbackRef(baseRef, tag = 'ISL', now = Date.now()) {
 }
 
 /**
+ * True when `previousRef` is already a tagged fallback for this order
+ * (`ETSY-123-ISL…`, `ETSY-123-P…`). Reusing it avoids paying for a second
+ * consignment after a lost S5118 / DS000007 response.
+ *
+ * @param {string} previousRef
+ * @param {string} baseRef
+ * @param {string} [tag='ISL']
+ * @returns {string} The existing tagged ref, or '' when none.
+ */
+function existingTaggedRef(previousRef, baseRef, tag = 'ISL') {
+  const root = nonemptyText(baseRef);
+  const prior = nonemptyText(previousRef);
+  const safeTag = String(tag || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+  if (!root || !prior || !safeTag) return '';
+  const prefix = `${root}-${safeTag}`.toUpperCase();
+  return prior.toUpperCase().startsWith(prefix) ? prior : '';
+}
+
+/**
+ * Transport faults on `ds.xms.order.create` — timeout, reset, DNS — where 4PX
+ * may already have committed the ref_no. Never mint a replacement ref from
+ * these; adopt the existing consignment instead.
+ *
+ * @param {Error|string|object|null|undefined} error
+ * @returns {boolean}
+ */
+function isTransientFourpxTransportError(error) {
+  if (error == null) return false;
+  if (isRefAlreadyExistsRejection(error) || isRefInProcessingRejection(error)) return false;
+  const code = String(error.code || '').trim().toUpperCase();
+  if ([
+    'ETIMEDOUT', 'ECONNRESET', 'ECONNABORTED', 'EPIPE', 'ECONNREFUSED',
+    'ENETUNREACH', 'EHOSTUNREACH', 'EAI_AGAIN', 'UND_ERR_SOCKET',
+    'ERR_SOCKET_CONNECTION_TIMEOUT',
+  ].includes(code)) return true;
+  const msg = String(error.message || error || '');
+  return /timeout|timed out|ECONNRESET|socket hang up|network error|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EPIPE/i.test(msg);
+}
+
+/**
  * True when 4PX rejected a create because the ref_no is still "in processing"
  * (DS000007). Distinct from a committed duplicate: no consignment exists yet,
  * but the same ref cannot be submitted again until 4PX releases it.
@@ -896,6 +1077,80 @@ function isRefInProcessingRejection(error) {
 }
 
 /**
+ * True when 4PX rejected a create because this customer `ref_no` is already a
+ * committed consignment (DS000056, "ref_no had already exists").
+ *
+ * Distinct from DS000007 ("in processing"): the order IS booked. Retrying create
+ * cannot succeed, and minting a new ref would pay for a second label. Recovery
+ * is to query `ds.xms.order.get` and adopt the existing shipment.
+ *
+ * @param {Error|string|object|null|undefined} error
+ * @returns {boolean}
+ */
+function isRefAlreadyExistsRejection(error) {
+  if (error == null) return false;
+  const code = String(error.code || '').trim().toUpperCase();
+  if (code === 'DS000056') return true;
+  const msg = String(error.message || error || '');
+  if (/DS000056/i.test(msg)) return true;
+  return /ref_no[^\n]{0,80}already exists|had already exists/i.test(msg);
+}
+
+/**
+ * Pull every customer/4PX reference 4PX echoed on a DS000056 (or similar)
+ * rejection so lookup can use the island-fallback ref, not only ETSY-{id}.
+ *
+ * @param {Error|object|string|null|undefined} error
+ * @returns {string[]}
+ */
+function extractDuplicateRefCandidates(error) {
+  if (error == null) return [];
+  const keys = [];
+  const walk = (obj, depth = 0) => {
+    if (!obj || typeof obj !== 'object' || depth > 4) return;
+    for (const field of ['reference_code', 'ref_no', 'refNo', 'request_no', 'requestNo']) {
+      if (obj[field] != null) keys.push(obj[field]);
+    }
+    if (obj.error_data && typeof obj.error_data === 'object') walk(obj.error_data, depth + 1);
+    const nestedErrors = obj.errors || obj.error_list;
+    if (Array.isArray(nestedErrors)) {
+      nestedErrors.forEach((item) => walk(item, depth + 1));
+    }
+  };
+  if (typeof error === 'object') {
+    walk(error);
+    if (error.apiBody) walk(error.apiBody);
+  }
+  const msg = String(error.message || error || '');
+  const fromMsg = msg.match(/\b(?:ETSY|MANUAL)-\d+(?:-[A-Z0-9]+)?/gi);
+  if (fromMsg) keys.push(...fromMsg);
+  return uniqueLookupKeys(keys);
+}
+
+/**
+ * Operator-facing 409 when DS000056 is confirmed but `ds.xms.order.get` has not
+ * yet returned identifiers. Never mint a replacement ref from this state.
+ *
+ * @param {Error|object|null|undefined} sourceErr
+ * @param {{ receiptId?: string|number, refNo?: string }} [ctx]
+ * @returns {Error}
+ */
+function duplicateRefUnrecoverableError(sourceErr, ctx = {}) {
+  const refNo = nonemptyText(ctx.refNo);
+  const receipt = ctx.receiptId != null ? String(ctx.receiptId) : '';
+  const err = new Error(
+    `A 4PX shipment already exists for this order` +
+    (refNo ? ` (ref ${refNo})` : '') +
+    `. The dashboard could not load the tracking number from 4PX yet. Wait a few seconds and try again — do not create a second shipment.`,
+  );
+  err.status = 409;
+  err.code = 'DS000056';
+  if (sourceErr && sourceErr.apiBody) err.apiBody = sourceErr.apiBody;
+  if (receipt) err.receipt_id = receipt;
+  return err;
+}
+
+/**
  * Fetch the shipping-label URL for an existing order.
  *
  * @param {string}  appKey
@@ -906,18 +1161,23 @@ function isRefInProcessingRejection(error) {
  * @returns {Promise<LabelResult>}
  */
 async function getShipLabel(appKey, appSecret, requestNo, opts = {}) {
-  const data = await callApi(appKey, appSecret, 'ds.xms.label.get', {
+  const data = coerceFourpxData(await callApi(appKey, appSecret, 'ds.xms.label.get', {
     request_no:                requestNo,
     response_label_format:     opts.format ?? 'PDF',
     is_print_declaration_list: 'Y',
     is_print_time:             'Y',
-  });
+  }));
+  const identity = normalizeShipOrderResponse(data, requestNo) || {};
+  const urls = data && typeof data === 'object' ? (data.label_url_info || data.labelUrlInfo || {}) : {};
 
   return {
-    labelBarcode:   data.label_barcode   ?? null,
-    logisticsLabel: data.label_url_info?.logistics_label ?? null,
-    customLabel:    data.label_url_info?.custom_label    ?? null,
-    packageLabel:   data.label_url_info?.package_label   ?? null,
+    labelBarcode:   firstNonempty(data, ['label_barcode', 'labelBarcode']) || identity.labelBarcode || null,
+    logisticsLabel: nonemptyText(urls.logistics_label || urls.logisticsLabel) || null,
+    customLabel:    nonemptyText(urls.custom_label || urls.customLabel) || null,
+    packageLabel:   nonemptyText(urls.package_label || urls.packageLabel) || null,
+    dsConsignmentNo: identity.dsConsignmentNo || null,
+    trackingNo:      identity.trackingNo || null,
+    refNo:           identity.refNo || nonemptyText(requestNo),
   };
 }
 
@@ -940,7 +1200,12 @@ async function cancelShipOrder(appKey, appSecret, requestNo, reason = 'Customer 
 }
 
 /**
- * Query an existing 4PX order by reference number.
+ * Query an existing 4PX order by ticket number or customer `ref_no`.
+ *
+ * Official method `ds.xms.order.get`: single query by ticket number
+ * (`request_no`) or batch query by time/status. Customer refs (`ETSY-…`,
+ * `ETSY-…-ISL…`) are sent as `request_no` first, then `ref_no` if that
+ * envelope has no consignment/tracking identity.
  *
  * @param {string} appKey
  * @param {string} appSecret
@@ -948,7 +1213,120 @@ async function cancelShipOrder(appKey, appSecret, requestNo, reason = 'Customer 
  * @returns {Promise<object>}
  */
 async function getShipOrder(appKey, appSecret, requestNo) {
-  return callApi(appKey, appSecret, 'ds.xms.order.get', { request_no: requestNo });
+  const no = nonemptyText(requestNo);
+  if (!no) throw new Error('requestNo is required to query a 4PX order');
+  let lastError = null;
+  let lastData = null;
+  for (const body of shipOrderGetPayloads(no)) {
+    try {
+      const data = coerceFourpxData(await callApi(appKey, appSecret, 'ds.xms.order.get', body));
+      lastData = data;
+      if (normalizeShipOrderResponse(data, no)) return data;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  if (lastData != null) return lastData;
+  if (lastError) throw lastError;
+  return {};
+}
+
+async function findShipOrderInRecentWindow(appKey, appSecret, lookupKeys, opts = {}) {
+  const keys = uniqueLookupKeys(lookupKeys);
+  if (!keys.length) return null;
+  const payloads = shipOrderSearchPayloads({
+    startMs: opts.startMs,
+    endMs: opts.endMs,
+  });
+  for (const body of payloads) {
+    try {
+      const data = coerceFourpxData(await callApi(appKey, appSecret, 'ds.xms.order.get', body));
+      const found = normalizeShipOrderResponse(data, keys);
+      if (isUsableShipOrder(found)) return found;
+    } catch {
+      // Alternate time-window field names are best-effort.
+    }
+  }
+  return null;
+}
+
+/**
+ * Recover a committed 4PX shipment by customer ref (and any DS000056
+ * `reference_code`) without creating a second consignment.
+ *
+ * @param {string} appKey
+ * @param {string} appSecret
+ * @param {string|string[]} lookupKeys
+ * @param {object} [opts]
+ * @param {number} [opts.attempts=1]
+ * @param {number} [opts.delayMs=1500]
+ * @param {(ms:number)=>Promise<void>} [opts.sleep]
+ * @param {Error|object} [opts.error]  Original create rejection (extra refs).
+ * @param {boolean} [opts.searchRecent=false]
+ * @param {boolean} [opts.tryLabel=false]
+ * @param {(key:string)=>Promise<object|null>} [opts.lookup]
+ * @returns {Promise<object|null>}
+ */
+async function resolveExistingShipOrder(appKey, appSecret, lookupKeys, opts = {}) {
+  const keys = uniqueLookupKeys(lookupKeys, extractDuplicateRefCandidates(opts.error));
+  if (!keys.length) return null;
+  const attempts = Math.max(1, Number(opts.attempts) || 1);
+  const delayMs = Number.isFinite(opts.delayMs) ? Math.max(0, opts.delayMs) : 1500;
+  const sleep = typeof opts.sleep === 'function'
+    ? opts.sleep
+    : (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const lookup = typeof opts.lookup === 'function'
+    ? opts.lookup
+    : async (key) => {
+      try {
+        return normalizeShipOrderResponse(
+          coerceFourpxData(await getShipOrder(appKey, appSecret, key)),
+          key,
+        );
+      } catch {
+        return null;
+      }
+    };
+
+  let last = null;
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0 && delayMs > 0) await sleep(delayMs);
+    for (const key of keys) {
+      last = await lookup(key);
+      if (isUsableShipOrder(last)) return last;
+    }
+  }
+
+  if (opts.searchRecent) {
+    try {
+      const listed = await findShipOrderInRecentWindow(appKey, appSecret, keys, opts);
+      if (isUsableShipOrder(listed)) return listed;
+    } catch {
+      // Batch query is a last-ditch probe, never a hard failure.
+    }
+  }
+
+  if (opts.tryLabel) {
+    for (const key of keys) {
+      try {
+        const label = await getShipLabel(appKey, appSecret, key);
+        const fromLabel = {
+          dsConsignmentNo: nonemptyText(label.dsConsignmentNo),
+          trackingNo: nonemptyText(label.trackingNo),
+          labelBarcode: nonemptyText(label.labelBarcode),
+          refNo: nonemptyText(label.refNo) || key,
+          logisticsChannelNo: null,
+          odaResultSign: null,
+          logisticsProductCode: null,
+        };
+        if (isUsableShipOrder(fromLabel)) return fromLabel;
+      } catch {
+        // label.get by customer ref is not guaranteed on every account.
+      }
+    }
+  }
+
+  return isUsableShipOrder(last) ? last : null;
 }
 
 // ── Freight / shipping-cost retrieval ───────────────────────────────────────────
@@ -1296,10 +1674,20 @@ module.exports = {
   getShipOrder,
   getOrderFreight,
   getEstimatedCost,
+  coerceFourpxData,
+  uniqueLookupKeys,
+  shipOrderGetPayloads,
+  shipOrderSearchPayloads,
   normalizeShipOrderResponse,
   planShipOrderReference,
   mintShipOrderFallbackRef,
+  existingTaggedRef,
+  isTransientFourpxTransportError,
   isRefInProcessingRejection,
+  isRefAlreadyExistsRejection,
+  extractDuplicateRefCandidates,
+  duplicateRefUnrecoverableError,
+  resolveExistingShipOrder,
   normalizeFreightResponse,
   safeLabelBaseName,
   assignUniqueLabelNames,
@@ -1311,5 +1699,6 @@ module.exports = {
   enforceSenderStreet,
   resolveRecipientState,
   generateRecipientPhone,
+  sanitizeRecipientPostCode,
   DEFAULT_RECIPIENT_PHONE,
 };

@@ -30,6 +30,7 @@
 const FILLER = new Set([
 	'a', 'an', 'and', 'for', 'the', 'with', 'of', 'in', 'on', 'to', 'or', 'by', 'from', 'your',
 	'case', 'cases', 'cover', 'covers', 'casing', 'shell', 'skin', 'protector', 'accessory', 'accessories',
+	'band', 'bands', 'strap', 'straps', 'bracelet', 'bracelets',
 	'phone', 'mobile', 'cell', 'cellphone', 'smartphone', 'device',
 	'gift', 'gifts', 'gifting', 'her', 'him', 'she', 'he', 'them', 'you',
 	'women', 'woman', 'womens', 'girl', 'girls', 'girlfriend', 'teen', 'teens', 'bestie', 'friend', 'bff', 'sister', 'mom',
@@ -61,7 +62,7 @@ const COLOR = new Set([
 
 // Device / compatibility tokens (plus any bare number).
 const DEVICE = new Set([
-	'iphone', 'airpods', 'airpod', 'apple', 'samsung', 'galaxy', 'pixel',
+	'iphone', 'airpods', 'airpod', 'apple', 'watch', 'watches', 'ipad', 'tablet', 'samsung', 'galaxy', 'pixel',
 	'pro', 'max', 'plus', 'mini', 'ultra', 'air', 'gen', 'generation',
 	'magsafe', 'mag', 'safe', 'magnetic', 'magnet', 'wireless', 'charging', 'charger',
 ])
@@ -82,8 +83,15 @@ const PLACEHOLDER_PATTERNS = [
 const DEFAULT_MIN_SCORE = 70
 const MAX_AESTHETIC_WORDS = 1
 const IDEAL_MAX_WORDS = 15
-const RECOMMENDED_MAX_WORDS = 20
+// A phone-case title must carry a long compatibility phrase, so the old
+// "under 15 words" suggestion cannot also hold the extra search phrases Etsy
+// indexes. 32 words is about a full 140-character title of real terms.
+const RECOMMENDED_MAX_WORDS = 32
 const ETSY_MAX_LENGTH = 140
+// Fill toward the hard limit with unused concrete queries. Stop short only
+// when nothing real still fits — never pad with gift or vibe words.
+const SEO_TITLE_FLOOR = 110
+const ITEM_NOUNS = new Set(['case', 'cover', 'shell', 'band', 'strap', 'bracelet'])
 
 // ── Tokenisation ─────────────────────────────────────────────────────────────
 
@@ -252,6 +260,7 @@ function scoreTitle(title, context = {}, opts = {}) {
 
 	const specificTerms = [...new Set(tokens.filter((t) => classify(t) === 'specific'))]
 	const aestheticWords = tokens.filter((t) => classify(t) === 'aesthetic')
+	const itemNounCount = tokens.filter((token) => ITEM_NOUNS.has(token)).length
 	const subjectPresent = subject ? titleContainsTerm(tokens, subject) : false
 	const devicePhrasePresent = devicePhrase ? titleContainsTerm(tokens, devicePhrase) : true
 
@@ -278,6 +287,9 @@ function scoreTitle(title, context = {}, opts = {}) {
 	if (evaluated && designTerms.length === 1 && matchedDesignTerms.length === 0) {
 		add('design_terms_missing', `The title does not mention the one design detail found on the case ("${designTerms[0]}").`, true)
 	}
+	if (evaluated && designTerms.length >= 3 && matchedDesignTerms.length < 2) {
+		add('design_coverage_thin', `The title uses only ${matchedDesignTerms.length} of the available concrete design details; include at least two strong objective traits.`, false)
+	}
 	if (evaluated && !specificTerms.length) {
 		add('no_specific_terms', 'Every word in the title is generic filler — it would fit any phone case in the shop.', true)
 	}
@@ -288,8 +300,11 @@ function scoreTitle(title, context = {}, opts = {}) {
 		const listed = [...counts.entries()].map(([word, n]) => (n > 1 ? `${word} ×${n}` : word)).join(', ')
 		add('aesthetic_spam', `The title stacks ${aestheticWords.length} vibe words (${listed}) where at most ${MAX_AESTHETIC_WORDS} belong.`, false)
 	}
+	if (itemNounCount > 2) {
+		add('item_noun_stacking', `The title names the item ${itemNounCount} times with case/cover or band/strap/bracelet synonyms. Etsy recommends stating what the item is once.`, false)
+	}
 	if (devicePhrase && !devicePhrasePresent) {
-		add('device_missing', `The title must carry the exact device coverage "${devicePhrase}".`, false)
+		add('device_missing', `The title must carry the exact required item/compatibility phrase "${devicePhrase}".`, true)
 	}
 
 	// ── Weighted score ────────────────────────────────────────────────────────
@@ -303,9 +318,13 @@ function scoreTitle(title, context = {}, opts = {}) {
 		// Nothing to be specific about — award the content points and judge format.
 		score += 80
 	}
-	score += tokens.length <= IDEAL_MAX_WORDS ? 10 : tokens.length <= RECOMMENDED_MAX_WORDS ? 5 : 0
+	if (text.length > ETSY_MAX_LENGTH) score += 0
+	else if (text.length >= SEO_TITLE_FLOOR) score += 10
+	else if (text.length >= 80) score += 5
 	score += aestheticWords.length <= MAX_AESTHETIC_WORDS ? 10 : 0
 	if (!devicePhrasePresent) score -= 10
+	if (evaluated && designTerms.length >= 3 && matchedDesignTerms.length < 2) score -= 15
+	if (itemNounCount > 2) score -= Math.min(10, (itemNounCount - 2) * 5)
 	if (isPlaceholder(text)) score -= 40
 
 	score = Math.max(0, Math.min(100, Math.round(score)))
@@ -371,10 +390,85 @@ function tidyTitle(title) {
 		.trim()
 }
 
+// Buyer-search words the specificity scorer treats as structure, but which
+// phone-case shoppers actually type.
+const SEARCH_KEEP = new Set([
+	'silicone', 'tpu', 'glitter', 'matte', 'glossy', 'bumper', 'grip', 'charm',
+	'quicksand', 'resin', 'acrylic', 'magsafe',
+])
+const SEARCH_BANNED = /\b(gift|gifts|perfect|beautiful|stunning|amazing|premium|best|sale|shipping|free|cheap)\b/i
+const SEARCH_WEAK = new Set([
+	'animal', 'cartoon', 'small', 'tiny', 'little', 'happy', 'nice', 'super', 'face',
+	'look', 'thing', 'stuff', 'style', 'design', 'character', 'picture', 'image', 'photo',
+	'back', 'label', 'soul', 'text', 'frame', 'line', 'side', 'front', 'top', 'bottom',
+])
+
+function searchTokenKept(token) {
+	const kind = classify(token)
+	return kind === 'specific' || kind === 'color' || SEARCH_KEEP.has(token)
+}
+
+/**
+ * Append unused concrete search phrases until the title is close to Etsy's
+ * 140-character limit. The opening words stay as written, so the part buyers
+ * see on mobile still names the product. Nothing already in the title is
+ * repeated, and gift or subjective filler is never added.
+ *
+ * @param {string} title
+ * @param {{designTerms?:string[], searchPhrases?:string[], hasMagsafe?:boolean, hasGrip?:boolean, hasCharm?:boolean}} [context]
+ * @returns {string}
+ */
+function expandTitleForSearch(title, context = {}) {
+	let text = tidyTitle(String(title || '').trim())
+	if (!text || text.length >= ETSY_MAX_LENGTH) return text
+
+	const present = new Set(tokenise(text))
+	const candidates = []
+	const push = (value) => {
+		const term = String(value || '').trim()
+		if (term) candidates.push(term)
+	}
+	for (const term of context.designTerms || []) push(term)
+	for (const term of context.searchPhrases || []) push(term)
+	if (context.hasGrip) push('3D Grip')
+	if (context.hasCharm) push('Charm Strap')
+	if (context.hasMagsafe) push('MagSafe')
+
+	const pieces = []
+	for (const term of candidates) {
+		if (SEARCH_BANNED.test(term) || isPlaceholder(term)) continue
+		if (!/\s/.test(term) && term.length > 14) continue
+		const words = term.split(/\s+/).filter(Boolean)
+		const kept = []
+		const seenInPiece = new Set()
+		for (const word of words) {
+			const token = tokenise(word)[0]
+			if (!token || !searchTokenKept(token) || SEARCH_WEAK.has(token) || present.has(token) || seenInPiece.has(token)) continue
+			seenInPiece.add(token)
+			kept.push(word.replace(/[^A-Za-z0-9-]+/g, '') || word)
+		}
+		const piece = kept.join(' ').replace(/\s+/g, ' ').trim()
+		const pieceTokens = tokenise(piece)
+		const strong = pieceTokens.filter((token) => classify(token) === 'specific' && !SEARCH_WEAK.has(token))
+		if (!strong.length && !pieceTokens.some((token) => SEARCH_KEEP.has(token))) continue
+		if (pieceTokens.length === 1 && piece.length < 4) continue
+		const next = pieces.length ? `${text}, ${pieces.join(', ')}, ${piece}` : `${text}, ${piece}`
+		if (next.length > ETSY_MAX_LENGTH) continue
+		pieces.push(piece)
+		for (const token of tokenise(piece)) present.add(token)
+		if (pieces.length >= 6) break
+	}
+
+	if (!pieces.length) return text
+	return `${text}, ${pieces.join(', ')}`
+}
+
 module.exports = {
 	scoreTitle,
 	buildTitleContext,
 	tidyTitle,
+	expandTitleForSearch,
+	SEO_TITLE_FLOOR,
 	isPlaceholder,
 	normaliseText,
 	tokenise,

@@ -11,16 +11,19 @@
  *   · The library is presented as SECTIONS, one per charm shop · stall, each led
  *     by a header naming the shop, its stall, its market · floor and how many
  *     charms stand there. A wall of CH-codes is what this replaced.
- *   · Sections follow the shopping route's walking order, and charms with no
- *     supplier land in one clearly-marked section at the end — visible enough to
- *     be fixed, never mixed in with located stock.
+ *   · Dedicated charm shops lead; other shops (case/grip booths that also sell
+ *     charms) follow in walking order. Charms with no supplier land in one
+ *     clearly-marked section at the end — visible enough to be fixed, never
+ *     mixed in with located stock.
  *   · A pick card shows the photo and the code, full stop: it never repeats the
  *     shop its section header already states, and carries no label beside it.
  *   · Picking a charm assigns THAT charm's code and shop — including shop names
  *     carrying quotes or markup, which is where hand-built HTML usually breaks.
  *   · A dropdown above the grid names every supplier in the picker and jumps to
  *     the one chosen, then selects whichever section the operator scrolls into.
- *     It never offers a destination the grid below does not hold.
+ *     It never offers a destination the grid below does not hold. When both
+ *     charm shops and other shops are on screen, the dropdown names those two
+ *     bands so the operator is not scrolling past 通信 to reach 龙胜.
  *   · Manage-charms mode stays ONE flat grid: sections would fight the drag that
  *     is the whole point of that mode.
  *
@@ -110,7 +113,13 @@ function makeEnv({ charms = LIBRARY, shops = SHOPS, assigned = '', manage = fals
 
 	const prelude = `
 		const API = ''
-		const I18N = { get: () => window.__lang }
+		const I18N = {
+			get: () => window.__lang,
+			t: (s) => {
+				if (window.__lang !== 'zh') return s
+				return ({ 'Charm shops': '吊饰店', 'Other shops': '其他店铺', 'No supplier set': '未设置供应商' })[s] || s
+			},
+		}
 		let _charmList = ${JSON.stringify(charms)}
 		let _charmShopDirectory = ${JSON.stringify(shops)}
 		let _charmManageMode = ${JSON.stringify(manage)}
@@ -170,6 +179,72 @@ function search(window, value) {
 	box.dispatchEvent(new window.window.Event('input', { bubbles: true }))
 }
 
+const MIXED_LIBRARY = [
+	{ code: 'CH-00101', default_charm_shop: '鑫宜', default_charm_shop_stall: 'A205', default_charm_shop_uses_supplier_location: true, has_image: false },
+	{ code: 'CH-00002', default_charm_shop: '彩虹', default_charm_shop_stall: '2D21', has_image: false },
+	{ code: 'CH-00099', default_charm_shop: '', default_charm_shop_stall: '', has_image: false },
+	{ code: 'CH-00013', default_charm_shop: '一樂潮品', default_charm_shop_stall: '2C666', has_image: false },
+	{ code: 'CH-00200', default_charm_shop: '贝贝利', default_charm_shop_stall: '经济5D06-07', default_charm_shop_uses_supplier_location: true, has_image: false },
+]
+const MIXED_SHOPS = [
+	{ shop_name: '一樂潮品', stall: '2C666', uses_supplier_location: false },
+	{ shop_name: '彩虹', stall: '2D21', uses_supplier_location: false },
+	{ shop_name: '鑫宜', stall: 'A205', uses_supplier_location: true },
+	{ shop_name: '贝贝利', stall: '经济5D06-07', uses_supplier_location: true },
+]
+const mixedEnv = () => makeEnv({ charms: MIXED_LIBRARY, shops: MIXED_SHOPS })
+const optgroupLabels = (doc) => Array.from(jumpSelect(doc)?.querySelectorAll('optgroup') || []).map((g) => g.label)
+
+// ─────────────────────────────────────────────────────────────────────────────
+group('Charm shops lead, other shops follow')
+
+test('dedicated charm shops sit above earlier-walking supplier booths', () => {
+	const { doc } = mixedEnv()
+	assert.deepStrictEqual(
+		sections(doc).map((s) => headText(s, '.cgh-shop')),
+		['一樂潮品', '彩虹', '贝贝利', '鑫宜', 'No supplier set'],
+		'charm shops must lead; 经济/通信 suppliers must not bury them',
+	)
+	assert.deepStrictEqual(
+		sections(doc).map((s) => s.getAttribute('data-kind')),
+		['charm', 'charm', 'supplier', 'supplier', 'unset'],
+	)
+	assert.deepStrictEqual(
+		optionLabels(doc),
+		['一樂潮品 · 2C666 (1)', '彩虹 · 2D21 (1)', '贝贝利 · 经济5D06-07 (1)', '鑫宜 · A205 (1)', 'No supplier set (1)'],
+		'the dropdown must follow the same charm-then-other order as the grid',
+	)
+})
+
+test('the dropdown names Charm shops and Other shops when both bands exist', () => {
+	const { doc } = mixedEnv()
+	assert.deepStrictEqual(optgroupLabels(doc), ['Charm shops', 'Other shops', 'No supplier set'])
+	const band = doc.querySelector('.charm-band-head')
+	assert.ok(band, 'the grid does not mark where charm shops end')
+	assert.strictEqual(band.textContent.trim(), 'Other shops')
+	assert.strictEqual(doc.querySelectorAll('.charm-band-head').length, 1, 'the Other-shops band must appear once, at the hand-off')
+})
+
+test('a charm-only library does not invent Other-shops chrome', () => {
+	const { doc } = makeEnv()
+	assert.strictEqual(optgroupLabels(doc).length, 0, 'optgroups on a charm-only list are noise')
+	assert.strictEqual(doc.querySelectorAll('.charm-band-head').length, 0, 'the Other-shops band appeared with no other shops')
+})
+
+test('jumping to an other-shop uses the section index, not the band divider', () => {
+	const { window, doc } = mixedEnv()
+	const asks = watchScroll(doc)
+	pickSupplier(window, 2)
+	assert.strictEqual(markedIndex(doc), 2, 'the chosen other-shop is not selected')
+	assert.strictEqual(headText(sections(doc)[2], '.cgh-shop'), '贝贝利')
+	assert.strictEqual(asks.length, 1, 'the picker was not scrolled')
+})
+
+test('the Other-shops band reads in the operator’s language', () => {
+	const { doc } = makeEnv({ charms: MIXED_LIBRARY, shops: MIXED_SHOPS, lang: 'zh' })
+	assert.deepStrictEqual(optgroupLabels(doc), ['吊饰店', '其他店铺', '未设置供应商'])
+	assert.strictEqual(doc.querySelector('.charm-band-head').textContent.trim(), '其他店铺')
+})
 const rail = (doc) => doc.getElementById('charmJump')
 const jumpSelect = (doc) => doc.getElementById('charmJumpSelect')
 const options = (doc) => Array.from(jumpSelect(doc)?.options || [])
@@ -204,6 +279,7 @@ test('the library is cut into one section per supplier, each headed with its sta
 	const secs = sections(doc)
 	assert.strictEqual(secs.length, 4, `expected 4 supplier sections, got ${secs.length}`)
 	assert.strictEqual(headText(secs[0], '.cgh-shop'), '一樂潮品', 'the first section does not name its shop')
+	assert.strictEqual(secs[0].getAttribute('data-kind'), 'charm', 'a dedicated charm stall must be tagged as a charm shop')
 	assert.strictEqual(headText(secs[0], '.cgh-stall'), '2C666', 'the stall code is missing from the header')
 	assert.strictEqual(headText(secs[0], '.cgh-market'), 'Longsheng · F2', 'the header does not say which market and floor')
 	assert.strictEqual(headText(secs[0], '.cgh-count'), '2', 'the header does not count the charms standing there')
@@ -250,6 +326,25 @@ test('a pick card carries the photo and the code, and nothing else', () => {
 test('the market reads in the operator’s language', () => {
 	const { doc } = makeEnv({ lang: 'zh' })
 	assert.strictEqual(headText(sections(doc)[0], '.cgh-market'), '龙胜 · F2', 'the header is not localised')
+})
+
+test('a supplier-backed charm booth renders in 通信, not 龙胜', () => {
+	const supplierCharm = [{
+		code: 'CH-00101',
+		default_charm_shop: '鑫宜',
+		default_charm_shop_stall: 'A205',
+		// Deliberately stale: the just-edited directory below must win immediately.
+		default_charm_shop_uses_supplier_location: false,
+		has_image: false,
+	}]
+	const { doc } = makeEnv({
+		charms: supplierCharm,
+		shops: [{ shop_name: '鑫宜', stall: 'A205', uses_supplier_location: true }],
+		lang: 'zh',
+	})
+	assert.strictEqual(headText(sections(doc)[0], '.cgh-shop'), '鑫宜')
+	assert.strictEqual(headText(sections(doc)[0], '.cgh-stall'), 'A205')
+	assert.strictEqual(headText(sections(doc)[0], '.cgh-market'), '通信 · F2')
 })
 
 test('the charm already on the line opens selected, and only that one', () => {

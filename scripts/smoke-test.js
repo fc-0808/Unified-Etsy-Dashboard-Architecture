@@ -15,7 +15,7 @@
  * Run intentionally:
  *   $env:ALLOW_LIVE_ETSY_READ_TEST='1'; node scripts/smoke-test.js
  *
- * Prerequisites: VPN + IPFoxy active, tokens.json populated for at least one shop.
+ * Prerequisites: configured network transport + IPFoxy active, and tokens present.
  */
 
 if (process.env.ALLOW_LIVE_ETSY_READ_TEST !== '1') {
@@ -76,6 +76,7 @@ async function testShop(shopCtx, tokenManager, proxyClient, db) {
     // ── Step 2: Build authenticated shop client ────────────────────────────────
     const shopClient = buildShopClient(proxyClient, shop.api_key, shop.shared_secret, accessToken, null, {
       requireProxy: usesGroupProxy(group), // fail closed for proxied groups
+      shopId: shop.shop_id,
     });
 
     // ── Step 3: API ping (validates x-api-key format) ─────────────────────────
@@ -209,15 +210,15 @@ async function main() {
   for (const groupId of groupIds) {
     const group = config.groups.find((g) => g.group_id === groupId);
     try {
-      const exitIp = await verifyGroupProxy(group, config.vpn_local_port);
+      const exitIp = await verifyGroupProxy(group, config.network_transport);
       proxyIPs.set(groupId, exitIp);
-      proxyClients.set(groupId, createGroupProxyClient(group, config.vpn_local_port));
+      proxyClients.set(groupId, createGroupProxyClient(group, config.network_transport));
       const routeLabel = usesGroupProxy(group) ? 'Proxy' : 'Direct';
       console.log(pass(`${routeLabel} [${groupId}]  exit IP = ${exitIp}`));
     } catch (err) {
       console.log(fail(`Network [${groupId}]  FAILED: ${err.message}`));
       if (usesGroupProxy(group)) {
-        console.log(info('  → Is your VPN connected? Is IPFoxy active?'));
+        console.log(info('  → Is the configured VPN/TUN transport connected? Is IPFoxy active?'));
       }
       console.log('');
       // Still continue — we'll report failure per shop for this group

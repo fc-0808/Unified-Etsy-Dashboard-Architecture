@@ -249,8 +249,10 @@ async function getShopListingSettings({ db, shopClient, shopId, shopKey, product
         const hasReadinessField = cached.defaults && 'readiness_state_id' in cached.defaults;
         const hasProductType = 'product_type' in cached;
         if (hasReadinessField && hasProductType) {
-          cached._cached = true;
-          return cached;
+          // Shipping/sections stay cached; models and styles always follow the
+          // live registry so a new iPhone / AirPods generation is offered on
+          // Bulk Listings without waiting out the 6-hour cache TTL.
+          return { ...cached, ...productTypes.productMeta(pt), _cached: true };
         }
       }
     } catch { /* table may not exist yet — fall through to live fetch */ }

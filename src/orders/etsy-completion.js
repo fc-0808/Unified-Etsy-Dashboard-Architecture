@@ -216,13 +216,20 @@ function classifyCompletionError(err) {
 	// "already" can never be mistaken for a completed shipment.
 	const alreadyShipped = /already/i.test(message) && /(ship|track)/i.test(message)
 
+	// "API key not found" is a bad credential, not a missing receipt. Matching
+	// every "not found" dead-lettered the whole shop after one auth failure,
+	// and Finish-them-now then had nothing left it was allowed to retry.
+	const credentialFault = /api key|shared secret|invalid_grant|invalid_client|access token|unauthori[sz]ed/i.test(message)
+	const missingReceipt = /\breceipt\b/i.test(message) && /not\s+found/i.test(message)
+
 	const permanent =
 		!alreadyShipped &&
+		!credentialFault &&
 		(status === 404 ||
 			err?.code === 'NOT_FOUND' ||
 			err?.code === 'NOT_ON_ETSY' ||
 			err?.code === 'NO_TRACKING' ||
-			/not\s+found/i.test(message) ||
+			missingReceipt ||
 			/cannot be shipped or tracked through Etsy/i.test(message))
 
 	return { alreadyShipped, permanent, message }
@@ -509,6 +516,43 @@ function adoptOrphans(db, { now = _nowSec(), maxAgeSec = ADOPT_MAX_AGE_SEC, limi
 }
 
 /**
+ * Operator pressed "Finish them now". Dead-lettered orders (a bad API key, a
+ * proxy blip mis-read as permanent) and intents still inside a lease from a
+ * sweep that died must become due immediately. Does not touch orders that are
+ * already completed, and does not invent an intent for a receipt that has none
+ * — adoption handles that.
+ *
+ * @returns {number} intents brought forward
+ */
+function rearmForOperator(db, { now = _nowSec() } = {}) {
+	const rows = db
+		.prepare(
+			`SELECT r.receipt_id, r.tracking_code, r.fourpx_tracking_no, r.fourpx_consignment_no, i.state
+       FROM receipts r
+       JOIN etsy_completion_intents i ON i.receipt_id = r.receipt_id
+      WHERE r.is_shipped = 0
+        AND i.state IN ('${STATE.DEAD}', '${STATE.PENDING}')
+        AND r.status NOT IN (${CANCELLED_SQL_LIST})
+        AND COALESCE(r.fourpx_order_status, '') <> 'cancelled'`,
+		)
+		.all()
+	let n = 0
+	for (const row of rows) {
+		const res = enqueue(db, {
+			receiptId: row.receipt_id,
+			trackingCode: resolveTracking(row),
+			origin: 'operator',
+			now,
+			graceSec: 0,
+			expedite: true,
+			revive: row.state === STATE.DEAD,
+		})
+		if (res.changed) n++
+	}
+	return n
+}
+
+/**
  * Counts for the operator-facing banner and for logs.
  * `due` is the subset of `pending` that is actionable right now.
  */
@@ -632,6 +676,7 @@ module.exports = {
 	claimDue,
 	releaseClaim,
 	adoptOrphans,
+	rearmForOperator,
 	summarize,
 	isStranded,
 	countStranded,

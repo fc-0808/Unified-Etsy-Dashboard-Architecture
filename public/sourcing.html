@@ -34,6 +34,17 @@
 				--purple: #a78bfa;
 				--teal: #2dd4bf;
 				--pink: #f472b6;
+				/* One hue per market so the rail, section bands, and shop rows
+				   agree at a glance — the same job colour does on Route/Shipping. */
+				--b-jingji: #f59e0b;
+				--b-tongxin: #6c8fff;
+				--b-kangle-north: #a78bfa;
+				--b-kangle: #c084fc;
+				--b-taipingyang: #2dd4bf;
+				--b-huitong: #22c55e;
+				--b-longsheng: #f472b6;
+				--b-unlocated: #94a3b8;
+				--b-other: #fb7185;
 				--radius: 10px;
 				/* Topbar (56) + trademark bar (22). The Library view sizes its two
 				   internally-scrolling columns against this, so it must stay in step
@@ -216,21 +227,38 @@
 				gap: 18px;
 				flex-wrap: wrap;
 				margin-bottom: 16px;
+				padding: 18px 20px;
+				border: 1px solid rgba(245, 100, 0, 0.16);
+				border-radius: 14px;
+				background:
+					radial-gradient(circle at 10% -30%, rgba(245, 100, 0, 0.16), transparent 48%),
+					linear-gradient(135deg, rgba(28, 30, 42, 0.96), rgba(15, 17, 23, 0.94));
+			}
+			.page-eyebrow {
+				margin: 0 0 5px;
+				color: #fdba74;
+				font-size: 10px;
+				font-weight: 700;
+				letter-spacing: 0.12em;
+				text-transform: uppercase;
 			}
 			.page-head h1 {
-				font-size: 20px;
+				font-size: 22px;
 				font-weight: 700;
+				letter-spacing: -0.02em;
 			}
 			.page-head .sub {
 				color: var(--muted);
 				font-size: 13px;
-				margin-top: 3px;
+				margin-top: 6px;
 				max-width: 76ch;
+				line-height: 1.5;
 			}
 			.head-actions {
 				display: flex;
 				gap: 8px;
 				flex-wrap: wrap;
+				align-self: center;
 			}
 
 			.stats {
@@ -242,13 +270,47 @@
 			.stat {
 				background: var(--card);
 				border: 1px solid var(--border);
-				border-radius: var(--radius);
+				border-radius: 12px;
 				padding: 11px 13px;
+			}
+			.page > .stats .stat {
+				position: relative;
+				overflow: hidden;
+				padding: 14px 16px 13px;
+			}
+			.page > .stats .stat::before {
+				content: '';
+				position: absolute;
+				inset: 0 0 auto;
+				height: 2px;
+				background: var(--stat-accent, var(--accent));
+			}
+			.page > .stats .stat:nth-child(1) {
+				--stat-accent: var(--accent);
+			}
+			.page > .stats .stat:nth-child(2) {
+				--stat-accent: var(--blue);
+			}
+			.page > .stats .stat:nth-child(3) {
+				--stat-accent: var(--purple);
+			}
+			.page > .stats .stat:nth-child(4) {
+				--stat-accent: var(--teal);
+			}
+			.page > .stats .stat:nth-child(5) {
+				--stat-accent: var(--pink);
+			}
+			.page > .stats .stat:nth-child(6) {
+				--stat-accent: var(--yellow);
 			}
 			.stat .v {
 				font-size: 20px;
 				font-weight: 700;
 				line-height: 1.2;
+			}
+			.page > .stats .stat .v {
+				font-size: 26px;
+				letter-spacing: -0.03em;
 			}
 			.stat .k {
 				color: var(--muted);
@@ -256,6 +318,12 @@
 				text-transform: uppercase;
 				letter-spacing: 0.04em;
 				margin-top: 2px;
+			}
+			.page > .stats .stat .k {
+				margin-top: 0;
+				margin-bottom: 5px;
+				letter-spacing: 0.08em;
+				font-size: 10.5px;
 			}
 			.stat .bar {
 				height: 3px;
@@ -332,6 +400,15 @@
 			.btn.danger:hover {
 				background: rgba(239, 68, 68, 0.12);
 			}
+			.btn svg {
+				width: 14px;
+				height: 14px;
+				fill: none;
+				stroke: currentColor;
+				stroke-width: 2;
+				stroke-linecap: round;
+				stroke-linejoin: round;
+			}
 			.btn.sm {
 				padding: 5px 10px;
 				font-size: 12px;
@@ -386,6 +463,289 @@
 			.chip.warn.on {
 				border-color: var(--yellow);
 				background: rgba(245, 159, 11, 0.12);
+			}
+
+			/* Suppliers: search + building chooser stay pinned under the
+			   topbar/disclaimer while the stall list scrolls. --sup-controls-h
+			   is measured so a photo-hit row can scroll-margin under this
+			   strip. Building bands stay IN FLOW — sticky <td> inside a
+			   collapsed table slides over the shops it is meant to label. */
+			.sup-controls {
+				position: sticky;
+				top: var(--chrome);
+				z-index: 12;
+				background:
+					linear-gradient(180deg, rgba(28, 30, 42, 0.98), rgba(22, 24, 34, 0.96));
+				padding: 10px 12px 12px;
+				margin: 0 0 14px;
+				border: 1px solid var(--border);
+				border-radius: 12px;
+			}
+			.sup-controls .toolbar {
+				margin-bottom: 8px;
+			}
+			.sup-controls .facet-row {
+				margin-bottom: 0;
+			}
+			.sup-controls .facet-scroller {
+				--facet-fade: #1c1e2a;
+			}
+			#viewSuppliers #supArea .supplier-table th {
+				top: calc(var(--chrome) + var(--sup-controls-h, 0px));
+			}
+			/* Grouped directory: column labels stay at the top of the table
+			   (they do not pin through a building). Market bands are ordinary
+			   rows, so a shop can never render both above and underneath one. */
+			#viewSuppliers .supplier-table.has-markets thead th {
+				position: static;
+				top: auto;
+			}
+			#viewSuppliers .supplier-table.has-markets .market-row td {
+				position: static;
+				top: auto;
+				z-index: auto;
+			}
+			/* Charm-shop labels are unpinned next to `.dtable th` — a second
+			   sticky thead on this page paints over 彩虹's count. */
+			#viewSuppliers .supplier-table tr.srow,
+			#viewSuppliers .supplier-table .market-row {
+				scroll-margin-top: calc(var(--chrome) + var(--sup-controls-h, 0px) + 10px);
+			}
+
+			/* Horizontal option rail — buildings on Suppliers, product types in
+			   a stall's drawer. One row that scrolls, never a wrapping chip
+			   cloud and never a dropdown parked off to the right: the choices
+			   are the UI, not a hidden <select>. */
+			.facet-row {
+				display: flex;
+				align-items: center;
+				gap: 10px;
+				margin-bottom: 12px;
+				min-width: 0;
+			}
+			.facet-row .lbl {
+				color: var(--muted);
+				font-size: 11px;
+				text-transform: uppercase;
+				letter-spacing: 0.04em;
+				flex-shrink: 0;
+			}
+			.facet-scroller {
+				position: relative;
+				flex: 1;
+				min-width: 0;
+				--facet-fade: var(--bg);
+			}
+			.facet-rail {
+				display: flex;
+				gap: 6px;
+				overflow-x: auto;
+				overscroll-behavior-x: contain;
+				scrollbar-width: none;
+				padding: 3px 2px;
+				scroll-snap-type: x proximity;
+				-webkit-overflow-scrolling: touch;
+				touch-action: pan-x;
+			}
+			.facet-rail::-webkit-scrollbar {
+				display: none;
+			}
+			.facet {
+				appearance: none;
+				flex: 0 0 auto;
+				scroll-snap-align: start;
+				background: var(--card);
+				border: 1px solid var(--border);
+				color: var(--muted);
+				font-size: 12.5px;
+				font-weight: 600;
+				border-radius: 999px;
+				padding: 6px 12px;
+				cursor: pointer;
+				display: inline-flex;
+				align-items: center;
+				gap: 7px;
+				user-select: none;
+				transition:
+					color 0.12s ease,
+					border-color 0.12s ease,
+					background 0.12s ease;
+			}
+			.facet:hover {
+				color: var(--text);
+				border-color: #39405a;
+			}
+			.facet:focus-visible {
+				outline: 2px solid var(--accent);
+				outline-offset: 2px;
+			}
+			.facet.on {
+				color: #fff;
+				border-color: var(--accent);
+				background: var(--accent);
+			}
+			.facet-n {
+				font-size: 11px;
+				font-weight: 700;
+				font-variant-numeric: tabular-nums;
+				background: rgba(255, 255, 255, 0.07);
+				border-radius: 999px;
+				padding: 1px 7px;
+				opacity: 0.85;
+			}
+			.facet.on .facet-n {
+				background: rgba(255, 255, 255, 0.22);
+				color: #fff;
+				opacity: 1;
+			}
+			.facet-swatch {
+				width: 8px;
+				height: 8px;
+				border-radius: 50%;
+				flex-shrink: 0;
+			}
+			.facet-swatch.t-iphone_case {
+				background: var(--blue);
+			}
+			.facet-swatch.t-airpods_case {
+				background: var(--purple);
+			}
+			.facet-swatch.t-apple_watch_band {
+				background: var(--yellow);
+			}
+			.facet-swatch.t-ipad_case {
+				background: var(--teal);
+			}
+			.facet-swatch.t-grip {
+				background: var(--teal);
+			}
+			.facet-swatch.t-charm {
+				background: var(--pink);
+			}
+			.facet-swatch.t-other {
+				background: var(--muted);
+			}
+			.facet.on .facet-swatch {
+				background: #fff;
+			}
+			/* Building chips keep their market colour even when selected, so
+			   the rail still classifies at a glance. Product-type swatches
+			   (above) bleach to white on the orange chip, which is correct
+			   for a type filter that is not a place. */
+			#supBuildingRail .facet.on {
+				color: var(--text);
+				border-color: color-mix(in srgb, var(--b, var(--accent)) 62%, var(--border));
+				background: color-mix(in srgb, var(--b, var(--accent)) 20%, var(--card));
+			}
+			#supBuildingRail .facet.on[data-val=''] {
+				color: #fff;
+				border-color: var(--accent);
+				background: var(--accent);
+			}
+			#supBuildingRail .facet.on .facet-swatch {
+				background: var(--b, #fff);
+				box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.22);
+			}
+			#supBuildingRail .facet.on .facet-n {
+				background: color-mix(in srgb, var(--b, var(--accent)) 28%, transparent);
+				color: var(--text);
+			}
+			#supBuildingRail .facet.on[data-val=''] .facet-n {
+				background: rgba(255, 255, 255, 0.22);
+				color: #fff;
+			}
+			#supBuildingRail .facet:not(.on) .facet-swatch {
+				background: var(--b, var(--muted));
+			}
+			#supBuildingRail .facet.is-here:not(.on) {
+				box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--b, var(--accent)) 70%, var(--border));
+			}
+			.b-jingji,
+			[data-building='jingji'] {
+				--b: var(--b-jingji);
+			}
+			.b-tongxin,
+			[data-building='tongxin'] {
+				--b: var(--b-tongxin);
+			}
+			.b-kangle-north,
+			[data-building='kangle-north'] {
+				--b: var(--b-kangle-north);
+			}
+			.b-kangle,
+			[data-building='kangle'] {
+				--b: var(--b-kangle);
+			}
+			.b-taipingyang,
+			[data-building='taipingyang'] {
+				--b: var(--b-taipingyang);
+			}
+			.b-huitong,
+			[data-building='huitong'] {
+				--b: var(--b-huitong);
+			}
+			.b-longsheng,
+			[data-building='longsheng'] {
+				--b: var(--b-longsheng);
+			}
+			.b-unlocated,
+			[data-building='##unlocated##'] {
+				--b: var(--b-unlocated);
+			}
+			.b-other {
+				--b: var(--b-other);
+			}
+			[data-building] {
+				--b: var(--b-other);
+			}
+			.facet.warn:not(.on) {
+				border-color: rgba(245, 159, 11, 0.4);
+				color: var(--yellow);
+			}
+			.facet.warn.on {
+				color: var(--text);
+				border-color: var(--yellow);
+				background: rgba(245, 159, 11, 0.2);
+			}
+			.facet.warn.on .facet-n {
+				background: rgba(0, 0, 0, 0.18);
+				color: var(--text);
+			}
+			.facet-scroller::before,
+			.facet-scroller::after {
+				content: '';
+				position: absolute;
+				top: 0;
+				bottom: 0;
+				width: 28px;
+				pointer-events: none;
+				z-index: 1;
+				opacity: 0;
+				transition: opacity 0.15s ease;
+			}
+			.facet-scroller::before {
+				left: 0;
+				background: linear-gradient(to right, var(--facet-fade), transparent);
+			}
+			.facet-scroller::after {
+				right: 0;
+				background: linear-gradient(to left, var(--facet-fade), transparent);
+			}
+			.facet-scroller.is-overflow-start::before {
+				opacity: 1;
+			}
+			.facet-scroller.is-overflow-end::after {
+				opacity: 1;
+			}
+			@media (prefers-reduced-motion: reduce) {
+				.facet,
+				.facet-scroller::before,
+				.facet-scroller::after {
+					transition: none;
+				}
+				.facet-rail {
+					scroll-snap-type: none;
+				}
 			}
 
 			.badge {
@@ -462,6 +822,18 @@
 			.pcard:hover {
 				border-color: #39405a;
 			}
+			.pcard.is-photo-hit,
+			.dtable tr.is-photo-hit,
+			.prow.is-photo-hit {
+				border-color: var(--accent);
+				box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+			}
+			.supplier-table tr.srow.is-photo-hit td {
+				background: color-mix(in srgb, var(--accent) 14%, var(--card));
+			}
+			.supplier-table tr.srow.is-photo-hit td:first-child {
+				box-shadow: inset 3px 0 0 var(--accent);
+			}
 			.pthumb {
 				position: relative;
 				width: 84px;
@@ -479,6 +851,11 @@
 				height: 100%;
 				object-fit: cover;
 				display: block;
+			}
+			.pthumb.charm img {
+				object-fit: contain;
+				object-position: center;
+				padding: 6px;
 			}
 			.pthumb .noimg {
 				color: var(--muted);
@@ -632,6 +1009,9 @@
 				stroke-linecap: round;
 				stroke-linejoin: round;
 			}
+			.iconbtn .act-label {
+				display: none;
+			}
 
 			/* ── Tables (catalog table mode + suppliers) ─────────────── */
 			.dtable {
@@ -640,11 +1020,11 @@
 			}
 			.dtable th {
 				text-align: left;
-				font-size: 11px;
+				font-size: 10.5px;
 				text-transform: uppercase;
-				letter-spacing: 0.03em;
+				letter-spacing: 0.06em;
 				color: var(--muted);
-				padding: 8px 10px;
+				padding: 9px 10px;
 				border-bottom: 1px solid var(--border);
 				white-space: nowrap;
 				position: sticky;
@@ -652,8 +1032,18 @@
 				background: var(--bg);
 				z-index: 2;
 			}
+			/* Must follow `.dtable th`. Charm shops sit under the supplier
+			   directory; pinning these labels to --chrome slides them over the
+			   first shop (彩虹) and hides the Charms count in that row. */
+			#viewSuppliers #cshopArea .dtable.supplier-table > thead > tr > th,
+			#cshopArea .dtable.supplier-table > thead > tr > th {
+				position: static;
+				top: auto;
+				z-index: auto;
+				background: var(--bg);
+			}
 			.dtable td {
-				padding: 9px 10px;
+				padding: 8px 10px;
 				border-bottom: 1px solid var(--border);
 				vertical-align: middle;
 			}
@@ -673,74 +1063,215 @@
 				display: inline-flex;
 				gap: 6px;
 			}
-			/* All supplier markets live in ONE table. The browser therefore
-			   computes the Products/Mall/Address/Notes columns once for the
-			   entire directory instead of independently for each market. */
+			/* Both directories share one five-column grid. They must stay in
+			   page flow — overflow-x:auto computes overflow-y to auto, which
+			   trapped Charm shops in an inner scroller. The window scrolls. */
+			#supArea,
+			#cshopArea {
+				min-width: 0;
+				overflow: visible;
+			}
 			.supplier-table {
 				table-layout: fixed;
+				width: 100%;
 			}
 			.supplier-table col.shop {
-				width: 12%;
+				width: 24%;
 			}
 			.supplier-table col.stall {
-				width: 12%;
-			}
-			.supplier-table col.location {
-				width: 28%;
-			}
-			.supplier-table col.products {
 				width: 14%;
 			}
-			.supplier-table col.mall {
-				width: 8%;
+			.supplier-table col.location {
+				width: 32%;
 			}
-			.supplier-table col.address {
-				width: 10%;
-			}
-			.supplier-table col.notes {
-				width: 6%;
+			.supplier-table col.products {
+				width: 16%;
 			}
 			.supplier-table col.actions {
-				width: 10%;
+				width: 14%;
+			}
+			#cshopArea .supplier-table {
+				border-collapse: separate;
+				border-spacing: 0;
+			}
+			#cshopArea td.num {
+				overflow: visible;
+				color: var(--text);
+				position: relative;
+				z-index: 1;
+			}
+			.supplier-table.has-markets {
+				border-collapse: separate;
+				border-spacing: 0;
 			}
 			.supplier-table .market-row td {
-				padding: 22px 10px 6px;
+				padding: 16px 0 0;
 				border-bottom: 0;
 				background: var(--bg);
+				white-space: normal;
 			}
 			.supplier-table .market-row:first-child td {
-				padding-top: 12px;
+				padding-top: 0;
 			}
 			.supplier-table .market-row:hover td {
 				background: var(--bg);
 			}
-			.market-label {
+			.market-label,
+			.building-banner {
 				display: flex;
-				align-items: baseline;
+				align-items: center;
 				gap: 10px;
+				min-width: 0;
 			}
-			.market-label h3 {
-				font-size: 14px;
+			.market-label {
+				margin: 0;
+				padding: 10px 12px;
+				border: 1px solid color-mix(in srgb, var(--b, var(--border)) 38%, var(--border));
+				border-left: 3px solid var(--b, var(--accent));
+				border-radius: 10px 10px 0 0;
+				background: linear-gradient(
+					90deg,
+					color-mix(in srgb, var(--b, var(--accent)) 16%, var(--card)),
+					var(--card) 58%
+				);
+			}
+			.supplier-table.has-markets tr.srow td {
+				background: var(--card);
+			}
+			.supplier-table.has-markets tr.srow td:first-child {
+				border-left: 1px solid var(--border);
+			}
+			.supplier-table.has-markets tr.srow td:last-child {
+				border-right: 1px solid var(--border);
+			}
+			.building-banner {
+				margin: 0 0 8px;
+				padding: 10px 14px;
+				border: 1px solid color-mix(in srgb, var(--b, var(--border)) 38%, var(--border));
+				border-left: 3px solid var(--b, var(--accent));
+				border-radius: 10px;
+				background: linear-gradient(
+					90deg,
+					color-mix(in srgb, var(--b, var(--accent)) 16%, var(--card)),
+					var(--card) 58%
+				);
+			}
+			.market-stop {
+				flex-shrink: 0;
+				min-width: 1.7em;
+				color: var(--b, var(--muted));
+				font-size: 10px;
+				font-weight: 800;
+				font-variant-numeric: tabular-nums;
+				letter-spacing: 0.08em;
+			}
+			.market-swatch {
+				width: 9px;
+				height: 9px;
+				border-radius: 50%;
+				flex-shrink: 0;
+				background: var(--b, var(--muted));
+				box-shadow: 0 0 0 3px color-mix(in srgb, var(--b, var(--muted)) 22%, transparent);
+			}
+			.market-label h3,
+			.building-banner .name {
+				font-size: 15px;
 				font-weight: 700;
+				letter-spacing: -0.02em;
+				flex: 0 1 auto;
+				min-width: 0;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
 			}
-			.market-label .n {
+			.market-floors {
 				color: var(--muted);
 				font-size: 12px;
-			}
-			.supplier-table td {
+				white-space: nowrap;
 				overflow: hidden;
+				text-overflow: ellipsis;
+			}
+			.market-label .n,
+			.building-banner .n {
+				margin-left: auto;
+				flex-shrink: 0;
+				color: var(--text);
+				font-size: 11px;
+				font-weight: 700;
+				font-variant-numeric: tabular-nums;
+				background: rgba(255, 255, 255, 0.06);
+				border-radius: 999px;
+				padding: 2px 8px;
+			}
+			.market-label .n b,
+			.building-banner .n b {
+				font-weight: 800;
+			}
+			/* Uniform directory rows: one line of text, fixed row height. Truncation
+			   lives on INNER wrappers — overflow:hidden on a collapsed-border <td>
+			   clips that cell's bottom border and made long names look "wider". */
+			.supplier-table tr.srow {
+				height: 44px;
+			}
+			.supplier-table tr.srow td {
+				height: 44px;
+				padding-top: 0;
+				padding-bottom: 0;
+				white-space: nowrap;
+				line-height: 1.25;
+			}
+			.supplier-table tr.srow td:first-child {
+				padding-left: 12px;
+				box-shadow: inset 3px 0 0 var(--b, transparent);
 			}
 			.supplier-table td.act {
 				padding-right: 4px;
 				padding-left: 4px;
 			}
+			.supplier-table td.muted {
+				color: var(--muted);
+			}
 			.supplier-table .rowlink {
+				display: flex;
+				align-items: center;
 				max-width: 100%;
+				min-width: 0;
+				width: 100%;
+				height: 100%;
+				line-height: 1.25;
 			}
 			.supplier-table .rowlink > span:first-child {
+				flex: 1;
+				min-width: 0;
 				overflow: hidden;
 				text-overflow: ellipsis;
 				white-space: nowrap;
+			}
+			.stall-code {
+				display: block;
+				min-width: 0;
+				max-width: 100%;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+				font-family: ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, monospace;
+				font-size: 12px;
+				font-weight: 650;
+				letter-spacing: 0.01em;
+				padding: 2px 7px;
+				border-radius: 6px;
+				background: rgba(255, 255, 255, 0.045);
+				border: 1px solid var(--border);
+				width: fit-content;
+			}
+			.supplier-table .stall-miss {
+				display: block;
+				min-width: 0;
+				max-width: 100%;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+				color: var(--yellow);
 			}
 			/* The Products column is a number an operator scans DOWN the page. A
 			   count followed by a variable-width chip in one right-aligned cell
@@ -748,10 +1279,15 @@
 			   a numeric column must not do — so the count gets a fixed slot of its
 			   own and the priced-coverage meter gets another beside it. */
 			.countcell {
-				display: inline-grid;
+				display: grid;
 				grid-template-columns: 4ch 62px;
 				align-items: center;
+				justify-content: end;
 				gap: 10px;
+				min-width: 0;
+				max-width: 100%;
+				margin-left: auto;
+				height: 18px;
 			}
 			.countcell .n {
 				text-align: right;
@@ -796,6 +1332,9 @@
 			.cov.empty {
 				visibility: hidden;
 			}
+			/* Charm shops reuse this 4ch + 62px countcell. The empty coverage
+			   slot is invisible, so the number occupies the Products count's
+			   x-position instead of sliding to the cell's right edge. */
 			/* A supplier row opens its products, so it reads and behaves as one
 			   target. The shop name is a real button, which is what makes the row
 			   reachable by keyboard without a tabindex on a <tr>. */
@@ -803,7 +1342,7 @@
 				cursor: pointer;
 			}
 			.dtable tr.srow:hover td {
-				background: rgba(245, 100, 0, 0.07);
+				background: color-mix(in srgb, var(--b, var(--accent)) 10%, transparent);
 			}
 			.rowlink {
 				appearance: none;
@@ -860,10 +1399,17 @@
 				font-size: 14px;
 			}
 			.cellwrap {
-				max-width: 520px;
+				display: block;
+				min-width: 0;
+				max-width: 100%;
 				overflow: hidden;
 				text-overflow: ellipsis;
 				white-space: nowrap;
+				line-height: 1.25;
+			}
+			.cellwrap.is-blank::after {
+				content: '—';
+				opacity: 0.28;
 			}
 
 			.group-head {
@@ -898,6 +1444,14 @@
 				color: var(--muted);
 				font-size: 12px;
 				margin-top: 2px;
+			}
+			.charm-shops-head {
+				margin-top: 36px;
+				padding: 14px 16px 13px;
+				border: 1px solid var(--border);
+				border-left: 3px solid var(--pink);
+				border-radius: 12px;
+				background: linear-gradient(90deg, rgba(244, 114, 182, 0.1), transparent 58%);
 			}
 
 			.empty {
@@ -1226,7 +1780,7 @@
 				top: 0;
 				right: 0;
 				bottom: 0;
-				width: min(760px, 100%);
+				width: min(900px, 100%);
 				z-index: 91;
 				background: var(--surface);
 				border-left: 1px solid var(--border);
@@ -1299,6 +1853,24 @@
 				gap: 8px;
 				margin-top: 12px;
 			}
+			.drawer-facets {
+				padding: 10px 20px 0;
+				border-bottom: 1px solid var(--border);
+				flex-shrink: 0;
+				display: flex;
+				flex-direction: column;
+				gap: 2px;
+				background: var(--surface);
+			}
+			.drawer-facets .facet-row {
+				margin-bottom: 0;
+			}
+			.drawer-facets .facet-row:last-child {
+				padding-bottom: 10px;
+			}
+			.drawer-facets .facet-scroller {
+				--facet-fade: var(--surface);
+			}
 			.drawer-toolbar {
 				display: flex;
 				align-items: center;
@@ -1316,24 +1888,221 @@
 				min-height: 0;
 				flex: 1;
 				padding: 14px 20px 32px;
+				background: var(--surface);
+			}
+			.cgrid {
+				display: grid;
+				grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+				gap: 10px;
+			}
+			.ccard {
+				display: flex;
+				flex-direction: column;
+				gap: 8px;
+				min-width: 0;
+				background: var(--card);
+				border: 1px solid var(--border);
+				border-radius: 12px;
+				padding: 10px;
+				color: inherit;
+				text-decoration: none;
+				cursor: pointer;
+				transition:
+					border-color 0.12s ease,
+					background 0.12s ease,
+					transform 0.12s ease;
+			}
+			a.ccard:hover {
+				border-color: rgba(244, 114, 182, 0.55);
+				background: color-mix(in srgb, var(--pink) 8%, var(--card));
+			}
+			a.ccard:focus-visible {
+				outline: 2px solid var(--accent);
+				outline-offset: 2px;
+			}
+			.ccard .pthumb.charm {
+				width: 100%;
+				height: auto;
+				aspect-ratio: 3 / 4;
+				min-height: 176px;
+				border-radius: 10px;
+				background: rgba(244, 114, 182, 0.06);
+				border: 1px solid rgba(244, 114, 182, 0.35);
+			}
+			.ccard .pthumb.charm img {
+				object-fit: contain;
+				object-position: center;
+				padding: 8px;
+			}
+			.ccard .ccode {
+				font-size: 13px;
+				font-weight: 700;
+				font-variant-numeric: tabular-nums;
+				overflow-wrap: anywhere;
+			}
+			.ccard .cmeta {
+				color: var(--muted);
+				font-size: 12px;
+				line-height: 1.35;
+			}
+			.ccard .cnotes {
+				color: var(--muted);
+				font-size: 11.5px;
+				line-height: 1.35;
+				display: -webkit-box;
+				-webkit-line-clamp: 2;
+				-webkit-box-orient: vertical;
+				overflow: hidden;
+			}
+			.ccard .copen {
+				font-size: 11px;
+				font-weight: 800;
+				color: var(--blue);
+				letter-spacing: 0.01em;
+			}
+			.sd-type-group {
+				margin-bottom: 6px;
+			}
+			.sd-type-group + .sd-type-group {
+				margin-top: 10px;
+			}
+			.sd-type-head {
+				display: flex;
+				align-items: baseline;
+				gap: 10px;
+				position: sticky;
+				top: 0;
+				z-index: 1;
+				background: var(--surface);
+				padding: 8px 2px 8px;
+				margin: 0 -2px 8px;
+				border-bottom: 1px solid var(--border);
+			}
+			.sd-type-head .n {
+				color: var(--muted);
+				font-size: 12px;
+				font-variant-numeric: tabular-nums;
 			}
 			.prow {
 				display: grid;
-				grid-template-columns: 62px minmax(0, 1fr) 256px 66px;
-				gap: 12px;
-				align-items: center;
-				padding: 10px;
+				grid-template-columns: auto minmax(160px, 1fr) minmax(196px, 220px) auto;
+				gap: 12px 14px;
+				align-items: start;
+				padding: 12px 14px;
 				border: 1px solid var(--border);
 				border-radius: var(--radius);
 				background: var(--card);
-				margin-bottom: 8px;
+				margin-bottom: 10px;
+				position: relative;
+				min-width: 0;
+			}
+			.prow > div:nth-child(2),
+			.prow.mergeable > div:nth-child(3) {
+				min-width: 0;
 			}
 			.prow:hover {
 				border-color: #39405a;
 			}
+			.prow.mergeable {
+				cursor: pointer;
+				grid-template-columns: 28px auto minmax(160px, 1fr) minmax(196px, 220px);
+			}
+			.prow.mergeable:hover {
+				border-color: var(--accent);
+			}
+			.prow.merge-sel {
+				border-color: var(--accent);
+				box-shadow: inset 0 0 0 1px var(--accent);
+				background: rgba(245, 100, 0, 0.08);
+			}
+			.prow .mtick {
+				width: 20px;
+				height: 20px;
+				border-radius: 6px;
+				border: 2px solid var(--border);
+				display: grid;
+				place-items: center;
+				flex-shrink: 0;
+				background: var(--surface);
+			}
+			.prow.merge-sel .mtick {
+				border-color: var(--accent);
+				background: var(--accent);
+				color: #111;
+			}
+			.prow.merge-sel .mtick::after {
+				content: '';
+				width: 10px;
+				height: 6px;
+				border-left: 2px solid currentColor;
+				border-bottom: 2px solid currentColor;
+				transform: rotate(-45deg) translate(1px, -1px);
+			}
+			.sd-merge-bar {
+				display: none;
+				align-items: center;
+				gap: 10px;
+				flex-wrap: wrap;
+				padding: 10px 20px;
+				border-bottom: 1px solid var(--border);
+				background: color-mix(in srgb, var(--accent) 12%, var(--card));
+			}
+			.sd-merge-bar.open {
+				display: flex;
+			}
+			.sd-merge-bar .hint {
+				flex: 1;
+				min-width: 160px;
+				font-size: 12.5px;
+				color: var(--muted);
+				line-height: 1.35;
+			}
+			.sd-merge-bar .hint strong {
+				color: var(--text);
+				font-weight: 700;
+			}
+			.prow .pmedia {
+				display: flex;
+				align-items: stretch;
+				gap: 8px;
+				flex-shrink: 0;
+			}
 			.prow .pthumb {
-				width: 62px;
-				height: 62px;
+				width: 96px;
+				height: 96px;
+				border-radius: 10px;
+			}
+			.prow .pthumb.charm {
+				width: 72px;
+				height: 96px;
+				border: 1px solid rgba(244, 114, 182, 0.35);
+				background: rgba(244, 114, 182, 0.06);
+				color: inherit;
+				text-decoration: none;
+				cursor: pointer;
+				transition:
+					border-color 0.12s ease,
+					background 0.12s ease;
+			}
+			.prow a.pthumb.charm:hover {
+				border-color: rgba(244, 114, 182, 0.7);
+				background: rgba(244, 114, 182, 0.14);
+			}
+			.prow a.pthumb.charm:focus-visible {
+				outline: 2px solid var(--accent);
+				outline-offset: 2px;
+			}
+			.prow .pthumb.charm img {
+				object-fit: contain;
+				padding: 4px;
+			}
+			.prow .pthumb.charm .charm-ph {
+				color: var(--pink);
+				font-size: 11px;
+				font-weight: 800;
+				letter-spacing: 0.04em;
+				text-transform: uppercase;
+				opacity: 0.55;
 			}
 			.prow .top {
 				display: flex;
@@ -1342,33 +2111,154 @@
 				flex-wrap: wrap;
 				margin-bottom: 3px;
 			}
+			.prow .top:empty {
+				display: none;
+			}
 			.prow .title {
-				font-size: 13px;
-				font-weight: 600;
+				font-size: 13.5px;
+				font-weight: 650;
 				line-height: 1.35;
+				overflow: hidden;
 				display: -webkit-box;
 				-webkit-line-clamp: 2;
+				line-clamp: 2;
 				-webkit-box-orient: vertical;
-				overflow: hidden;
+				white-space: normal;
 			}
 			.prow .meta {
 				color: var(--muted);
 				font-size: 11.5px;
-				margin-top: 3px;
+				margin-top: 6px;
 				display: flex;
 				flex-wrap: wrap;
 				gap: 6px;
 				align-items: center;
+				min-width: 0;
+				overflow: visible;
 			}
 			.prow .meta .missing {
 				color: var(--yellow);
+				min-width: 0;
+			}
+			.prow .meta .gap-chip {
+				flex-shrink: 0;
+			}
+			/* Charm identity is an action, not a truncated badge. Label, code and
+			   stall flag stay fully visible; shop · stall wrap onto the next line
+			   instead of clipping “本档有售”. The whole chip opens Route CRUD. */
+			.charm-line {
+				display: flex;
+				flex-wrap: wrap;
+				align-items: center;
+				gap: 6px 8px;
+				margin-top: 8px;
+				padding: 7px 10px;
+				border-radius: 9px;
+				border: 1px solid rgba(244, 114, 182, 0.28);
+				background: rgba(244, 114, 182, 0.08);
+				font-size: 12px;
+				line-height: 1.35;
+				max-width: 100%;
+				min-width: 0;
+				overflow: visible;
+				white-space: normal;
+				color: inherit;
+				text-decoration: none;
+				cursor: pointer;
+				transition:
+					border-color 0.12s ease,
+					background 0.12s ease;
+			}
+			a.charm-line:hover {
+				border-color: rgba(244, 114, 182, 0.55);
+				background: rgba(244, 114, 182, 0.14);
+			}
+			a.charm-line.elsewhere:hover {
+				border-color: rgba(245, 159, 11, 0.6);
+				background: rgba(245, 159, 11, 0.14);
+			}
+			a.charm-line:focus-visible {
+				outline: 2px solid var(--accent);
+				outline-offset: 2px;
+			}
+			.charm-line.elsewhere {
+				border-color: rgba(245, 159, 11, 0.4);
+				background: rgba(245, 159, 11, 0.08);
+			}
+			.charm-line .ck {
+				font-size: 10px;
+				font-weight: 800;
+				letter-spacing: 0.04em;
+				text-transform: uppercase;
+				color: var(--pink);
+				flex: 0 0 auto;
+			}
+			.charm-line.elsewhere .ck {
+				color: var(--yellow);
+			}
+			.charm-line .ccode {
+				font-weight: 800;
+				color: var(--text);
+				font-variant-numeric: tabular-nums;
+				flex: 0 0 auto;
+			}
+			.charm-line .cflag {
+				font-size: 10.5px;
+				font-weight: 800;
+				letter-spacing: 0.02em;
+				color: var(--yellow);
+				background: rgba(245, 159, 11, 0.14);
+				border: 1px solid rgba(245, 159, 11, 0.35);
+				border-radius: 999px;
+				padding: 2px 8px;
+				white-space: nowrap;
+				flex: 0 0 auto;
+			}
+			.charm-line .cflag.same {
+				color: var(--muted);
+				background: rgba(255, 255, 255, 0.05);
+				border-color: rgba(255, 255, 255, 0.1);
+			}
+			.charm-line .copen {
+				font-size: 10.5px;
+				font-weight: 800;
+				letter-spacing: 0.02em;
+				color: var(--blue);
+				background: rgba(108, 143, 255, 0.12);
+				border: 1px solid rgba(108, 143, 255, 0.3);
+				border-radius: 999px;
+				padding: 2px 8px;
+				white-space: nowrap;
+				flex: 0 0 auto;
+				margin-left: auto;
+			}
+			.charm-line .ctrail {
+				flex: 1 1 100%;
+				min-width: 0;
+				overflow: visible;
+				white-space: normal;
+				color: var(--muted);
+				line-height: 1.4;
+			}
+			.charm-line .ctrail .cshop {
+				font-weight: 700;
+				color: var(--text);
+			}
+			.charm-line .ctrail .cloc {
+				color: var(--muted);
+			}
+			.charm-line .ctrail .cdot {
+				color: var(--muted);
+				opacity: 0.55;
+				margin: 0 0.15em;
 			}
 			.prow .costs {
 				display: grid;
-				grid-template-columns: repeat(4, 58px);
-				gap: 8px;
+				grid-template-columns: repeat(4, minmax(44px, 1fr));
+				gap: 6px;
 				align-items: start;
 				text-align: right;
+				padding-top: 2px;
 			}
 			.prow .costs .p {
 				font-size: 13px;
@@ -1398,11 +2288,18 @@
 				display: inline-flex;
 				gap: 6px;
 				justify-content: flex-end;
+				padding-top: 2px;
 			}
-			.alias-details {
+			/* Grouped listing records open from the list icon — keep the closed
+			   <details> out of the card height so every prow stays one rhythm. */
+			.alias-details:not([open]) {
+				display: none;
+			}
+			.alias-details[open] {
 				grid-column: 2 / -1;
 				border-top: 1px solid var(--border);
 				padding-top: 8px;
+				margin-top: 2px;
 			}
 			.alias-details summary {
 				color: var(--blue);
@@ -1454,23 +2351,437 @@
 				display: inline-flex;
 				gap: 6px;
 			}
-			@media (max-width: 640px) {
+			@media (max-width: 768px) {
+				/* Item lists become cards. CRUD is a labeled 44px bar under the
+				   content, never a pair of 30px icons next to the title. */
+				.toolbar input[type='search'] {
+					flex: 1 1 100%;
+					min-width: 0;
+					min-height: 44px;
+					font-size: 16px;
+				}
+				.toolbar select,
+				.toolbar .btn,
+				.head-actions .btn,
+				.chip {
+					min-height: 44px;
+				}
+				#catModeBtn {
+					display: none;
+				}
+				input[type='text'],
+				input[type='search'],
+				input[type='number'],
+				textarea,
+				select {
+					font-size: 16px;
+				}
+				.iconbtn {
+					width: auto;
+					min-width: 44px;
+					min-height: 44px;
+					height: 44px;
+					padding: 0 12px;
+					gap: 7px;
+					border-radius: 10px;
+					touch-action: manipulation;
+				}
+				.iconbtn svg {
+					width: 16px;
+					height: 16px;
+					flex-shrink: 0;
+				}
+				.iconbtn .act-label {
+					display: inline;
+					font-size: 13px;
+					font-weight: 650;
+					letter-spacing: 0.01em;
+					line-height: 1;
+					white-space: nowrap;
+				}
+				.pgrid {
+					grid-template-columns: 1fr;
+					gap: 10px;
+				}
+				.pcard {
+					display: grid;
+					grid-template-columns: 76px minmax(0, 1fr);
+					grid-template-areas:
+						'thumb body'
+						'acts acts';
+					gap: 10px 12px;
+					padding: 12px;
+					align-items: start;
+				}
+				.pcard > .pthumb {
+					grid-area: thumb;
+					width: 76px;
+					height: 76px;
+				}
+				.pcard .pbody {
+					grid-area: body;
+				}
+				.pcard .pactions {
+					grid-area: acts;
+					flex-direction: row;
+					width: 100%;
+					padding-top: 10px;
+					border-top: 1px solid var(--border);
+				}
+				.pcard .pactions .iconbtn {
+					flex: 1;
+					justify-content: center;
+				}
+				.ptitle {
+					font-size: 15px;
+					line-height: 1.35;
+					margin: 4px 0 6px;
+					-webkit-line-clamp: 3;
+					line-clamp: 3;
+				}
+				.pmeta {
+					font-size: 13px;
+				}
+				.pprices .p {
+					font-size: 14px;
+				}
 				.prow {
-					grid-template-columns: 52px minmax(0, 1fr) 66px;
+					grid-template-columns: auto minmax(0, 1fr);
+					align-items: start;
+					padding: 12px;
+					gap: 10px 12px;
+				}
+				.prow.mergeable {
+					grid-template-columns: 28px auto minmax(0, 1fr);
+				}
+				.prow .pthumb {
+					width: 72px;
+					height: 72px;
+				}
+				.prow .pthumb.charm {
+					width: 54px;
+					height: 72px;
+				}
+				.prow .title {
+					white-space: normal;
+					display: -webkit-box;
+					-webkit-line-clamp: 3;
+					line-clamp: 3;
+					-webkit-box-orient: vertical;
+					font-size: 15px;
+					line-height: 1.35;
 				}
 				.prow .costs {
-					grid-column: 2 / -1;
-					grid-row: 2;
+					grid-column: 1 / -1;
+					grid-row: auto;
+					grid-template-columns: repeat(4, minmax(0, 1fr));
+					width: 100%;
+					gap: 6px;
+					text-align: center;
+					padding-top: 8px;
+					border-top: 1px solid var(--border);
+				}
+				.prow .costs .p {
+					font-size: 14px;
 				}
 				.prow .acts {
-					grid-column: 3;
-					grid-row: 1;
+					grid-column: 1 / -1;
+					grid-row: auto;
+					width: 100%;
+					display: grid;
+					grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+					gap: 8px;
+					padding-top: 2px;
 				}
-				.alias-details {
+				.prow.mergeable .costs,
+				.prow.mergeable .acts {
 					grid-column: 2 / -1;
+				}
+				.prow .acts .iconbtn {
+					width: 100%;
+					justify-content: center;
+				}
+				.alias-details[open] {
+					grid-column: 1 / -1;
+				}
+				.prow.mergeable .alias-details[open] {
+					grid-column: 2 / -1;
+				}
+				.alias-row {
+					grid-template-columns: 1fr;
+					gap: 8px;
+				}
+				.alias-row .alias-title {
+					white-space: normal;
+				}
+				.alias-row .alias-actions {
+					display: grid;
+					grid-template-columns: 1fr 1fr;
+					width: 100%;
+				}
+				.alias-row .alias-actions .iconbtn {
+					width: 100%;
+					justify-content: center;
 				}
 				.drawer-stats {
 					grid-template-columns: repeat(2, minmax(0, 1fr));
+				}
+				.drawer-actions {
+					display: grid;
+					grid-template-columns: 1fr 1fr;
+					gap: 8px;
+				}
+				.drawer-actions .btn {
+					min-height: 44px;
+					justify-content: center;
+					padding: 10px 12px;
+					white-space: normal;
+					text-align: center;
+				}
+				.drawer-actions .btn.primary {
+					grid-column: 1 / -1;
+				}
+				.drawer-head .iconbtn {
+					width: 44px;
+					height: 44px;
+					min-width: 44px;
+					padding: 0;
+				}
+				.drawer-head .iconbtn .act-label {
+					display: none;
+				}
+				.drawer-body {
+					padding: 12px 14px 28px;
+				}
+				.supplier-table {
+					table-layout: auto;
+					border-collapse: separate;
+					border-spacing: 0;
+				}
+				.supplier-table thead {
+					display: none;
+				}
+				.supplier-table,
+				.supplier-table tbody,
+				.supplier-table colgroup {
+					display: block;
+					width: 100%;
+				}
+				.supplier-table col {
+					width: auto;
+				}
+				.supplier-table tr.market-row,
+				.supplier-table tr.market-row td {
+					display: block;
+					width: 100%;
+					height: auto;
+					white-space: normal;
+					padding: 0;
+				}
+				.supplier-table tr.srow {
+					display: grid;
+					grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+					grid-template-areas:
+						'shop shop'
+						'stall place'
+						'count count'
+						'acts acts';
+					height: auto;
+					gap: 0;
+					margin: 0 0 10px;
+					padding: 0;
+					border: 1px solid var(--border);
+					border-radius: 12px;
+					background: var(--card);
+					overflow: hidden;
+				}
+				.supplier-table tr.srow td {
+					display: none;
+					height: auto;
+					white-space: normal;
+					border-bottom: 0;
+					padding: 0;
+					background: transparent;
+				}
+				.supplier-table tr.srow:hover td {
+					background: transparent;
+				}
+				.supplier-table tr.srow td.col-shop {
+					display: block;
+					grid-area: shop;
+					padding: 12px 12px 4px 14px;
+				}
+				.supplier-table tr.srow td.col-stall {
+					display: block;
+					grid-area: stall;
+					padding: 0 8px 10px 14px;
+				}
+				.supplier-table tr.srow td.col-place {
+					display: block;
+					grid-area: place;
+					padding: 0 12px 10px 0;
+				}
+				.supplier-table tr.srow td.col-count {
+					display: block;
+					grid-area: count;
+					padding: 0 12px 10px 14px;
+					text-align: left;
+				}
+				.supplier-table tr.srow td.act {
+					display: flex;
+					grid-area: acts;
+					width: 100%;
+					padding: 10px 12px;
+					border-top: 1px solid var(--border);
+					background: rgba(255, 255, 255, 0.03);
+					text-align: left;
+				}
+				.supplier-table tr.srow td.act:not(:has(button)) {
+					display: none;
+				}
+				.supplier-table tr.srow td.act > div {
+					display: grid;
+					grid-template-columns: 1fr 1fr;
+					gap: 8px;
+					width: 100%;
+				}
+				.supplier-table tr.srow td.act .iconbtn {
+					width: 100%;
+					justify-content: center;
+				}
+				.supplier-table tr.srow td:first-child {
+					box-shadow: inset 4px 0 0 var(--b, transparent);
+				}
+				.supplier-table .rowlink {
+					min-height: 44px;
+					font-size: 16px;
+					width: 100%;
+				}
+				.supplier-table .rowlink .chev {
+					opacity: 0.75;
+					width: 16px;
+					height: 16px;
+				}
+				.supplier-table .countcell {
+					margin-left: 0;
+					justify-content: flex-start;
+				}
+				.stall-code {
+					font-size: 13px;
+				}
+				#viewCatalog .dtable thead {
+					display: none;
+				}
+				#viewCatalog .dtable,
+				#viewCatalog .dtable tbody {
+					display: block;
+					width: 100%;
+				}
+				#viewCatalog .dtable tr {
+					display: grid;
+					grid-template-columns: 56px minmax(0, 1fr);
+					gap: 8px 12px;
+					padding: 12px;
+					margin: 0 0 10px;
+					border: 1px solid var(--border);
+					border-radius: 12px;
+					background: var(--card);
+				}
+				#viewCatalog .dtable td {
+					border: 0;
+					padding: 0;
+					white-space: normal;
+					background: transparent;
+				}
+				#viewCatalog .dtable tr:hover td {
+					background: transparent;
+				}
+				#viewCatalog .dtable td.act {
+					grid-column: 1 / -1;
+					padding-top: 10px;
+					border-top: 1px solid var(--border);
+				}
+				#viewCatalog .dtable td.act > div {
+					display: grid;
+					grid-template-columns: 1fr 1fr;
+					gap: 8px;
+					width: 100%;
+				}
+				#viewCatalog .dtable td.act .iconbtn {
+					width: 100%;
+					justify-content: center;
+				}
+				.pkg-table thead {
+					display: none;
+				}
+				.pkg-table,
+				.pkg-table tbody {
+					display: block;
+					width: 100%;
+				}
+				.pkg-table tr {
+					display: grid;
+					grid-template-columns: 1fr;
+					gap: 8px;
+					padding: 12px;
+					margin: 0 0 10px;
+					border: 1px solid var(--border);
+					border-radius: 12px;
+					background: var(--card);
+				}
+				.pkg-table td {
+					border: 0;
+					padding: 0;
+					background: transparent;
+				}
+				.pkg-table td.pkg-size,
+				.pkg-table td.pkg-date {
+					display: none;
+				}
+				.pkg-table .row-actions {
+					display: grid;
+					grid-template-columns: 1fr 1fr 1fr;
+					gap: 8px;
+				}
+				.pkg-table .row-actions .iconbtn {
+					width: 100%;
+					justify-content: center;
+				}
+				.pane-actions .btn {
+					min-height: 44px;
+				}
+				.modal-bg {
+					align-items: flex-end;
+					padding: 0;
+				}
+				.modal {
+					max-width: none;
+					width: 100%;
+					max-height: 92vh;
+					border-radius: 16px 16px 0 0;
+					padding: 18px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+					overflow-y: auto;
+				}
+				.modal.wide {
+					max-width: none;
+				}
+				.modal-actions {
+					position: sticky;
+					bottom: 0;
+					flex-wrap: wrap;
+					gap: 8px;
+					margin-top: 16px;
+					padding-top: 12px;
+					background: var(--surface);
+				}
+				.modal-actions .btn {
+					min-height: 44px;
+					flex: 1 1 calc(50% - 8px);
+					justify-content: center;
+				}
+				.modal-actions .spacer {
+					flex: 1 1 100%;
+					margin-right: 0;
 				}
 			}
 
@@ -1501,6 +2812,125 @@
 			}
 			.modal.wide {
 				max-width: 640px;
+			}
+			.find-hit-list {
+				display: flex;
+				flex-direction: column;
+				gap: 8px;
+			}
+			.find-hit {
+				appearance: none;
+				width: 100%;
+				display: flex;
+				align-items: center;
+				gap: 12px;
+				text-align: left;
+				background: var(--bg);
+				border: 1px solid var(--border);
+				border-radius: 10px;
+				padding: 10px;
+				color: var(--text);
+				cursor: pointer;
+				font-family: inherit;
+			}
+			.find-hit:hover,
+			.find-hit:focus-visible {
+				border-color: var(--accent);
+			}
+			.find-hit img,
+			.find-hit-ph {
+				width: 64px;
+				height: 64px;
+				object-fit: cover;
+				border-radius: 8px;
+				background: var(--card2);
+				flex-shrink: 0;
+			}
+			.find-hit-shop {
+				display: block;
+				font-size: 16px;
+				font-weight: 700;
+			}
+			.find-hit-loc,
+			.find-hit-title,
+			.find-hit-conf {
+				display: block;
+				font-size: 12px;
+				color: var(--muted);
+				margin-top: 2px;
+			}
+			.find-hit-conf {
+				font-weight: 600;
+			}
+			.find-hit-conf.exact,
+			.find-hit-conf.likely {
+				color: var(--green);
+			}
+			.find-photo-status {
+				color: var(--muted);
+				font-size: 13px;
+				line-height: 1.45;
+			}
+			.find-photo-query {
+				color: var(--text);
+				font-size: 13px;
+				line-height: 1.45;
+				margin: 8px 0 0;
+			}
+			.find-photo-pick {
+				display: flex;
+				flex-direction: column;
+				gap: 8px;
+			}
+			.find-photo-pick .btn {
+				width: 100%;
+				justify-content: center;
+			}
+			.find-photo-live {
+				position: relative;
+				background: #0a0c12;
+				border: 1px solid var(--border);
+				border-radius: 12px;
+				overflow: hidden;
+				aspect-ratio: 3 / 4;
+				max-height: min(58vh, 480px);
+			}
+			.find-photo-live video {
+				display: block;
+				width: 100%;
+				height: 100%;
+				object-fit: contain;
+				background: #000;
+			}
+			.find-photo-live-status {
+				position: absolute;
+				inset: 0;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				margin: 0;
+				padding: 16px;
+				text-align: center;
+				color: var(--muted);
+				background: rgba(10, 12, 18, 0.55);
+				font-size: 13px;
+			}
+			.find-photo-live-acts {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 8px;
+				margin-top: 12px;
+			}
+			.find-photo-live-acts .btn {
+				flex: 1;
+				min-width: 120px;
+				justify-content: center;
+			}
+			#findPhotoHint {
+				color: var(--muted);
+				font-size: 12px;
+				line-height: 1.45;
+				margin: -8px 0 14px;
 			}
 			.modal h3 {
 				font-size: 17px;
@@ -1609,6 +3039,13 @@
 				.dtable th {
 					position: static;
 				}
+				/* Keep the building chooser reachable on a phone while the
+				   long Tongxin list scrolls. Column headers go static so they
+				   do not fight this strip for the top edge. */
+				.sup-controls {
+					top: 0;
+					z-index: 11;
+				}
 				.library-layout {
 					grid-template-columns: 1fr;
 					height: auto;
@@ -1661,6 +3098,7 @@
 		<section class="page" id="viewCatalog">
 			<div class="page-head">
 				<div>
+					<p class="page-eyebrow" data-i18n="catEyebrow">Shared catalog</p>
 					<h1 data-i18n="catTitle">Product Catalog</h1>
 					<div class="sub" data-i18n="catSub">
 						Every product we sell, the supplier who sells it, where that supplier is, and what each component costs. This is the same catalog the shopping route is
@@ -1680,6 +3118,11 @@
 
 			<div class="toolbar">
 				<input type="search" id="catSearch" placeholder="Search title, supplier, stall, charm code…" />
+				<button class="btn sm" type="button" data-act="cat-find-photo" id="catFindPhoto" title="Find by photo" aria-label="Find by photo">
+					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l1.8-2.5h6.4L17 8h3v11H4z"/><circle cx="12" cy="13.5" r="3.2"/></svg>
+					<span data-i18n="findPhoto">Find by photo</span>
+				</button>
+				<input type="file" id="catFindPhotoFile" accept="image/jpeg,image/png,image/webp" hidden />
 				<select id="catSupplier" aria-label="Supplier"></select>
 				<select id="catSort" aria-label="Sort">
 					<option value="location" data-i18n="sortLocation">Sort: walking order</option>
@@ -1703,6 +3146,7 @@
 		<section class="page" id="viewSuppliers" hidden>
 			<div class="page-head">
 				<div>
+					<p class="page-eyebrow" data-i18n="supEyebrow">Walking order</p>
 					<h1 data-i18n="supTitle">Suppliers</h1>
 					<div class="sub" data-i18n="supSub">
 						The physical stalls we buy from, grouped in the order a buyer walks them. Stall codes drive the shopping route, so keeping them exact is what keeps a trip
@@ -1717,25 +3161,61 @@
 
 			<div class="stats" id="supStats"></div>
 
-			<div class="toolbar">
-				<input type="search" id="supSearch" placeholder="Search shop, stall, address…" />
-				<select id="supBuilding" aria-label="Market"></select>
-				<span class="result-count" id="supCount"></span>
+			<!-- Search + building rail pin under the top chrome while the
+			     directory scrolls, so a buyer mid-list can switch markets
+			     without climbing back to the page head. -->
+			<div class="sup-controls" id="supControls">
+				<div class="toolbar">
+					<input type="search" id="supSearch" placeholder="Search shop, stall…" />
+					<button class="btn sm" type="button" data-act="cat-find-photo" id="supFindPhoto" title="Find shop from photo" aria-label="Find shop from photo">
+						<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l1.8-2.5h6.4L17 8h3v11H4z"/><circle cx="12" cy="13.5" r="3.2"/></svg>
+						<span data-i18n="findPhotoShop">Find shop from photo</span>
+					</button>
+					<span class="result-count" id="supCount"></span>
+				</div>
+				<div class="facet-row" id="supBuildingRow" hidden>
+					<span class="lbl" data-i18n="filterBuildings">Building</span>
+					<div class="facet-scroller" id="supBuildingScroller">
+						<div class="facet-rail" id="supBuildingRail" role="radiogroup" aria-label="Building"></div>
+					</div>
+				</div>
 			</div>
 
 			<div id="supArea">
 				<div class="loading" data-i18n="loading">Loading…</div>
 			</div>
 
-			<div class="section-head">
+			<div class="section-head charm-shops-head">
 				<div>
 					<h2 data-i18n="charmShops">Charm shops</h2>
-					<div class="sub" data-i18n="charmShopsSub">Where the charm codes are bought. Charm photos and codes themselves are managed on the dashboard’s Route tab.</div>
+					<div class="sub" data-i18n="charmShopsSub">Where the charm codes are bought. Open a shop to see its charms and photos. Codes and photo files stay on the Route tab.</div>
 				</div>
 				<button class="btn sm primary can-edit" data-act="cshop-new">+ <span data-i18n="addCharmShop">Add charm shop</span></button>
 			</div>
 			<div id="cshopArea"></div>
 		</section>
+
+		<div class="drawer-bg" id="cshopDrawerBg" data-act="cshop-close"></div>
+		<aside class="drawer" id="cshopDrawer" role="dialog" aria-labelledby="csdShop" aria-hidden="true">
+			<header class="drawer-head">
+				<div class="top">
+					<div>
+						<h2 id="csdShop"></h2>
+						<div class="loc" id="csdLoc"></div>
+					</div>
+					<button class="iconbtn" id="csdClose" data-act="cshop-close" title="Close" aria-label="Close">
+						<svg viewBox="0 0 24 24"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+					</button>
+				</div>
+				<div class="drawer-stats" id="csdStats"></div>
+				<div class="drawer-actions" id="csdActions"></div>
+			</header>
+			<div class="drawer-toolbar">
+				<input type="search" id="csdSearch" placeholder="Search this shop’s charms…" />
+				<span class="result-count" id="csdCount"></span>
+			</div>
+			<div class="drawer-body" id="csdBody"></div>
+		</aside>
 
 		<!-- ══ Supplier detail · the products behind one stall ═══════════════ -->
 		<!-- Lives outside the views because it is an overlay, not a page. Its
@@ -1756,9 +3236,28 @@
 				<div class="drawer-stats" id="sdStats"></div>
 				<div class="drawer-actions" id="sdActions"></div>
 			</header>
+			<div class="drawer-facets" id="sdFacets" hidden>
+				<div class="facet-row" id="sdTypeRow" hidden>
+					<span class="lbl" data-i18n="filterType">Type</span>
+					<div class="facet-scroller" id="sdTypeScroller">
+						<div class="facet-rail" id="sdTypeRail" role="radiogroup" aria-label="Product type"></div>
+					</div>
+				</div>
+				<div class="facet-row" id="sdGapRow" hidden>
+					<span class="lbl" data-i18n="filterAttention">Needs attention</span>
+					<div class="facet-scroller" id="sdGapScroller">
+						<div class="facet-rail" id="sdGapRail" role="radiogroup" aria-label="Needs attention"></div>
+					</div>
+				</div>
+			</div>
 			<div class="drawer-toolbar">
 				<input type="search" id="sdSearch" placeholder="Search this supplier’s products…" />
 				<span class="result-count" id="sdCount"></span>
+			</div>
+			<div class="sd-merge-bar" id="sdMergeBar" aria-live="polite">
+				<div class="hint" id="sdMergeHint"></div>
+				<button type="button" class="btn sm" data-act="sd-merge-cancel" id="sdMergeCancel"></button>
+				<button type="button" class="btn sm primary" data-act="sd-merge-confirm" id="sdMergeConfirm" disabled></button>
 			</div>
 			<div class="drawer-body" id="sdBody"></div>
 		</aside>
@@ -1833,7 +3332,7 @@
 				<div class="field">
 					<label data-i18n="fProductTitle">Product title *</label>
 					<textarea id="prTitle" rows="2" placeholder="The exact Etsy listing title"></textarea>
-					<div class="hint" data-i18n="fProductTitleHint">Matched to orders by title, so it must be the listing title character for character.</div>
+					<div class="hint" id="prTitleHint" data-i18n="fProductTitleHint">Matched to orders by title, so it must be the listing title character for character.</div>
 				</div>
 				<div class="grid2">
 					<div class="field">
@@ -1886,6 +3385,20 @@
 		<datalist id="dlStalls"></datalist>
 		<datalist id="dlCharmShops"></datalist>
 		<datalist id="dlCharmCodes"></datalist>
+
+		<div class="modal-bg" id="findPhotoModal" aria-hidden="true">
+			<div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="findPhotoHead" tabindex="-1">
+				<h3 id="findPhotoHead" data-i18n="findPhotoTitle">Find supplier from a photo</h3>
+				<p class="hint" id="findPhotoHint" data-i18n="findPhotoHint">
+					Take or upload a photo of the product. Close matches appear first. A phone snap of a case is often weaker than the listing photo.
+				</p>
+				<div id="findPhotoBody"></div>
+				<div class="modal-actions">
+					<button class="btn" id="findPhotoAgain" data-act="cat-find-photo-again" data-i18n="findPhotoAgain">Try another photo</button>
+					<button class="btn" data-act="close" data-target="findPhotoModal" data-i18n="cancel">Cancel</button>
+				</div>
+			</div>
+		</div>
 
 		<!-- Stall supplier (supplier_directory) -->
 		<div class="modal-bg" id="stallModal" aria-hidden="true">
@@ -2041,6 +3554,9 @@
 			const CAPS = (window.__AUTH && window.__AUTH.capabilities) || ['*']
 			const can = (c) => CAPS.includes('*') || CAPS.includes(c)
 			const CAN_EDIT_CATALOG = can('route:catalog')
+			// Same-product merges: packer + shopper hold `route:merges` so an
+			// employee at the stall can collapse duplicate drawer cards.
+			const CAN_MERGE = can('route:merges')
 
 			// Sentinel from src/route/stall-location.js: "floor could not be read".
 			const UNKNOWN_FLOOR = 999
@@ -2048,6 +3564,9 @@
 			// Supplier-filter value meaning "rows with no supplier at all". Can't be ''
 			// (that's "any"), so it's a token no real shop name would ever be.
 			const NO_SUPPLIER = '##none##'
+			// Building-filter value meaning "stalls the directory could not locate".
+			// '' is "every market"; a real building_id is a registered market.
+			const UNLOCATED_BUILDING = '##unlocated##'
 
 			// ── i18n (lightweight; labels applied via [data-i18n]) ────────────────
 			const STR = {
@@ -2067,6 +3586,7 @@
 				add: { en: 'Add', zh: '新增' },
 
 				// Catalog
+				catEyebrow: { en: 'Shared catalog', zh: '统一目录' },
 				catTitle: { en: 'Product Catalog', zh: '产品目录' },
 				catSub: {
 					en: 'Every product we sell, the supplier who sells it, where that supplier is, and what each component costs. This is the same catalog the shopping route is built from — an edit here takes effect everywhere.',
@@ -2109,6 +3629,66 @@
 				noProducts: { en: 'No products in the catalog yet', zh: '目录中暂无产品' },
 				noProductsSub: { en: 'Add one here, or import the Product Map sheet from the Route tab.', zh: '在此新增，或从「路线」标签导入产品对照表。' },
 				noMatchProducts: { en: 'No products match your filters.', zh: '没有符合筛选条件的产品。' },
+				catSearch: { en: 'Search title, supplier, stall, charm code…', zh: '搜索标题、供应商、摊位、挂件编号…' },
+				findPhoto: { en: 'Find by photo', zh: '拍照找货' },
+				findPhotoShop: { en: 'Find shop from photo', zh: '拍照找店' },
+				findPhotoTitle: { en: 'Find supplier from a photo', zh: '拍照查找供应商' },
+				findPhotoHint: {
+					en: 'Take a photo with this device’s camera, or choose one from files. Close matches appear first; a likely match opens that stall.',
+					zh: '用本机摄像头拍照，或从文件选择照片。接近的匹配会排在前面，很可能的匹配会立刻打开对应档口。',
+				},
+				findPhotoSearching: { en: 'Reading the photo…', zh: '正在识别照片…' },
+				findPhotoEmpty: { en: 'No close matches. Try a flatter photo of the print, or search by name.', zh: '没有接近的匹配。请尽量拍产品正面的图案，或改用名称搜索。' },
+				findPhotoIndexEmpty: { en: 'Product photos are still being indexed. Try again in a minute.', zh: '产品图片仍在建立索引，请稍后再试。' },
+				findPhotoNeedVision: {
+					en: 'No close listing-photo match, and visual search is off. Add a vision API key, or search by name.',
+					zh: '没有接近的目录图匹配，且视觉搜索未开启。请配置视觉 API 密钥，或改用名称搜索。',
+				},
+				findPhotoVisionFail: {
+					en: 'Visual search could not read that photo. Try another shot of the print, or search by name.',
+					zh: '视觉搜索无法识别这张照片。请换一张拍到图案的照片，或改用名称搜索。',
+				},
+				findPhotoLookedFor: { en: 'Looked for', zh: '识别到' },
+				findPhotoVisual: { en: 'Photo match', zh: '照片匹配' },
+				findPhotoNeedFile: { en: 'Choose a JPEG, PNG, or WebP photo.', zh: '请选择 JPEG、PNG 或 WebP 照片。' },
+				findPhotoTooLarge: { en: 'Photo is too large (max 10 MB).', zh: '照片过大（最大 10 MB）。' },
+				findPhotoFail: { en: 'Could not search from that photo.', zh: '无法用这张照片查找。' },
+				findPhotoNoSupplier: { en: 'Supplier not in catalog', zh: '目录中没有供应商' },
+				findPhotoAgain: { en: 'Try another photo', zh: '换一张照片' },
+				findPhotoTake: { en: 'Take photo with camera', zh: '用摄像头拍照' },
+				findPhotoUpload: { en: 'Choose from this device', zh: '从本机选择照片' },
+				findPhotoCapture: { en: 'Capture', zh: '拍照' },
+				findPhotoFlip: { en: 'Flip camera', zh: '切换镜头' },
+				findPhotoCamStarting: { en: 'Starting camera…', zh: '正在打开摄像头…' },
+				findPhotoCamDenied: {
+					en: 'Camera permission was denied. Allow the camera, or choose a photo from this device.',
+					zh: '摄像头权限被拒绝。请允许使用摄像头，或从本机选择照片。',
+				},
+				findPhotoCamMissing: {
+					en: 'No camera was found on this device. Choose a photo instead.',
+					zh: '此设备没有摄像头。请改从本机选择照片。',
+				},
+				findPhotoCamBusy: {
+					en: 'The camera is in use by another app. Close it, or choose a photo from this device.',
+					zh: '摄像头正被其他程序占用。请关闭后重试，或从本机选择照片。',
+				},
+				findPhotoCamUnsupported: {
+					en: 'This browser cannot open the camera. Choose a photo from this device.',
+					zh: '当前浏览器无法打开摄像头。请从本机选择照片。',
+				},
+				findPhotoCamInsecure: {
+					en: 'Camera needs a secure page (this computer via localhost, or HTTPS). Choose a photo from this device instead.',
+					zh: '摄像头需要安全页面（本机 localhost 或 HTTPS）。请改从本机选择照片。',
+				},
+				findPhotoCamFail: {
+					en: 'Could not open the camera. Choose a photo from this device instead.',
+					zh: '无法打开摄像头。请改从本机选择照片。',
+				},
+				confExact: { en: 'Exact match', zh: '精确匹配' },
+				confLikely: { en: 'Likely', zh: '很可能' },
+				confPossible: { en: 'Possible', zh: '可能' },
+				confWeak: { en: 'Weak match', zh: '弱匹配' },
+				confDistant: { en: 'Low confidence', zh: '把握较低' },
 				showMore: { en: 'Show more', zh: '显示更多' },
 				showing: { en: 'Showing', zh: '显示' },
 				of: { en: 'of', zh: '/' },
@@ -2118,6 +3698,7 @@
 				inferredStall: { en: 'from supplier directory', zh: '来自供应商目录' },
 
 				// Suppliers
+				supEyebrow: { en: 'Walking order', zh: '采购动线' },
 				supTitle: { en: 'Suppliers', zh: '供应商' },
 				supSub: {
 					en: 'The physical stalls we buy from, grouped in the order a buyer walks them. Stall codes drive the shopping route, so keeping them exact is what keeps a trip efficient.',
@@ -2125,14 +3706,32 @@
 				},
 				addSupplier2: { en: 'Add supplier', zh: '新增供应商' },
 				editSupplier2: { en: 'Edit supplier', zh: '编辑供应商' },
+				filterBuildings: { en: 'Building', zh: '市场' },
 				allMarkets: { en: 'All markets', zh: '全部市场' },
+				unlocatedShops: { en: 'Unlocated', zh: '未定位' },
+				allTypes: { en: 'All types', zh: '全部类型' },
+				sdAllAttention: { en: 'All items', zh: '全部' },
 				charmShops: { en: 'Charm shops', zh: '挂件店' },
 				charmShopsSub: {
-					en: 'Where the charm codes are bought. Charm photos and codes themselves are managed on the dashboard’s Route tab.',
-					zh: '挂件的采购地点。挂件图片与编号本身在仪表盘的「路线」标签管理。',
+					en: 'Where the charm codes are bought. Open a shop to see its charms and photos. Codes and photo files stay on the Route tab.',
+					zh: '挂件的采购地点。点开店铺即可查看挂件与图片。编号和照片文件仍在「路线」页管理。',
 				},
 				addCharmShop: { en: 'Add charm shop', zh: '新增挂件店' },
 				editCharmShop: { en: 'Edit charm shop', zh: '编辑挂件店' },
+				openCharmShop: { en: 'Open charm shop', zh: '查看挂件店' },
+				csSearch: { en: 'Search this shop’s charms…', zh: '搜索该店挂件…' },
+				csCharms: { en: 'Charms', zh: '挂件数' },
+				csWithPhoto: { en: 'With photo', zh: '有照片' },
+				csOnProducts: { en: 'Used on products', zh: '已用于产品' },
+				csKnownCost: { en: 'Known cost total', zh: '已知成本合计' },
+				csNoCharms: { en: 'No charms mapped to this shop yet', zh: '该店尚未登记挂件' },
+				csNoCharmsSub: {
+					en: 'Charm codes and photos for this stall are managed on the Route tab.',
+					zh: '该档口的挂件编号和照片在「路线」页管理。',
+				},
+				csNoMatch: { en: 'No charms here match your search.', zh: '该店没有符合搜索的挂件。' },
+				csUsedOn: { en: 'used on products', zh: '用于产品' },
+				csNoPhoto: { en: 'No photo', zh: '无照片' },
 				colShop: { en: 'Shop', zh: '店名' },
 				colStall: { en: 'Stall', zh: '摊位' },
 				colLocation: { en: 'Location', zh: '位置' },
@@ -2146,6 +3745,9 @@
 				noMatchSuppliers: { en: 'No suppliers match your filters.', zh: '没有符合筛选条件的供应商。' },
 				noCharmShops: { en: 'No charm shops recorded yet.', zh: '暂无挂件店记录。' },
 				unlocated: { en: 'Stall not recorded', zh: '未记录摊位' },
+				supSearch: { en: 'Search shop, stall…', zh: '搜索店名、摊位…' },
+				supShopUnit: { en: 'shops', zh: '家档口' },
+				supShopUnitOne: { en: 'shop', zh: '家档口' },
 
 				// Supplier detail drawer
 				openSupplier: { en: 'Open supplier', zh: '查看供应商' },
@@ -2171,7 +3773,7 @@
 					en: 'Add a product here, or set this shop as the supplier on an existing product. Only products with a photo appear in this catalog.',
 					zh: '可在此新增产品，或将现有产品的供应商设为该店。仅有图片的产品会出现在目录中。',
 				},
-				sdNoMatch: { en: 'No products here match your search.', zh: '该供应商下没有符合搜索的产品。' },
+				sdNoMatch: { en: 'No products here match your filters.', zh: '该供应商下没有符合筛选条件的产品。' },
 				sdPricedTitle: { en: 'priced of', zh: '已定价 / 共' },
 				sdSavedNoPhoto: {
 					en: 'Saved. It will appear here once a photo is available — the catalog only lists products with one.',
@@ -2179,6 +3781,34 @@
 				},
 				sdStallDiffers: { en: 'stall on this product', zh: '该产品记录的摊位' },
 				sdCharmDetails: { en: 'Charm', zh: '挂件' },
+				sdCharmElsewhere: { en: 'Separate stall', zh: '另档采购' },
+				sdCharmElsewhereHint: {
+					en: 'This charm is bought at a different stall from the case supplier.',
+					zh: '该挂件需在壳供应商以外的档口采购。',
+				},
+				sdCharmSameStall: { en: 'At this stall', zh: '本档有售' },
+				sdCharmOpen: { en: 'Edit in Route', zh: '在路线中编辑' },
+				sdCharmAdd: { en: 'Add in Route', zh: '去路线页新增' },
+				sdCharmOpenHint: {
+					en: 'Opens this charm in the Route tab so you can change its photo, supplier, or code.',
+					zh: '在路线页打开该挂件，可改图片、供应商或编号。',
+				},
+				csOpenInRoute: { en: 'Edit in Route', zh: '在路线中编辑' },
+				sdMarkDuplicates: { en: 'Mark duplicates', zh: '标记同款' },
+				sdMergeExit: { en: 'Done selecting', zh: '结束选择' },
+				sdMergeHint: {
+					en: 'Tap every card that is the same physical product, then confirm.',
+					zh: '点选所有同一实物产品的卡片，然后确认合并。',
+				},
+				sdMergeSelected: { en: 'selected', zh: '已选' },
+				sdMergeDo: { en: 'Merge as same product', zh: '合并为同款' },
+				sdMergeNeedTwo: { en: 'Select at least two cards.', zh: '请至少选择两张卡片。' },
+				sdMergeConfirm: {
+					en: 'Merge the selected products into one catalog card? This also links them on the shopping route when listing IDs are known.',
+					zh: '将所选产品合并为同一目录卡片？在能解析到刊登 ID 时，购物路线也会一并合并。',
+				},
+				sdMerged: { en: 'Merged as same product', zh: '已合并为同款' },
+				sdMergeFail: { en: 'Could not merge those products.', zh: '无法合并这些产品。' },
 
 				// Design library
 				designSuppliers: { en: 'Design suppliers', zh: '设计供应商' },
@@ -2208,6 +3838,14 @@
 				fProductTitleHint: {
 					en: 'Matched to orders by title, so it must be the listing title character for character.',
 					zh: '订单按标题匹配，必须与上架标题完全一致。',
+				},
+				fProductTitleRenameHint: {
+					en: 'You can rename this product. Previous titles still match existing Etsy orders and photos.',
+					zh: '可以修改产品名称。以往的标题仍会匹配现有 Etsy 订单和照片。',
+				},
+				renameProductConfirm: {
+					en: 'Rename this product? Orders that used the previous listing title will still find it.',
+					zh: '要修改这个产品的名称吗？使用旧上架标题的订单仍然能匹配到它。',
 				},
 				fProductType: { en: 'Product type', zh: '产品类型' },
 				fSupplier: { en: 'Supplier (shop name)', zh: '供应商（店名）' },
@@ -2252,8 +3890,31 @@
 					el.textContent = t(el.getAttribute('data-i18n'))
 				})
 				document.querySelectorAll('.lang-switch button').forEach((b) => b.classList.toggle('active', b.dataset.lang === LANG))
+				const catSearch = document.getElementById('catSearch')
+				if (catSearch) catSearch.placeholder = t('catSearch')
+				const catFindPhoto = document.getElementById('catFindPhoto')
+				if (catFindPhoto) {
+					catFindPhoto.title = t('findPhoto')
+					catFindPhoto.setAttribute('aria-label', t('findPhoto'))
+				}
+				const supFindPhoto = document.getElementById('supFindPhoto')
+				if (supFindPhoto) {
+					supFindPhoto.title = t('findPhotoShop')
+					supFindPhoto.setAttribute('aria-label', t('findPhotoShop'))
+				}
+				if (document.getElementById('findPhotoModal')?.classList.contains('open') && lastFindPhotoState) paintFindPhoto(lastFindPhotoState)
 				const sdSearch = document.getElementById('sdSearch')
 				if (sdSearch) sdSearch.placeholder = t('sdSearch')
+				const csdSearch = document.getElementById('csdSearch')
+				if (csdSearch) csdSearch.placeholder = t('csSearch')
+				const supSearch = document.getElementById('supSearch')
+				if (supSearch) supSearch.placeholder = t('supSearch')
+				const buildingRail = document.getElementById('supBuildingRail')
+				if (buildingRail) buildingRail.setAttribute('aria-label', t('filterBuildings'))
+				const typeRail = document.getElementById('sdTypeRail')
+				if (typeRail) typeRail.setAttribute('aria-label', t('filterType'))
+				const gapRail = document.getElementById('sdGapRail')
+				if (gapRail) gapRail.setAttribute('aria-label', t('filterAttention'))
 			}
 			function setLang(l) {
 				LANG = l
@@ -2373,6 +4034,48 @@
 				if (loc.code) parts.push(loc.code)
 				return parts.join(' · ')
 			}
+			/** Building + floor only — the stall code already has its own column. */
+			function locPlaceText(loc) {
+				if (!loc || !loc.located) return ''
+				const parts = []
+				const b = loc.building_label ? (LANG === 'zh' ? loc.building_label.zh : loc.building_label.en) : ''
+				if (b) parts.push(b)
+				if (loc.floor != null && loc.floor !== UNKNOWN_FLOOR) parts.push(LANG === 'zh' ? loc.floor + '楼' : 'F' + loc.floor)
+				return parts.join(' · ')
+			}
+			function groupFloorSummary(rows) {
+				const seen = new Set()
+				const floors = []
+				for (const s of rows) {
+					const f = s.location && s.location.located ? s.location.floor : null
+					if (f == null || f === UNKNOWN_FLOOR || seen.has(f)) continue
+					seen.add(f)
+					floors.push(f)
+				}
+				floors.sort((a, b) => a - b)
+				if (!floors.length) return ''
+				return floors.map((f) => (LANG === 'zh' ? f + '楼' : 'F' + f)).join(' · ')
+			}
+			function buildingTone(id) {
+				if (!id) return ''
+				if (id === UNLOCATED_BUILDING) return 'b-unlocated'
+				const safe = String(id)
+					.replace(/[^a-z0-9-]+/gi, '')
+					.toLowerCase()
+				return safe ? 'b-' + safe : 'b-other'
+			}
+			function shopCountHtml(n) {
+				const count = Number(n) || 0
+				const unit = count === 1 ? t('supShopUnitOne') : t('supShopUnit')
+				return `<span class="n"><b>${esc(count)}</b> ${esc(unit)}</span>`
+			}
+			function stallCell(stall) {
+				if (!stall) {
+					const miss = t('unlocated')
+					return `<span class="stall-miss" title="${esc(miss)}">${esc(miss)}</span>`
+				}
+				return `<span class="stall-code" title="${esc(stall)}">${esc(stall)}</span>`
+			}
 			const norm = (s) => String(s == null ? '' : s).trim().replace(/\s+/g, ' ').toLowerCase()
 
 			// ── State ─────────────────────────────────────────────────────────
@@ -2384,7 +4087,23 @@
 			let catalogLoadSeq = 0
 			const catFilters = { types: new Set(), gaps: new Set(), mode: localStorage.getItem('sourcingCatMode') === 'table' ? 'table' : 'grid' }
 			let catShown = CAT_PAGE_SIZE
+			let lastFindPhotoState = null
+			let lastFindPhotoMatches = []
+			let findPhotoSeq = 0
+			let findPhotoStream = null
+			let findPhotoFacing = 'environment'
+			let findPhotoCameraGen = 0
 			let editingProductId = null
+			// Building rail: one market at a time, persisted so a buyer who was
+			// looking at Tongxin still is after a refresh. '' = every market.
+			let supBuildingFilter = localStorage.getItem('sourcingSupBuilding') || ''
+			// Drawer facets reset each time a stall opens — a type chosen on HAN
+			// must not hide every row on the next shop.
+			let sdTypeFilter = ''
+			let sdGapFilter = ''
+			let _supBuildingPainted = null
+			let _sdTypePainted = null
+			let _sdGapPainted = null
 
 			// Design library (sourcing_suppliers + sourcing_packages).
 			let DESIGN = []
@@ -2405,8 +4124,694 @@
 			// server's `supplier.key` (not an index) so a catalog reload after an edit
 			// can re-find the same stall even if the list was re-sorted.
 			let openSupplierKey = null
+			// Charm-shop drawer identity: shop name + stall, same key the
+			// directory itself uses, so a catalog reload can re-open the stall.
+			let openCharmShopKey = null
 			let supplierGroupsCatalog = null
 			let supplierGroupsByKey = new Map()
+			// Employee duplicate-fix: click cards in the open stall drawer, then
+			// POST /api/route/product-map/merge so they share one canonical key.
+			let sdMergeMode = false
+			const sdMergeSelected = new Set() // group.key values
+			let sdMergeBusy = false
+
+			function findPhotoConfidenceLabel(id) {
+				if (id === 'exact') return t('confExact')
+				if (id === 'likely') return t('confLikely')
+				if (id === 'possible') return t('confPossible')
+				if (id === 'weak') return t('confWeak')
+				return t('confDistant')
+			}
+
+			function setFindPhotoBusy(busy) {
+				for (const id of ['catFindPhoto', 'supFindPhoto']) {
+					const btn = document.getElementById(id)
+					if (!btn) continue
+					btn.disabled = Boolean(busy)
+					if (busy) btn.setAttribute('aria-busy', 'true')
+					else btn.removeAttribute('aria-busy')
+				}
+			}
+
+			function findPhotoLookedForText(query) {
+				if (!query || typeof query !== 'object') return ''
+				const subject = String(query.subject || '').trim()
+				if (subject) return subject
+				const motifs = Array.isArray(query.motifs) ? query.motifs.map((m) => String(m || '').trim()).filter(Boolean) : []
+				return motifs.slice(0, 3).join(', ')
+			}
+
+			function findPhotoEmptyCopy(state) {
+				if (state && state.reason === 'index_empty') return t('findPhotoIndexEmpty')
+				if (state && state.reason === 'vision_unavailable') return t('findPhotoNeedVision')
+				if (state && state.reason === 'vision_failed') return t('findPhotoVisionFail')
+				return t('findPhotoEmpty')
+			}
+
+			function findPhotoCatalogProduct(match) {
+				if (!CAT || !match || !Array.isArray(CAT.products)) return null
+				if (match.catalog_id != null) {
+					const byId = CAT.products.find((p) => p.id === match.catalog_id)
+					if (byId) return byId
+				}
+				const title = norm(match.title)
+				const shop = norm(match.shop_name)
+				if (title && shop) {
+					const both = CAT.products.find((p) => norm(p.title) === title && norm(p.shop_name) === shop)
+					if (both) return both
+				}
+				if (title) {
+					const named = CAT.products.filter((p) => norm(p.title) === title)
+					if (named.length === 1) return named[0]
+				}
+				return null
+			}
+
+			function hydrateFindPhotoMatches(matches) {
+				return (Array.isArray(matches) ? matches : []).map((row) => {
+					if (!row || typeof row !== 'object') return row
+					const product = findPhotoCatalogProduct(row)
+					const listingId = row.listing_id || (product && product.listing_id) || null
+					let imageUrl = String(row.image_url || '').trim()
+					if (!imageUrl && listingId) imageUrl = `/api/route/listing-image/${listingId}?w=300`
+					if (!imageUrl && product && product.image_url) imageUrl = String(product.image_url)
+					if (!imageUrl && !product) return row
+					return {
+						...row,
+						image_url: imageUrl || row.image_url || '',
+						listing_id: listingId || row.listing_id || null,
+						catalog_id: row.catalog_id != null ? row.catalog_id : product ? product.id : null,
+					}
+				})
+			}
+
+			function findPhotoIsSecureContext() {
+				return typeof window === 'undefined' || window.isSecureContext !== false
+			}
+
+			function findPhotoCanUseCamera() {
+				if (!findPhotoIsSecureContext()) return false
+				const media = typeof navigator !== 'undefined' ? navigator.mediaDevices : null
+				return Boolean(media && typeof media.getUserMedia === 'function')
+			}
+
+			function findPhotoCameraBlockReason() {
+				if (!findPhotoIsSecureContext()) return 'insecure'
+				if (!findPhotoCanUseCamera()) return 'unsupported'
+				return ''
+			}
+
+			function findPhotoCameraErrorCopy(kind) {
+				if (kind === 'denied') return t('findPhotoCamDenied')
+				if (kind === 'missing') return t('findPhotoCamMissing')
+				if (kind === 'busy') return t('findPhotoCamBusy')
+				if (kind === 'unsupported') return t('findPhotoCamUnsupported')
+				if (kind === 'insecure') return t('findPhotoCamInsecure')
+				return t('findPhotoCamFail')
+			}
+
+			function findPhotoCameraErrorKind(err) {
+				const name = String((err && err.name) || '')
+				if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError') {
+					return findPhotoIsSecureContext() ? 'denied' : 'insecure'
+				}
+				if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return 'missing'
+				if (name === 'NotReadableError' || name === 'TrackStartError') return 'busy'
+				if (name === 'NotSupportedError' || name === 'TypeError') return 'unsupported'
+				return 'failed'
+			}
+
+			function stopFindPhotoTracks(stream) {
+				if (!stream || typeof stream.getTracks !== 'function') return
+				for (const track of stream.getTracks()) {
+					try {
+						track.stop()
+					} catch {
+						/* already ended */
+					}
+				}
+			}
+
+			function stopFindPhotoCamera() {
+				findPhotoCameraGen += 1
+				const stream = findPhotoStream
+				findPhotoStream = null
+				stopFindPhotoTracks(stream)
+				const video = document.getElementById('findPhotoLive')
+				if (video) video.srcObject = null
+			}
+
+			function bindFindPhotoVideoEl(video) {
+				if (!video) return
+				video.setAttribute('playsinline', '')
+				video.setAttribute('webkit-playsinline', '')
+				video.playsInline = true
+				video.muted = true
+				video.autoplay = true
+				video.setAttribute('muted', '')
+				video.setAttribute('autoplay', '')
+				video.setAttribute('aria-label', t('findPhotoTake'))
+			}
+
+			function attachFindPhotoStream() {
+				const video = document.getElementById('findPhotoLive')
+				if (!video || !findPhotoStream) return
+				bindFindPhotoVideoEl(video)
+				video.srcObject = findPhotoStream
+				const play = video.play()
+				if (play && typeof play.catch === 'function') play.catch(() => {})
+			}
+
+			function openFindPhotoPicker() {
+				findPhotoSeq += 1
+				setFindPhotoBusy(false)
+				stopFindPhotoCamera()
+				openModal('findPhotoModal')
+				paintFindPhoto({ status: 'pick' })
+			}
+
+			function openFindPhotoFilePicker() {
+				const input = document.getElementById('catFindPhotoFile')
+				if (input) input.click()
+			}
+
+			function findPhotoFileFromBlob(blob, name) {
+				if (!blob) return null
+				const type = blob.type || 'image/jpeg'
+				if (typeof File === 'function') {
+					try {
+						return new File([blob], name, { type, lastModified: Date.now() })
+					} catch {
+						/* fall through */
+					}
+				}
+				try {
+					blob.name = name
+				} catch {
+					/* immutable */
+				}
+				return blob
+			}
+
+			async function requestFindPhotoCamera(facing) {
+				const media = navigator.mediaDevices
+				const mode = facing || 'environment'
+				const attempts = [
+					{
+						audio: false,
+						video: {
+							facingMode: { ideal: mode },
+							width: { ideal: 1280 },
+							height: { ideal: 960 },
+						},
+					},
+					{ audio: false, video: { facingMode: mode } },
+					{ audio: false, video: true },
+				]
+				let lastErr = null
+				for (const constraints of attempts) {
+					try {
+						return await media.getUserMedia(constraints)
+					} catch (err) {
+						lastErr = err
+						const name = String((err && err.name) || '')
+						if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError') {
+							throw err
+						}
+					}
+				}
+				throw lastErr || new Error('camera')
+			}
+
+			async function startFindPhotoCamera() {
+				if (!findPhotoCanUseCamera()) {
+					paintFindPhoto({ status: 'pick', cameraError: findPhotoCameraBlockReason() || 'unsupported' })
+					return
+				}
+				stopFindPhotoCamera()
+				const gen = findPhotoCameraGen
+				openModal('findPhotoModal')
+				paintFindPhoto({ status: 'camera', starting: true })
+				let stream
+				try {
+					stream = await requestFindPhotoCamera(findPhotoFacing)
+				} catch (err) {
+					if (gen !== findPhotoCameraGen) return
+					paintFindPhoto({ status: 'pick', cameraError: findPhotoCameraErrorKind(err) })
+					return
+				}
+				if (gen !== findPhotoCameraGen) {
+					stopFindPhotoTracks(stream)
+					return
+				}
+				findPhotoStream = stream
+				paintFindPhoto({ status: 'camera' })
+				const video = document.getElementById('findPhotoLive')
+				const shutter = document.getElementById('findPhotoShutter')
+				if (shutter) shutter.disabled = true
+				try {
+					await waitForFindPhotoVideo(video)
+					if (gen !== findPhotoCameraGen) return
+					if (shutter) {
+						shutter.disabled = false
+						try {
+							shutter.focus()
+						} catch {
+							/* jsdom / hidden tab */
+						}
+					}
+					void updateFindPhotoFlipVisibility()
+				} catch {
+					if (gen !== findPhotoCameraGen) return
+					stopFindPhotoCamera()
+					paintFindPhoto({ status: 'pick', cameraError: 'failed' })
+				}
+			}
+
+			async function updateFindPhotoFlipVisibility() {
+				const btn = document.querySelector('#findPhotoBody [data-act="find-photo-flip"]')
+				if (!btn || !navigator.mediaDevices || typeof navigator.mediaDevices.enumerateDevices !== 'function') return
+				try {
+					const devices = await navigator.mediaDevices.enumerateDevices()
+					const cams = devices.filter((d) => d && d.kind === 'videoinput')
+					btn.hidden = cams.length < 2
+				} catch {
+					btn.hidden = false
+				}
+			}
+
+			function waitForFindPhotoVideo(video, ms = 8000) {
+				return new Promise((resolve, reject) => {
+					if (!video) {
+						reject(new Error('no video'))
+						return
+					}
+					let settled = false
+					const start = Date.now()
+					const finish = (ok, err) => {
+						if (settled) return
+						settled = true
+						clearInterval(timer)
+						video.removeEventListener('loadedmetadata', onReady)
+						video.removeEventListener('loadeddata', onReady)
+						video.removeEventListener('playing', onReady)
+						if (ok) resolve()
+						else reject(err || new Error('camera timeout'))
+					}
+					const onReady = () => {
+						if (video.videoWidth >= 8 && video.videoHeight >= 8) finish(true)
+					}
+					const timer = setInterval(() => {
+						if (!video.isConnected) {
+							finish(false, new Error('camera cancelled'))
+							return
+						}
+						onReady()
+						if (!settled && Date.now() - start > ms) finish(false, new Error('camera timeout'))
+					}, 50)
+					video.addEventListener('loadedmetadata', onReady)
+					video.addEventListener('loadeddata', onReady)
+					video.addEventListener('playing', onReady)
+					onReady()
+				})
+			}
+
+			async function captureFindPhotoFromCamera() {
+				const gen = findPhotoCameraGen
+				const shutter = document.getElementById('findPhotoShutter')
+				if (shutter) {
+					if (shutter.disabled) return
+					shutter.disabled = true
+				}
+				const video = document.getElementById('findPhotoLive')
+				if (!video || video.videoWidth < 8 || video.videoHeight < 8) {
+					if (shutter) shutter.disabled = false
+					toast(t('findPhotoCamFail'), 'err')
+					return
+				}
+				const maxEdge = 1280
+				const scale = Math.min(1, maxEdge / Math.max(video.videoWidth, video.videoHeight))
+				const width = Math.max(1, Math.round(video.videoWidth * scale))
+				const height = Math.max(1, Math.round(video.videoHeight * scale))
+				const canvas = document.createElement('canvas')
+				canvas.width = width
+				canvas.height = height
+				const ctx = canvas.getContext && canvas.getContext('2d')
+				if (!ctx) {
+					if (shutter) shutter.disabled = false
+					toast(t('findPhotoFail'), 'err')
+					return
+				}
+				ctx.drawImage(video, 0, 0, width, height)
+				let file = null
+				if (typeof canvas.toBlob === 'function') {
+					const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.82))
+					if (blob) file = findPhotoFileFromBlob(blob, 'camera.jpg')
+				}
+				if (!file && typeof canvas.toDataURL === 'function') {
+					const dataUrl = canvas.toDataURL('image/jpeg', 0.82)
+					const match = /^data:image\/jpeg;base64,(.+)$/i.exec(dataUrl || '')
+					if (match) {
+						const raw = atob(match[1])
+						const bytes = new Uint8Array(raw.length)
+						for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i)
+						file = findPhotoFileFromBlob(new Blob([bytes], { type: 'image/jpeg' }), 'camera.jpg')
+					}
+				}
+				if (gen !== findPhotoCameraGen) return
+				stopFindPhotoCamera()
+				if (!file) {
+					toast(t('findPhotoFail'), 'err')
+					return
+				}
+				await searchCatalogByPhoto(file)
+			}
+
+			async function flipFindPhotoCamera() {
+				findPhotoFacing = findPhotoFacing === 'environment' ? 'user' : 'environment'
+				await startFindPhotoCamera()
+			}
+
+			function paintFindPhoto(state) {
+				lastFindPhotoState = state
+				const body = document.getElementById('findPhotoBody')
+				if (!body) return
+				const again = document.getElementById('findPhotoAgain')
+				const hideAgain = !state || state.status === 'pick' || state.status === 'camera' || state.status === 'searching'
+				if (again) again.hidden = hideAgain
+				if (!state || state.status === 'searching') {
+					lastFindPhotoMatches = []
+					body.innerHTML = `<p class="find-photo-status">${esc(t('findPhotoSearching'))}</p>`
+					return
+				}
+				if (state.status === 'pick') {
+					lastFindPhotoMatches = []
+					const block = findPhotoCameraBlockReason()
+					const canCam = !block
+					const err = state.cameraError
+						? `<p class="find-photo-status">${esc(findPhotoCameraErrorCopy(state.cameraError))}</p>`
+						: block
+							? `<p class="find-photo-status">${esc(findPhotoCameraErrorCopy(block))}</p>`
+							: ''
+					body.innerHTML =
+						err +
+						`<div class="find-photo-pick">` +
+						`<button type="button" class="btn primary" data-act="find-photo-camera"${canCam ? '' : ' disabled'}>${esc(t('findPhotoTake'))}</button>` +
+						`<button type="button" class="btn" data-act="find-photo-upload">${esc(t('findPhotoUpload'))}</button>` +
+						`</div>`
+					try {
+						const take = body.querySelector('[data-act="find-photo-camera"]')
+						const upload = body.querySelector('[data-act="find-photo-upload"]')
+						if (canCam && take) take.focus()
+						else if (upload) upload.focus()
+					} catch {
+						/* jsdom / hidden tab */
+					}
+					return
+				}
+				if (state.status === 'camera') {
+					lastFindPhotoMatches = []
+					const starting = !!state.starting
+					body.innerHTML =
+						`<div class="find-photo-live">` +
+						`<video id="findPhotoLive" autoplay muted playsinline webkit-playsinline></video>` +
+						(starting ? `<p class="find-photo-live-status">${esc(t('findPhotoCamStarting'))}</p>` : '') +
+						`</div>` +
+						`<div class="find-photo-live-acts">` +
+						`<button type="button" class="btn" data-act="find-photo-upload">${esc(t('findPhotoUpload'))}</button>` +
+						`<button type="button" class="btn primary" id="findPhotoShutter" data-act="find-photo-shutter"${starting ? ' disabled' : ''}>${esc(t('findPhotoCapture'))}</button>` +
+						`<button type="button" class="btn" data-act="find-photo-flip">${esc(t('findPhotoFlip'))}</button>` +
+						`</div>`
+					attachFindPhotoStream()
+					return
+				}
+				if (state.status === 'error') {
+					lastFindPhotoMatches = []
+					body.innerHTML = `<p class="find-photo-status">${esc(state.message || t('findPhotoFail'))}</p>`
+					return
+				}
+				const matches = hydrateFindPhotoMatches(state.matches)
+				lastFindPhotoMatches = matches
+				if (!matches.length) {
+					const looked = findPhotoLookedForText(state.query)
+					body.innerHTML =
+						`<p class="find-photo-status">${esc(findPhotoEmptyCopy(state))}</p>` +
+						(looked ? `<p class="find-photo-query">${esc(t('findPhotoLookedFor'))}: ${esc(looked)}</p>` : '')
+					return
+				}
+				body.innerHTML =
+					'<div class="find-hit-list">' +
+					matches
+						.map((m, i) => {
+							const loc = locText(m.location)
+							const shop = String(m.shop_name || '').trim()
+							const stall = String(m.stall || '').trim()
+							const shopLine = shop || t('findPhotoNoSupplier')
+							const locLine = loc || stall
+							const img = m.image_url
+								? `<img src="${esc(m.image_url)}" alt="" loading="lazy" decoding="async">`
+								: '<span class="find-hit-ph" aria-hidden="true"></span>'
+							const visual =
+								m.match_kind === 'embed' || (m.match_kind === 'vision' && m.vision_evidence === 'rerank')
+									? ` · ${t('findPhotoVisual')}`
+									: ''
+							return (
+								`<button type="button" class="find-hit" data-act="find-photo-use" data-idx="${i}">` +
+								img +
+								`<span><span class="find-hit-shop">${esc(shopLine)}</span>` +
+								(locLine ? `<span class="find-hit-loc">${esc(locLine)}</span>` : '') +
+								(m.title ? `<span class="find-hit-title">${esc(m.title)}</span>` : '') +
+								`<span class="find-hit-conf ${esc(m.confidence || '')}">${esc(findPhotoConfidenceLabel(m.confidence))}${esc(visual)}</span>` +
+								`</span></button>`
+							)
+						})
+						.join('') +
+					'</div>'
+			}
+
+			function readFileAsDataUrl(file) {
+				return new Promise((resolve, reject) => {
+					const reader = new FileReader()
+					reader.onload = () => resolve(reader.result)
+					reader.onerror = () => reject(new Error(t('findPhotoFail')))
+					reader.readAsDataURL(file)
+				})
+			}
+
+			async function compressPhotoForUpload(file) {
+				if (typeof createImageBitmap !== 'function') return null
+				try {
+					const bitmap = await createImageBitmap(file)
+					const maxEdge = 640
+					const scale = Math.min(1, maxEdge / Math.max(bitmap.width || 1, bitmap.height || 1))
+					const width = Math.max(1, Math.round((bitmap.width || 1) * scale))
+					const height = Math.max(1, Math.round((bitmap.height || 1) * scale))
+					const canvas = document.createElement('canvas')
+					canvas.width = width
+					canvas.height = height
+					const ctx = canvas.getContext && canvas.getContext('2d')
+					if (!ctx || typeof canvas.toDataURL !== 'function') {
+						if (typeof bitmap.close === 'function') bitmap.close()
+						return null
+					}
+					ctx.drawImage(bitmap, 0, 0, width, height)
+					if (typeof bitmap.close === 'function') bitmap.close()
+					const dataUrl = canvas.toDataURL('image/jpeg', scale < 1 ? 0.72 : 0.82)
+					if (!dataUrl || !/^data:image\/jpeg;base64,/i.test(dataUrl)) return null
+					if (dataUrl.length > file.size * 1.35 + 64) return null
+					return dataUrl
+				} catch {
+					return null
+				}
+			}
+
+			async function readPhotoDataUrl(file) {
+				if (!file) throw new Error(t('findPhotoNeedFile'))
+				const typeOk = /^image\/(jpeg|jpg|png|webp)$/i.test(file.type || '')
+				const nameOk = /\.(jpe?g|png|webp)$/i.test(file.name || '')
+				if (!typeOk && !nameOk) throw new Error(t('findPhotoNeedFile'))
+				if (file.size > 10 * 1024 * 1024) throw new Error(t('findPhotoTooLarge'))
+				const compressed = await compressPhotoForUpload(file)
+				if (compressed) return compressed
+				return readFileAsDataUrl(file)
+			}
+
+			async function searchCatalogByPhoto(file) {
+				const seq = ++findPhotoSeq
+				stopFindPhotoCamera()
+				setFindPhotoBusy(true)
+				openModal('findPhotoModal')
+				paintFindPhoto({ status: 'searching' })
+				try {
+					const photo_data = await readPhotoDataUrl(file)
+					if (seq !== findPhotoSeq) return
+					const data = await api('/api/sourcing/find-by-photo', jsonBody('POST', { photo_data }))
+					if (seq !== findPhotoSeq) return
+					const matches = hydrateFindPhotoMatches(data.matches || [])
+					paintFindPhoto({ status: 'results', matches, reason: data.reason || null, query: data.query || null })
+					const best = matches[0]
+					if (shouldAutoLocatePhoto(best)) {
+						try {
+							applyFindPhotoMatch(best)
+						} catch (locateErr) {
+							toast(locateErr.message || t('findPhotoFail'), 'err')
+						}
+					}
+				} catch (err) {
+					if (seq !== findPhotoSeq) return
+					paintFindPhoto({ status: 'error', message: err.message || t('findPhotoFail') })
+				} finally {
+					if (seq === findPhotoSeq) setFindPhotoBusy(false)
+				}
+			}
+
+			function shouldAutoLocatePhoto(match) {
+				if (!match) return false
+				if (match.confidence !== 'exact' && match.confidence !== 'likely') return false
+				return Boolean(findSupplierForPhotoMatch(match) || match.catalog_id)
+			}
+
+			function findSupplierForPhotoMatch(match) {
+				if (!CAT || !match || !Array.isArray(CAT.suppliers)) return null
+				const catalogRow =
+					match.catalog_id && CAT.products ? CAT.products.find((p) => p.id === match.catalog_id) : null
+				const key = catalogRow && catalogRow.supplier_key
+				if (key) {
+					const byKey = CAT.suppliers.find((s) => s.key === key)
+					if (byKey) return byKey
+				}
+				const shop = norm((catalogRow && catalogRow.shop_name) || match.shop_name)
+				const stall = norm((catalogRow && catalogRow.stall) || match.stall)
+				if (shop && stall) {
+					const both = CAT.suppliers.find((s) => norm(s.shop_name) === shop && norm(s.stall) === stall)
+					if (both) return both
+				}
+				if (shop) {
+					const named = CAT.suppliers.filter((s) => norm(s.shop_name) === shop)
+					if (named.length === 1) return named[0]
+					if (!stall) return null
+					const stallHit = named.find((s) => norm(s.stall) === stall)
+					if (stallHit) return stallHit
+				}
+				return null
+			}
+
+			function revealSupplierFromPhoto(s, match) {
+				setView('suppliers')
+				const search = document.getElementById('supSearch')
+				if (search) search.value = ''
+				const bid = supplierBuildingId(s)
+				if (bid !== supBuildingFilter) {
+					supBuildingFilter = bid
+					_supBuildingPainted = null
+					try {
+						localStorage.setItem('sourcingSupBuilding', bid)
+					} catch {
+						/* ignore */
+					}
+				}
+				renderSuppliers()
+				const idx = CAT.suppliers.indexOf(s)
+				document.querySelectorAll('#supArea tr.srow.is-photo-hit').forEach((el) => el.classList.remove('is-photo-hit'))
+				const row = idx >= 0 ? document.querySelector(`#supArea tr.srow[data-idx="${idx}"]`) : null
+				if (row) {
+					row.classList.add('is-photo-hit')
+					if (typeof row.scrollIntoView === 'function') {
+						row.scrollIntoView({ block: 'center', behavior: prefersReducedMotion() ? 'auto' : 'smooth' })
+					}
+				}
+				if (idx >= 0) {
+					openSupplierDrawer(idx, { skipFocus: true })
+					revealProductInOpenDrawer(match)
+				}
+				const loc = locText(s.location) || s.stall || ''
+				toast(`${s.shop_name}${loc ? ' · ' + loc : ''}`, 'ok')
+			}
+
+			function drawerRowForPhotoMatch(match) {
+				const body = document.getElementById('sdBody')
+				if (!body || !match) return null
+				const id = match.catalog_id != null ? String(match.catalog_id) : ''
+				if (id && /^\d+$/.test(id)) {
+					const exact = body.querySelector(`.prow[data-product-id="${id}"]`)
+					if (exact) return exact
+					for (const el of body.querySelectorAll('.prow[data-product-ids]')) {
+						const ids = String(el.getAttribute('data-product-ids') || '').split(/\s+/)
+						if (ids.includes(id)) return el
+					}
+				}
+				const title = norm(match.title)
+				if (title) {
+					for (const el of body.querySelectorAll('.prow')) {
+						if (norm((el.querySelector('.title') || {}).textContent) === title) return el
+					}
+				}
+				return null
+			}
+
+			function revealProductInOpenDrawer(match) {
+				if (!match || !openSupplierKey) return
+				let el = drawerRowForPhotoMatch(match)
+				if (!el) {
+					const search = document.getElementById('sdSearch')
+					if (search) search.value = ''
+					sdTypeFilter = ''
+					sdGapFilter = ''
+					renderSupplierDrawer()
+					el = drawerRowForPhotoMatch(match)
+				}
+				document.querySelectorAll('#sdBody .prow.is-photo-hit').forEach((node) => node.classList.remove('is-photo-hit'))
+				if (!el) return
+				el.classList.add('is-photo-hit')
+				if (typeof el.scrollIntoView === 'function') {
+					el.scrollIntoView({
+						block: 'center',
+						behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+					})
+				}
+			}
+
+			function revealCatalogFromPhoto(match) {
+				setView('catalog')
+				const catalogRow =
+					match.catalog_id && CAT && CAT.products
+						? CAT.products.find((p) => p.id === match.catalog_id)
+						: null
+				const shop = String((catalogRow && catalogRow.shop_name) || match.shop_name || '').trim()
+				const title = String((catalogRow && catalogRow.title) || match.title || '').trim()
+				const sel = document.getElementById('catSupplier')
+				const search = document.getElementById('catSearch')
+				const hasShop = Boolean(shop && sel && [...sel.options].some((o) => o.value === shop))
+				if (sel) sel.value = hasShop ? shop : ''
+				if (search) search.value = title || shop
+				catShown = CAT_PAGE_SIZE
+				if (search && hasShop && !filteredProducts().length) search.value = ''
+				renderCatalog()
+				const hitId = (catalogRow && catalogRow.id) || match.catalog_id
+				if (hitId) {
+					const el = document.querySelector(`[data-product-id="${hitId}"]`)
+					if (el) {
+						el.classList.add('is-photo-hit')
+						if (typeof el.scrollIntoView === 'function') {
+							el.scrollIntoView({
+								block: 'nearest',
+								behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+							})
+						}
+					}
+				}
+			}
+
+			function applyFindPhotoMatch(match) {
+				if (!match) return
+				closeModal('findPhotoModal')
+				const supplier = findSupplierForPhotoMatch(match)
+				if (supplier) {
+					revealSupplierFromPhoto(supplier, match)
+					return
+				}
+				revealCatalogFromPhoto(match)
+			}
 
 			function typeMeta(id) {
 				return (META.product_types || []).find((x) => x.id === id) || { id, label: id, label_zh: id }
@@ -2436,6 +4841,7 @@
 			// ══════════════════════════════════════════════════════════════════
 			async function boot() {
 				applyLang()
+				watchSourcingCompact()
 				for (const el of document.querySelectorAll('.can-edit')) el.hidden = !CAN_EDIT_CATALOG
 
 				try {
@@ -2469,6 +4875,11 @@
 				document.getElementById('viewSuppliers').hidden = view !== 'suppliers'
 				document.getElementById('viewLibrary').hidden = view !== 'library'
 				for (const b of document.querySelectorAll('#viewNav button')) b.classList.toggle('active', b.dataset.view === view)
+				if (view === 'suppliers') {
+					observeSupControls()
+					// Layout after unhiding — height is 0 while the section is hidden.
+					requestAnimationFrame(syncSupControlsHeight)
+				}
 				if (opts.skipLoad) return
 				if (view === 'catalog' || view === 'suppliers') {
 					if (!CAT) loadCatalog()
@@ -2485,6 +4896,7 @@
 				renderCatalog()
 				renderSuppliers()
 				if (openSupplierKey) renderSupplierDrawer()
+				if (openCharmShopKey) renderCharmShopDrawer()
 				renderDesignList()
 				renderDesignView()
 				renderPackages()
@@ -2515,6 +4927,7 @@
 					const gapIds = new Set(META.gap_types.map((x) => x.id))
 					for (const v of [...catFilters.types]) if (!typeIds.has(v)) catFilters.types.delete(v)
 					for (const v of [...catFilters.gaps]) if (!gapIds.has(v)) catFilters.gaps.delete(v)
+					pruneSupBuildingFilter()
 					fillSupplierFilter()
 					fillProductDatalists()
 					renderCatalog()
@@ -2523,6 +4936,7 @@
 					// Keep the open drawer live: after a product/supplier edit the
 					// counts and the list behind the number must refresh in place.
 					if (openSupplierKey) renderSupplierDrawer()
+					if (openCharmShopKey) renderCharmShopDrawer()
 				} catch (e) {
 					if (requestSeq !== catalogLoadSeq) return
 					// Keep the last-good catalog visible during a transient outage;
@@ -2577,7 +4991,7 @@
 				else if (supplier) rows = rows.filter((p) => p.shop_name === supplier)
 				if (q) {
 					rows = rows.filter((p) =>
-						[p.title, p.shop_name, p.stall_effective, p.charm_code, p.charm_shop, typeLabel(p.product_type)].some((v) => norm(v).includes(q)),
+						[p.title, ...(p.title_aliases || []), p.shop_name, p.stall_effective, p.charm_code, p.charm_shop, typeLabel(p.product_type)].some((v) => norm(v).includes(q)),
 					)
 				}
 
@@ -2620,7 +5034,7 @@
 				// Windowed rendering: 700+ rows with photos is a lot of DOM, and every
 				// keystroke re-renders. A page of 48 keeps filtering instant.
 				const slice = rows.slice(0, catShown)
-				area.innerHTML = catFilters.mode === 'grid' ? productGridHtml(slice) : productTableHtml(slice)
+				area.innerHTML = catalogUsesCards() ? productGridHtml(slice) : productTableHtml(slice)
 				document.getElementById('catCount').textContent = `${t('showing')} ${slice.length} ${t('of')} ${rows.length}`
 				more.hidden = slice.length >= rows.length
 				if (!more.hidden) more.querySelector('button').textContent = `${t('showMore')} (${rows.length - slice.length})`
@@ -2638,7 +5052,7 @@
 				document.getElementById('catStats').innerHTML = cards
 					.map(
 						(c) =>
-							`<div class="stat"><div class="v">${esc(c.v)}</div><div class="k">${esc(c.k)}</div>` +
+							`<div class="stat"><div class="k">${esc(c.k)}</div><div class="v">${esc(c.v)}</div>` +
 							(c.bar == null ? '' : `<div class="bar"><i style="width:${c.bar}%"></i></div>`) +
 							`</div>`,
 					)
@@ -2684,6 +5098,76 @@
 				)
 			}
 
+			/** Content-addressed charm thumbnail URL — same contract as shop.html. */
+			function charmImageUrl(code, version) {
+				const base = `/api/route/charm-image?code=${encodeURIComponent(code)}`
+				return version ? `${base}&v=${encodeURIComponent(version)}` : base
+			}
+
+			/**
+			 * Deep-link into the dashboard Route tab's charm catalog. `view=charms`
+			 * opens Manage charms; `charm=` focuses the editor for that code so the
+			 * operator can change the photo or supplier without duplicating CRUD here.
+			 */
+			const ROUTE_CHARM_WINDOW = 'ued-route-charms'
+			function routeCharmHref(opts = {}) {
+				const q = new URLSearchParams()
+				q.set('tab', 'route')
+				q.set('view', 'charms')
+				const code = String(opts.code || '').trim()
+				const shop = String(opts.shop || '').trim()
+				if (code) q.set('charm', code)
+				if (shop) q.set('charmShop', shop)
+				return `/?${q.toString()}`
+			}
+			function routeCharmLinkAttrs(opts = {}) {
+				const code = String(opts.code || '').trim()
+				const shop = String(opts.shop || '').trim()
+				const href = routeCharmHref({ code, shop })
+				const bits = [
+					`href="${esc(href)}"`,
+					`target="${ROUTE_CHARM_WINDOW}"`,
+					'rel="noopener noreferrer"',
+					'data-act="route-charm"',
+				]
+				if (code) bits.push(`data-code="${esc(code)}"`)
+				if (shop) bits.push(`data-shop="${esc(shop)}"`)
+				return bits.join(' ')
+			}
+			function openRouteCharmWindow(href) {
+				if (!href) return
+				let opened = null
+				try {
+					opened = window.open(href, ROUTE_CHARM_WINDOW)
+				} catch {
+					opened = null
+				}
+				if (!opened) window.location.assign(href)
+			}
+
+			/**
+			 * Product photo (large) + optional charm photo beside it for the
+			 * supplier drawer. Catalog cards keep thumbHtml() alone.
+			 */
+			function supplierMediaHtml(p) {
+				const product = thumbHtml(p)
+				if (!product) return ''
+				const code = String(p.charm_code || '').trim()
+				if (!code) return `<div class="pmedia">${product}</div>`
+				const version = String(p.charm_image_version || '').trim()
+				const known = p.has_charm_image === true || !!version
+				const lib = !known && CAT && Array.isArray(CAT.charms)
+					? CAT.charms.find((c) => String(c.code || '').toUpperCase() === code.toUpperCase())
+					: null
+				const hasImage = known || !!(lib && (lib.has_image || lib.image_version))
+				const ver = version || (lib && lib.image_version) || ''
+				const openHint = t('sdCharmOpenHint')
+				const charm = hasImage
+					? `<a class="pthumb charm" ${routeCharmLinkAttrs({ code })} title="${esc(openHint)}" aria-label="${esc(`${t('sdCharmOpen')}: ${code}`)}"><img class="charm-img" loading="lazy" decoding="async" src="${esc(charmImageUrl(code, ver))}" alt=""></a>`
+					: `<a class="pthumb charm" ${routeCharmLinkAttrs({ code })} title="${esc(openHint)}" aria-label="${esc(`${t('sdCharmOpen')}: ${code}`)}"><span class="charm-ph">${esc(t('sdCharmDetails'))}</span></a>`
+				return `<div class="pmedia">${product}${charm}</div>`
+			}
+
 			function supplierLineHtml(p) {
 				if (!p.shop_name) return `<span class="missing">${esc(gapLabel('no_supplier'))}</span>`
 				const loc = locText(p.location)
@@ -2704,14 +5188,51 @@
 				return bits.join(' · ')
 			}
 
+			function iconActionButton(act, label, attrs, svgPaths, danger) {
+				const extra = attrs ? ` ${attrs}` : ''
+				return (
+					`<button type="button" class="iconbtn${danger ? ' danger' : ''}" data-act="${act}"${extra} title="${esc(label)}" aria-label="${esc(label)}">` +
+					`<svg viewBox="0 0 24 24" aria-hidden="true">${svgPaths}</svg>` +
+					`<span class="act-label">${esc(label)}</span></button>`
+				)
+			}
+
 			function actionsHtml(id) {
 				if (!CAN_EDIT_CATALOG) return ''
 				return (
-					`<button class="iconbtn" data-act="product-edit" data-id="${id}" title="${esc(t('edit'))}" aria-label="${esc(t('edit'))}">` +
-					`<svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>` +
-					`<button class="iconbtn danger" data-act="product-del" data-id="${id}" title="${esc(t('delete'))}" aria-label="${esc(t('delete'))}">` +
-					`<svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg></button>`
+					iconActionButton('product-edit', t('edit'), `data-id="${id}"`, '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>') +
+					iconActionButton('product-del', t('delete'), `data-id="${id}"`, '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/>', true)
 				)
+			}
+
+			function directoryRowActions(editAct, delAct, idx) {
+				if (!CAN_EDIT_CATALOG) return ''
+				return (
+					iconActionButton(editAct, t('edit'), `data-idx="${idx}"`, '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>') +
+					iconActionButton(delAct, t('delete'), `data-idx="${idx}"`, '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/>', true)
+				)
+			}
+
+			function isSourcingCompact() {
+				try {
+					return typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 768px)').matches
+				} catch {
+					return false
+				}
+			}
+
+			function catalogUsesCards() {
+				return catFilters.mode === 'grid' || isSourcingCompact()
+			}
+
+			function watchSourcingCompact() {
+				if (typeof window.matchMedia !== 'function') return
+				const mq = window.matchMedia('(max-width: 768px)')
+				const onCompactMq = () => {
+					if (CAT) renderCatalog()
+				}
+				if (typeof mq.addEventListener === 'function') mq.addEventListener('change', onCompactMq)
+				else if (typeof mq.addListener === 'function') mq.addListener(onCompactMq)
 			}
 
 			function productGridHtml(rows) {
@@ -2724,7 +5245,7 @@
 							const prices = [price(p.cost_case, t('colCase')), price(p.cost_grip, t('colGrip'))]
 							if (p.cost_total != null) prices.push(`<span class="p total">${esc(fmtMoney(p.cost_total))}<small>${esc(t('colUnit'))}</small></span>`)
 							return (
-								`<article class="pcard">${thumbHtml(p)}<div class="pbody">` +
+								`<article class="pcard" data-product-id="${p.id}">${thumbHtml(p)}<div class="pbody">` +
 								`<div class="toprow"><div class="left">` +
 								`<span class="badge t-${esc(p.product_type)}">${esc(typeLabel(p.product_type))}</span>` +
 								(p.product_type_source === 'derived' ? `<span class="auto-tag" title="${esc(t('autoTagHint'))}">${esc(t('autoTag'))}</span>` : '') +
@@ -2755,7 +5276,7 @@
 					.map((p) => {
 						const img = `<img class="tthumb" loading="lazy" decoding="async" src="${esc(p.image_url)}" alt="">`
 						return (
-							`<tr><td>${img}</td>` +
+							`<tr data-product-id="${p.id}"><td>${img}</td>` +
 							`<td><div class="cellwrap" title="${esc(p.title)}">${esc(p.title)}</div></td>` +
 							`<td><span class="badge t-${esc(p.product_type)}">${esc(typeLabel(p.product_type))}</span>` +
 							(p.product_type_source === 'derived' ? ` <span class="auto-tag" title="${esc(t('autoTagHint'))}">${esc(t('autoTag'))}</span>` : '') +
@@ -2766,7 +5287,7 @@
 							`<td class="num">${esc(fmtMoney(p.cost_grip)) || '—'}</td>` +
 							`<td class="num" style="color:var(--green)">${esc(fmtMoney(p.cost_total)) || '—'}</td>` +
 							`<td>${p.gaps.map((g) => `<span class="gap-chip">${esc(gapLabel(g))}</span>`).join(' ')}</td>` +
-							`<td class="act"><div>${actionsHtml(p.id)}</div></td></tr>`
+							`<td class="act" data-act="stop"><div>${actionsHtml(p.id)}</div></td></tr>`
 						)
 					})
 					.join('')
@@ -2786,12 +5307,18 @@
 				document.getElementById('prTitleHead').textContent = p ? t('editProduct') : t('addProduct')
 				const titleInput = document.getElementById('prTitle')
 				titleInput.value = p ? p.title : ''
-				titleInput.readOnly = !!p
-				titleInput.title = p
-					? LANG === 'zh'
-						? '产品标题是稳定标识。如需更正，请新增正确标题后停用此产品。'
-						: 'Product titles are stable identities. Add the corrected title, then discontinue this product.'
-					: ''
+				titleInput.readOnly = false
+				titleInput.removeAttribute('readonly')
+				titleInput.title = p ? t('fProductTitleRenameHint') : ''
+				const titleHint = document.getElementById('prTitleHint')
+				if (titleHint) {
+					const aliases = (p && p.title_aliases) || []
+					titleHint.textContent = p
+						? aliases.length
+							? `${t('fProductTitleRenameHint')} ${aliases.join(' · ')}`
+							: t('fProductTitleRenameHint')
+						: t('fProductTitleHint')
+				}
 				document.getElementById('prShop').value = p ? p.shop_name : seed && seed.shop_name ? seed.shop_name : ''
 				// The stored stall, never the inferred one — inferring is a display aid,
 				// and saving it back would silently copy the directory into 700 rows.
@@ -2805,7 +5332,7 @@
 				fillTypeSelect(p && p.product_type_source === 'override' ? p.product_type : '')
 				onProductFieldChange()
 				openModal('productModal')
-				setTimeout(() => document.getElementById(p ? 'prShop' : 'prTitle').focus(), 50)
+				setTimeout(() => document.getElementById('prTitle').focus(), 50)
 			}
 
 			function fillTypeSelect(selected) {
@@ -2899,11 +5426,25 @@
 				onProductFieldChange()
 			}
 
+			function catalogTitleKey(text) {
+				return String(text || '')
+					.replace(/\|/g, ',')
+					.replace(/\s+/g, ' ')
+					.trim()
+					.toLowerCase()
+			}
+
 			async function saveProduct() {
 				const title = document.getElementById('prTitle').value.trim()
 				if (!title) {
 					document.getElementById('prErr').textContent = t('needTitle')
 					return
+				}
+				if (editingProductId != null && CAT) {
+					const original = CAT.products.find((x) => x.id === editingProductId)
+					if (original && catalogTitleKey(title) !== catalogTitleKey(original.title)) {
+						if (!confirm(t('renameProductConfirm'))) return
+					}
 				}
 				// Every optional key is sent explicitly, including '' — the endpoint reads
 				// a present-but-blank value as "clear this", which is how a price or a
@@ -2968,6 +5509,294 @@
 			}
 
 			// ══════════════════════════════════════════════════════════════════
+			// Shared facet rail (buildings, drawer types, drawer gaps)
+			// ══════════════════════════════════════════════════════════════════
+			function prefersReducedMotion() {
+				return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+			}
+
+			function supplierBuildingId(s) {
+				return s.location && s.location.located ? s.location.building_id : UNLOCATED_BUILDING
+			}
+
+			function buildingLabelOf(locOrLabel) {
+				const label = locOrLabel && locOrLabel.building_label ? locOrLabel.building_label : locOrLabel
+				if (!label || typeof label !== 'object') return t('unlocatedShops')
+				return LANG === 'zh' ? label.zh || label.en : label.en || label.zh || t('unlocatedShops')
+			}
+
+			function isValidSupBuilding(id) {
+				if (!id) return true
+				if (!CAT) return false
+				if (id === UNLOCATED_BUILDING) return CAT.suppliers.some((s) => !s.location.located)
+				return CAT.suppliers.some((s) => s.location.located && s.location.building_id === id)
+			}
+
+			function pruneSupBuildingFilter() {
+				if (!supBuildingFilter || isValidSupBuilding(supBuildingFilter)) return
+				supBuildingFilter = ''
+				_supBuildingPainted = null
+				try {
+					localStorage.removeItem('sourcingSupBuilding')
+				} catch {
+					/* quota / private mode */
+				}
+			}
+
+			function bindFacetScroller(scroller) {
+				if (!scroller || scroller.dataset.facetBound) return
+				scroller.dataset.facetBound = '1'
+				const rail = scroller.querySelector('.facet-rail')
+				if (rail) rail.addEventListener('scroll', () => syncFacetOverflow(scroller), { passive: true })
+			}
+
+			function syncFacetOverflow(scroller) {
+				if (!scroller) return
+				bindFacetScroller(scroller)
+				const rail = scroller.querySelector('.facet-rail')
+				if (!rail) return
+				const max = rail.scrollWidth - rail.clientWidth
+				scroller.classList.toggle('is-overflow-start', rail.scrollLeft > 8)
+				scroller.classList.toggle('is-overflow-end', max > 8 && rail.scrollLeft < max - 8)
+			}
+
+			function paintFacetRail(rail, items, selected, act, opts = {}) {
+				if (!rail) return
+				const scroller = rail.closest('.facet-scroller')
+				const restore = rail.contains(document.activeElement)
+				const prevScroll = rail.scrollLeft
+				rail.innerHTML = items
+					.map((item) => {
+						const on = item.id === selected
+						const tone = item.tone ? ` ${esc(item.tone)}` : ''
+						const swatchClass = item.swatchClass || (item.swatch ? `t-${item.swatch}` : '')
+						const swatch = swatchClass ? `<span class="facet-swatch ${esc(swatchClass)}" aria-hidden="true"></span>` : ''
+						return (
+							`<button type="button" class="facet${on ? ' on' : ''}${item.warn ? ' warn' : ''}${tone}" role="radio" aria-checked="${on ? 'true' : 'false'}"` +
+							` data-act="${esc(act)}" data-val="${esc(item.id)}" tabindex="${on ? '0' : '-1'}">` +
+							swatch +
+							`<span class="facet-label">${esc(item.label)}</span>` +
+							`<span class="facet-n">${item.count}</span></button>`
+						)
+					})
+					.join('')
+				rail.scrollLeft = prevScroll
+				const selectedBtn = rail.querySelector('.facet.on')
+				if (restore && selectedBtn) selectedBtn.focus({ preventScroll: true })
+				if (opts.scrollToSelected && selectedBtn && typeof selectedBtn.scrollIntoView === 'function') {
+					selectedBtn.scrollIntoView({
+						inline: 'nearest',
+						block: 'nearest',
+						behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+					})
+				}
+				syncFacetOverflow(scroller)
+			}
+
+			function searchedSuppliers() {
+				const q = norm(document.getElementById('supSearch').value)
+				let rows = CAT.suppliers
+				if (q) rows = rows.filter((s) => [s.shop_name, s.stall, s.mall, s.address, s.notes].some((v) => norm(v).includes(q)))
+				return rows
+			}
+
+			function suppliersInBuilding(rows, building) {
+				if (!building) return rows
+				return rows.filter((s) => supplierBuildingId(s) === building)
+			}
+
+			function renderBuildingRail() {
+				const row = document.getElementById('supBuildingRow')
+				const rail = document.getElementById('supBuildingRail')
+				if (!row || !rail || !CAT) return
+				const matched = searchedSuppliers()
+				const seen = new Map()
+				let unlocatedCount = 0
+				for (const s of CAT.suppliers) {
+					if (!s.location.located) {
+						unlocatedCount++
+						continue
+					}
+					if (!seen.has(s.location.building_id)) seen.set(s.location.building_id, s.location)
+				}
+				const bucketCount = seen.size + (unlocatedCount ? 1 : 0)
+				if (bucketCount < 2) {
+					row.hidden = true
+					if (supBuildingFilter) {
+						supBuildingFilter = ''
+						_supBuildingPainted = null
+						try {
+							localStorage.removeItem('sourcingSupBuilding')
+						} catch {
+							/* ignore */
+						}
+					}
+					return
+				}
+				row.hidden = false
+				rail.setAttribute('aria-label', t('filterBuildings'))
+				const countIn = (id) => suppliersInBuilding(matched, id).length
+				const items = [{ id: '', label: t('allMarkets'), count: matched.length }].concat(
+					[...seen.entries()]
+						.sort((a, b) => a[1].building_order - b[1].building_order)
+						.map(([id, loc]) => ({
+							id,
+							label: buildingLabelOf(loc),
+							count: countIn(id),
+							tone: buildingTone(id),
+							swatchClass: buildingTone(id),
+						})),
+				)
+				if (unlocatedCount) {
+					items.push({
+						id: UNLOCATED_BUILDING,
+						label: t('unlocatedShops'),
+						count: countIn(UNLOCATED_BUILDING),
+						tone: buildingTone(UNLOCATED_BUILDING),
+						swatchClass: buildingTone(UNLOCATED_BUILDING),
+					})
+				}
+				const changed = _supBuildingPainted !== supBuildingFilter
+				_supBuildingPainted = supBuildingFilter
+				paintFacetRail(rail, items, supBuildingFilter, 'sup-building', { scrollToSelected: changed })
+			}
+
+			function setSupBuilding(id) {
+				const next = id || ''
+				if (next === supBuildingFilter) return
+				supBuildingFilter = next
+				_supBuildingPainted = null
+				try {
+					localStorage.setItem('sourcingSupBuilding', next)
+				} catch {
+					/* ignore */
+				}
+				renderSuppliers()
+			}
+
+			function groupProductType(group) {
+				return group.representative.product_type || 'other'
+			}
+
+			function groupMatchesSearch(group, q) {
+				if (!q) return true
+				return group.aliases.some((p) =>
+					[p.title, ...(p.title_aliases || []), p.stall, p.charm_code, p.charm_shop, typeLabel(p.product_type)].some((v) => norm(v).includes(q)),
+				)
+			}
+
+			function pruneDrawerFacets(allGroups) {
+				const types = new Set(allGroups.map(groupProductType))
+				if (sdTypeFilter && !types.has(sdTypeFilter)) {
+					sdTypeFilter = ''
+					_sdTypePainted = null
+				}
+				const gaps = new Set()
+				for (const group of allGroups) for (const g of group.representative.gaps || []) gaps.add(g)
+				if (sdGapFilter && !gaps.has(sdGapFilter)) {
+					sdGapFilter = ''
+					_sdGapPainted = null
+				}
+			}
+
+			function renderDrawerFacets(allGroups, searched) {
+				const facets = document.getElementById('sdFacets')
+				const typeRow = document.getElementById('sdTypeRow')
+				const gapRow = document.getElementById('sdGapRow')
+				const typeRail = document.getElementById('sdTypeRail')
+				const gapRail = document.getElementById('sdGapRail')
+				if (!facets || !typeRow || !gapRow) return
+
+				const typeOrder = (META.product_types || []).map((pt) => pt.id)
+				const typesPresent = new Set(allGroups.map(groupProductType))
+				const typeIds = typeOrder.filter((id) => typesPresent.has(id)).concat([...typesPresent].filter((id) => !typeOrder.includes(id)))
+				const showTypes = typeIds.length > 1 || !!sdTypeFilter
+				typeRow.hidden = !showTypes
+				if (showTypes && typeRail) {
+					typeRail.setAttribute('aria-label', t('filterType'))
+					const gapApplied = sdGapFilter
+						? searched.filter((group) => (group.representative.gaps || []).includes(sdGapFilter))
+						: searched
+					const items = [{ id: '', label: t('allTypes'), count: gapApplied.length }].concat(
+						typeIds.map((id) => ({
+							id,
+							label: typeLabel(id),
+							count: gapApplied.filter((group) => groupProductType(group) === id).length,
+							swatch: id,
+						})),
+					)
+					const changed = _sdTypePainted !== sdTypeFilter
+					_sdTypePainted = sdTypeFilter
+					paintFacetRail(typeRail, items, sdTypeFilter, 'sd-type', { scrollToSelected: changed })
+				}
+
+				const typeApplied = sdTypeFilter ? searched.filter((group) => groupProductType(group) === sdTypeFilter) : searched
+				const gapIds = (META.gap_types || []).map((g) => g.id).filter((id) => allGroups.some((group) => (group.representative.gaps || []).includes(id)))
+				const showGaps = gapIds.length > 0 || !!sdGapFilter
+				gapRow.hidden = !showGaps
+				if (showGaps && gapRail) {
+					gapRail.setAttribute('aria-label', t('filterAttention'))
+					const items = [{ id: '', label: t('sdAllAttention'), count: typeApplied.length }].concat(
+						gapIds.map((id) => ({
+							id,
+							label: gapLabel(id),
+							count: typeApplied.filter((group) => (group.representative.gaps || []).includes(id)).length,
+							warn: true,
+						})),
+					)
+					const changed = _sdGapPainted !== sdGapFilter
+					_sdGapPainted = sdGapFilter
+					paintFacetRail(gapRail, items, sdGapFilter, 'sd-gap', { scrollToSelected: changed })
+				}
+
+				facets.hidden = typeRow.hidden && gapRow.hidden
+			}
+
+			function setSdType(id) {
+				const next = id || ''
+				if (next === sdTypeFilter) return
+				sdTypeFilter = next
+				_sdTypePainted = null
+				renderSupplierDrawer()
+			}
+
+			function setSdGap(id) {
+				const next = id || ''
+				if (next === sdGapFilter) return
+				sdGapFilter = next
+				_sdGapPainted = null
+				renderSupplierDrawer()
+			}
+
+			function supplierDrawerListHtml(groups) {
+				const byType = new Map()
+				for (const group of groups) {
+					const id = groupProductType(group)
+					if (!byType.has(id)) byType.set(id, [])
+					byType.get(id).push(group)
+				}
+				const order = (META.product_types || []).map((pt) => pt.id)
+				const ids = [...byType.keys()].sort((a, b) => {
+					const ia = order.indexOf(a)
+					const ib = order.indexOf(b)
+					return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib)
+				})
+				const groupByType = !sdTypeFilter && ids.length > 1
+				if (!groupByType) return groups.map((group) => supplierProductRowHtml(group)).join('')
+				return ids
+					.map((id) => {
+						const rows = byType.get(id)
+						return (
+							`<section class="sd-type-group">` +
+							`<header class="sd-type-head"><span class="badge t-${esc(id)}">${esc(typeLabel(id))}</span><span class="n">${rows.length}</span></header>` +
+							rows.map((group) => supplierProductRowHtml(group, { hideType: true })).join('') +
+							`</section>`
+						)
+					})
+					.join('')
+			}
+
+			// ══════════════════════════════════════════════════════════════════
 			// VIEW 2 · Suppliers
 			// ══════════════════════════════════════════════════════════════════
 			function renderSuppliers() {
@@ -2980,16 +5809,13 @@
 					{ v: tt.charm_shops, k: t('statCharmShops') },
 					{ v: tt.charms, k: t('statCharms') },
 				]
-					.map((c) => `<div class="stat"><div class="v">${esc(c.v)}</div><div class="k">${esc(c.k)}</div></div>`)
+					.map((c) => `<div class="stat"><div class="k">${esc(c.k)}</div><div class="v">${esc(c.v)}</div></div>`)
 					.join('')
 
-				fillBuildingFilter()
+				pruneSupBuildingFilter()
+				renderBuildingRail()
 
-				const q = norm(document.getElementById('supSearch').value)
-				const building = document.getElementById('supBuilding').value
-				let rows = CAT.suppliers
-				if (building) rows = rows.filter((s) => (s.location.located ? s.location.building_id : '') === building)
-				if (q) rows = rows.filter((s) => [s.shop_name, s.stall, s.mall, s.address, s.notes].some((v) => norm(v).includes(q)))
+				const rows = suppliersInBuilding(searchedSuppliers(), supBuildingFilter)
 
 				const area = document.getElementById('supArea')
 				document.getElementById('supCount').textContent = `${rows.length} ${t('of')} ${CAT.suppliers.length}`
@@ -3000,40 +5826,100 @@
 					area.innerHTML = `<div class="empty">${esc(t('noMatchSuppliers'))}</div>`
 				} else {
 					// Grouped by market in walking order, then by floor, so the page reads
-					// like the trip itself.
+					// like the trip itself. When the rail already names one building, the
+					// in-table market headers would only repeat it.
 					const groups = new Map()
 					for (const s of rows) {
-						const key = s.location.located ? s.location.building_id : '\u0000none'
-						if (!groups.has(key)) groups.set(key, { order: s.location.located ? s.location.building_order : 99999, label: s.location.building_label, rows: [] })
+						const key = supplierBuildingId(s)
+						if (!groups.has(key)) {
+							groups.set(key, {
+								order: s.location.located ? s.location.building_order : 99999,
+								label: s.location.located ? s.location.building_label : null,
+								rows: [],
+							})
+						}
 						groups.get(key).rows.push(s)
 					}
 					const ordered = [...groups.entries()].sort((a, b) => a[1].order - b[1].order)
-					const tableGroups = ordered.map(([key, g]) => {
+					const tableGroups = ordered.map(([key, g], i) => {
 						g.rows.sort((a, b) => (a.location.sort_key < b.location.sort_key ? -1 : a.location.sort_key > b.location.sort_key ? 1 : 0))
 						return {
-							label: key === '\u0000none' ? t('unlocated') : LANG === 'zh' ? g.label.zh || g.label.en : g.label.en || g.label.zh,
+							id: key,
+							stop: i + 1,
+							label: key === UNLOCATED_BUILDING ? t('unlocatedShops') : buildingLabelOf(g.label),
+							floors: groupFloorSummary(g.rows),
 							rows: g.rows,
 						}
 					})
-					area.innerHTML = supplierTableHtml(tableGroups)
+					area.innerHTML = supplierTableHtml(tableGroups, { showMarketHeaders: !supBuildingFilter })
 				}
 
 				renderCharmShops()
+				syncSupControlsHeight()
+				bindBuildingScrollSpy()
+				spyVisibleBuilding()
 			}
 
-			function fillBuildingFilter() {
-				const sel = document.getElementById('supBuilding')
-				const prev = sel.value
-				const seen = new Map()
-				for (const s of CAT.suppliers) {
-					if (!s.location.located || seen.has(s.location.building_id)) continue
-					seen.set(s.location.building_id, s.location)
+			/** Scroll-margin for photo-hits sits under the measured sticky strip. */
+			function syncSupControlsHeight() {
+				const el = document.getElementById('supControls')
+				const view = document.getElementById('viewSuppliers')
+				if (!el || !view) return
+				const h = view.hidden ? 0 : Math.ceil(el.getBoundingClientRect().height)
+				view.style.setProperty('--sup-controls-h', h + 'px')
+			}
+
+			let _supControlsObserver = null
+			function observeSupControls() {
+				const el = document.getElementById('supControls')
+				if (!el || _supControlsObserver || typeof ResizeObserver !== 'function') return
+				_supControlsObserver = new ResizeObserver(() => syncSupControlsHeight())
+				_supControlsObserver.observe(el)
+			}
+
+			let _buildingSpyBound = false
+			let _buildingSpyRaf = 0
+			function bindBuildingScrollSpy() {
+				if (_buildingSpyBound) return
+				_buildingSpyBound = true
+				const tick = () => {
+					if (_buildingSpyRaf) return
+					const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (fn) => setTimeout(fn, 16)
+					_buildingSpyRaf = raf(() => {
+						_buildingSpyRaf = 0
+						spyVisibleBuilding()
+					})
 				}
-				const opts = [...seen.entries()].sort((a, b) => a[1].building_order - b[1].building_order)
-				sel.innerHTML =
-					`<option value="">${esc(t('allMarkets'))}</option>` +
-					opts.map(([id, loc]) => `<option value="${esc(id)}">${esc(LANG === 'zh' ? loc.building_label.zh || loc.building_label.en : loc.building_label.en)}</option>`).join('')
-				if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev
+				window.addEventListener('scroll', tick, { passive: true })
+			}
+
+			function spyVisibleBuilding() {
+				const rail = document.getElementById('supBuildingRail')
+				if (!rail) return
+				rail.querySelectorAll('.facet.is-here').forEach((el) => el.classList.remove('is-here'))
+				const view = document.getElementById('viewSuppliers')
+				if (!view || view.hidden) return
+				const bands = [...document.querySelectorAll('#supArea .market-row[data-building]')]
+				if (!bands.length) return
+				const controls = document.getElementById('supControls')
+				const line = (controls ? controls.getBoundingClientRect().bottom : 0) + 8
+				let current = bands[0]
+				for (const band of bands) {
+					if (band.getBoundingClientRect().top <= line) current = band
+				}
+				const id = current.getAttribute('data-building') || ''
+				const chip = [...rail.querySelectorAll('.facet')].find((el) => el.dataset.val === id)
+				if (chip) chip.classList.add('is-here')
+			}
+
+			// One line per cell: a mall name that wraps used to stretch
+			// that one supplier into a taller, visually wider row than its neighbours.
+			function cellWrap(value, extraStyle) {
+				const text = value == null ? '' : String(value)
+				const title = text ? ` title="${esc(text)}"` : ''
+				const style = extraStyle ? ` style="${extraStyle}"` : ''
+				const blank = text ? '' : ' is-blank'
+				return `<div class="cellwrap${blank}"${title}${style}>${text ? esc(text) : ''}</div>`
 			}
 
 			/**
@@ -3057,6 +5943,38 @@
 				return `<span class="countcell" title="${esc(`${n} ${t('sdProducts')}${listingNote}`)}"><span class="n${n ? '' : ' zero'}">${n}</span>${cov}</span>`
 			}
 
+			/* Case/grip shops and charm shops share this grid so Shop · Stall ·
+			   Location · Count · Actions line up down the page. Mall, address
+			   and notes stay on the edit forms, not in the directory. */
+			const DIRECTORY_COLS = ['shop', 'stall', 'location', 'products', 'actions']
+
+			function directoryColgroupHtml() {
+				return `<colgroup>${DIRECTORY_COLS.map((name) => `<col class="${name}">`).join('')}</colgroup>`
+			}
+
+			function directoryHeadHtml(countLabel) {
+				return (
+					`<tr><th>${esc(t('colShop'))}</th><th>${esc(t('colStall'))}</th><th>${esc(t('colLocation'))}</th>` +
+					`<th class="num">${esc(countLabel)}</th><th></th></tr>`
+				)
+			}
+
+			function emptyCoverageSlot() {
+				return '<span class="cov empty" aria-hidden="true"></span>'
+			}
+
+			function buildingBannerHtml(group) {
+				const floors = group.floors ? `<span class="market-floors">${esc(group.floors)}</span>` : ''
+				return (
+					`<div class="building-banner" data-building="${esc(group.id || '')}">` +
+					`<span class="market-swatch" aria-hidden="true"></span>` +
+					`<span class="name">${esc(group.label)}</span>` +
+					floors +
+					shopCountHtml(group.rows.length) +
+					`</div>`
+				)
+			}
+
 			/**
 			 * Render every market in one table. Separate tables let the browser choose
 			 * a different width for Products and every column after it in each market,
@@ -3067,47 +5985,55 @@
 			 * Row actions carry an INDEX into CAT.suppliers, so a composite key with
 			 * quotes or Chinese characters never has to survive an HTML round-trip.
 			 */
-			function supplierTableHtml(groups) {
-				const head =
-					`<tr><th>${esc(t('colShop'))}</th><th>${esc(t('colStall'))}</th><th>${esc(t('colLocation'))}</th><th class="num">${esc(t('colProducts'))}</th>` +
-					`<th>${esc(t('colMall'))}</th><th>${esc(t('colAddress'))}</th><th>${esc(t('colNotes'))}</th><th></th></tr>`
+			function supplierTableHtml(groups, opts = {}) {
+				const showMarketHeaders = opts.showMarketHeaders !== false
+				const head = directoryHeadHtml(t('colProducts'))
 				const body = groups
 					.map(
 						(group) =>
-							`<tr class="market-row"><td colspan="8"><div class="market-label"><h3>${esc(group.label)}</h3><span class="n">${group.rows.length}</span></div></td></tr>` +
+							(showMarketHeaders
+								? `<tr class="market-row" data-building="${esc(group.id || '')}"><td colspan="${DIRECTORY_COLS.length}"><div class="market-label"><span class="market-stop" aria-hidden="true">${esc(
+										String(group.stop || 0).padStart(2, '0'),
+									)}</span><span class="market-swatch" aria-hidden="true"></span><h3>${esc(group.label)}</h3>${
+										group.floors ? `<span class="market-floors">${esc(group.floors)}</span>` : ''
+									}${shopCountHtml(group.rows.length)}</div></td></tr>`
+								: '') +
 							group.rows
 								.map((s) => {
 						const idx = CAT.suppliers.indexOf(s)
-						const acts = CAN_EDIT_CATALOG
-							? `<button class="iconbtn" data-act="stall-edit" data-idx="${idx}" title="${esc(t('edit'))}"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>` +
-								`<button class="iconbtn danger" data-act="stall-del" data-idx="${idx}" title="${esc(t('delete'))}"><svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg></button>`
-							: ''
+						const acts = directoryRowActions('stall-edit', 'stall-del', idx)
 						// The whole row opens the supplier; the shop name is a real button
 						// so the same target is reachable with the keyboard. Both carry the
 						// same data-act, and the action buttons above win `closest()`, so a
-						// click on Edit never also opens the drawer.
+						// click on Edit never also opens the drawer. The action cell uses
+						// data-act="stop" so a near-miss on the footer does not open either.
 						const name =
-							`<button class="rowlink" data-act="sup-open" data-idx="${idx}" aria-label="${esc(`${t('openSupplier')}: ${s.shop_name}`)}">` +
+							`<button class="rowlink" data-act="sup-open" data-idx="${idx}" title="${esc(s.shop_name)}" aria-label="${esc(`${t('openSupplier')}: ${s.shop_name}`)}">` +
 							`<span>${esc(s.shop_name)}</span>` +
 							`<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>`
+						const bid = supplierBuildingId(s)
 						return (
-							`<tr class="srow" data-act="sup-open" data-idx="${idx}"><td>${name}</td>` +
-							`<td>${esc(s.stall) || `<span style="color:var(--yellow)">${esc(t('unlocated'))}</span>`}</td>` +
-							`<td style="color:var(--muted)">${esc(locText(s.location))}</td>` +
-							`<td class="num">${productCountCell(s)}</td>` +
-							`<td style="color:var(--muted)">${esc(s.mall)}</td>` +
-							`<td style="color:var(--muted)"><div class="cellwrap" style="max-width:240px">${esc(s.address)}</div></td>` +
-							`<td style="color:var(--muted)"><div class="cellwrap" style="max-width:240px" title="${esc(s.notes)}">${esc(s.notes)}</div></td>` +
-							`<td class="act"><div>${acts}</div></td></tr>`
+							`<tr class="srow" data-act="sup-open" data-idx="${idx}" data-building="${esc(bid)}">` +
+							`<td class="col-shop">${name}</td>` +
+							`<td class="col-stall">${stallCell(s.stall)}</td>` +
+							`<td class="col-place muted">${cellWrap(locPlaceText(s.location))}</td>` +
+							`<td class="col-count num">${productCountCell(s)}</td>` +
+							`<td class="act" data-act="stop"><div>${acts}</div></td></tr>`
 						)
 								})
 								.join(''),
 					)
 					.join('')
-				const cols =
-					'<colgroup><col class="shop"><col class="stall"><col class="location"><col class="products">' +
-					'<col class="mall"><col class="address"><col class="notes"><col class="actions"></colgroup>'
-				return `<table class="dtable supplier-table">${cols}<thead>${head}</thead><tbody>${body}</tbody></table>`
+				const banner = !showMarketHeaders && groups.length === 1 ? buildingBannerHtml(groups[0]) : ''
+				return (
+					banner +
+					`<table class="dtable supplier-table${showMarketHeaders ? ' has-markets' : ''}">${directoryColgroupHtml()}<thead>${head}</thead><tbody>${body}</tbody></table>`
+				)
+			}
+
+			function charmCountCell(n) {
+				const count = Number(n) || 0
+				return `<span class="countcell" title="${esc(`${count} ${t('colCharms')}`)}"><span class="n${count ? '' : ' zero'}">${count}</span>${emptyCoverageSlot()}</span>`
 			}
 
 			function renderCharmShops() {
@@ -3116,46 +6042,120 @@
 					area.innerHTML = `<div class="empty" style="padding:28px">${esc(t('noCharmShops'))}</div>`
 					return
 				}
-				const head = `<tr><th>${esc(t('colShop'))}</th><th>${esc(t('colStall'))}</th><th>${esc(t('colLocation'))}</th><th class="num">${esc(t('colCharms'))}</th><th>${esc(t('colNotes'))}</th><th></th></tr>`
+				const head = directoryHeadHtml(t('colCharms'))
 				const body = CAT.charm_shops
 					.map((s, idx) => {
-						const acts = CAN_EDIT_CATALOG
-							? `<button class="iconbtn" data-act="cshop-edit" data-idx="${idx}" title="${esc(t('edit'))}"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>` +
-								`<button class="iconbtn danger" data-act="cshop-del" data-idx="${idx}" title="${esc(t('delete'))}"><svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg></button>`
-							: ''
+						const acts = directoryRowActions('cshop-edit', 'cshop-del', idx)
+						const bid = s.location && s.location.located ? s.location.building_id : UNLOCATED_BUILDING
+						const name =
+							`<button class="rowlink" data-act="cshop-open" data-idx="${idx}" title="${esc(s.shop_name)}" aria-label="${esc(`${t('openCharmShop')}: ${s.shop_name}`)}">` +
+							`<span>${esc(s.shop_name)}</span>` +
+							`<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>`
 						return (
-							`<tr><td><b>${esc(s.shop_name)}</b></td><td>${esc(s.stall)}</td>` +
-							`<td style="color:var(--muted)">${esc(locText(s.location))}</td>` +
-							`<td class="num">${s.charm_count}</td>` +
-							`<td style="color:var(--muted)"><div class="cellwrap" style="max-width:320px" title="${esc(s.notes)}">${esc(s.notes)}</div></td>` +
-							`<td class="act"><div>${acts}</div></td></tr>`
+							`<tr class="srow" data-act="cshop-open" data-idx="${idx}" data-building="${esc(bid)}">` +
+							`<td class="col-shop">${name}</td>` +
+							`<td class="col-stall">${stallCell(s.stall)}</td>` +
+							`<td class="col-place muted">${cellWrap(locPlaceText(s.location))}</td>` +
+							`<td class="col-count num">${charmCountCell(s.charm_count)}</td>` +
+							`<td class="act" data-act="stop"><div>${acts}</div></td></tr>`
 						)
 					})
 					.join('')
-				area.innerHTML = `<table class="dtable"><thead>${head}</thead><tbody>${body}</tbody></table>`
+				area.innerHTML = `<table class="dtable supplier-table">${directoryColgroupHtml()}<thead>${head}</thead><tbody>${body}</tbody></table>`
 			}
 
 			// ── Supplier detail drawer ────────────────────────────────────────
-			function openSupplierDrawer(idx) {
+			function openSupplierDrawer(idx, opts = {}) {
 				if (!CAT) return
 				const s = CAT.suppliers[idx]
 				if (!s) return
+				closeCharmShopDrawer()
 				openSupplierKey = s.key
+				sdTypeFilter = ''
+				sdGapFilter = ''
+				_sdTypePainted = null
+				_sdGapPainted = null
+				exitSupplierMergeMode()
 				document.getElementById('sdSearch').value = ''
 				renderSupplierDrawer()
 				document.getElementById('supDrawerBg').classList.add('open')
 				const drawer = document.getElementById('supDrawer')
 				drawer.classList.add('open')
 				drawer.setAttribute('aria-hidden', 'false')
-				setTimeout(() => document.getElementById('sdSearch').focus(), 60)
+				if (!opts.skipFocus) setTimeout(() => document.getElementById('sdSearch').focus(), 60)
 			}
 
 			function closeSupplierDrawer() {
 				openSupplierKey = null
+				exitSupplierMergeMode()
 				document.getElementById('supDrawerBg').classList.remove('open')
 				const drawer = document.getElementById('supDrawer')
 				drawer.classList.remove('open')
 				drawer.setAttribute('aria-hidden', 'true')
+			}
+
+			function exitSupplierMergeMode() {
+				sdMergeMode = false
+				sdMergeSelected.clear()
+				sdMergeBusy = false
+			}
+
+			function enterSupplierMergeMode() {
+				if (!CAN_MERGE) return toast(t('readOnly'), 'err')
+				sdMergeMode = true
+				sdMergeSelected.clear()
+				renderSupplierDrawer()
+			}
+
+			function toggleSupplierMergePick(groupKey) {
+				if (!sdMergeMode || !groupKey) return
+				if (sdMergeSelected.has(groupKey)) sdMergeSelected.delete(groupKey)
+				else sdMergeSelected.add(groupKey)
+				renderSupplierDrawer()
+			}
+
+			function syncSupplierMergeBar() {
+				const bar = document.getElementById('sdMergeBar')
+				const hint = document.getElementById('sdMergeHint')
+				const cancel = document.getElementById('sdMergeCancel')
+				const confirm = document.getElementById('sdMergeConfirm')
+				if (!bar) return
+				bar.classList.toggle('open', !!sdMergeMode)
+				if (!sdMergeMode) return
+				const n = sdMergeSelected.size
+				hint.innerHTML =
+					`<strong>${n}</strong> ${esc(t('sdMergeSelected'))}` +
+					` · ${esc(t('sdMergeHint'))}`
+				cancel.textContent = t('cancel')
+				confirm.textContent = t('sdMergeDo')
+				confirm.disabled = sdMergeBusy || n < 2
+			}
+
+			async function confirmSupplierMerge() {
+				if (!CAN_MERGE || sdMergeBusy) return
+				if (sdMergeSelected.size < 2) return toast(t('sdMergeNeedTwo'), 'err')
+				if (!window.confirm(t('sdMergeConfirm'))) return
+				const productIds = new Set()
+				const groups = supplierProductGroupsFor(openSupplierKey)
+				for (const group of groups) {
+					if (!sdMergeSelected.has(group.key)) continue
+					for (const id of group.product_ids || []) productIds.add(id)
+					for (const alias of group.aliases || []) if (alias && alias.id) productIds.add(alias.id)
+				}
+				if (productIds.size < 2) return toast(t('sdMergeNeedTwo'), 'err')
+				sdMergeBusy = true
+				syncSupplierMergeBar()
+				try {
+					await api('/api/route/product-map/merge', jsonBody('POST', { product_ids: [...productIds], note: 'sourcing-drawer' }))
+					exitSupplierMergeMode()
+					await loadCatalog()
+					toast(t('sdMerged'), 'ok')
+				} catch (e) {
+					toast(e.message || t('sdMergeFail'), 'err')
+				} finally {
+					sdMergeBusy = false
+					if (openSupplierKey) renderSupplierDrawer()
+				}
 			}
 
 			/**
@@ -3293,25 +6293,30 @@
 					})
 					.join('')
 
-				document.getElementById('sdActions').innerHTML = CAN_EDIT_CATALOG
-					? `<button class="btn sm primary" data-act="sup-add-product" data-idx="${idx}">+ ${esc(t('sdAddProduct'))}</button>` +
-						`<button class="btn sm" data-act="stall-edit" data-idx="${idx}">${esc(t('sdEditSupplier'))}</button>` +
-						`<button class="btn sm danger" data-act="stall-del" data-idx="${idx}">${esc(t('sdDeleteSupplier'))}</button>`
-					: ''
+				document.getElementById('sdActions').innerHTML =
+					(CAN_MERGE
+						? `<button class="btn sm${sdMergeMode ? ' primary' : ''}" data-act="${sdMergeMode ? 'sd-merge-exit' : 'sd-merge-start'}">${esc(
+								t(sdMergeMode ? 'sdMergeExit' : 'sdMarkDuplicates'),
+							)}</button>`
+						: '') +
+					(CAN_EDIT_CATALOG && !sdMergeMode
+						? `<button class="btn sm primary" data-act="sup-add-product" data-idx="${idx}">+ ${esc(t('sdAddProduct'))}</button>` +
+							`<button class="btn sm" data-act="stall-edit" data-idx="${idx}">${esc(t('sdEditSupplier'))}</button>` +
+							`<button class="btn sm danger" data-act="stall-del" data-idx="${idx}">${esc(t('sdDeleteSupplier'))}</button>`
+						: '')
 
 				const q = norm(document.getElementById('sdSearch').value)
-				let groups = allGroups
-				if (q) {
-					groups = groups.filter((group) =>
-						group.aliases.some((p) =>
-							[p.title, p.stall, p.charm_code, p.charm_shop, typeLabel(p.product_type)].some((v) => norm(v).includes(q)),
-						),
-					)
-				}
+				pruneDrawerFacets(allGroups)
+				const searched = allGroups.filter((group) => groupMatchesSearch(group, q))
+				renderDrawerFacets(allGroups, searched)
+				let groups = searched
+				if (sdTypeFilter) groups = groups.filter((group) => groupProductType(group) === sdTypeFilter)
+				if (sdGapFilter) groups = groups.filter((group) => (group.representative.gaps || []).includes(sdGapFilter))
 				groups = groups.slice().sort((a, b) => String(a.representative.title).localeCompare(String(b.representative.title)))
 
+				const filtered = !!(q || sdTypeFilter || sdGapFilter)
 				document.getElementById('sdCount').textContent = groups.length
-					? `${groups.length}${q ? ` ${t('of')} ${summary.product_count}` : ''}`
+					? `${groups.length}${filtered ? ` ${t('of')} ${summary.product_count}` : ''}`
 					: summary.product_count
 						? `0 ${t('of')} ${summary.product_count}`
 						: ''
@@ -3323,12 +6328,14 @@
 				} else if (!groups.length) {
 					body.innerHTML = `<div class="empty">${esc(t('sdNoMatch'))}</div>`
 				} else {
-					body.innerHTML = groups.map(supplierProductRowHtml).join('')
+					body.innerHTML = supplierDrawerListHtml(groups)
 				}
+				syncSupplierMergeBar()
 			}
 
-			function supplierProductRowHtml(group) {
+			function supplierProductRowHtml(group, opts = {}) {
 				const p = group.representative
+				const supplier = CAT.suppliers.find((s) => s.key === openSupplierKey) || null
 				const price = (v, label, kind = '', title = '') => {
 					const classes = ['p', v == null ? 'none' : '', v != null ? kind : ''].filter(Boolean).join(' ')
 					return `<span class="${classes}"${title ? ` title="${esc(title)}"` : ''}>${v == null ? '—' : esc(fmtMoney(v))}<small>${esc(label)}</small></span>`
@@ -3351,42 +6358,92 @@
 					price(p.cost_total, t('priceTotal'), 'total', totalTitle),
 				]
 				const stallNote =
-					p.stall && p.stall !== (CAT.suppliers.find((s) => s.key === openSupplierKey) || {}).stall
+					p.stall && supplier && p.stall !== supplier.stall
 						? `<span class="missing">${esc(t('sdStallDiffers'))}: ${esc(p.stall)}</span>`
 						: p.stall_source === 'directory'
 							? `<em>(${esc(t('inferredStall'))})</em>`
 							: ''
-				const charmParts = []
-				if (p.charm_code) charmParts.push(`<b>${esc(p.charm_code)}</b>`)
-				if (p.charm_shop) charmParts.push(esc(p.charm_shop))
-				if (p.charm_stall) charmParts.push(`<em>${esc(p.charm_stall)}</em>`)
-				// The charm's COST belongs in the explicit Charm price column above,
-				// never as an unlabeled number in this identity/location line.
-				const charmDetails = charmParts.length ? `<span><b>${esc(t('sdCharmDetails'))}:</b> ${charmParts.join(' · ')}</span>` : ''
 				const gapDetails = p.gaps.map((g) => `<span class="gap-chip">${esc(gapLabel(g))}</span>`).join(' ')
-				const meta = [charmDetails, stallNote, gapDetails].filter(Boolean).join('<span aria-hidden="true">·</span>')
+				const meta = [stallNote, gapDetails].filter(Boolean).join('<span aria-hidden="true">·</span>')
 				const isGrouped = group.aliases.length > 1
 				const groupedHint = `${group.aliases.length} ${t('sdListings')} · ${t('sdGroupedHint')}`
 				const groupBadge = isGrouped ? `<span class="pill" title="${esc(groupedHint)}">${group.aliases.length} ${esc(t('sdListings'))}</span>` : ''
-				const rowActions = isGrouped
-					? `<button class="iconbtn" data-act="sup-toggle-listings" data-id="${p.id}" title="${esc(t(CAN_EDIT_CATALOG ? 'sdManageListings' : 'sdViewListings'))}" aria-label="${esc(t(CAN_EDIT_CATALOG ? 'sdManageListings' : 'sdViewListings'))}"><svg viewBox="0 0 24 24"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg></button>`
-					: actionsHtml(p.id)
-				const aliasDetails = isGrouped ? supplierAliasDetailsHtml(group) : ''
+				const selected = sdMergeMode && sdMergeSelected.has(group.key)
+				const rowActions = sdMergeMode
+					? ''
+					: isGrouped
+						? `<button type="button" class="iconbtn" data-act="sup-toggle-listings" data-id="${p.id}" title="${esc(t(CAN_EDIT_CATALOG ? 'sdManageListings' : 'sdViewListings'))}" aria-label="${esc(t(CAN_EDIT_CATALOG ? 'sdManageListings' : 'sdViewListings'))}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg><span class="act-label">${esc(t(CAN_EDIT_CATALOG ? 'sdManageListings' : 'sdViewListings'))}</span></button>`
+						: actionsHtml(p.id)
+				const aliasDetails = !sdMergeMode && isGrouped ? supplierAliasDetailsHtml(group) : ''
+				const mergeAttrs = sdMergeMode
+					? ` data-act="sd-merge-toggle" data-gkey="${esc(group.key)}" role="button" tabindex="0" aria-pressed="${selected ? 'true' : 'false'}"`
+					: ''
+				const tick = sdMergeMode ? '<span class="mtick" aria-hidden="true"></span>' : ''
+				const ids = (group.product_ids || []).filter((id) => id != null).join(' ')
 				return (
-					`<article class="prow">` +
-					thumbHtml(p) +
+					`<article class="prow${sdMergeMode ? ' mergeable' : ''}${selected ? ' merge-sel' : ''}" data-product-id="${p.id}" data-product-ids="${esc(ids)}"${mergeAttrs}>` +
+					tick +
+					supplierMediaHtml(p) +
 					`<div><div class="top">` +
-					`<span class="badge t-${esc(p.product_type)}">${esc(typeLabel(p.product_type))}</span>` +
-					(p.product_type_source === 'derived' ? `<span class="auto-tag" title="${esc(t('autoTagHint'))}">${esc(t('autoTag'))}</span>` : '') +
+					(opts.hideType
+						? ''
+						: `<span class="badge t-${esc(p.product_type)}">${esc(typeLabel(p.product_type))}</span>` +
+							(p.product_type_source === 'derived' ? `<span class="auto-tag" title="${esc(t('autoTagHint'))}">${esc(t('autoTag'))}</span>` : '')) +
 					groupBadge +
 					`</div><div class="title" title="${esc(p.title)}">${esc(p.title)}</div>` +
+					supplierCharmLineHtml(p, supplier) +
 					(meta ? `<div class="meta">${meta}</div>` : '') +
 					`</div>` +
 					`<div class="costs">${costs.join('')}</div>` +
-					`<div class="acts">${rowActions}</div>` +
+					(rowActions ? `<div class="acts">${rowActions}</div>` : '') +
 					aliasDetails +
 					`</article>`
 				)
+			}
+
+			/**
+			 * Charms are often bought at a charm booth, not at the case supplier
+			 * whose drawer is open. Surface that as a callout: code first, then
+			 * shop + stall, with an explicit “separate stall” flag when the
+			 * booth is not this supplier.
+			 */
+			function charmBelongsElsewhere(p, supplier) {
+				if (!p || (!p.charm_code && !p.charm_shop && !p.charm_stall)) return false
+				if (!supplier) return !!(p.charm_shop || p.charm_stall)
+				if (p.charm_shop && norm(p.charm_shop) !== norm(supplier.shop_name)) return true
+				if (p.charm_stall && supplier.stall && norm(p.charm_stall) !== norm(supplier.stall)) return true
+				return false
+			}
+
+			function supplierCharmLineHtml(p, supplier) {
+				if (!p.charm_code && !p.charm_shop && !p.charm_stall) return ''
+				const elsewhere = charmBelongsElsewhere(p, supplier)
+				const code = String(p.charm_code || '').trim()
+				const shop = String(p.charm_shop || '').trim()
+				const bits = []
+				bits.push(`<span class="ck">${esc(t('sdCharmDetails'))}</span>`)
+				if (code) bits.push(`<span class="ccode">${esc(code)}</span>`)
+				if (elsewhere) {
+					bits.push(`<span class="cflag">${esc(t('sdCharmElsewhere'))}</span>`)
+				} else if (p.charm_shop || p.charm_stall) {
+					bits.push(`<span class="cflag same">${esc(t('sdCharmSameStall'))}</span>`)
+				}
+				bits.push(`<span class="copen">${esc(code ? t('sdCharmOpen') : t('sdCharmAdd'))}</span>`)
+				const trail = []
+				if (p.charm_shop) trail.push(`<span class="cshop">${esc(p.charm_shop)}</span>`)
+				if (p.charm_stall) trail.push(`<span class="cloc">${esc(p.charm_stall)}</span>`)
+				if (trail.length) {
+					bits.push(
+						`<span class="ctrail">${trail
+							.map((part, i) => (i ? `<span class="cdot" aria-hidden="true">·</span>${part}` : part))
+							.join('')}</span>`,
+					)
+				}
+				const identity = [code, p.charm_shop, p.charm_stall].filter(Boolean).join(' · ')
+				const title = elsewhere
+					? `${t('sdCharmElsewhereHint')} · ${identity}. ${t('sdCharmOpenHint')}`
+					: `${identity ? `${identity}. ` : ''}${t('sdCharmOpenHint')}`
+				return `<a class="charm-line${elsewhere ? ' elsewhere' : ''}" ${routeCharmLinkAttrs({ code, shop })} title="${esc(title)}">${bits.join('')}</a>`
 			}
 
 			/**
@@ -3528,6 +6585,143 @@
 			}
 
 			// ── Charm-shop CRUD (charm_shop_directory) ────────────────────────
+			function charmShopIdentity(s) {
+				return `${norm(s && s.shop_name)}\u0000${norm(s && s.stall)}`
+			}
+
+			function findOpenCharmShop() {
+				if (!CAT || !openCharmShopKey || !Array.isArray(CAT.charm_shops)) return null
+				return CAT.charm_shops.find((s) => charmShopIdentity(s) === openCharmShopKey) || null
+			}
+
+			function charmsForShop(s) {
+				if (!s || !CAT || !Array.isArray(CAT.charms)) return []
+				const key = norm(s.shop_name)
+				if (!key) return []
+				return CAT.charms.filter((c) => norm(c.charm_shop) === key)
+			}
+
+			function charmThumbHtml(c) {
+				const code = String((c && c.code) || '').trim()
+				if (!code) return ''
+				const hasImage = c.has_image === true || !!c.image_version
+				if (hasImage) {
+					return `<div class="pthumb charm" title="${esc(code)}"><img class="charm-img" loading="lazy" decoding="async" src="${esc(charmImageUrl(code, c.image_version))}" alt=""></div>`
+				}
+				return `<div class="pthumb charm" title="${esc(code)}"><span class="charm-ph">${esc(t('csNoPhoto'))}</span></div>`
+			}
+
+			function charmCardHtml(c) {
+				const code = String(c.code || '').trim()
+				const shop = String(c.charm_shop || c.default_charm_shop || '').trim()
+				const used = Number(c.product_count) || 0
+				const meta = [
+					c.cost != null ? fmtMoney(c.cost) : '',
+					used ? `${used} ${t('csUsedOn')}` : '',
+				]
+					.filter(Boolean)
+					.join(' · ')
+				const notes = String(c.notes || '').trim()
+				const openLabel = `${t('csOpenInRoute')}${code ? `: ${code}` : ''}`
+				return (
+					`<a class="ccard" ${routeCharmLinkAttrs({ code, shop })} data-charm-code="${esc(code)}" title="${esc(t('sdCharmOpenHint'))}" aria-label="${esc(openLabel)}">` +
+					charmThumbHtml(c) +
+					`<div class="ccode">${esc(code)}</div>` +
+					(meta ? `<div class="cmeta">${esc(meta)}</div>` : '') +
+					(notes ? `<div class="cnotes" title="${esc(notes)}">${esc(notes)}</div>` : '') +
+					`<div class="copen">${esc(t('csOpenInRoute'))}</div>` +
+					`</a>`
+				)
+			}
+
+			function openCharmShopDrawer(idx, opts = {}) {
+				if (!CAT) return
+				const s = CAT.charm_shops[idx]
+				if (!s) return
+				closeSupplierDrawer()
+				openCharmShopKey = charmShopIdentity(s)
+				document.getElementById('csdSearch').value = ''
+				renderCharmShopDrawer()
+				document.getElementById('cshopDrawerBg').classList.add('open')
+				const drawer = document.getElementById('cshopDrawer')
+				drawer.classList.add('open')
+				drawer.setAttribute('aria-hidden', 'false')
+				if (!opts.skipFocus) setTimeout(() => document.getElementById('csdSearch').focus(), 60)
+			}
+
+			function closeCharmShopDrawer() {
+				openCharmShopKey = null
+				document.getElementById('cshopDrawerBg').classList.remove('open')
+				const drawer = document.getElementById('cshopDrawer')
+				drawer.classList.remove('open')
+				drawer.setAttribute('aria-hidden', 'true')
+			}
+
+			function renderCharmShopDrawer() {
+				if (!openCharmShopKey) return
+				if (!CAT) {
+					closeCharmShopDrawer()
+					return
+				}
+				const s = findOpenCharmShop()
+				if (!s) {
+					closeCharmShopDrawer()
+					return
+				}
+				const idx = CAT.charm_shops.indexOf(s)
+				document.getElementById('csdShop').textContent = s.shop_name
+				const loc = locText(s.location) || s.stall || t('unlocated')
+				document.getElementById('csdLoc').innerHTML =
+					`<span>${esc(loc)}</span>` + (s.notes ? `<span>· ${esc(s.notes)}</span>` : '')
+
+				const all = charmsForShop(s).slice().sort((a, b) => String(a.code || '').localeCompare(String(b.code || '')))
+				const withPhoto = all.filter((c) => c.has_image === true || !!c.image_version).length
+				const used = all.filter((c) => (Number(c.product_count) || 0) > 0).length
+				let knownCost = 0
+				let hasKnownCost = false
+				for (const c of all) {
+					if (c.cost == null) continue
+					knownCost += Number(c.cost) || 0
+					hasKnownCost = true
+				}
+				const pct = (n, d) => (d ? Math.round((n / d) * 100) : 0)
+				document.getElementById('csdStats').innerHTML = [
+					{ v: all.length, k: t('csCharms') },
+					{ v: withPhoto, k: t('csWithPhoto'), bar: pct(withPhoto, all.length), color: 'var(--pink)' },
+					{ v: used, k: t('csOnProducts'), bar: pct(used, all.length), color: 'var(--green)' },
+					{ v: hasKnownCost ? fmtMoney(Math.round(knownCost * 100) / 100) : '—', k: t('csKnownCost') },
+				]
+					.map((c) => {
+						const bar = c.bar != null ? `<div class="bar"><i style="width:${c.bar}%;background:${c.color}"></i></div>` : ''
+						return `<div class="stat"><div class="v">${esc(c.v)}</div><div class="k">${esc(c.k)}</div>${bar}</div>`
+					})
+					.join('')
+
+				document.getElementById('csdActions').innerHTML =
+					CAN_EDIT_CATALOG && idx >= 0
+						? `<button class="btn sm" data-act="cshop-edit" data-idx="${idx}">${esc(t('editCharmShop'))}</button>` +
+							`<button class="btn sm danger" data-act="cshop-del" data-idx="${idx}">${esc(t('delete'))}</button>`
+						: ''
+
+				const q = norm(document.getElementById('csdSearch').value)
+				const shown = q
+					? all.filter((c) => [c.code, c.notes, c.charm_stall].some((v) => norm(v).includes(q)))
+					: all
+				document.getElementById('csdCount').textContent = all.length
+					? `${shown.length}${q ? ` ${t('of')} ${all.length}` : ''}`
+					: ''
+
+				const body = document.getElementById('csdBody')
+				if (!all.length) {
+					body.innerHTML =
+						`<div class="empty"><div class="big">${esc(t('csNoCharms'))}</div><div>${esc(t('csNoCharmsSub'))}</div></div>`
+				} else if (!shown.length) {
+					body.innerHTML = `<div class="empty">${esc(t('csNoMatch'))}</div>`
+				} else {
+					body.innerHTML = `<div class="cgrid">${shown.map(charmCardHtml).join('')}</div>`
+				}
+			}
+
 			function openCshopModal(idx) {
 				if (!CAN_EDIT_CATALOG) return toast(t('readOnly'), 'err')
 				const s = idx == null ? null : CAT.charm_shops[idx]
@@ -3560,6 +6754,9 @@
 						await api('/api/route/charm-shops', jsonBody('POST', body))
 					}
 					closeModal('cshopModal')
+					if (editingCshop && openCharmShopKey === charmShopIdentity(editingCshop)) {
+						openCharmShopKey = charmShopIdentity(body)
+					}
 					await loadCatalog()
 					toast(t('saved'), 'ok')
 				} catch (e) {
@@ -3575,6 +6772,7 @@
 				const where = [s.shop_name, s.stall].filter(Boolean).join(' · ')
 				if (!confirm(LANG === 'zh' ? `删除挂件店“${where}”？` : `Delete charm shop “${where}”?`)) return
 				try {
+					if (openCharmShopKey === charmShopIdentity(s)) closeCharmShopDrawer()
 					await api('/api/route/charm-shops', jsonBody('DELETE', { shop_name: s.shop_name, stall: s.stall }))
 					await loadCatalog()
 					toast(t('deleted'), 'ok')
@@ -3747,15 +6945,15 @@
 							.map((s) => `<option value="${esc(s.id)}"${s.id === p.status ? ' selected' : ''}>${esc(LANG === 'zh' ? s.label_zh : s.label)}</option>`)
 							.join('')
 						return `<tr>
-							<td><div class="pkg-title">${title}</div>${sub}</td>
-							<td><span class="badge cat">${esc(catLabel(p.category))}</span></td>
-							<td style="color:var(--muted)">${fmtBytes(p.size_bytes)}</td>
-							<td><select class="status-select st-${esc(p.status)}" data-act="pkg-status" data-id="${p.id}">${statusOpts}</select></td>
-							<td style="color:var(--muted);white-space:nowrap">${fmtDate(p.created_at)}</td>
-							<td><div class="row-actions">
-								<button class="iconbtn" title="${esc(t('download'))}" data-act="pkg-dl" data-id="${p.id}"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 11 5 5 5-5"/><path d="M5 21h14"/></svg></button>
-								<button class="iconbtn" title="${esc(t('edit'))}" data-act="pkg-edit" data-id="${p.id}"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
-								<button class="iconbtn danger" title="${esc(t('delete'))}" data-act="pkg-del" data-id="${p.id}"><svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg></button>
+							<td class="pkg-name"><div class="pkg-title">${title}</div>${sub}</td>
+							<td class="pkg-cat"><span class="badge cat">${esc(catLabel(p.category))}</span></td>
+							<td class="pkg-size" style="color:var(--muted)">${fmtBytes(p.size_bytes)}</td>
+							<td class="pkg-status"><select class="status-select st-${esc(p.status)}" data-act="pkg-status" data-id="${p.id}">${statusOpts}</select></td>
+							<td class="pkg-date" style="color:var(--muted);white-space:nowrap">${fmtDate(p.created_at)}</td>
+							<td class="pkg-acts" data-act="stop"><div class="row-actions">
+								${iconActionButton('pkg-dl', t('download'), `data-id="${p.id}"`, '<path d="M12 3v12"/><path d="m7 11 5 5 5-5"/><path d="M5 21h14"/>')}
+								${iconActionButton('pkg-edit', t('edit'), `data-id="${p.id}"`, '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>')}
+								${iconActionButton('pkg-del', t('delete'), `data-id="${p.id}"`, '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/>', true)}
 							</div></td>
 						</tr>`
 					})
@@ -4008,6 +7206,7 @@
 				const wasOpen = root.classList.contains('open')
 				root.classList.remove('open')
 				root.setAttribute('aria-hidden', 'true')
+				if (id === 'findPhotoModal') stopFindPhotoCamera()
 				const target = modalReturnFocus.get(id)
 				modalReturnFocus.delete(id)
 				if (wasOpen && target?.isConnected) setTimeout(() => target.focus(), 0)
@@ -4076,6 +7275,22 @@
 					// Catalog
 					case 'cat-refresh':
 						return loadCatalog()
+					case 'cat-find-photo':
+					case 'cat-find-photo-again':
+						return openFindPhotoPicker()
+					case 'find-photo-camera':
+						return void startFindPhotoCamera()
+					case 'find-photo-upload':
+						return openFindPhotoFilePicker()
+					case 'find-photo-shutter':
+						return void captureFindPhotoFromCamera()
+					case 'find-photo-flip':
+						return void flipFindPhotoCamera()
+					case 'find-photo-use': {
+						const match = lastFindPhotoMatches[idx]
+						if (!match) return
+						return applyFindPhotoMatch(match)
+					}
 					case 'cat-mode':
 						catFilters.mode = catFilters.mode === 'grid' ? 'table' : 'grid'
 						localStorage.setItem('sourcingCatMode', catFilters.mode)
@@ -4103,6 +7318,12 @@
 						return saveProduct()
 
 					// Suppliers
+					case 'sup-building':
+						return setSupBuilding(el.dataset.val || '')
+					case 'sd-type':
+						return setSdType(el.dataset.val || '')
+					case 'sd-gap':
+						return setSdGap(el.dataset.val || '')
 					case 'sup-open':
 						return openSupplierDrawer(idx)
 					case 'sup-close':
@@ -4111,6 +7332,18 @@
 						return addProductForOpenSupplier()
 					case 'sup-toggle-listings':
 						return toggleSupplierListingDetails(id)
+					case 'sd-merge-start':
+						return enterSupplierMergeMode()
+					case 'sd-merge-exit':
+						exitSupplierMergeMode()
+						return renderSupplierDrawer()
+					case 'sd-merge-cancel':
+						exitSupplierMergeMode()
+						return renderSupplierDrawer()
+					case 'sd-merge-toggle':
+						return toggleSupplierMergePick(el.dataset.gkey || '')
+					case 'sd-merge-confirm':
+						return confirmSupplierMerge()
 					case 'stall-new':
 						return openStallModal(null)
 					case 'stall-edit':
@@ -4121,12 +7354,24 @@
 						return saveStall()
 					case 'cshop-new':
 						return openCshopModal(null)
+					case 'cshop-open':
+						return openCharmShopDrawer(idx)
+					case 'cshop-close':
+						return closeCharmShopDrawer()
 					case 'cshop-edit':
 						return openCshopModal(idx)
 					case 'cshop-del':
 						return deleteCshop(idx)
 					case 'cshop-save':
 						return saveCshop()
+					case 'route-charm': {
+						if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+						const href = el.getAttribute('href')
+						if (!href) return
+						e.preventDefault()
+						openRouteCharmWindow(href)
+						return
+					}
 
 					// Design library
 					case 'design-new':
@@ -4176,11 +7421,26 @@
 				renderCatalog()
 			}, 160)
 			document.getElementById('catSearch').addEventListener('input', rerenderCatalog)
+			document.getElementById('catFindPhotoFile').addEventListener('change', (e) => {
+				const file = e.target.files && e.target.files[0]
+				e.target.value = ''
+				if (file) void searchCatalogByPhoto(file)
+			})
+			document.addEventListener('visibilitychange', () => {
+				if (!document.hidden) return
+				if (!findPhotoStream) return
+				stopFindPhotoCamera()
+				const modal = document.getElementById('findPhotoModal')
+				if (modal && modal.classList.contains('open') && lastFindPhotoState && lastFindPhotoState.status === 'camera') {
+					paintFindPhoto({ status: 'pick' })
+				}
+			})
+			window.addEventListener('pagehide', () => stopFindPhotoCamera())
 			document.getElementById('catSupplier').addEventListener('change', rerenderCatalog)
 			document.getElementById('catSort').addEventListener('change', rerenderCatalog)
 			document.getElementById('supSearch').addEventListener('input', debounce(renderSuppliers, 160))
-			document.getElementById('supBuilding').addEventListener('change', renderSuppliers)
 			document.getElementById('sdSearch').addEventListener('input', debounce(renderSupplierDrawer, 140))
+			document.getElementById('csdSearch').addEventListener('input', debounce(renderCharmShopDrawer, 140))
 			document.getElementById('designSearch').addEventListener('input', debounce(renderDesignList, 120))
 			document.getElementById('pkgSearch').addEventListener('input', debounce(renderPackages, 140))
 			document.getElementById('statusFilter').addEventListener('change', renderPackages)
@@ -4230,6 +7490,22 @@
 				}),
 			)
 			document.addEventListener('keydown', (e) => {
+				const radio = e.target.closest && e.target.closest('.facet-rail [role="radio"]')
+				if (radio) {
+					const rail = radio.closest('.facet-rail')
+					const buttons = rail ? [...rail.querySelectorAll('[role="radio"]')] : []
+					const i = buttons.indexOf(radio)
+					const delta = e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : 0
+					let next = null
+					if (delta && buttons.length) next = buttons[(i + delta + buttons.length) % buttons.length]
+					else if (e.key === 'Home') next = buttons[0]
+					else if (e.key === 'End') next = buttons[buttons.length - 1]
+					if (next) {
+						e.preventDefault()
+						next.click()
+						return
+					}
+				}
 				if (e.key !== 'Escape') return
 				const openModalBg = document.querySelector('.modal-bg.open')
 				if (openModalBg) {
@@ -4237,16 +7513,35 @@
 					return
 				}
 				if (openSupplierKey) closeSupplierDrawer()
+				else if (openCharmShopKey) closeCharmShopDrawer()
+			})
+			window.addEventListener('resize', () => {
+				document.querySelectorAll('.facet-scroller').forEach(syncFacetOverflow)
+				syncSupControlsHeight()
 			})
 
 			// Broken product photos: drop the card/row rather than leave a blank
-			// hole. Capture-phase so it works for dynamically inserted <img>s
-			// without an inline onerror (forbidden by the page contract).
+			// hole. Charm thumbs fail independently — keep the charm frame and
+			// show a placeholder so the layout (and the case photo) stay intact.
+			// Capture-phase so it works for dynamically inserted <img>s without
+			// an inline onerror (forbidden by the page contract).
 			document.addEventListener(
 				'error',
 				(e) => {
 					const img = e.target
 					if (!(img instanceof HTMLImageElement)) return
+					if (img.classList.contains('charm-img') || img.closest('.pthumb.charm')) {
+						const thumb = img.closest('.pthumb.charm')
+						if (!thumb) return
+						img.remove()
+						if (!thumb.querySelector('.charm-ph')) {
+							const ph = document.createElement('span')
+							ph.className = 'charm-ph'
+							ph.textContent = 'Charm'
+							thumb.appendChild(ph)
+						}
+						return
+					}
 					const host = img.closest('.pcard, .prow, tr')
 					if (host) host.remove()
 				},

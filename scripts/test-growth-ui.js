@@ -51,10 +51,6 @@ const report = {
 		api_calls_on_page_load: 0,
 		message: 'Manual mode',
 	},
-	compliance: {
-		status: 'elevated',
-		risks: [{ level: 'high', title: 'Multi-key approval missing' }],
-	},
 	coverage: {
 		shops: 2,
 		manual_shops: 0,
@@ -171,12 +167,6 @@ test('four useful KPIs render without dash-only placeholder cards', () => {
 	assert.equal(cards.length, 4)
 	assert.ok(cards.every((card) => card.textContent.trim() && !/^—$/.test(card.textContent.trim())))
 	assert.match(cards[1].textContent, /0\/2/)
-})
-
-test('elevated marketplace compliance is visible beside growth work', () => {
-	const banner = window.document.getElementById('growthComplianceBanner')
-	assert.equal(banner.hidden, false)
-	assert.match(banner.textContent, /Multi-key approval missing/)
 })
 
 test('window mismatch explains why existing manual data is not selected', () => {

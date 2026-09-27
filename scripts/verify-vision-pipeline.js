@@ -30,7 +30,7 @@ const section = (m) => console.log(`\n${BOLD}${CYAN}── ${m} ──${RESET}`)
 
 function download(url, dest) {
   return new Promise((resolve, reject) => {
-    https.get(url, { headers: { 'User-Agent': 'Y2KASEshop-verify/1.0' } }, (res) => {
+    https.get(url, { headers: { 'User-Agent': 'Y2KASE-verify/1.0' } }, (res) => {
       if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode}`)) }
       const out = fs.createWriteStream(dest)
       res.pipe(out)
@@ -100,7 +100,7 @@ async function main() {
   const startMs = Date.now()
   let result
   try {
-    result = await generateListingCopy(product, { shopName: 'Y2KASEshop', brandTags: ['y2kase'] })
+    result = await generateListingCopy(product, { shopName: 'Y2KiPhoneCases', brandTags: ['y2kase'] })
   } catch (err) {
     fail(`Pipeline FAILED: ${err.message}`)
     if (/json_schema|response_format|structured|schema/i.test(err.message)) {

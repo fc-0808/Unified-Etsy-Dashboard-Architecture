@@ -858,9 +858,13 @@
 				width: 104px;
 				height: 104px;
 				border-radius: 12px;
-				object-fit: cover;
+				/* Contain, not cover: listing photos often include dangling charms
+				   hanging off the case. Cover centre-crops those beads off the
+				   square and the shopper cannot tell the designs apart. */
+				object-fit: contain;
 				background: var(--surface2);
 				flex-shrink: 0;
+				padding: 4px;
 			}
 			.thumb.ph {
 				background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40' viewBox='0 0 24 24' fill='none' stroke='%238a90a6' stroke-width='1.4'%3E%3Crect x='3' y='3' width='18' height='18' rx='3'/%3E%3Ccircle cx='8.5' cy='8.5' r='1.6'/%3E%3Cpath d='M21 15l-5-5L5 21'/%3E%3C/svg%3E");
@@ -2947,19 +2951,18 @@
 			// so it reads as "other" rather than as an empty chip.
 			const buildingLabel = (loc) => (LANG === 'zh' ? loc.buildingLabel.zh : loc.buildingLabel.en) || t('otherFloor')
 
-			// Where a CHARM is shopped. Charms are bought in their own market (龙胜),
-			// whose stalls are recorded with bare codes exactly like the home
-			// case/grip market — so a bare charm code, which parses as the home
-			// market, is re-homed to 龙胜 (floor and code untouched). A charm stall
-			// that explicitly names another market keeps it. A charm sold at a stall
-			// already on the case/grip route is merged into that supplier's stop
-			// upstream and never reaches here, so it correctly keeps the supplier's
-			// market — the one exception the shopper asked for.
+			// Where a CHARM is shopped. Dedicated charm vendors are in 龙胜, but their
+			// legacy directory stores bare stall codes exactly like 通信 suppliers.
+			// The server disambiguates each charm shop by exact booth identity:
+			// `usesSupplierLocation` means the same shop + stall exists in the supplier
+			// directory, so normal supplier parsing wins (A205 → 通信). Every other bare
+			// charm code is re-homed to 龙胜. This must not depend on another case/grip
+			// line being visible: Charm Only orders deliberately have no such line.
 			// ══ CHARM LOCATION ══
 			const CHARM_HOME_BUILDING_ID = 'longsheng'
-			function charmLoc(stall) {
+			function charmLoc(stall, usesSupplierLocation = false) {
 				const loc = parseStall(stall)
-				if (!loc.isHome) return loc
+				if (!loc.isHome || usesSupplierLocation) return loc
 				const b = BUILDING_BY_ID.get(CHARM_HOME_BUILDING_ID)
 				return { ...loc, buildingId: b.id, buildingOrder: b.order, buildingLabel: b.label, isHome: false }
 			}
@@ -2977,18 +2980,28 @@
 				return shop ? shop.toLowerCase() : '\uffff'
 			}
 
-			// ── Charms sold at a stall we already visit ──────────────────────────
-			// A sourced charm normally has its own stop in the Charms section. But some
-			// charm stalls ARE case/grip suppliers (one merchant sells both), and making
-			// the shopper walk back to a stall they already stood at is wasted time. So a
-			// charm whose stall is a stop already on the Cases & Grips route is shopped
-			// THERE — the same principle as an integral (AirPods) charm, which is bought
-			// with its case. The charm keeps its own card (code, photo, price, quantity
-			// merged across orders); only the STOP it hangs under changes.
+			// ── Supplier stops, including supplier-backed charms ──────────────────
+			// Cases & Grips is the shopper's SUPPLIER walk, not a taxonomy of the Etsy
+			// variation. A loose charm sold by a regular supplier belongs on that walk
+			// even when its order is Charm Only and therefore contributes no case/grip
+			// product row. Dedicated charm-market vendors remain in the Charms section.
+			//
+			// The charm keeps its own card (code, photo, price, quantity); only the
+			// operational section/stop changes.
+			// ══ CHARM STOP ROUTING ══
 			const shopIdent = (s) => String(s || '').trim().toLowerCase()
-			// Case/grip stops of the WHOLE route, indexed by merchant and by stop key.
-			// Built from every case/grip line — never the filtered view — so a charm's
-			// home stop can't flip just because a case was bought, hidden or searched out.
+			function indexSupplierStop(byKey, byShop, stop) {
+				const id = shopIdent(stop.shop)
+				if (!id || byKey.has(stop.key)) return
+				byKey.set(stop.key, stop)
+				const list = byShop.get(id)
+				list ? list.push(stop) : byShop.set(id, [stop])
+			}
+			// Supplier stops of the WHOLE route, indexed by merchant and stop key.
+			// This includes:
+			//   1. every case/grip product supplier, whether currently filtered/done;
+			//   2. every charm booth the server proved is also a regular supplier.
+			// The second set is what keeps Charm Only at 鑫宜 · A205 in Cases & Grips.
 			// Memoised on the ROWS identity (ROWS is replaced, never mutated in place).
 			let _cgStops = { rows: null, idx: null }
 			function cgStopIndex() {
@@ -2996,15 +3009,24 @@
 				const byKey = new Map() // stop key → { key, shop, stall, floor }
 				const byShop = new Map() // merchant → [stop, …]
 				for (const r of ROWS) {
-					if (!inCgSection(r)) continue
-					const id = shopIdent(r.supplier_shop)
-					if (!id) continue // no merchant name → nothing to match a charm against
-					const key = supKeyOf(r)
-					if (byKey.has(key)) continue
-					const stop = { key, shop: (r.supplier_shop || '').trim(), stall: (r.supplier_stall || '').trim(), floor: r.supplier_floor }
-					byKey.set(key, stop)
-					const list = byShop.get(id)
-					list ? list.push(stop) : byShop.set(id, [stop])
+					if (inCgSection(r)) {
+						indexSupplierStop(byKey, byShop, {
+							key: supKeyOf(r),
+							shop: (r.supplier_shop || '').trim(),
+							stall: (r.supplier_stall || '').trim(),
+							floor: r.supplier_floor,
+						})
+					}
+					if (inCharmSection(r) && r.charm_uses_supplier_location === true) {
+						const shop = (r.charm_shop || '').trim()
+						const stall = (r.charm_stall || '').trim()
+						indexSupplierStop(byKey, byShop, {
+							key: locationSortKey(stall, shop),
+							shop,
+							stall,
+							floor: r.charm_floor,
+						})
+					}
 				}
 				const idx = { byKey, byShop }
 				_cgStops = { rows: ROWS, idx }
@@ -3030,6 +3052,7 @@
 				}
 				return stops.length === 1 ? stops[0].key : null
 			}
+			// ══ END CHARM STOP ROUTING ══
 			// ── Summary + progress ───────────────────────────────────────────────
 			function renderSummary() {
 				// Swaps never reach ROWS (the server projects them out of the buy list
@@ -3413,6 +3436,7 @@
 					})
 			}
 
+			// ══ CHARM GROUPING ══
 			// Charms are shopped at charm stalls, so they group by charm shop/stall.
 			// A merchant is still ONE stop (identity stays the shop name, which the
 			// completion / celebration paths key off), but the stops are laid out in
@@ -3425,9 +3449,9 @@
 					const key = shop ? shop.toLowerCase() : '\uffff'
 					if (!groups.has(key)) {
 						const stall = (r.charm_stall || '').trim()
-						const loc = charmLoc(stall)
-						// Sort on the re-homed market so 龙胜 stops group together and any
-						// charm at another named market sorts after them, matching the tree.
+						const loc = charmLoc(stall, r.charm_uses_supplier_location === true)
+						// Sort on the resolved physical market. Dedicated charm booths
+						// group in 龙胜; supplier-backed booths retain their supplier market.
 						const orderKey = shop || stall ? [String(loc.buildingOrder).padStart(4, '0'), loc.buildingId, String(floorSortValue(loc.floor)).padStart(4, '0'), loc.code.toLowerCase(), shop.toLowerCase()].join('\x00') : '\uffff'
 						groups.set(key, { loc, shop, stall, sortKey: key, orderKey, rows: [] })
 					}
@@ -3435,6 +3459,7 @@
 				}
 				return [...groups.values()].sort((a, b) => (a.orderKey < b.orderKey ? -1 : a.orderKey > b.orderKey ? 1 : a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0))
 			}
+			// ══ END CHARM GROUPING ══
 
 			function applySearch(rows) {
 				if (!searchQ) return rows
@@ -3475,11 +3500,11 @@
 				for (const r of cg) ensureGroup(r).rows.push(r)
 				for (const x of applySearch(EXCHANGES)) ensureGroup(x).exRows.push(x)
 
-				// Section 2 — Charms. Those sold at a stall this route ALREADY stops at
-				// for cases/grips move into that supplier's group above (one stop, one
-				// visit); the rest keep their own charm stalls here. Integral (AirPods)
-				// charms are excluded entirely — they shop as a component of their case,
-				// so they must never appear here as a "no charm code" stray.
+				// Section 2 — dedicated charm-market vendors only. A charm sold by any
+				// regular supplier moves into Cases & Grips above, even if Charm Only is
+				// the route's sole reason to visit that booth. Integral (AirPods) charms
+				// are excluded entirely — they shop as a component of their case, so they
+				// must never appear here as a "no charm code" stray.
 				let ch = ROWS.filter(inCharmSection)
 				ch = applySearch(ch.filter((r) => showDone || !charmDone(r)))
 				const chOwn = []
@@ -5969,6 +5994,12 @@
 							':' +
 							(r.charm_code || '') +
 							':' +
+							(r.charm_shop || '') +
+							'@' +
+							(r.charm_stall || '') +
+							'@' +
+							(r.charm_uses_supplier_location ? 'supplier' : 'charm') +
+							':' +
 							(r.cost_case ?? '') +
 							'/' +
 							(r.cost_grip ?? '') +
@@ -6165,6 +6196,9 @@
 						return
 					}
 					const before = fullyPurchased(r)
+					const charmAssignmentChanged =
+						(msg.charm_code != null && msg.charm_code !== r.charm_code) ||
+						(msg.charm_shop != null && msg.charm_shop !== r.charm_shop)
 					r.status_case = msg.status_case
 					r.status_grip = msg.status_grip
 					r.status_charm = msg.status_charm
@@ -6173,6 +6207,10 @@
 					// In-place patch (no full re-render) so the list never flashes when a
 					// teammate — or our own echoed change — comes in over the stream.
 					patchRowEverywhere(r)
+					// A charm-shop change can also change its stall and market context,
+					// which the compact assign event intentionally does not duplicate.
+					// Pull the authoritative row so a Charm Only card moves buildings.
+					if (charmAssignmentChanged) scheduleRouteRefetch()
 					if (msg.by && msg.by !== ME) {
 						const after = fullyPurchased(r)
 						if (after && !before) toast(LANG === 'zh' ? `${msg.by} 已购买一项` : `${msg.by} bought an item`)

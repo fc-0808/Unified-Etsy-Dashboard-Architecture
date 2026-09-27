@@ -34,7 +34,10 @@
  *      but the parcel never entered the carrier network) — OR the operator
  *      explicitly flagged it (receipts.needs_purchase_at) regardless of state.
  *   3. It has NOT been physically packaged (packing is terminal and wins).
- *   4. It still has real work: at least one line is outstanding to buy, or the
+ *   4. Its shipping address is not waiting on an owner review (US military /
+ *      Australia). Those orders live in Address review until the owner marks
+ *      them reviewed (employees may then shop) or holds them on Issues.
+ *   5. It still has real work: at least one line is outstanding to buy, or the
  *      order is ON HOLD behind an open fulfilment issue.  ← classifyPurchaseState
  *
  * A CHARM LINE inside those orders belongs on the shopping list only when the
@@ -45,6 +48,7 @@ const routeDashboard = require('../route/dashboard')
 const { getSubstitutionsForReceipts } = require('../db/setup')
 const { actionableOrderSql } = require('./dedup')
 const lineIdentity = require('./line-identity')
+const addressReview = require('./address-review')
 
 /** Receipts that are cancelled or fully refunded never belong in any work queue. */
 const NOT_CANCELLED = "status NOT IN ('Canceled', 'Cancelled', 'Fully Refunded', 'Fully refunded')"
@@ -71,21 +75,26 @@ const UNBUYABLE_STATUSES = new Set(['Out of Production', 'Model Unavailable'])
 const NP_FILTERS = ['all', 'tobuy', 'onhold']
 
 /**
- * SQL fragment — the ORDER-level half of the Need-to-purchase scope (rules 1–3
- * above). The "still has work" half (rule 4) cannot be expressed in SQL (it
+ * SQL fragment — the ORDER-level half of the Need-to-purchase scope (rules 1–4
+ * above). The "still has work" half (rule 5) cannot be expressed in SQL (it
  * depends on per-line component statuses) and is applied by classifyPurchaseState
  * + resolveNeedsPurchaseSet.
  *
  * @param {object} config - dashboard config (reads `pre_transit_days`, default 30).
  * @param {string} alias  - the `receipts` table alias used by the caller (e.g. 'r').
+ * @param {object} [opts]
+ * @param {boolean} [opts.excludeAddressReview=true] - when false, held military /
+ *        Australia orders stay in the ship-state set (the Address-review queue
+ *        uses this so the two views stay complementary).
  * @returns {string} a SQL boolean expression (never contains user input).
  */
-function needsPurchaseScopeSql(config = {}, alias = 'r') {
+function needsPurchaseScopeSql(config = {}, alias = 'r', opts = {}) {
 	if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) throw new TypeError('Invalid SQL alias')
 	const preTransitDays = config.pre_transit_days ?? 30
 	const cutoff = Math.floor(Date.now() / 1000) - preTransitDays * 24 * 3600
 	const a = alias
-	return `(
+	const excludeAddressReview = opts.excludeAddressReview !== false
+	const shipState = `(
       (
         (${a}.is_shipped = 0 AND ${a}.${NOT_CANCELLED})
         OR
@@ -101,6 +110,12 @@ function needsPurchaseScopeSql(config = {}, alias = 'r') {
       AND ${a}.is_paid = 1
       AND ${a}.packaged_at IS NULL
     )`
+	// The Address-review queue reuses this ship-state WITHOUT the hold exclusion,
+	// so the two sets stay complementary: held orders leave Need-to-purchase and
+	// appear there until an owner marks the address reviewed (ready to shop)
+	// or holds it on Issues.
+	if (!excludeAddressReview) return shipState
+	return `(${shipState} AND ${addressReview.excludeOpenSql(a)})`
 }
 
 /**
@@ -291,9 +306,9 @@ function classifyPurchaseState(db, candidates) {
 function lineComponents(tx, sub) {
 	const parsed = routeDashboard.parseVariations(tx.variations)
 	const style = sub && sub.new_style ? sub.new_style : parsed.style
-	// The effective identity of the line also tells styleComponents what a
-	// single-axis product (a watch band) physically is, since its size-only
-	// variation carries no bundle words to read.
+	// The effective identity also tells styleComponents what a non-bundle
+	// product (watch band / iPad case) physically is: its color/fit values carry
+	// no component words to read.
 	const phoneModel = (sub && sub.new_phone_model) || parsed.phoneModel || ''
 	const title = (sub && sub.new_title) || tx.title || ''
 	const sc = routeDashboard.styleComponents(style, { phoneModel, title })

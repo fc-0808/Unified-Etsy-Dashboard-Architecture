@@ -40,7 +40,7 @@ class ShopRepricer {
   /**
    * Keep only values the product line offers, with a finite, positive price
    * (rounded to cents). Scoping to the line is what lets the same tool reprice
-   * "Case + Charm" bundles and Apple Watch "Band Size" values without either
+   * "Case + Charm" bundles and Apple Watch "Band Style" values without either
    * vocabulary leaking into the other.
    */
   _sanitizePrices(prices, productType) {

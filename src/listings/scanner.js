@@ -168,6 +168,8 @@ module.exports = {
   scanInputRoot,
   scanProductFolder,
   naturalCompare,
+  mimeForImage,
+  mimeForVideo,
   IMAGE_EXTS,
   VIDEO_EXTS,
   MAX_IMAGES,

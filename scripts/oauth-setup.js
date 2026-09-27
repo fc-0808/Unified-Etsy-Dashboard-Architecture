@@ -3,10 +3,6 @@
 /**
  * One-time OAuth 2.0 setup wizard for each Etsy shop.
  *
- * Run this script as the authorized shop owner using Etsy's documented,
- * user-driven OAuth flow. Network/proxy configuration does not change ownership,
- * scope, application-purpose, or API-key obligations.
- *
  * What this script does:
  *   1. Lists all unauthenticated shops from config.json
  *   2. Lets you choose a shop to authenticate
@@ -19,11 +15,8 @@
  *
  * Run: npm run oauth:setup
  *
- * IMPORTANT: For a configured proxied group, API-key checks and token exchange
- * use that route and fail closed if it is unavailable. This is transport
- * consistency only; do not use proxy/browser tooling to conceal common ownership
- * or bypass Etsy controls. Etsy API Terms assign one designated key per
- * application; obtain written approval before using multiple keys in this app.
+ * For a configured proxied group, API-key checks and token exchange use that
+ * route and fail closed if it is unavailable.
  *
  * Required scopes (what we request):
  *   transactions_r  — read orders and receipts
@@ -47,7 +40,12 @@ const readline = require('readline');
 const axios = require('axios');
 const { loadConfig, getAllShops, findShopContext, usesGroupProxy } = require('../src/config/schema');
 const { TokenManager } = require('../src/auth/token-manager');
-const { createGroupProxyClient, verifyGroupProxy } = require('../src/proxy/factory');
+const {
+  createGroupProxyClient,
+  describeGroupRoute,
+  verifyGroupProxy,
+} = require('../src/proxy/factory');
+const { shopUserAgent } = require('../src/etsy/user-agent');
 
 const REDIRECT_URI = 'http://localhost:3003/oauth/redirect';
 const CALLBACK_PORT = 3003;
@@ -98,8 +96,29 @@ function escapeHtml(value) {
 
 // ─── Interactive shop selector ────────────────────────────────────────────────
 
+function parseShopArg() {
+  const flagged = process.argv.find((a) => a.startsWith('--shop='));
+  if (flagged) return flagged.slice('--shop='.length).trim();
+  const idx = process.argv.indexOf('--shop');
+  if (idx >= 0) return String(process.argv[idx + 1] || '').trim();
+  return '';
+}
+
 async function selectShop(config, tokenManager) {
   const allShops = getAllShops(config);
+  const shopArg = parseShopArg();
+  if (shopArg) {
+    const needle = shopArg.toLowerCase();
+    const match = allShops.find(
+      (s) => String(s.shop_id).toLowerCase() === needle || String(s.shop_name).toLowerCase() === needle
+    );
+    if (!match) {
+      console.error(`\n  No shop in config.json matches --shop=${shopArg}\n`);
+      return null;
+    }
+    return match;
+  }
+
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const question = (q) => new Promise((res) => rl.question(q, res));
 
@@ -146,7 +165,11 @@ async function selectShop(config, tokenManager) {
  * @returns {Promise<string>} The authorization code
  */
 function waitForAuthCode(expectedState) {
-  return new Promise((resolve, reject) => {
+  let markListening;
+  const listening = new Promise((resolve) => {
+    markListening = resolve;
+  });
+  const codePromise = new Promise((resolve, reject) => {
     let settled = false;
     let timer = null;
     const server = http.createServer((req, res) => {
@@ -232,16 +255,21 @@ function waitForAuthCode(expectedState) {
       else resolve(code);
     }
 
-    server.once('error', finish);
+    server.once('error', (err) => {
+      markListening();
+      finish(err);
+    });
     server.listen(CALLBACK_PORT, '127.0.0.1', () => {
       console.log(`\n  Callback server listening at http://localhost:${CALLBACK_PORT}/oauth/redirect`);
+      markListening();
     });
 
-    // Timeout after 5 minutes
+    // Timeout after 15 minutes so the shop owner can sign in and approve scopes.
     timer = setTimeout(() => {
-      finish(new Error('OAuth timeout — no redirect received within 5 minutes.'));
-    }, 5 * 60 * 1000);
+      finish(new Error('OAuth timeout — no redirect received within 15 minutes.'));
+    }, 15 * 60 * 1000);
   });
+  return { codePromise, listening };
 }
 
 // ─── API key preflight ─────────────────────────────────────────────────────────
@@ -255,14 +283,22 @@ function waitForAuthCode(expectedState) {
  * @param {import('axios').AxiosInstance} [proxyClient] - Group proxy client for
  *        proxied groups so this preflight egresses on the same IP as every other
  *        call for this shop. Falls back to a direct connection when omitted.
+ * @param {string|number} shopId
  * @returns {Promise<number>} application_id from openapi-ping
  */
-async function verifyApiKeyActive(keystring, sharedSecret, proxyClient) {
+async function verifyApiKeyActive(keystring, sharedSecret, proxyClient, shopId) {
   try {
+    if (proxyClient?._proxyEnforced === true && !proxyClient._egressVerifiedAt) {
+      throw new Error('Group-proxy egress has not passed its preflight check.');
+    }
     const client = proxyClient ?? axios;
     const { data } = await client.get('https://api.etsy.com/v3/application/openapi-ping', {
       baseURL: '', // full URL — don't prepend the proxy client's /v3 baseURL
-      headers: { 'x-api-key': `${keystring}:${sharedSecret}` },
+      headers: {
+        'x-api-key': `${keystring}:${sharedSecret}`,
+        'User-Agent': shopUserAgent(shopId),
+      },
+      proxy: false,
       timeout: 15_000,
     });
     return data.application_id;
@@ -286,7 +322,7 @@ async function verifyApiKeyActive(keystring, sharedSecret, proxyClient) {
 
 // ─── Token exchange ────────────────────────────────────────────────────────────
 
-async function exchangeCodeForTokens(keystring, authCode, codeVerifier, proxyClient) {
+async function exchangeCodeForTokens(keystring, authCode, codeVerifier, proxyClient, shopId) {
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     client_id: keystring,
@@ -297,10 +333,18 @@ async function exchangeCodeForTokens(keystring, authCode, codeVerifier, proxyCli
 
   // Route through the configured group transport when supplied. This keeps
   // runtime networking deterministic; it does not alter Etsy authorization.
+  if (proxyClient?._proxyEnforced === true && !proxyClient._egressVerifiedAt) {
+    throw new Error('Group-proxy egress has not passed its preflight check.');
+  }
   const client = proxyClient ?? axios;
   const { data } = await client.post(ETSY_TOKEN_URL, body.toString(), {
     baseURL: '', // full URL — don't prepend the proxy client's /v3 baseURL
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': shopUserAgent(shopId),
+    },
+    proxy: false,
+    timeout: 30_000,
   });
   return data;
 }
@@ -315,12 +359,8 @@ async function main() {
   console.log(`
   Network check — proxied groups (socks5:// in config.json):
   ─────────────────────────────────────────────────────────────
-  Complete OAuth manually as the authorized shop owner. If this
-  application's approved deployment uses a proxy, keep that route
-  available for the API-key check and token exchange.
-
-  A proxy does not authorize extra shops/keys and must never be
-  used to conceal ownership or evade Etsy platform controls.
+  Complete OAuth in the browser as the shop owner. Proxied groups
+  use that route for the API-key check and token exchange.
   ─────────────────────────────────────────────────────────────
 `);
 
@@ -345,7 +385,9 @@ async function main() {
   console.log(`\n  Setting up OAuth for: ${shop.shop_name} (${shop.shop_id})`);
   console.log(`  Owner email:  ${shop.owner_email || 'not set in config'}`);
   console.log(`  Group:        ${shop.group_label}`);
-  console.log(`  Routing:      ${isDirect ? 'direct (no proxy)' : 'VPN → IPFoxy proxy'}`);
+  console.log(
+    `  Routing:      ${isDirect ? 'direct (no proxy)' : describeGroupRoute(shopCtx.group, config.network_transport)}`
+  );
   console.log(`  API key:      ${shop.api_key.slice(0, 8)}...`);
 
   // Build the SAME network path the runtime uses for this shop. Proxied groups
@@ -353,16 +395,16 @@ async function main() {
   // Fail closed if it is unavailable rather than silently changing egress.
   let proxyClient = null;
   if (!isDirect) {
-    console.log('\n  Verifying the group proxy chain (VPN → IPFoxy)...');
+    console.log('\n  Verifying the configured transport and group proxy...');
     try {
-      const egressIp = await verifyGroupProxy(shopCtx.group, config.vpn_local_port);
-      proxyClient = createGroupProxyClient(shopCtx.group, config.vpn_local_port);
+      const egressIp = await verifyGroupProxy(shopCtx.group, config.network_transport);
+      proxyClient = createGroupProxyClient(shopCtx.group, config.network_transport);
       console.log(`  ✓ Proxy verified — Etsy will see exit IP ${egressIp}`);
       console.log('  ► Confirm this is the network route approved for this application.');
     } catch (err) {
       console.error(
         `\n  ✗ Could not reach this group's proxy chain: ${err.message}\n\n` +
-          `  Start the VPN (localhost:${config.vpn_local_port}) and make sure the group's\n` +
+          `  Start the configured VPN/TUN transport and make sure the group's\n` +
           `  configured proxy is active, then re-run oauth:setup. Refusing to continue\n` +
           `  rather than silently changing the application's network route.\n`
       );
@@ -372,7 +414,7 @@ async function main() {
 
   console.log('\n  Verifying API key with Etsy (openapi-ping)...');
   try {
-    const appId = await verifyApiKeyActive(shop.api_key, shop.shared_secret, proxyClient);
+    const appId = await verifyApiKeyActive(shop.api_key, shop.shared_secret, proxyClient, shop.shop_id);
     console.log(`  ✓ API key active — application_id ${appId}`);
   } catch (err) {
     console.error(`\n  ${err.message}\n`);
@@ -401,6 +443,14 @@ async function main() {
   });
   const oauthUrl = `${ETSY_OAUTH_URL}?${oauthParams.toString()}`;
 
+  const { codePromise, listening } = waitForAuthCode(state);
+  try {
+    await listening;
+  } catch (err) {
+    console.error(`\n  Could not start callback server: ${err.message}\n`);
+    process.exit(1);
+  }
+
   console.log('\n  ─────────────────────────────────────────────────────────');
   console.log('  Requested scopes:');
   REQUIRED_SCOPES.split(' ').forEach((s) => console.log(`    • ${s}`));
@@ -411,7 +461,7 @@ async function main() {
 
   let authCode;
   try {
-    authCode = await waitForAuthCode(state);
+    authCode = await codePromise;
   } catch (err) {
     console.error(`\n  Authorization failed: ${err.message}\n`);
     process.exit(1);
@@ -421,7 +471,7 @@ async function main() {
 
   let tokenData;
   try {
-    tokenData = await exchangeCodeForTokens(shop.api_key, authCode, codeVerifier, proxyClient);
+    tokenData = await exchangeCodeForTokens(shop.api_key, authCode, codeVerifier, proxyClient, shop.shop_id);
   } catch (err) {
     const desc = err.response?.data?.error_description ?? err.message;
     console.error(`\n  Token exchange failed: ${desc}\n`);

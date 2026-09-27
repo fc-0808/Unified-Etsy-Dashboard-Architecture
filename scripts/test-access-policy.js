@@ -86,6 +86,15 @@ console.log('\n  First-match-wins ordering resolves to the tighter rule\n')
 	resolves('POST', '/api/route/charms/reorder', 'route:catalog')
 	resolves('POST', '/api/route/assign', 'route:assign')
 	resolves('POST', '/api/route/generate', 'route:generate')
+	resolves('POST', '/api/sourcing/find-by-photo', 'sourcing:manage')
+	check(
+		'Shopping Mode has no find-by-photo endpoint',
+		policy.requiredCapability('POST', '/api/shop/find-by-photo') === null,
+	)
+	check(
+		'Route tab has no find-by-photo endpoint',
+		policy.requiredCapability('POST', '/api/route/find-by-photo') === null,
+	)
 	// `resolve` is the shop-floor half of exchanges and must not be swallowed by
 	// the broader `manage` rules.
 	resolves('POST', '/api/exchanges/7/done', 'exchanges:resolve')
@@ -96,9 +105,16 @@ console.log('\n  First-match-wins ordering resolves to the tighter rule\n')
 	resolves('POST', '/api/4px/tracking-sync/run', 'shipping:admin')
 	resolves('GET', '/api/4px/shipping-alerts', 'shipping:admin')
 	resolves('POST', '/api/4px/shipping-alerts/review', 'shipping:admin')
+	resolves('GET', '/api/4px/compensation-cases', 'shipping:admin')
+	resolves('POST', '/api/4px/compensation-cases', 'shipping:admin')
+	resolves('PATCH', '/api/4px/compensation-cases/12', 'shipping:admin')
+	resolves('DELETE', '/api/4px/compensation-cases/12', 'shipping:admin')
 	resolves('GET', '/api/4px/shipments/123/buyer-notice', 'shipping:admin')
 	resolves('POST', '/api/4px/shipments/123/buyer-notice', 'shipping:admin')
+	resolves('POST', '/api/4px/bulk-complete', 'shipping:4px')
+	resolves('GET', '/api/4px/bulk-complete/jobs/0123456789abcdef0123456789abcdef', 'shipping:4px')
 	resolves('POST', '/api/4px/track/refresh/123', 'shipping:4px')
+	resolves('POST', '/api/4px/track/refresh-batch', 'shipping:4px')
 	resolves('GET', '/api/sourcing/suppliers', 'sourcing:manage')
 	// A query string can never be used to dodge a rule (paths are matched bare).
 	check('Rules match the path, never the query string', policy.requiredCapability('GET', '/api/route/open') === 'route:local-open')
@@ -117,8 +133,11 @@ console.log('\n  First-match-wins ordering resolves to the tighter rule\n')
 		'/api/growth/rights-review.csv',
 		'/api/bulk/run',
 		'/api/bulk/jobs/job-1/publish',
+		'/api/listings/history/match',
+		'/api/listings/history/update',
+		'/api/listings/history/locate',
+		'/api/listings/history/open',
 		'/api/sync/trigger-all',
-		'/api/admin/suspension-risk',
 	]
 	check(
 		'Undelegated endpoints have no rule (deny-by-default)',
@@ -161,23 +180,57 @@ console.log('\n  Access matrix\n')
 		['POST', '/api/route/import-status', true, true, false],
 		['GET', '/api/route/charm-image', true, true, true],
 		['POST', '/api/route/product-merges', true, true, true],
+		['POST', '/api/route/product-map/merge', true, true, true],
+		['POST', '/api/sourcing/find-by-photo', true, true, false],
 		['GET', '/api/route/open', true, false, false],
 		['POST', '/api/route/supplier-catalog/open', true, false, false],
 		['GET', '/api/orders', true, true, false],
+		['GET', '/api/orders/calendar-counts', true, true, false],
+		['POST', '/api/orders/1/clear-address-review', true, false, false],
+		['POST', '/api/orders/1/hold-address-review', true, false, false],
+		['POST', '/api/orders/1/reopen-address-review', true, false, false],
 		['POST', '/api/orders/1/ship', true, true, false],
+		['PUT', '/api/orders/1/shipping-address', true, true, false],
+		['DELETE', '/api/orders/1/shipping-address', true, true, false],
 		['POST', '/api/orders/manual', true, false, false],
 		['GET', '/api/operations/checklist', true, false, false],
 		['PUT', '/api/operations/checklist', true, false, false],
 		['GET', '/api/4px/tracking-sync/status', true, false, false],
 		['POST', '/api/4px/tracking-sync/run', true, false, false],
+		['POST', '/api/4px/track/refresh-batch', true, true, false],
 		['GET', '/api/sourcing/suppliers', true, true, false],
+		['GET', '/api/supplies/items', true, true, false],
+		['POST', '/api/supplies/items', true, true, false],
+		['PATCH', '/api/supplies/items/1', true, true, false],
+		['DELETE', '/api/supplies/items/1', true, true, false],
+		['POST', '/api/supplies/items/reorder', true, true, false],
+		['POST', '/api/supplies/counts', true, true, false],
+		['POST', '/api/supplies/receive', true, true, false],
 		['GET', '/api/users', true, false, false],
 		['GET', '/api/audit', true, false, false],
 		['GET', '/api/earnings', true, false, false],
+		['GET', '/api/finance/summary', true, false, false],
+		['GET', '/api/finance/goods-float', true, false, false],
+		['PUT', '/api/finance/goods-float/2026-09', true, false, false],
+		['POST', '/api/finance/goods-float/2026-09/adjust', true, false, false],
+		['GET', '/api/finance/goods-float/screenshots', true, false, false],
+		['POST', '/api/finance/goods-float/screenshots', true, false, false],
+		['POST', '/api/finance/goods-float/screenshots/import', true, false, false],
+		['POST', '/api/finance/goods-float/screenshots/1/import', true, false, false],
+		['POST', '/api/finance/goods-float/screenshots/1/retry', true, false, false],
+		['DELETE', '/api/finance/goods-float/screenshots/1', true, false, false],
+		['GET', '/api/finance/goods-float/screenshots/1/image', true, false, false],
+		['POST', '/api/finance/goods-float/transfers', true, false, false],
+		['PATCH', '/api/finance/goods-float/transfers/1', true, false, false],
+		['DELETE', '/api/finance/goods-float/transfers/1', true, false, false],
 		['POST', '/api/bulk/run', true, false, false],
 		['POST', '/api/bulk/jobs/job-1/publish', true, false, false],
+		['POST', '/api/listings/history/match', true, false, false],
+		['POST', '/api/listings/history/update', true, false, false],
+		['POST', '/api/listings/history/locate', true, false, false],
+		['POST', '/api/listings/history/open', true, false, false],
+		['GET', '/api/listings/history/status', true, false, false],
 		['POST', '/api/sync/trigger-all', true, false, false],
-		['GET', '/api/admin/suspension-risk', true, false, false],
 		['PATCH', '/api/inventory/auto-restock', true, false, false],
 	]
 
@@ -190,6 +243,9 @@ console.log('\n  Access matrix\n')
 	}
 
 	check('Owner is a superuser (allowed even with no matching rule)', policy.authorizeApi('owner', 'POST', '/api/some/brand/new/thing').allowed)
+	check('Owner can read the Etsy news briefing', policy.authorizeApi('owner', 'GET', '/api/news').allowed)
+	check('Employee cannot read the Etsy news briefing', !policy.authorizeApi('packer', 'GET', '/api/news').allowed)
+	check('Shopper cannot read the Etsy news briefing', !policy.authorizeApi('shopper', 'GET', '/api/news').allowed)
 	check('An unknown role is denied everything', !policy.authorizeApi('intern', 'GET', '/api/orders').allowed)
 	check('A new endpoint starts private for the employee', !policy.authorizeApi('packer', 'POST', '/api/some/brand/new/thing').allowed)
 	check('A denial reports which capability was missing', policy.authorizeApi('shopper', 'GET', '/api/route/dashboard').capability === 'route:read')
@@ -238,9 +294,19 @@ console.log('\n  public/index.html tab gating matches the policy\n')
 
 	const ownerTabs = tabsFor('owner')
 	check('Owner keeps every tab', sameSet(ownerTabs, Object.keys(policy.TAB_CAPABILITY)), ownerTabs.join(','))
+	check(
+		'Owner tab order is the fulfillment workflow, with Route last',
+		ownerTabs.join(',') === 'overview,orders,shipping,supplies,listings,bulk,earnings,growth,news,events,shops,route',
+		ownerTabs.join(','),
+	)
 
 	const employeeTabs = tabsFor('packer')
-	check('Employee sees exactly Orders + Route', sameSet(employeeTabs, ['orders', 'route']), employeeTabs.join(','))
+	check(
+		'Employee sees exactly Orders + Route + Supplies',
+		sameSet(employeeTabs, ['orders', 'route', 'supplies']),
+		employeeTabs.join(','),
+	)
+	check('Employee tab order is Orders, Supplies, Route', employeeTabs.join(',') === 'orders,supplies,route', employeeTabs.join(','))
 	check('…so the tab bar is shown (more than one tab)', employeeTabs.length > 1)
 
 	const shopperTabs = tabsFor('shopper')

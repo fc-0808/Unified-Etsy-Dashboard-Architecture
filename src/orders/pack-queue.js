@@ -30,6 +30,8 @@
  * so they are safe to interpolate directly into a prepared statement's text.
  */
 
+const addressReview = require('./address-review')
+
 // Receipts that are cancelled or fully refunded never belong in any work queue.
 const NOT_CANCELLED = "status NOT IN ('Canceled', 'Cancelled', 'Fully Refunded', 'Fully refunded')"
 
@@ -94,6 +96,16 @@ function openExchangeExistsSql(alias = 'r') {
  */
 function excludeOpenExchangeSql(alias = 'r') {
 	return `NOT ${openExchangeExistsSql(alias)}`
+}
+
+/**
+ * SQL fragment — exclude orders whose shipping address is still waiting on an
+ * owner review (military / Australia). A held order must not reach the packing
+ * bench even if every product happens to already be in hand (legacy shop, or a
+ * manual line marked bought before the hold existed).
+ */
+function excludeOpenAddressReviewSql(alias = 'r') {
+	return addressReview.excludeOpenSql(alias)
 }
 
 /**
@@ -289,10 +301,106 @@ function requireVerifyBeforePack(config = {}) {
 	return config.require_verify_before_pack === true
 }
 
+// ── Ready-to-pack ship-state sub-filter ──────────────────────────────────────
+// The packing queue MIXES two kinds of work: parcels that still need a 4PX
+// shipment created (Needs-shipping / unshipped) and parcels whose label was
+// created early to beat the Etsy ship-by deadline (Pre-transit / labeled).
+// A packer who wants to select-and-ship must be able to isolate the first
+// group without leaving the queue. These helpers are the single source of
+// truth for that split — the /api/orders handler, the packing chips, and
+// the regression test all import them so they cannot drift.
+const SHIP_FILTERS = Object.freeze(['all', 'unshipped', 'labeled'])
+
+/**
+ * Canonicalise a Ready-to-pack ship-state sub-filter.
+ * Unknown / empty values become 'all' so a typo can never empty the queue.
+ *
+ * @param {unknown} value
+ * @returns {'all'|'unshipped'|'labeled'}
+ */
+function normalizeShipFilter(value) {
+	const v = String(value || 'all')
+		.trim()
+		.toLowerCase()
+	return v === 'unshipped' || v === 'labeled' ? v : 'all'
+}
+
+/**
+ * SQL fragment — narrow the Ready-to-pack ship-state to one half of the mix.
+ *   'unshipped' — no Etsy shipment yet (COALESCE so pre-migration NULLs stay
+ *                 in the "still need to ship" bucket, never vanish).
+ *   'labeled'   — already shipped on Etsy (pre-transit label on the bench).
+ *   'all'       — unrestricted (the mixed queue).
+ *
+ * @param {unknown} filter
+ * @param {string}  [alias='r']
+ */
+function shipFilterSql(filter, alias = 'r') {
+	const a = alias
+	switch (normalizeShipFilter(filter)) {
+		case 'unshipped':
+			return `COALESCE(${a}.is_shipped, 0) = 0`
+		case 'labeled':
+			return `${a}.is_shipped = 1`
+		default:
+			return '1 = 1'
+	}
+}
+
+/**
+ * Size of every Ready-to-pack ship-state chip, from the SAME extraWhere the
+ * list uses BEFORE the chip itself is applied — so clicking "Not yet shipped"
+ * never blanks the "Label created" count. `all === unshipped + labeled` for
+ * this scope, because Ready-to-pack is defined as those two ship-states.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {object} [opts]
+ * @param {string} [opts.extraWhere='1 = 1'] additional SQL AND'd in (alias `r`)
+ * @param {object} [opts.params={}]          bind params for extraWhere
+ * @returns {{ all: number, unshipped: number, labeled: number }}
+ */
+function listShipCounts(db, opts = {}) {
+	const extraWhere = opts.extraWhere || '1 = 1'
+	const params = opts.params || {}
+	try {
+		const row = db
+			.prepare(
+				`SELECT
+					COUNT(*) AS all_n,
+					COALESCE(SUM(CASE WHEN COALESCE(r.is_shipped, 0) = 0 THEN 1 ELSE 0 END), 0) AS unshipped,
+					COALESCE(SUM(CASE WHEN r.is_shipped = 1 THEN 1 ELSE 0 END), 0) AS labeled
+				 FROM receipts r
+				 WHERE (${extraWhere})`,
+			)
+			.get(params)
+		return {
+			all: Number(row && row.all_n) || 0,
+			unshipped: Number(row && row.unshipped) || 0,
+			labeled: Number(row && row.labeled) || 0,
+		}
+	} catch {
+		return { all: 0, unshipped: 0, labeled: 0 }
+	}
+}
+
+/**
+ * ORDER BY fragment — unshipped parcels first, then already-labelled ones.
+ * Ties break on created-at oldest-first, which is the packing queue's
+ * existing urgency order. The To pack & ship preset uses this so a packer
+ * can select-and-ship from the top of the mixed list without hunting, while
+ * labelled parcels remain visible below for packing.
+ *
+ * @param {string} [alias='r']
+ */
+function unshippedFirstSortSql(alias = 'r') {
+	return `COALESCE(${alias}.is_shipped, 0) ASC, ${alias}.etsy_created_at ASC`
+}
+
 module.exports = {
 	readyToPackShipStateSql,
 	openExchangeExistsSql,
 	excludeOpenExchangeSql,
+	excludeOpenAddressReviewSql,
 	openExchangeHoldCount,
 	purchasedCohortSql,
 	packagedCohortSql,
@@ -300,4 +408,9 @@ module.exports = {
 	localDayKeyFromSec,
 	requireVerifyBeforePack,
 	startOfLocalDaySec,
+	SHIP_FILTERS,
+	normalizeShipFilter,
+	shipFilterSql,
+	listShipCounts,
+	unshippedFirstSortSql,
 }

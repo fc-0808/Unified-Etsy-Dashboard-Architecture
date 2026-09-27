@@ -369,6 +369,8 @@ assert.equal(duplicateKey, null, 'an ambiguous exact key never silently borrows 
 const server = fs.readFileSync(path.resolve(__dirname, '../src/server/index.js'), 'utf8')
 assert.match(server, /activityProductContext\.safeProductImageUrl\(val\)/, 'audit writes validate the event-time image reference')
 assert.match(server, /activityProductContext\.enrichAuditEntries\(\{/, 'audit reads invoke historical product enrichment')
+assert.match(server, /activityDescribe\.describeAuditEntry\(entry\)/, 'audit reads attach a specific route/assign action sentence')
+assert.match(server, /_AUDIT_KEEP_EMPTY = new Set\(activityDescribe\.ROUTE_ASSIGN_MUTATION_KEYS\)/, 'cleared supplier/charm fields stay on the audit snapshot')
 assert.match(server, /product_context TEXT/, 'audit storage has a dedicated order-product snapshot column')
 assert.match(server, /serializeOrderProductSnapshot\(res\.locals\.auditOrderProductSnapshot\)/, 'audit writes serialize the trusted server-side order snapshot')
 assert.equal((server.match(/^\s*_captureAuditOrderProductSnapshot\(res, receiptId\)$/gm) || []).length, 2, 'mark and unmark packaged both capture event-time products')

@@ -117,7 +117,7 @@ function seed(db) {
   db.prepare(
     `INSERT INTO route_manual_items (receipt_id, item_key, title, phone_model, style, quantity, shop_name, created_at)
      VALUES (?,?,?,?,?,1,?,?)`,
-  ).run(RID, KEY, TITLE, 'iPhone 17 Pro Max', STYLE, 'Y2KASEshop', now - 3600);
+  ).run(RID, KEY, TITLE, 'iPhone 17 Pro Max', STYLE, 'Y2KiPhoneCases', now - 3600);
   // Hand-assigned supplier on the Route tab (the override the desktop shows).
   db.prepare(
     `INSERT INTO route_assignments (receipt_id, item_key, title, supplier_shop_override, supplier_stall_override, updated_at)

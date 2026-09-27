@@ -1,7 +1,17 @@
 {
   "_comment": "Copy this file to config.json and fill in your real values. config.json is gitignored and NEVER committed.",
 
-  "vpn_local_port": 7897,
+  "_network_transport_comment": "Efan exposes a real loopback SOCKS5 listener on port 7897. local_socks5 creates an explicit Efan → IPFoxy chain, so a missing Efan listener fails closed. Keep Efan LAN access disabled. For a VPN that only owns the OS TUN route and has no SOCKS5 listener, use {\"mode\":\"system_tunnel\",\"provider\":\"Provider name\",\"interface_name\":\"Adapter name\"} instead.",
+  "network_transport": {
+    "mode": "local_socks5",
+    "provider": "Efan VPN",
+    "local_host": "127.0.0.1",
+    "local_port": 7897
+  },
+  "_browser_proxy_audit_comment": "Optional expected number of unique AdsPower static-proxy profile mappings. This is checked only by npm run browser:verify; it never starts or automates a browser.",
+  "browser_expected_static_proxy_count": null,
+  "_browser_profiles_comment": "Optional non-secret inventory for browser:verify. Add profile_id + its static public exit only; never store browser passwords, cookies, fingerprints, or proxy credentials here.",
+  "browser_profiles": [],
   "sync_interval_minutes": 60,
   "max_orders_per_sync": 100,
   "_db_path_comment": "Leave null for the platform-safe application-data default (Windows LocalAppData, macOS Application Support, Linux XDG data). Never place live SQLite in OneDrive/Dropbox/source control.",
@@ -17,7 +27,7 @@
   "_pre_transit_comment": "pre_transit_days: upper bound (in days) for how long after label creation we query carrier tracking for an order. With the 4PX tracking integration active (Pass D in sync worker), this is NOT the primary pre-transit signal — carrier_confirmed_at IS NULL is. This value controls how far back we look for unconfirmed orders to check. 30 days is the default — it gives a generous window so even slow-moving packages are checked. Once carrier_confirmed_at is set (carrier physically picked up the package), the order immediately moves to In-transit regardless of this value.",
   "pre_transit_days": 30,
 
-  "_tracking_edit_comment": "tracking_edit_days: window (in days) during which Etsy allows the tracking number of a shipped receipt to be edited / re-submitted. Etsy's policy is ~3 days from the shipment notification; after that their API rejects re-submitting tracking. The dashboard uses this value to show/hide the 'Edit tracking' action on pre-transit orders and to display the remaining time. Etsy remains the source of truth — a call outside the window still surfaces Etsy's own rejection.",
+  "_tracking_edit_comment": "tracking_edit_days: window (in days) during which the tracking number of a shipped receipt can be edited / re-submitted. About 3 days from the shipment notification; after that the API rejects re-submitting tracking. The dashboard uses this value to show/hide the 'Edit tracking' action on pre-transit orders and to display the remaining time. A call outside the window still surfaces the API rejection.",
   "tracking_edit_days": 3,
 
   "_recently_packaged_comment": "recently_packaged_days: legacy look-back hint (no longer caps the Recently packaged list — full packing history is shown with day chips + an archive picker). Kept for API compatibility; safe to omit.",
@@ -53,11 +63,8 @@
   "fourpx_pickup_max_days_ahead": 14,
   "fourpx_pickup_awaiting_days": 7,
 
-  "_multi_key_approval_comment": "Etsy API Terms assign one designated key per application. Keep false unless Etsy approved this exact multi-key/shop topology in writing and you retained that response. This flag records approval; it does not create permission.",
-  "etsy_multi_key_approved": false,
-  "_catalog_health_comment": "Growth is manual-first and makes zero Etsy API calls. Leave both values false and paste aggregate Etsy Shop Manager Stats into Growth. Etsy's API Terms (updated Aug 18, 2026) require express written authorization to request API content for analytics. Set etsy_api_analytics_approved true only after receiving and retaining that written authorization; catalog_health_sync additionally opts into the once-per-shop listing/review walk. Both true values are required. catalog_health_interval_hours is clamped to 12–168.",
+  "_catalog_health_comment": "Growth is manual-first and makes zero Etsy API calls until catalog_health_sync is true. Paste aggregate Etsy Shop Manager Stats into Growth. catalog_health_sync opts into the once-per-shop listing/review walk. catalog_health_interval_hours is clamped to 12–168.",
   "catalog_health_sync": false,
-  "etsy_api_analytics_approved": false,
   "catalog_health_interval_hours": 24,
 
   "_fourpx_freight_comment": "4PX shipping-cost sync (shown in the Earnings tab). When 4PX credentials are set, the sync worker prices every 4PX order: an immediate rate-card ESTIMATE via ds.xms.estimated_cost.get (the cost the 4PX portal shows once a parcel is measured), reconciled to the BILLED amount via ds.xms.order.getFreight once 4PX settles it. fourpx_freight_sync: set false to disable the extra API traffic. fourpx_freight_recheck_hours: how often an unbilled/estimated order is re-priced (default 6). fourpx_default_weight_g: fallback parcel weight (grams) for orders with no stored declared weight (default 100). fourpx_settlement_currency: currency 4PX bills in (CN accounts: CNY).",
@@ -78,12 +85,12 @@
   "label_print_copies": 1,
   "_pickup_form_print_comment": "The 4PX pickup appointment form (打印预约单) prints through the SAME settings as a shipping label, from the same button pipeline: 4PX issues it as a 95 x 95 mm square whose content is a barcode of the appointment number — a label, not an office document — so it goes on the same stock, at label_dpi, through the same 1-bit crisp-barcode path. There is deliberately nothing extra to configure. If 4PX ever returns a form that is NOT label-shaped, the server refuses to shrink it onto label stock and opens the PDF instead.",
 
-  "_fourpx_ioss_comment": "EU VAT compliance. fourpx_ioss_no: your Import One-Stop Shop (IOSS) registration number — REQUIRED by 4PX for EU (EU27) destinations with a declared value <= EUR 150 (field 'ioss_no'). For marketplace sales (e.g. Etsy) use the platform's IOSS number. Format: 'IM' + 10 digits (12 chars, no spaces, no 'IOSS' prefix). The server attaches it automatically to every EU27 order. fourpx_vat_no / fourpx_eori_no: optional EU VAT / EORI identifiers, attached to EU orders when set. Leave null to omit.",
+  "_fourpx_ioss_comment": "EU VAT identifiers. fourpx_ioss_no: your Import One-Stop Shop (IOSS) registration number — REQUIRED by 4PX for EU (EU27) destinations with a declared value <= EUR 150 (field 'ioss_no'). For marketplace sales (e.g. Etsy) use the platform's IOSS number. Format: 'IM' + 10 digits (12 chars, no spaces, no 'IOSS' prefix). The server attaches it automatically to every EU27 order. fourpx_vat_no / fourpx_eori_no: optional EU VAT / EORI identifiers, attached to EU orders when set. Leave null to omit.",
   "fourpx_ioss_no": null,
   "fourpx_vat_no": null,
   "fourpx_eori_no": null,
 
-  "_marketplace_tax_ids_comment": "Import-tax identifiers Etsy registers per destination, shown on the packing bench and transmitted as customs data. src/compliance/destination-tax.js ships a reviewed value for every scheme, so leave this null unless Etsy changes a number or you sell through another marketplace. Keys: EU_IOSS, UK_VAT, NO_VOEC, CH_VAT, AU_GST, NZ_GST — e.g. { \"UK_VAT\": \"370 6004 28\" }. Values are format- and checksum-validated at load; an invalid entry is ignored with a warning and the built-in value is used. NOTE: Etsy forbids writing the EU IOSS number on a parcel (it must be transmitted electronically); the UK VAT number is the opposite — Etsy instructs you to write it on the package.",
+  "_marketplace_tax_ids_comment": "Import-tax identifiers shown on the packing bench and transmitted as customs data. src/compliance/destination-tax.js ships a value for every scheme, so leave this null unless a number changes or you sell through another marketplace. Keys: EU_IOSS, UK_VAT, NO_VOEC, CH_VAT, AU_GST, NZ_GST — e.g. { \"UK_VAT\": \"370 6004 28\" }. Values are format- and checksum-validated at load; an invalid entry is ignored with a warning and the built-in value is used. EU IOSS is sent as carrier data and is not printed on the parcel. The UK VAT number is printed on the package.",
   "marketplace_tax_ids": null,
 
   "_fourpx_email_comment": "Default recipient email injected when the buyer's Etsy email is unavailable. 4PX requires recipient_info.email for all Etsy-origin shipments (and mandates it for MX, etc.). Set this to your shop contact address as a safe fallback.",
@@ -98,16 +105,14 @@
 
   "_auth_note": "OAuth access tokens expire in 1 HOUR. Run npm run oauth:setup so refresh tokens are written atomically to gitignored tokens.json; leave per-shop refresh_token null unless you deliberately need the legacy fallback. Re-authorize when Etsy expires or revokes a refresh token.",
 
-  "_compliance_note": "Etsy API safety: connect only shops and the single designated API key Etsy approved for this application's declared purpose. Never create duplicate apps/keys to bypass limits; a multi-key topology requires written Etsy approval. Platform shop/key allocations have no local override. Keep auto_restock_enabled false unless physical inventory is authoritative. Keep sync_interval_minutes >= 15 and inv_watch_interval_minutes >= 60. Run npm run compliance:check.",
-
   "_email_imap_comment": "OPTIONAL — per-shop email_imap block enables the Messages tab email sync feature. Etsy sends a notification email to the shop's linked Gmail/Outlook account whenever a buyer sends a message. This dashboard polls that inbox via IMAP, parses the emails, and displays the conversations here. GMAIL SETUP: (1) Enable 2-Step Verification on the Google account. (2) Go to Google Account → Security → App Passwords. (3) Choose 'Mail' and generate a 16-character app password. (4) Use that code as `password` — NOT your regular Gmail login. OUTLOOK: use your regular password or an app password if MFA is enabled. Leave out the email_imap block entirely to skip email sync for that shop.",
 
   "groups": [
     {
-      "_compliance": "This is one operational network group within one Etsy-approved application. Add shops only within the allocation shown in the Developer Portal. Do not add another API key unless Etsy approves this application using it in writing.",
       "group_id": "operations_group_1",
       "label": "Operations Group 1",
       "proxy": "direct",
+      "_expected_egress_ip_comment": "For a static proxied group, add expected_egress_ip using the address confirmed in the IPFoxy portal. Every verification and Etsy workflow then fails closed if that address changes. Omit it for a direct group.",
       "shops": [
         {
           "shop_id": "12345678",

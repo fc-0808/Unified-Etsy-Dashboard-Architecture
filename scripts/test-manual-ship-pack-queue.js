@@ -54,6 +54,7 @@ function readyToPackIds(db) {
 	const sql = `SELECT r.receipt_id FROM receipts r
      WHERE ${packQueue.readyToPackShipStateSql(CONFIG, 'r')}
        AND ${packQueue.excludeOpenExchangeSql('r')}
+       AND ${packQueue.excludeOpenAddressReviewSql('r')}
        AND r.packaged_at IS NULL
      ORDER BY r.receipt_id`
 	return db.prepare(sql).all().map((x) => x.receipt_id)

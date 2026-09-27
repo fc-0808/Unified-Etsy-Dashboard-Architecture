@@ -137,7 +137,7 @@ function txFor(title, listingId) {
 
 function seed(db) {
   const now = Math.floor(Date.now() / 1000);
-  db.prepare('INSERT INTO shops (shop_id, shop_name) VALUES (?,?)').run('SHOP_A', 'Y2KASEshop');
+  db.prepare('INSERT INTO shops (shop_id, shop_name) VALUES (?,?)').run('SHOP_A', 'Y2KiPhoneCases');
 
   // The ORIGINAL listing has a cached image — the one that used to leak through.
   db.prepare('INSERT INTO listing_images (listing_id, url) VALUES (?,?)').run(ORIG_LISTING, ORIG_IMAGE);

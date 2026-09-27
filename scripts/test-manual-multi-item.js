@@ -31,6 +31,7 @@ const {
   purgeManualOrder,
   upsertRouteAssignment,
   getManualItems,
+  getManualItemsForReceipts,
   migrateRouteManualItemsSharedReceipt,
   MAX_ROUTE_MANUAL_ITEMS,
   MANUAL_SHOP_ID,
@@ -85,6 +86,9 @@ function line(title, extras = {}) {
     shop_name: extras.shop_name || 'Manual Orders',
     charm_code: extras.charm_code || '',
     charm_shop: extras.charm_shop || '',
+    image_url: extras.image_url || '',
+    image_data: extras.image_data || null,
+    image_mime: extras.image_mime || '',
     item_key: extras.item_key || routeDashboard.lineItemKeyWithVariant(
       title, listingId, extras.phone_model || '', extras.style || '',
     ),
@@ -365,6 +369,33 @@ console.log('Manual multi-item order regression test\n');
   const rows = routeDashboard.buildRouteRows(db, {});
   const mine = rows.filter((r) => r.receipt_id === created.receipt_id);
   assert(mine.length === 2, `unscoped dashboard shows exactly 2 lines (got ${mine.length})`);
+  db.close();
+}
+
+// ── 12. Custom uploaded photo is the dashboard thumbnail ───────────────────
+{
+  console.log('\n12. Custom uploaded photo is the dashboard thumbnail');
+  const db = initDb(':memory:');
+  const created = createRouteManualOrder(db, {
+    shop_id: MANUAL_SHOP_ID,
+    items: [
+      line('Hello Kitty Kawaii Magnetic Stand Phone Case', {
+        source: 'custom',
+        phone_model: 'iPhone 17 Pro Max',
+        style: 'Case+Grip+Charm',
+        image_data: Buffer.from('fake-image-bytes'),
+        image_mime: 'image/png',
+      }),
+    ],
+  });
+  const rows = routeDashboard.buildRouteRows(db, {}, { receipt_id: created.receipt_id });
+  assert(rows.length === 1, `custom line is on the dashboard (got ${rows.length})`);
+  assert(
+    /^\/api\/route\/manual-image\/\d+/.test(String(rows[0].image_url || '')),
+    `custom photo is a sidecar URL (got ${rows[0].image_url})`,
+  );
+  const scoped = getManualItemsForReceipts(db, [created.receipt_id]);
+  assert(scoped.length === 1 && scoped[0].has_image_data, 'receipt-scoped sidecar lookup sees the uploaded bytes');
   db.close();
 }
 

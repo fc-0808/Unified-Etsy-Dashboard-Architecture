@@ -47,6 +47,14 @@
 const HOME_BUILDING_ID = 'tongxin'
 
 /**
+ * The default market for dedicated charm vendors. Bare charm-stall codes are
+ * ambiguous: the old charm directory means 龙胜, while the supplier directory
+ * means 通信. `charmLocation()` resolves that ambiguity from explicit booth
+ * context instead of guessing from the code.
+ */
+const CHARM_HOME_BUILDING_ID = 'longsheng'
+
+/**
  * Buildings we shop, in walking order. `aliases` are the prefixes actually
  * typed into the catalog — list every spelling in use; the longest match wins,
  * so '康乐北区' can never be swallowed by '康乐'.
@@ -60,11 +68,10 @@ const BUILDINGS = [
 	{ id: 'kangle',       order: 31, label: { en: 'Kangle',       zh: '康乐'     }, aliases: ['康乐'] },
 	{ id: 'taipingyang',  order: 40, label: { en: 'Taipingyang',  zh: '太平洋'   }, aliases: ['太平洋'] },
 	{ id: 'huitong',      order: 50, label: { en: 'Huitong',      zh: '汇通'     }, aliases: ['汇通'] },
-	// The charm market. Its stalls are recorded with bare codes just like the
-	// home case/grip market, so it has no prefix to parse — it is only ever
-	// reached by the charm re-home in Shopping Mode (see shop.html `charmLoc`),
-	// which is why its alias list is empty. It sits last because the charm leg of
-	// the trip is walked after the cases and grips.
+	// The dedicated charm market. Its stalls are recorded with bare codes just
+	// like the home supplier market, so it has no prefix to parse. Dedicated
+	// charm booths are re-homed here; charm shops that are also known supplier
+	// booths retain the supplier location instead.
 	{ id: 'longsheng',    order: 60, label: { en: 'Longsheng',    zh: '龙胜'     }, aliases: [] },
 ]
 
@@ -174,6 +181,33 @@ function parseStall(stall) {
 	return located(home, home.order, raw, raw, true)
 }
 
+/**
+ * Resolve where a charm is physically purchased.
+ *
+ * Dedicated charm shops historically store bare stalls (2D21, 2C666), which
+ * belong to 龙胜. A merchant that also exists as the exact same booth in the
+ * supplier directory uses supplier semantics instead, so its bare stall remains
+ * in 通信 (or keeps any explicit market prefix). This distinction is essential
+ * for Charm Only orders: there is no case/grip row whose stop could otherwise
+ * reveal that the charm is bought from the product supplier.
+ *
+ * @param {*} stall charm-shop stall
+ * @param {boolean} usesSupplierLocation exact booth is in supplier_directory
+ * @returns {ReturnType<typeof parseStall>}
+ */
+function charmLocation(stall, usesSupplierLocation = false) {
+	const loc = parseStall(stall)
+	if (!loc.isHome || usesSupplierLocation) return loc
+	const building = BUILDING_BY_ID.get(CHARM_HOME_BUILDING_ID)
+	return {
+		...loc,
+		buildingId: building.id,
+		buildingOrder: building.order,
+		buildingLabel: building.label,
+		isHome: false,
+	}
+}
+
 function located(building, order, code, raw, registered) {
 	return {
 		buildingId: building.id,
@@ -248,16 +282,52 @@ function supplierIdentityKey(shop, stall) {
 	return `${s}\x00${t}`
 }
 
+/**
+ * Annotate charm-shop directory rows with the context needed to disambiguate a
+ * bare stall code. Only an exact, normalised shop + stall match to a located
+ * supplier booth qualifies; matching merely on shop name or stall would risk
+ * sending the shopper to a same-named merchant's other booth.
+ *
+ * This is derived on every API read rather than persisted, so supplier edits
+ * take effect atomically everywhere and cannot leave stale charm metadata.
+ *
+ * @param {Array<object>} charmShops
+ * @param {Array<object>} suppliers
+ * @returns {Array<object>}
+ */
+function enrichCharmShopLocations(charmShops, suppliers) {
+	const supplierBooths = new Set()
+	for (const supplier of Array.isArray(suppliers) ? suppliers : []) {
+		const shop = String(supplier && supplier.shop_name || '').trim()
+		const stall = supplier && supplier.stall
+		if (!shop || !parseStall(stall).located) continue
+		supplierBooths.add(supplierIdentityKey(shop, stall))
+	}
+
+	return (Array.isArray(charmShops) ? charmShops : []).map((charmShop) => {
+		const shop = String(charmShop && charmShop.shop_name || '').trim()
+		const stall = charmShop && charmShop.stall
+		const key = shop && parseStall(stall).located ? supplierIdentityKey(shop, stall) : ''
+		return {
+			...charmShop,
+			uses_supplier_location: !!key && supplierBooths.has(key),
+		}
+	})
+}
+
 module.exports = {
 	HOME_BUILDING_ID,
+	CHARM_HOME_BUILDING_ID,
 	BUILDINGS,
 	UNKNOWN_FLOOR,
 	UNLOCATED_ORDER,
 	UNREGISTERED_ORDER,
 	normalizeStall,
 	parseStall,
+	charmLocation,
 	stallFloor,
 	floorSortValue,
 	locationSortKey,
 	supplierIdentityKey,
+	enrichCharmShopLocations,
 }

@@ -23,6 +23,10 @@
  *     lines belong at another booth, not on this supplier's prep sheet.
  *   • Exchanges (swaps) are excluded — they are not purchases to prep.
  *   • Labels are always Simplified Chinese: the recipients are market staff.
+ *     Phone cases are 手机壳; AirPods cases are 耳机壳 (and iPad 平板壳 /
+ *     watch 表带) so a mixed 合计 line is unambiguous on WeChat.
+ *   • Prep photos are letterboxed (object-fit: contain), never cover-cropped.
+ *     Charms are tall and cases often have dangling beads — cover hid both.
  *   • Canvas rendering lives here so the page stays thin; Node never calls it.
  */
 ;(function (root, factory) {
@@ -35,14 +39,45 @@
 	'use strict'
 
 	const COMP = {
-		case: { key: 'case', flag: 'has_case', status: 'status_case', label: '壳' },
+		case: { key: 'case', flag: 'has_case', status: 'status_case', label: '手机壳' },
 		grip: { key: 'grip', flag: 'has_grip', status: 'status_grip', label: '支架' },
 		charm: { key: 'charm', flag: 'has_charm', status: 'status_charm', label: '挂件' },
 	}
 
+	const FAMILY_IPHONE = 'iphone'
+	const FAMILY_AIRPODS = 'airpods'
+	const FAMILY_WATCH = 'watch'
+	const FAMILY_IPAD = 'ipad'
+
+	/**
+	 * Stall-facing case noun per device family. Matches catalog label_zh
+	 * (src/sourcing/catalog.js): 手机壳 / 耳机壳 / 平板壳 / 表带. Never lump
+	 * AirPods into the phone-case noun on the sheet (item line or 合计).
+	 */
+	const CASE_LABEL = {
+		[FAMILY_IPHONE]: '手机壳',
+		[FAMILY_AIRPODS]: '耳机壳',
+		[FAMILY_IPAD]: '平板壳',
+		[FAMILY_WATCH]: '表带',
+	}
+
+	// Byte-identical to src/listings/product-types.js — this file also loads in
+	// the phone browser and cannot require() that module. test-supplier-prep.js
+	// pins the literals so a registry tweak cannot silently split classification.
+	const AIRPODS_RE = /air\s*pods?/i
+	const WATCH_MODEL_RE = /apple\s*watch|\b\d{2}(?:\s*\/\s*\d{2})*\s*mm\b/i
+	const WATCH_TITLE_RE = /apple\s*watch|watch\s*band|watch\s*strap/i
+	const IPAD_MODEL_RE = /\bipad\b|\b\d{1,2}(?:\.\d)?\s*(?:"|″|”|-?\s?inch\b)/i
+	const IPAD_TITLE_RE = /\bipad\b|\btablet\b/i
+
 	const PREP_EXCLUDED = new Set(['Purchased', 'Wrong Stall'])
 	/** Source pixels for listing photos embedded in the export (max server resize). */
 	const PREP_SOURCE_WIDTH = 960
+	/** Identification photos: show the whole object (charms, dangling beads). */
+	const FIT_CONTAIN = 'contain'
+	const FIT_COVER = 'cover'
+	/** Keep letterboxed photos off the rounded-rect clip so tips are not eaten. */
+	const CONTAIN_INSET = 16
 
 	function normTitle(s) {
 		return String(s || '')
@@ -58,6 +93,117 @@
 
 	function isIntegralCharm(r) {
 		return !!(r && r.charm_integral && r.has_charm)
+	}
+
+	function isBlankModel(model) {
+		const m = String(model || '').trim()
+		return !m || m === '—'
+	}
+
+	/**
+	 * Device family of a shopping-route row. Same rules as
+	 * product-types.deviceFamilyOf: the model variation is authoritative;
+	 * title is only a fallback when the model is blank. An integral charm
+	 * is AirPods by definition (the charm ships attached to the case).
+	 *
+	 * @param {string} [model]
+	 * @param {string} [title]
+	 * @returns {'iphone'|'airpods'|'watch'|'ipad'}
+	 */
+	function deviceFamilyOf(model, title) {
+		const m = String(model ?? '').trim()
+		if (!isBlankModel(m)) {
+			if (WATCH_MODEL_RE.test(m)) return FAMILY_WATCH
+			if (IPAD_MODEL_RE.test(m)) return FAMILY_IPAD
+			return AIRPODS_RE.test(m) ? FAMILY_AIRPODS : FAMILY_IPHONE
+		}
+		const t = String(title ?? '')
+		if (AIRPODS_RE.test(t)) return FAMILY_AIRPODS
+		if (WATCH_TITLE_RE.test(t)) return FAMILY_WATCH
+		if (IPAD_TITLE_RE.test(t)) return FAMILY_IPAD
+		return FAMILY_IPHONE
+	}
+
+	/**
+	 * Family for a case-line group. Integral-charm rows win (AirPods), else
+	 * the first row's model/title. Passing the group (not the grouped model
+	 * key) matters: the key may be "—" while the title still names AirPods.
+	 *
+	 * @param {object|object[]} rows
+	 * @returns {'iphone'|'airpods'|'watch'|'ipad'}
+	 */
+	function caseFamilyOf(rows) {
+		const list = Array.isArray(rows) ? rows : rows ? [rows] : []
+		for (const r of list) {
+			if (r && r.charm_integral) return FAMILY_AIRPODS
+		}
+		const sample = list[0] || {}
+		return deviceFamilyOf(sample.phone_model, sample.title)
+	}
+
+	function caseLabelForFamily(family) {
+		return CASE_LABEL[family] || CASE_LABEL[FAMILY_IPHONE]
+	}
+
+	function emptyTotals() {
+		return { case: 0, airpods: 0, ipad: 0, watch: 0, grip: 0, charm: 0, items: 0 }
+	}
+
+	function addCaseTotal(totals, family, qty) {
+		if (!qty) return
+		if (family === FAMILY_AIRPODS) totals.airpods += qty
+		else if (family === FAMILY_IPAD) totals.ipad += qty
+		else if (family === FAMILY_WATCH) totals.watch += qty
+		else totals.case += qty
+	}
+
+	/**
+	 * WeChat 合计 fragments, only the buckets that have quantity.
+	 * Phone 手机壳 and AirPods 耳机壳 are separate so a mixed stall is readable.
+	 * @param {{case?:number, airpods?:number, ipad?:number, watch?:number, grip?:number, charm?:number}} totals
+	 * @returns {string[]}
+	 */
+	function summaryParts(totals) {
+		const t = totals || {}
+		const parts = []
+		if (t.case) parts.push(CASE_LABEL[FAMILY_IPHONE] + ' ×' + t.case)
+		if (t.airpods) parts.push(CASE_LABEL[FAMILY_AIRPODS] + ' ×' + t.airpods)
+		if (t.ipad) parts.push(CASE_LABEL[FAMILY_IPAD] + ' ×' + t.ipad)
+		if (t.watch) parts.push(CASE_LABEL[FAMILY_WATCH] + ' ×' + t.watch)
+		if (t.grip) parts.push(COMP.grip.label + ' ×' + t.grip)
+		if (t.charm) parts.push(COMP.charm.label + ' ×' + t.charm)
+		return parts
+	}
+
+	/**
+	 * Destination rect for drawing `imgW`×`imgH` into a square well.
+	 * `contain` letterboxes (whole object visible); `cover` fills and crops.
+	 * Exported so Node tests can pin that a tall charm is not centre-cropped.
+	 *
+	 * @param {number} imgW
+	 * @param {number} imgH
+	 * @param {number} boxX
+	 * @param {number} boxY
+	 * @param {number} boxSize
+	 * @param {string} [fit]
+	 * @param {number} [inset]
+	 * @returns {{x:number, y:number, w:number, h:number}}
+	 */
+	function imageDrawRect(imgW, imgH, boxX, boxY, boxSize, fit, inset) {
+		const mode = fit === FIT_COVER ? FIT_COVER : FIT_CONTAIN
+		const pad = mode === FIT_COVER ? 0 : inset == null ? CONTAIN_INSET : inset
+		const inner = Math.max(1, boxSize - pad * 2)
+		const iw = Math.max(Number(imgW) || 0, 1)
+		const ih = Math.max(Number(imgH) || 0, 1)
+		const scale = mode === FIT_COVER ? Math.max(boxSize / iw, boxSize / ih) : Math.min(inner / iw, inner / ih)
+		const dw = iw * scale
+		const dh = ih * scale
+		return {
+			x: boxX + (boxSize - dw) / 2,
+			y: boxY + (boxSize - dh) / 2,
+			w: dw,
+			h: dh,
+		}
 	}
 
 	function isPrepLine(status) {
@@ -143,9 +289,9 @@
 	 *   building: string,
 	 *   date: string,
 	 *   filename: string,
-	 *   products: Array<{imageUrl:string, lines:Array<{kind:string,label:string,model:string|null,qty:number}>}>,
-	 *   charms: Array<{imageUrl:string, code:string, qty:number}>,
-	 *   totals: {case:number, grip:number, charm:number, items:number}
+	 *   products: Array<{imageUrl:string, fit:string, lines:Array<{kind:string,family?:string,label:string,model:string|null,qty:number}>}>,
+	 *   charms: Array<{imageUrl:string, code:string, qty:number, fit:string}>,
+	 *   totals: {case:number, airpods:number, ipad:number, watch:number, grip:number, charm:number, items:number}
 	 * }}
 	 */
 	function buildSupplierPrep(group, opts) {
@@ -161,7 +307,7 @@
 		const date = formatDate(opts.date)
 
 		const products = []
-		const totals = { case: 0, grip: 0, charm: 0, items: 0 }
+		const totals = emptyTotals()
 
 		if (g.section !== 'charm') {
 			const byProduct = new Map()
@@ -201,8 +347,15 @@
 				for (const [model, modelRows] of models) {
 					const qty = prepQty(modelRows, COMP.case.status)
 					if (!qty) continue
-					entryLines.push({ kind: 'case', label: COMP.case.label, model, qty })
-					totals.case += qty
+					const family = caseFamilyOf(modelRows)
+					entryLines.push({
+						kind: 'case',
+						family,
+						label: caseLabelForFamily(family),
+						model,
+						qty,
+					})
+					addCaseTotal(totals, family, qty)
 				}
 				if (gripLines.length) {
 					const qty = prepQty(gripLines, COMP.grip.status)
@@ -220,7 +373,7 @@
 				}
 				if (!entryLines.length) continue
 				const imageUrl = upgradePrepImageUrl(String(lines[0].image_url || '').trim())
-				products.push({ imageUrl, lines: entryLines })
+				products.push({ imageUrl, fit: FIT_CONTAIN, lines: entryLines })
 				totals.items += 1
 			}
 		}
@@ -238,6 +391,7 @@
 				imageUrl: code ? charmUrl(code, version) : '',
 				code: code || '未指定挂件',
 				qty,
+				fit: FIT_CONTAIN,
 			})
 			totals.charm += qty
 			totals.items += 1
@@ -292,10 +446,7 @@
 		for (const c of prep.charms) {
 			blocks.push(i++ + '. 挂件 ' + c.code + ' ×' + c.qty)
 		}
-		const summary = []
-		if (prep.totals.case) summary.push('壳 ×' + prep.totals.case)
-		if (prep.totals.grip) summary.push('支架 ×' + prep.totals.grip)
-		if (prep.totals.charm) summary.push('挂件 ×' + prep.totals.charm)
+		const summary = summaryParts(prep.totals)
 		return (
 			head +
 			'\n\n' +
@@ -324,6 +475,9 @@
 		muted: '#6b7280',
 		accent: '#ea580c',
 		case: '#2563eb',
+		airpods: '#0f766e',
+		ipad: '#0369a1',
+		watch: '#b45309',
 		grip: '#ea580c',
 		charm: '#7c3aed',
 	}
@@ -350,8 +504,13 @@
 		})
 	}
 
-	function kindColor(kind) {
-		return kind === 'case' ? CANVAS.case : kind === 'grip' ? CANVAS.grip : CANVAS.charm
+	function kindColor(kind, family) {
+		if (kind === 'grip') return CANVAS.grip
+		if (kind === 'charm') return CANVAS.charm
+		if (family === FAMILY_AIRPODS) return CANVAS.airpods
+		if (family === FAMILY_IPAD) return CANVAS.ipad
+		if (family === FAMILY_WATCH) return CANVAS.watch
+		return CANVAS.case
 	}
 
 	function cardHeight(lineCount, imageSize) {
@@ -360,21 +519,20 @@
 		return innerPad + imageSize + CANVAS.textGap + textH + innerPad
 	}
 
-	function drawThumb(ctx, img, imgUrl, x, y, size) {
+	function drawThumb(ctx, img, imgUrl, x, y, size, fit) {
 		const thumb = size || 0
 		if (thumb <= 0) return
 		roundRect(ctx, x, y, thumb, thumb, 14)
+		ctx.fillStyle = img ? '#ffffff' : '#eef0f4'
+		ctx.fill()
 		if (img) {
 			ctx.save()
+			roundRect(ctx, x, y, thumb, thumb, 14)
 			ctx.clip()
-			const scale = Math.max(thumb / Math.max(img.width, 1), thumb / Math.max(img.height, 1))
-			const dw = img.width * scale
-			const dh = img.height * scale
-			ctx.drawImage(img, x + (thumb - dw) / 2, y + (thumb - dh) / 2, dw, dh)
+			const r = imageDrawRect(img.width, img.height, x, y, thumb, fit || FIT_CONTAIN, CONTAIN_INSET)
+			ctx.drawImage(img, r.x, r.y, r.w, r.h)
 			ctx.restore()
 		} else {
-			ctx.fillStyle = '#eef0f4'
-			ctx.fill()
 			ctx.fillStyle = CANVAS.muted
 			ctx.font = '400 16px "PingFang SC","Microsoft YaHei",sans-serif'
 			ctx.textBaseline = 'top'
@@ -464,7 +622,7 @@
 		}
 		y += 12
 
-		function paintCard(imgUrl, rows) {
+		function paintCard(imgUrl, rows, fit) {
 			const img = imgUrl ? images.get(imgUrl) : null
 			const h = cardHeight(rows.length, imageSize)
 			roundRect(ctx, pad, y, contentW, h, CANVAS.radius)
@@ -476,7 +634,7 @@
 
 			const ix = pad + innerPad
 			const iy = y + innerPad
-			drawThumb(ctx, img, imgUrl, ix, iy, imageSize)
+			drawThumb(ctx, img, imgUrl, ix, iy, imageSize, fit || FIT_CONTAIN)
 			let ty = iy + imageSize + CANVAS.textGap
 			const textX = pad + innerPad
 			for (const row of rows) {
@@ -492,18 +650,16 @@
 				p.lines.map((ln) => ({
 					label: ln.kind === 'case' ? ln.label + '  ' + ln.model : ln.label,
 					qty: ln.qty,
-					color: kindColor(ln.kind),
+					color: kindColor(ln.kind, ln.family),
 				})),
+				p.fit,
 			)
 		}
 		for (const ch of prep.charms) {
-			paintCard(ch.imageUrl, [{ label: '挂件  ' + ch.code, qty: ch.qty, color: CANVAS.charm }])
+			paintCard(ch.imageUrl, [{ label: '挂件  ' + ch.code, qty: ch.qty, color: CANVAS.charm }], ch.fit)
 		}
 
-		const summary = []
-		if (prep.totals.case) summary.push('壳 ×' + prep.totals.case)
-		if (prep.totals.grip) summary.push('支架 ×' + prep.totals.grip)
-		if (prep.totals.charm) summary.push('挂件 ×' + prep.totals.charm)
+		const summary = summaryParts(prep.totals)
 		ctx.fillStyle = CANVAS.text
 		ctx.font = '700 18px "PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif'
 		ctx.fillText('合计：' + summary.join(' · '), pad, y)
@@ -606,12 +762,25 @@
 
 	return {
 		COMP,
+		CASE_LABEL,
+		FAMILY_IPHONE,
+		FAMILY_AIRPODS,
+		FAMILY_WATCH,
+		FAMILY_IPAD,
+		FIT_CONTAIN,
+		FIT_COVER,
+		CONTAIN_INSET,
 		PREP_EXCLUDED,
 		PREP_SOURCE_WIDTH,
 		buildSupplierPrep,
 		prepToText,
+		summaryParts,
 		renderPrepImage,
 		upgradePrepImageUrl,
+		imageDrawRect,
+		deviceFamilyOf,
+		caseFamilyOf,
+		caseLabelForFamily,
 		isIOS,
 		isPrepLine,
 		prepRows,

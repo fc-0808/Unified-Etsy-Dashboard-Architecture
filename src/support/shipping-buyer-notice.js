@@ -4,30 +4,15 @@
  * Buyer-outreach copy for stuck and disposed 4PX parcels.
  *
  * Etsy Open API v3 has no shop-to-buyer messaging endpoint, so the operator
- * still pastes (or already pasted) text into the Etsy conversation by hand.
- * This module's job is to make the attested copy safe and consistent:
+ * pastes the draft into the Etsy conversation by hand.
  *
- *   · one deterministic template per operational kind (stuck vs disposed),
- *     filled with the order's real name / shop / tracking — never AI, because
- *     a model can invent a carrier phone number or a 4PX URL and that is a
- *     shop-suspension event;
- *   · the buyer is told to contact the *carrier shown on their tracking* about
- *     the delivery address, without us handing them off-Etsy contact details;
- *   · carrier "last event" strings are NEVER quoted into the buyer message —
- *     they routinely contain facility phone numbers and opaque codes that the
- *     Etsy-policy scanner (correctly) rejects as off-platform contact;
- *   · every draft is run through the same Etsy-policy scanner the Issues
- *     workflow uses, with 4PX tracking codes masked so they are not mistaken
- *     for phone numbers.
+ *   · one deterministic template per kind (stuck vs disposed), filled with the
+ *     order's real name / shop / tracking;
+ *   · carrier "last event" strings are never quoted into the buyer message.
  */
-
-const { checkMessageCompliance, complianceReason } = require('./message-compliance')
 
 const NOTICE_KINDS = Object.freeze(['stuck', 'disposed'])
 const ETSY_SOLD_ORDER_URL = (receiptId) => `https://www.etsy.com/your/orders/sold?order_id=${receiptId}`
-
-/** 4PX public tracking codes look like long digit runs; the phone-number rule would flag them. */
-const FOURPX_TRACKING_RE = /\b4PX[A-Za-z0-9]{6,40}\b/gi
 
 function firstName(name) {
 	const n = String(name || '').trim()
@@ -38,11 +23,6 @@ function firstName(name) {
 
 function normalizeKind(kind) {
 	return kind === 'disposed' ? 'disposed' : kind === 'stuck' ? 'stuck' : null
-}
-
-function checkShippingNoticeCompliance(text) {
-	const masked = String(text || '').replace(FOURPX_TRACKING_RE, 'TRACKING')
-	return checkMessageCompliance(masked)
 }
 
 /**
@@ -59,7 +39,7 @@ function checkShippingNoticeCompliance(text) {
  * @param {string} [ctx.trackingNo]
  * @param {string} [ctx.lastEvent] Ignored in the message body (operator-only).
  * @param {string} [ctx.country]
- * @returns {{ kind: string, message: string, compliance: object }}
+ * @returns {{ kind: string, message: string }}
  */
 function composeShippingBuyerNotice(ctx = {}) {
 	const kind = normalizeKind(ctx.kind)
@@ -99,8 +79,7 @@ function composeShippingBuyerNotice(ctx = {}) {
 			`The ${shop} Team`
 	}
 
-	const compliance = checkShippingNoticeCompliance(message)
-	return { kind, message, compliance }
+	return { kind, message }
 }
 
 module.exports = {
@@ -108,7 +87,5 @@ module.exports = {
 	ETSY_SOLD_ORDER_URL,
 	firstName,
 	normalizeKind,
-	checkShippingNoticeCompliance,
 	composeShippingBuyerNotice,
-	complianceReason,
 }

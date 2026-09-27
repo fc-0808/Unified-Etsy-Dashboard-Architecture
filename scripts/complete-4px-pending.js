@@ -16,13 +16,13 @@
  * Etsy order) and completes it on Etsy with its OWN stored tracking number —
  * headless, no dashboard UI required. It reuses the exact same production path
  * the dashboard uses (per-group proxy chain, TokenManager, createReceiptShipment)
- * so OpSec (correct egress IP per group) is preserved.
+ * so the configured and pinned egress route is preserved.
  *
  * SAFETY (how a top team ships a bulk write)
  * ------------------------------------------
  *   • Dry-run by default — prints the plan; pass --yes to execute.
- *   • Paced — a short pause between each ship and a cooldown between chunks, so
- *     the burst of buyer ship-notifications stays human-like (anti-abuse).
+ *   • Paced — a short pause between each ship and a cooldown between chunks to
+ *     remain within documented API rate limits.
  *   • Fail-closed proxy — a proxied group is verified once; if its exit IP can't
  *     be confirmed the whole group is skipped rather than shipped from a wrong IP.
  *   • Idempotent-ish — an order already shipped is skipped; a per-order Etsy error
@@ -33,7 +33,7 @@
  * USAGE
  *   node scripts/complete-4px-pending.js                 # dry run (review)
  *   node scripts/complete-4px-pending.js --yes           # do it
- *   node scripts/complete-4px-pending.js --yes --shop Y2KASEshop
+ *   node scripts/complete-4px-pending.js --yes --shop Y2KiPhoneCases
  *   npm run complete:4px -- --yes
  *
  * FLAGS
@@ -202,7 +202,7 @@ async function main() {
 		// (never ship from the wrong IP).
 		if (proxied && !groupProxyOk.has(o.groupCfg.group_id)) {
 			try {
-				const ip = await verifyGroupProxy(o.groupCfg, config.vpn_local_port);
+				const ip = await verifyGroupProxy(o.groupCfg, config.network_transport);
 				groupProxyOk.set(o.groupCfg.group_id, true);
 				console.log(`  ${c.cyan('proxy')} ${o.groupCfg.group_id} verified — exit IP ${ip}`);
 			} catch (err) {
@@ -219,13 +219,14 @@ async function main() {
 			// Build (and cache) an authenticated client per shop.
 			let cached = shopClientCache.get(o.shop_id);
 			if (!cached) {
-				const proxyClient = createGroupProxyClient(o.groupCfg, config.vpn_local_port);
+				const proxyClient = createGroupProxyClient(o.groupCfg, config.network_transport);
 				const accessToken = await tokenManager.getAccessToken(
 					o.shopCfg.shop_id, o.shopCfg.api_key, o.shopCfg.refresh_token ?? null, proxyClient
 				);
 				const client = buildShopClient(proxyClient, o.shopCfg.api_key, o.shopCfg.shared_secret, accessToken, null, {
 					priority: 'critical',
 					requireProxy: proxied,
+					shopId: o.shopCfg.shop_id,
 				});
 				const numericShopId = await resolveShopId(client, o.shopCfg.shop_id);
 				cached = { client, numericShopId };

@@ -10,13 +10,12 @@
  * variation matrix → Etsy create) is product-type agnostic and simply reads
  * from the descriptor returned here.
  *
- * Every listing has ONE required variation axis — the "choice" axis (Etsy
- * custom property 514) whose values carry the price, the quantity and the
- * variation photo. For a phone/AirPods case that axis is "Styles" (the bundle
- * the buyer picks); for an Apple Watch band it is "Band Size"; for an iPad case
- * it is "iPad Model". A product type MAY also declare a second, device-model
- * axis (custom property 513) when the same design is sold per device
- * generation — a line whose one choice already states the fit does not.
+ * Every listing has ONE priced "choice" axis — Etsy custom property 514 —
+ * whose values carry the price, quantity and variation photo. A product type
+ * MAY also declare a fit axis on custom property 513. For an iPhone case those
+ * are "Styles" + "Phone Model"; for an Apple Watch band they are the
+ * vision-grouped "Band Style" + the fixed "Band Size" catalogue. Etsy requires
+ * a buyer to select a value on every axis before adding the item to the cart.
  *
  * Adding a new product type is a matter of appending one descriptor below — no
  * changes to the pipeline are required.
@@ -81,8 +80,10 @@ const IPHONE_CASE = {
   // a run from publishing into another line's storefront section.
   deviceAliases: ['iPhone'],
   // Ordered "Phone Model" variation values (newest first). "iPhone 14/13" is a
-  // single combined offering. Verbatim from the original variation-builder.
+  // single combined offering. New drafts emit this full list; live listings
+  // receive newly released generations through DEVICE_GENERATION_ADDITIONS.
   models: [
+    'iPhone 18 Pro Max', 'iPhone 18 Pro',
     'iPhone 17 Pro Max', 'iPhone 17 Pro', 'iPhone 17',
     'iPhone 16 Pro Max', 'iPhone 16 Pro', 'iPhone 16',
     'iPhone 15 Pro Max', 'iPhone 15 Pro', 'iPhone 15',
@@ -120,7 +121,8 @@ const IPHONE_CASE = {
   unavailableNote: ['all Plus, Mini, Air and "e" models', 'iPhone 13 Pro / Pro Max'],
   // Universal SEO tags the AI must always include for this device.
   universalTags: ['kawaii phone case', 'cute iphone case', 'y2k phone case'],
-  deviceTagExamples: ['iphone 17 case', 'iphone 16 pro max'],
+  deviceTagExamples: ['iphone 18 pro max', 'iphone 17 case'],
+  seoFallbackTags: ['iphone accessories', 'iphone cover', 'silicone phone case', 'protective case'],
 };
 
 const AIRPODS_CASE = {
@@ -137,7 +139,7 @@ const AIRPODS_CASE = {
   // the 1st-generation Pro (no numeric suffix).
   models: [
     'AirPods Pro 3', 'AirPods Pro 2', 'AirPods Pro',
-    'AirPods 4', 'AirPods 3', 'AirPods 2', 'AirPods 1',
+    'AirPods 5', 'AirPods 4', 'AirPods 3', 'AirPods 2', 'AirPods 1',
   ],
   modelDescriptionNames: {}, // AirPods model names are already buyer-facing.
   deviceProperty: { id: PROP_DEVICE, name: 'AirPods Model' },
@@ -160,16 +162,24 @@ const AIRPODS_CASE = {
   supportsMagsafe: false,
   unavailableNote: ['AirPods Max', 'any non-listed generation'],
   universalTags: ['airpods case', 'cute airpods case', 'kawaii airpods case'],
-  deviceTagExamples: ['airpods pro 2 case', 'airpods 3 case'],
+  deviceTagExamples: ['airpods 5 case', 'airpods pro 2 case'],
+  seoFallbackTags: ['earbud case', 'airpods accessory', 'wireless earbud case', 'airpods cover', 'earbud accessories'],
 };
 
-// Apple Watch bands are the shop's first SINGLE-AXIS product line: the buyer
-// picks a band size and nothing else, so there is no device-model axis at all
-// and "Band Size" is the priced property. The three sizes below are Apple's own
-// case-size groupings and match the live storefront listings exactly.
+// Apple Watch bands have two buyer choices:
+//   513 "Band Size"  — the three fixed compatibility groups below. They are
+//                      always emitted and intentionally not operator-editable.
+//   514 "Band Style" — distinct physical bands grouped from this listing's
+//                      photos and named Band 1, Band 2, ... deterministically.
+//
+// Keeping size on the fit axis makes it behave exactly like "Phone Model" on an
+// iPhone case: Etsy requires the buyer to pick it, while the bulk editor can
+// safely keep the invariant in the background instead of showing three repeated
+// controls on every listing.
+//
 // `compatibilityName` is the buyer-facing "does it fit my watch?" wording used in
 // the description; `descriptionLabel` names the size itself.
-const APPLE_WATCH_BAND_STYLES = [
+const APPLE_WATCH_BAND_SIZES = [
   {
     key: '38/40/41mm', label: '38/40/41mm',
     descriptionLabel: 'Band size 38mm / 40mm / 41mm',
@@ -190,6 +200,21 @@ const APPLE_WATCH_BAND_STYLES = [
   },
 ];
 
+// A deliberately conservative fallback for when vision cannot distinguish a
+// physical option with sufficient confidence. Normally it is replaced by
+// deterministic Band 1 / Band 2 values. Retaining a fallback means an AI outage
+// never invents variants or leaves the listing with empty inventory.
+const APPLE_WATCH_STYLE_FALLBACK = [
+  {
+    key: 'As Shown',
+    label: 'As Shown',
+    priceLabel: 'All detected bands',
+    descriptionLabel: 'Band shown in the selected photo',
+    hasGrip: false,
+    hasCharm: false,
+  },
+];
+
 const APPLE_WATCH_BAND = {
   id: 'apple_watch_band',
   label: 'Apple Watch Band',
@@ -199,28 +224,38 @@ const APPLE_WATCH_BAND = {
   deviceShort: 'Apple Watch band',
   deviceLabel: 'Apple Watch sizes',
   titleFitPhrase: 'Strap for',
+  // Etsy's strongest, buyer-readable item phrase. Unlike "Band … Strap for
+  // Apple Watch", this names the item exactly once and matches the core query.
+  titleListingPhrase: 'Apple Watch Band',
   deviceAliases: ['Apple Watch', 'Watch Band', 'Watch Strap', 'Smart Watch', 'Smartwatch'],
-  // Single-axis: the band size IS the only choice, so there is no second
-  // device-model dimension to offer (Apple groups its watches by case size).
-  models: [],
-  modelDescriptionNames: {},
-  deviceProperty: null,
-  styleProperty: { id: PROP_CHOICE, name: 'Band Size' },
-  styles: APPLE_WATCH_BAND_STYLES.map((s) => ({ ...s })),
-  // 'size' means the choice axis is a fit dimension, not a bundle: the buyer
-  // always receives the same item, so the sizes drive the compatibility section
-  // and "What's Included" is the fixed contents list below.
-  styleAxis: 'size',
-  // What to call the choice axis's values in prose ("never present the SIZES
-  // as separate included items"). A size axis means something different on
-  // every line — a band has sizes, an iPad case has models.
-  choiceNoun: 'sizes',
+  // Fixed fit catalogue. `fixedDeviceAxis` is a server-enforced invariant:
+  // incoming saved/UI maps can never switch one of these sizes off.
+  models: APPLE_WATCH_BAND_SIZES.map((s) => s.key),
+  modelDescriptionNames: Object.fromEntries(
+    APPLE_WATCH_BAND_SIZES.map((s) => [s.key, [s.compatibilityName]])
+  ),
+  deviceProperty: { id: PROP_DEVICE, name: 'Band Size' },
+  fixedDeviceAxis: true,
+  styleProperty: { id: PROP_CHOICE, name: 'Band Style' },
+  // Read-only compatibility for drafts produced by the immediately preceding
+  // implementation. New inventory always writes Band Style.
+  legacyStylePropertyNames: ['Band Color'],
+  styles: APPLE_WATCH_STYLE_FALLBACK.map((s) => ({ ...s })),
+  // A visual-variant axis is neither a bundle nor a fit. Every value is one
+  // complete band design, whether single-colour, multicolour or patterned.
+  styleAxis: 'variant',
+  choiceNoun: 'band styles',
+  singleUnit: true,
+  // Ask the focused vision classifier to replace "As Shown" with per-listing
+  // physical-band groups. The string is a strategy id, not display copy.
+  visionStyle: 'band_variant',
+  replaceFallbackWithVisionStyles: true,
   // Nouns the copy must never use for this product. A band is routinely
   // mis-described as a case because every other line in the shop is one.
   confusableNouns: ['phone case', 'AirPods case', 'cover', 'shell'],
   includedItems: ['1 x Apple Watch band in the size you select', '1 x matching buckle / clasp hardware'],
-  // Every size is always offered — unlike a grip or a charm, a band size is not
-  // something the product photos can confirm or deny.
+  // The fallback is offered only if vision cannot safely materialise concrete
+  // band groups. Fixed sizes are controlled independently above.
   styleSelection: 'all',
   // Etsy exposes watch bands under more than one branch depending on the seller
   // taxonomy version; try the most specific node first.
@@ -234,13 +269,14 @@ const APPLE_WATCH_BAND = {
   supportsCharm: false,
   supportsMagsafe: false,
   unavailableNote: [],
-  // Fixed per-currency retail price for every band size. The 4-currency master
+  // Fixed per-currency retail price for every numbered band. The 4-currency master
   // workbook only covers the case bundles, so this line carries its own price
   // book; a currency that is absent here is left blank for the operator to fill
   // in the Variation Prices card rather than being silently guessed.
   defaultPrices: { HKD: 350.11, CAD: 63.15 },
   universalTags: ['apple watch band', 'watch band', 'kawaii watch band'],
   deviceTagExamples: ['apple watch strap', 'watch band 41mm'],
+  seoFallbackTags: ['smart watch band', 'watch bracelet', 'apple watch jewelry', 'watch accessories', 'replacement band'],
 };
 
 // ── iPad cases ───────────────────────────────────────────────────────────────
@@ -349,6 +385,7 @@ const IPAD_CASE = {
   defaultPrices: IPAD_DEFAULT_PRICES,
   universalTags: ['ipad case', 'cute ipad case', 'kawaii ipad case'],
   deviceTagExamples: ['ipad pro 11 case', 'ipad air 5 case'],
+  seoFallbackTags: ['tablet case', 'ipad cover', 'tablet accessories', 'protective ipad case'],
 };
 
 const PRODUCT_TYPES = {
@@ -359,6 +396,43 @@ const PRODUCT_TYPES = {
 };
 
 const DEFAULT_PRODUCT_TYPE = IPHONE_CASE.id;
+
+/**
+ * Newly released generations to ADD onto existing live listings.
+ *
+ * New drafts already pick up the full `models` list on each descriptor. Live
+ * listings are never rebuilt from that list — an operator may have turned a
+ * generation off on purpose. The catalog-rollout job injects only this set:
+ * additive, never a backfill of older models, never a cross-family write.
+ *
+ * Every value here MUST also appear in that product type's `models` array.
+ */
+const DEVICE_GENERATION_ADDITIONS = Object.freeze({
+  [IPHONE_CASE.id]: Object.freeze(['iPhone 18 Pro Max', 'iPhone 18 Pro']),
+  [AIRPODS_CASE.id]: Object.freeze(['AirPods 5']),
+});
+
+/**
+ * Models a NEW bulk-listing draft offers before the operator touches the picker.
+ *
+ * `models` is the catalog (everything that can be turned on). This list is the
+ * commercial default for a fresh upload. iPhone 18 currently ships as Pro and
+ * Pro Max only, so those two values are the whole 18 family and they start
+ * selected. The 15–17 families stay selected — that is the set a new upload
+ * already offered. The 14 family stays in the catalog but starts off; an
+ * operator can still tick it.
+ *
+ * A type omitted here defaults to every catalog model. An explicit operator
+ * map always wins over this list, including one that turns 18 Pro off.
+ */
+const UPLOAD_DEFAULT_ON = Object.freeze({
+  [IPHONE_CASE.id]: Object.freeze([
+    'iPhone 18 Pro Max', 'iPhone 18 Pro',
+    'iPhone 17 Pro Max', 'iPhone 17 Pro', 'iPhone 17',
+    'iPhone 16 Pro Max', 'iPhone 16 Pro', 'iPhone 16',
+    'iPhone 15 Pro Max', 'iPhone 15 Pro', 'iPhone 15',
+  ]),
+});
 
 // The product line each fulfilment family is sold as. Built from the registry so
 // a new line is reachable from an order line the moment it declares its family.
@@ -402,8 +476,9 @@ function listProductTypes() {
     models: p.models.slice(),
     supportsGrip: !!p.supportsGrip,
     hasDeviceAxis: hasDeviceAxis(p),
+    fixedDeviceAxis: isDeviceAxisFixed(p),
     styleProperty: stylePropertyFor(p).name,
-    styles: stylesFor(p).map(({ key, label }) => ({ key, label })),
+    styles: stylesFor(p).map(({ key, label, priceLabel }) => ({ key, label, priceLabel })),
   }));
 }
 
@@ -419,6 +494,12 @@ function stylePropertyFor(idOrPt) {
 function hasDeviceAxis(idOrPt) {
   const pt = getProductType(idOrPt);
   return Boolean(pt.deviceProperty && pt.models && pt.models.length);
+}
+
+/** True when every declared device/fit value must always be offered. */
+function isDeviceAxisFixed(idOrPt) {
+  const pt = getProductType(idOrPt);
+  return hasDeviceAxis(pt) && pt.fixedDeviceAxis === true;
 }
 
 /** The priced axis's ordered value descriptors ({ key, label, … }). */
@@ -460,7 +541,7 @@ function normaliseEnabledStyles(idOrPt, input = {}) {
  *   'accessory' — a case: derived from what the photos actually show. "Case
  *                 Only" is always offered; grip/charm bundles only when the
  *                 corresponding accessory was detected.
- *   'all'       — every value (e.g. all three Apple Watch band sizes).
+ *   'all'       — every declared value (e.g. a fixed fit option or safe fallback).
  */
 function defaultEnabledStyles(idOrPt, { hasGrip = false, hasCharm = false } = {}) {
   const pt = getProductType(idOrPt);
@@ -525,42 +606,56 @@ function productMeta(idOrPt) {
     label: pt.label,
     device_label: pt.deviceLabel,
     has_device_axis: hasDeviceAxis(pt),
+    fixed_device_axis: isDeviceAxisFixed(pt),
+    device_property_name: pt.deviceProperty ? pt.deviceProperty.name : null,
     models: pt.models.slice(),
     style_property_name: styleProp.name,
     style_axis: styleAxisOf(pt),
-    styles: stylesFor(pt).map(({ key, label }) => ({ key, label })),
+    vision_style: pt.visionStyle || null,
+    replace_fallback_with_vision_styles: pt.replaceFallbackWithVisionStyles === true,
+    fallback_style_key: fallbackStyleKey(pt),
+    styles: stylesFor(pt).map(({ key, label, priceLabel }) => ({
+      key,
+      label,
+      price_label: priceLabel || label,
+    })),
     // Retained for older clients that only read the key list.
     style_keys: styleKeysFor(pt),
     supports_grip: Boolean(pt.supportsGrip),
     supports_charm: pt.supportsCharm !== false,
     supports_magsafe: Boolean(pt.supportsMagsafe),
     price_book_currencies: priceBookCurrencies(pt),
+    // What a fresh bulk upload ticks before the operator edits the picker.
+    // The inspector uses this when a preview has no saved model map yet, so
+    // the checkboxes, the title and the variation matrix cannot disagree.
+    default_enabled_models: defaultEnabledModels(pt),
   };
 }
 
 /**
  * What the priced choice axis means to the buyer:
- *   'bundle' — the values name what is in the box (a case's accessory bundles).
- *   'size'   — the values name a fit dimension (an Apple Watch band size).
+ *   'bundle' — values name what is in the box (a case's accessory bundles).
+ *   'size'   — values name the only fit dimension (an iPad model).
+ *   'variant'— values name a visual variant; fit lives on property 513.
  */
 function styleAxisOf(idOrPt) {
-  return getProductType(idOrPt).styleAxis === 'size' ? 'size' : 'bundle';
+  const axis = getProductType(idOrPt).styleAxis;
+  return axis === 'size' || axis === 'variant' ? axis : 'bundle';
 }
 
 /**
- * The fixed "What's Included" contents for a type whose choice axis is a size
- * (every buyer receives the same item). Empty for bundle types, whose contents
- * are the offered bundles themselves.
+ * The fixed "What's Included" contents for a non-bundle type (every buyer
+ * receives the same physical item). Empty for bundle types, whose contents are
+ * the offered bundles themselves.
  */
 function includedItemsFor(idOrPt) {
   return (getProductType(idOrPt).includedItems || []).slice();
 }
 
 /**
- * What the copy should call the choice axis's values in prose. A size axis means
- * something different on each line — a band has "sizes", an iPad case has
- * "models" — and telling a buyer that the models are separate included items is
- * how a listing ends up promising three iPad cases in one box.
+ * What the copy should call the priced-axis values in prose. Their meaning is
+ * line-specific — a watch band has numbered styles, an iPad case has models — and they
+ * must never be presented as several physical items in the box.
  */
 function choiceNounFor(idOrPt) {
   return getProductType(idOrPt).choiceNoun || 'options';
@@ -676,10 +771,10 @@ function crossFamilyModelError(lineFamily, typedModel) {
 /**
  * Canonical variation values for a family, in the order the line declares them.
  *
- * For a two-axis line those are the device generations. For a SINGLE-axis line
- * the priced axis IS the fit, so its values are the "models" — the Apple Watch
- * band sizes, the iPad models. Read from the registry rather than enumerated,
- * so a family becomes answerable here the moment its line declares itself.
+ * When a dedicated fit axis exists those are its device generations/sizes. For
+ * a single-axis size line (iPad), the priced axis itself supplies the models.
+ * Read from the registry rather than enumerated, so a family becomes answerable
+ * here the moment its line declares itself.
  *
  * @param {'iphone'|'airpods'|'watch'|'ipad'} family
  * @returns {string[]}
@@ -691,38 +786,62 @@ function canonicalModelsForFamily(family) {
 
 /**
  * True when a line in this family has exactly ONE physical unit and no bundle
- * variation to say so — a watch band, an iPad case. Such a line's only
- * variation is a fit, so nothing in it spells out what to buy; fulfilment has
- * to infer the single unit or the item is never shopped at all.
+ * variation to say so — a watch band, an iPad case. Its variations describe
+ * fit/appearance rather than components, so fulfilment has to infer the single
+ * unit or the item is never shopped at all.
  *
  * @param {'iphone'|'airpods'|'watch'|'ipad'} family
  * @returns {boolean}
  */
 function familyIsSingleUnit(family) {
   const pt = TYPE_BY_FAMILY.get(family);
-  return Boolean(pt) && styleAxisOf(pt) === 'size';
+  return Boolean(pt) && (pt.singleUnit === true || styleAxisOf(pt) === 'size');
 }
 
 /**
- * The priced-axis property NAMES of every single-axis line ("Band Size",
- * "iPad Model"), lowercased. Those properties carry a fit rather than a bundle,
- * which is what the inventory layer needs to know to group a restock by them.
+ * The priced-axis property names of every single-axis SIZE line ("iPad Model"),
+ * lowercased. Retained for older inventory callers; new code should use
+ * pricedAxisPropertyNames(), which also includes Styles and Band Style.
  *
  * @returns {string[]}
  */
 function sizeAxisPropertyNames() {
-  return [...FIT_AXIS_PROPERTY_NAMES];
+  return Object.values(PRODUCT_TYPES)
+    .filter((p) => p.styleAxis === 'size' && p.styleProperty)
+    .map((p) => p.styleProperty.name.trim().toLowerCase());
+}
+
+/** Every priced-axis property name, lowercased ("Styles", "Band Style", …). */
+function pricedAxisPropertyNames() {
+  return [...new Set(
+    Object.values(PRODUCT_TYPES).flatMap((p) => [
+      ...(p.styleProperty ? [p.styleProperty.name] : []),
+      ...(p.legacyStylePropertyNames || []),
+    ]).map((name) => name.trim().toLowerCase())
+  )];
 }
 
 // ── Order-line variation roles (fulfilment) ──────────────────────────────────
 
-// Every priced axis of a SIZE type states a fit ("Band Size"), so its property
-// name must be read as the line's fit dimension rather than as a bundle. Derived
-// from the registry so adding a size-axis product type needs no second edit.
+// A fit is either the dedicated device property (Phone Model / Band Size) or
+// the priced property of a single-axis size line (iPad Model).
 const FIT_AXIS_PROPERTY_NAMES = new Set(
+  Object.values(PRODUCT_TYPES).flatMap((p) => [
+    ...(p.deviceProperty ? [p.deviceProperty.name] : []),
+    ...(p.styleAxis === 'size' && p.styleProperty ? [p.styleProperty.name] : []),
+  ]).map((name) => name.trim().toLowerCase())
+);
+
+// A priced non-size axis states the buyer's product choice. This includes the
+// ordinary "Styles" bundle and a watch band's "Band Style".
+const CHOICE_AXIS_PROPERTY_NAMES = new Set(
   Object.values(PRODUCT_TYPES)
-    .filter((p) => p.styleAxis === 'size' && p.styleProperty)
-    .map((p) => p.styleProperty.name.trim().toLowerCase())
+    .filter((p) => p.styleAxis !== 'size')
+    .flatMap((p) => [
+      ...(p.styleProperty ? [p.styleProperty.name] : []),
+      ...(p.legacyStylePropertyNames || []),
+    ])
+    .map((name) => name.trim().toLowerCase())
 );
 
 /** Property names that state WHICH generation/size the buyer chose. */
@@ -735,14 +854,12 @@ const CHOICE_PROP_RE = /style/i;
  *
  *   'fit'    — which device generation or band size to buy ("Phone Model",
  *              "AirPods Model", "Band Size").
- *   'choice' — which accessory bundle is in the box ("Styles").
+ *   'choice' — which priced product option was chosen ("Styles", "Band Style").
  *   null     — a property fulfilment has no opinion about (e.g. "Gift wrap").
  *
- * A watch band's priced axis is BOTH its price carrier and its fit, so it is
- * classified 'fit': that is the dimension a shopper must match at the stall and
- * the one the model-fix flow corrects. This is the single source of truth shared
- * by the route builder and the Orders API, so no surface can read a variation
- * differently from another.
+ * A watch band's "Band Size" is its fit and "Band Style" is its choice. This is
+ * the single source of truth shared by the route builder and Orders API, so no
+ * surface can read those two dimensions differently.
  *
  * @param {string} [name] - Etsy `formatted_name` / `property_name`
  * @returns {'fit'|'choice'|null}
@@ -751,6 +868,7 @@ function variationPropertyRole(name) {
   const n = String(name ?? '').trim().toLowerCase();
   if (!n) return null;
   if (FIT_AXIS_PROPERTY_NAMES.has(n)) return 'fit';
+  if (CHOICE_AXIS_PROPERTY_NAMES.has(n)) return 'choice';
   if (CHOICE_PROP_RE.test(n)) return 'choice';
   if (FIT_PROP_RE.test(n)) return 'fit';
   return null;
@@ -772,15 +890,55 @@ function primaryComponentLabel(family) {
 // ── Device-model helpers (parameterised by product type) ─────────────────────
 
 /**
+ * The model selection a fresh bulk upload starts with.
+ *
+ * Fixed catalogues (Apple Watch sizes) are always fully on. An iPhone upload
+ * starts with 18 Pro, 18 Pro Max and the 15–17 families on, and the 14 family
+ * off. Every other line starts with its whole catalog on. The returned map is
+ * a new object; callers may store it without mutating the registry.
+ *
+ * This is not what `normaliseEnabledModels` does with an empty input. An empty
+ * input there still means "the whole catalog", so title helpers and inventory
+ * built without a selection keep describing every model the line can sell.
+ * Upload code must call this function when the operator has not chosen.
+ *
+ * @param {string|object} idOrPt
+ * @returns {Record<string, boolean>}
+ */
+function defaultEnabledModels(idOrPt) {
+  const pt = getProductType(idOrPt);
+  const order = pt.models;
+  if (!order.length) return {};
+  if (isDeviceAxisFixed(pt)) {
+    return Object.fromEntries(order.map((m) => [m, true]));
+  }
+  const explicit = UPLOAD_DEFAULT_ON[pt.id];
+  if (!explicit) return Object.fromEntries(order.map((m) => [m, true]));
+  const on = new Set(explicit);
+  return Object.fromEntries(order.map((m) => [m, on.has(m)]));
+}
+
+/**
  * Coerce an arbitrary {model: truthy} map into a clean boolean map over the
  * type's known models. If the input enables nothing, every model is enabled — a
  * listing must always offer at least one device model. A type with no device
  * axis always returns an empty map.
+ *
+ * A missing key on a non-empty map is off. That is how an operator unticks one
+ * model without the normaliser silently turning it back on. New uploads that
+ * have no map yet must use `defaultEnabledModels` first, which is what turns
+ * iPhone 18 Pro and 18 Pro Max on.
  */
 function normaliseEnabledModels(idOrPt, input) {
   const pt = getProductType(idOrPt);
   const order = pt.models;
   if (!order.length) return {};
+  // A fixed fit catalogue is policy, not operator state. Always reconstruct it
+  // from the registry so stale previews or hand-crafted API payloads cannot
+  // silently remove a mandatory Apple Watch size.
+  if (isDeviceAxisFixed(pt)) {
+    return Object.fromEntries(order.map((m) => [m, true]));
+  }
   if (!input || typeof input !== 'object' || !Object.keys(input).length) {
     const all = {};
     for (const m of order) all[m] = true;
@@ -875,13 +1033,19 @@ function allDescriptionNames(idOrPt) {
 
 /**
  * The compact device string for the TITLE, derived from the enabled models.
- *   iPhone : all → "iPhone 17 16 15 14 13 Pro Max"; 15-17 → "iPhone 17 16 15 Pro Max".
- *   AirPods: "AirPods Pro 3 2 1 & AirPods 4 3 2 1" (only the offered generations).
- *   Single-axis types (Apple Watch band) simply use the device word.
+ *   iPhone : all → "iPhone 18 17 16 15 14 13 Pro Max";
+ *            upload default → "iPhone 18 17 16 15 Pro Max";
+ *            15-17 → "iPhone 17 16 15 Pro Max".
+ *   AirPods: "AirPods Pro 3 2 1 & AirPods 5 4 3 2 1" (only the offered generations).
+ *   Apple Watch: fixed sizes stay in the dropdown; the title simply says "Apple Watch".
  */
 function titleDevicePhrase(idOrPt, enabledModels) {
   const pt = getProductType(idOrPt);
   if (!pt.models.length) return pt.deviceWord;
+  // Band sizes are mandatory in the Etsy dropdown and fully enumerated in the
+  // compatibility section; spelling all millimetre groups into the title would
+  // make it unreadable and does not improve the required choice.
+  if (pt.id === 'apple_watch_band') return pt.deviceWord;
   const names = compatibilityNamesFor(pt, enabledModels);
   if (!names.length) return pt.deviceWord;
 
@@ -914,6 +1078,66 @@ function titleDevicePhrase(idOrPt, enabledModels) {
   return `${pt.deviceWord} ${nums.join(' ')}${anyProMax ? ' Pro Max' : ''}`;
 }
 
+/**
+ * Device generations the live-listing rollout should inject for this line.
+ * Empty for lines with no pending launch (watch, iPad, unknown).
+ *
+ * @param {string|object} [idOrPt]
+ * @returns {string[]}
+ */
+function generationAdditionsFor(idOrPt) {
+  const pt = getProductType(idOrPt);
+  return (DEVICE_GENERATION_ADDITIONS[pt.id] || []).slice();
+}
+
+;(function assertGenerationAdditions() {
+  for (const [typeId, added] of Object.entries(DEVICE_GENERATION_ADDITIONS)) {
+    const pt = PRODUCT_TYPES[typeId];
+    if (!pt) {
+      throw new Error(`DEVICE_GENERATION_ADDITIONS refers to unknown product type "${typeId}"`);
+    }
+    for (const model of added) {
+      if (!pt.models.includes(model)) {
+        throw new Error(`DEVICE_GENERATION_ADDITIONS.${typeId} includes "${model}" which is not in ${typeId}.models`);
+      }
+    }
+  }
+  for (const [typeId, on] of Object.entries(UPLOAD_DEFAULT_ON)) {
+    const pt = PRODUCT_TYPES[typeId];
+    if (!pt) {
+      throw new Error(`UPLOAD_DEFAULT_ON refers to unknown product type "${typeId}"`);
+    }
+    const offered = new Set(on);
+    for (const model of on) {
+      if (!pt.models.includes(model)) {
+        throw new Error(`UPLOAD_DEFAULT_ON.${typeId} includes "${model}" which is not in ${typeId}.models`);
+      }
+    }
+    // A generation we inject onto live listings must also start selected on a
+    // brand-new upload. Otherwise the rollout and the bulk creator disagree
+    // about whether iPhone 18 Pro exists.
+    for (const model of DEVICE_GENERATION_ADDITIONS[typeId] || []) {
+      if (!offered.has(model)) {
+        throw new Error(`UPLOAD_DEFAULT_ON.${typeId} omits new generation "${model}"`);
+      }
+    }
+  }
+})();
+
+/**
+ * Exact buyer-readable phrase every title must contain.
+ *
+ * Most lines express compatibility after the product noun ("Cover for iPhone
+ * 18…"). A watch band is clearer and matches its strongest query when the item
+ * phrase itself is "Apple Watch Band", without repeating it as "Band … Strap
+ * for Apple Watch".
+ */
+function titleListingPhraseFor(idOrPt, enabledModels) {
+  const pt = getProductType(idOrPt);
+  if (pt.titleListingPhrase) return pt.titleListingPhrase;
+  return `${pt.titleFitPhrase || 'Cover for'} ${titleDevicePhrase(pt, enabledModels)}`.trim();
+}
+
 module.exports = {
   ALL_STYLE_KEYS,
   CANONICAL_STYLES,
@@ -921,6 +1145,7 @@ module.exports = {
   PROP_CHOICE,
   PRODUCT_TYPES,
   DEFAULT_PRODUCT_TYPE,
+  DEVICE_GENERATION_ADDITIONS,
   FAMILY_IPHONE,
   FAMILY_AIRPODS,
   FAMILY_WATCH,
@@ -930,6 +1155,7 @@ module.exports = {
   listProductTypes,
   stylePropertyFor,
   hasDeviceAxis,
+  isDeviceAxisFixed,
   stylesFor,
   styleKeysFor,
   styleLabelFor,
@@ -946,14 +1172,18 @@ module.exports = {
   canonicalModelsForFamily,
   familyIsSingleUnit,
   sizeAxisPropertyNames,
+  pricedAxisPropertyNames,
   variationPropertyRole,
   primaryComponentLabel,
+  defaultEnabledModels,
   normaliseEnabledModels,
   enabledModelList,
   compatibilityNamesFor,
   styleCompatibilityNames,
   allDescriptionNames,
   titleDevicePhrase,
+  titleListingPhraseFor,
+  generationAdditionsFor,
   styleAxisOf,
   includedItemsFor,
   choiceNounFor,

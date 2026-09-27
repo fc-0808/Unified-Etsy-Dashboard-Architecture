@@ -142,15 +142,9 @@ test('uses the exact operator-defined shop sequence shared by other tabs', () =>
 	const orderedDb = initDb(':memory:')
 	try {
 		const names = [
-			'CuteiPhoneCasesGoods',
-			'KawaiiiPhoneCases',
 			'IPhoneCasesByTwily',
-			'Y2KASEshop',
-			'LUVKASEofficial',
-			'CuteiPhoneCasesFinds',
+			'CuteCasesMore',
 			'Y2KiPhoneCases',
-			'IPhoneCasesDesignArt',
-			'Y2KASEofficial',
 		]
 		syncConfigToDb(orderedDb, {
 			groups: [{
@@ -172,6 +166,14 @@ test('uses the exact operator-defined shop sequence shared by other tabs', () =>
 	} finally {
 		orderedDb.close()
 	}
+})
+
+test('the dashboard HTML shop order matches src/shops/roster.js', () => {
+	const html = fs.readFileSync(path.join(__dirname, '../public/index.html'), 'utf8')
+	const match = html.match(/const SHOP_DISPLAY_ORDER = \[([^\]]+)\]/)
+	assert.ok(match, 'SHOP_DISPLAY_ORDER must remain defined in public/index.html')
+	const names = [...match[1].matchAll(/'([^']+)'/g)].map((entry) => entry[1].toLowerCase())
+	assert.deepEqual(names, checklist.SHOP_DISPLAY_ORDER.map((name) => name.toLowerCase()))
 })
 
 test('persists a per-shop attestation with actor and stable shop snapshot', () => {
@@ -379,7 +381,7 @@ test('the checklist domain has no Etsy or network client dependency', () => {
 	const imports = [
 		...source.matchAll(/\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g),
 	].map((match) => match[1])
-	assert.deepEqual(imports, [])
+	assert.deepEqual(imports, ['../shops/roster'])
 	assert.equal(/\bfetch\s*\(|\baxios\b|TokenManager|buildShopClient/.test(source), false)
 })
 

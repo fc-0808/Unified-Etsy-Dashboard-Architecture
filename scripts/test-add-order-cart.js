@@ -419,6 +419,9 @@ test('the modal markup keeps the hooks the block renders into', () => {
 		source.includes("'Add one or more products from your catalog, build a custom product, or pull in an existing Etsy order. Products you add here ship as a single buyer order.':"),
 		'the multi-product subtitle is missing from the Chinese dictionary',
 	)
+	assert.ok(MODAL_HTML.includes('id="aoBuildingSelect"'), 'the catalog tab lost the market chooser Product Catalog classifies by')
+	assert.ok(MODAL_HTML.includes('id="aoSupplierSelect"'), 'the catalog tab lost the supplier chooser')
+	assert.ok(MODAL_HTML.includes('id="aoCatalogMeta"'), 'the catalog tab no longer says how many shops the operator is looking at')
 })
 
 test('the product grid gives up height without collapsing its cards', () => {

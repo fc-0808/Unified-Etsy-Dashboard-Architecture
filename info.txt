@@ -3,20 +3,10 @@ Unified Dashboard project context
 This repository contains a private, single-tenant operations dashboard that
 integrates with Etsy's documented Open API and other configured services.
 
-Compliance and privacy requirements:
+Privacy:
 
 1. Do not commit real seller/customer names, email addresses, shop identities,
    API credentials, OAuth tokens, proxy credentials, or order data.
 2. Keep config.json, tokens.json, databases, logs, and backups outside version
    control and protect them with operating-system access controls.
-3. One application must use the API key/topology Etsy approved for its declared
-   purpose. Do not create duplicate applications or keys to bypass limits.
-4. Proxies and browser profiles are transport tools, not compliance controls.
-   Never use them to conceal ownership or evade platform enforcement.
-5. OAuth must be completed manually by the authorized shop owner using Etsy's
-   documented PKCE flow. Do not automate or scrape Etsy's website.
-6. Test Etsy writes only under Etsy's API Testing Policy; prefer offline mocks
-   and draft listings, and never run live mutating tests by default.
-
-Current official terms:
-https://www.etsy.com/legal/api/
+3. Prefer offline mocks and draft listings. Do not run live mutating tests by default.

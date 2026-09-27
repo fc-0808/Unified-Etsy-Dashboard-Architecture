@@ -702,10 +702,116 @@ console.log('Repairing rows already cached in the database');
     assert.strictEqual(queueOverdueTrackingRechecks(db, { stuckDays: 10, nowEpoch: now }), 0, 'queueing is idempotent');
   });
 
+  check('already-critical aged forecast-only labels are requeued for a public-feed recheck', () => {
+    seed.run({
+      id: 313,
+      name: 'emily michael',
+      status: 'pre_transit',
+      event: 'Parcel information received',
+      eventAt: now - 13 * 86400,
+      location: null,
+      health: 'critical',
+      reason: 'No carrier acceptance scan for 13 days',
+      disposed: 0,
+      now,
+      tracking: '4PX3003119358496CN',
+      consignment: 'C-313',
+    });
+    db.prepare('UPDATE receipts SET tracking_checked_at = ? WHERE receipt_id = 313').run(now);
+    assert.strictEqual(
+      queueOverdueTrackingRechecks(db, { stuckDays: 10, nowEpoch: now }),
+      1,
+      'the stale Attention label must be queued even though health is already critical',
+    );
+    assert.strictEqual(
+      db.prepare('SELECT tracking_checked_at FROM receipts WHERE receipt_id = 313').get().tracking_checked_at,
+      null,
+    );
+    assert.strictEqual(queueOverdueTrackingRechecks(db, { stuckDays: 10, nowEpoch: now }), 0, 'forecast requeue is idempotent');
+  });
+
   db.close();
   try {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   } catch {}
+}
+
+console.log('\nOfficial forecast-only vs public last-mile');
+{
+  const {
+    isForecastOnlyTimeline,
+    shouldConsultPublicFeed,
+    preferRicherTrackingTimeline,
+    snapshotFromTrackingResult,
+    FORECAST_PUBLIC_FALLBACK_HOURS,
+  } = require('../src/tracking/checker');
+
+  const forecast = {
+    status: 'pre_transit',
+    source: 'official',
+    events: [{
+      description: 'Parcel information received',
+      timestamp: Math.floor(Date.now() / 1000) - 13 * 86400,
+      location: null,
+    }],
+  };
+  const delivered = {
+    status: 'delivered',
+    source: 'public',
+    events: [{
+      description: 'Delivered. Position: Front door',
+      timestamp: Math.floor(Date.now() / 1000) - 8 * 86400,
+      location: 'CATONSVILLE, MD 21228, US',
+    }, {
+      description: 'Parcel information received',
+      timestamp: Math.floor(Date.now() / 1000) - 13 * 86400,
+      location: null,
+    }],
+  };
+
+  check('aged Parcel information received is forecast-only', () => {
+    assert.strictEqual(isForecastOnlyTimeline(forecast), true);
+  });
+  check('a delivered timeline is not forecast-only', () => {
+    assert.strictEqual(isForecastOnlyTimeline(delivered), false);
+  });
+  check('fresh forecast-only official does not consult the public feed', () => {
+    const fresh = {
+      ...forecast,
+      events: [{ ...forecast.events[0], timestamp: Math.floor(Date.now() / 1000) - 3600 }],
+    };
+    assert.strictEqual(shouldConsultPublicFeed(fresh), false);
+  });
+  check('aged forecast-only official consults the public feed', () => {
+    assert.ok(FORECAST_PUBLIC_FALLBACK_HOURS >= 24);
+    assert.strictEqual(shouldConsultPublicFeed(forecast), true);
+  });
+  check('public delivered wins over official forecast-only', () => {
+    const chosen = preferRicherTrackingTimeline(forecast, delivered);
+    assert.strictEqual(chosen.status, 'delivered');
+    assert.strictEqual(chosen.events[0].description, 'Delivered. Position: Front door');
+  });
+  check('a failed public feed cannot replace a usable official snapshot', () => {
+    const chosen = preferRicherTrackingTimeline(forecast, { status: 'error', events: [] });
+    assert.strictEqual(chosen.status, 'pre_transit');
+  });
+  check('snapshotFromTrackingResult keeps the latest event for persistence', () => {
+    const snap = snapshotFromTrackingResult(delivered, { stuckDays: 10 });
+    assert.strictEqual(snap.ok, true);
+    assert.strictEqual(snap.status, 'delivered');
+    assert.strictEqual(snap.lastEvent, 'Delivered. Position: Front door');
+    assert.ok(snap.lastLocation.includes('CATONSVILLE'));
+  });
+  check('Etsy 4PX number and dashboard 4PX number are both lookup candidates', () => {
+    const { collectTrackingLookupCodes } = require('../src/tracking/checker');
+    const codes = collectTrackingLookupCodes('4PX3003116448862CN', [
+      '4PX3003119358496CN',
+      '4PX3003116448862CN',
+      'DS4PX3003116448862CN',
+    ]);
+    assert.deepStrictEqual(codes.slice(0, 2), ['4PX3003116448862CN', '4PX3003119358496CN']);
+    assert.ok(codes.length <= 3);
+  });
 }
 
 if (failed) {

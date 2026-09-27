@@ -149,12 +149,10 @@ test('a product line with no "Grip Only" style is completely unaffected', () => 
 test('the Apple Watch band\'s own price book is untouched by the (absent) link', () => {
 	const resolved = resolveDefaultPrices({
 		db: emptyDb, shopId: 'ShopA',
-		sheetPrices: { '38/40/41mm': 350.11, '42mm [Series 10/11]': 350.11, '42/44/45/46/49mm': 350.11 },
+		sheetPrices: { 'As Shown': 350.11 },
 		productType: 'apple_watch_band',
 	})
-	assert.strictEqual(resolved.prices['38/40/41mm'], 350.11)
-	assert.strictEqual(resolved.prices['42mm [Series 10/11]'], 350.11)
-	assert.strictEqual(resolved.prices['42/44/45/46/49mm'], 350.11)
+	assert.deepStrictEqual(resolved.prices, { 'As Shown': 350.11 })
 })
 
 // ── Runner ──────────────────────────────────────────────────────────────────

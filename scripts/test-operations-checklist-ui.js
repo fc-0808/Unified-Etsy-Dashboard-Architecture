@@ -291,7 +291,7 @@ test('renders shops in the canonical order supplied by the checklist API', async
 		)
 		assert.equal(
 			env.document.querySelector('.ops-checklist-edge-progress').textContent,
-			'0/9 complete',
+			`0/${checklistDomain.SHOP_DISPLAY_ORDER.length} complete`,
 		)
 	} finally {
 		env.widget.destroy()

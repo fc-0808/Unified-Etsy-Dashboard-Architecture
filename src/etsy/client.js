@@ -34,17 +34,8 @@
  *   shops_r        — read shop info
  *   listings_r     — read private/inactive listings
  *
- * ─── PERSONAL ACCESS LIMIT ───────────────────────────────────────────────────
- *
- * The Developer Portal's allocation is authoritative (this installation has
- * historically shown five shops for Personal Access). Etsy API Terms permit one
- * designated key per application and prohibit duplicate keys/apps used to
- * circumvent limits. Never split shops across extra keys without Etsy's written
- * approval for this exact application topology.
- *
  * ─── RATE BUDGET MATH ────────────────────────────────────────────────────────
  *
- * Shops per key varies only by Etsy's approved allocation, never by network path.
  * ~5 API calls per shop per sync (resolveShopId + 2 receipt passes + listing images).
  *
  * 5 shops/key, 60-min interval: 5 × 5 × 24 =  600 calls/day → 12% of 5K QPD
@@ -57,6 +48,7 @@
 const axios = require('axios');
 const FormData = require('form-data');
 const { TokenExpiredError } = require('../auth/token-manager');
+const { shopUserAgent } = require('./user-agent');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Rate Limiter (local, per-key)
@@ -97,15 +89,6 @@ const PRIORITY_CRITICAL = 'critical';
 // EVERY outgoing request through a per-key leaky bucket sized a touch under the
 // wall so the combined rate can never exceed it, no matter how many jobs overlap.
 const QPS_SAFETY = 4; // requests/sec per key (Etsy allows 5 — leave headroom)
-
-// A single, stable identifier Etsy can attribute our traffic to. A descriptive
-// User-Agent is Etsy best practice and reduces the chance of being lumped in with
-// anonymous/generic bot traffic. Version is read from package.json (best-effort).
-const APP_VERSION = (() => {
-  try { return require('../../package.json').version || '0.0.0'; }
-  catch { return '0.0.0'; }
-})();
-const ETSY_USER_AGENT = `Unified-Etsy-Dashboard/${APP_VERSION} (+node)`;
 
 /**
  * Thrown when an API key's QPD (queries-per-day) budget is exhausted, or when a
@@ -374,9 +357,11 @@ async function resolveShopId(shopClient, shopIdOrName) {
   if (_shopIdCache.has(str)) return _shopIdCache.get(str); // cached from a previous call
 
   gateClient(shopClient);
-  const { data } = await shopClient.get('/application/shops', {
-    params: { shop_name: str, limit: 1 },
-  });
+  const { data } = await withRetry(() =>
+    shopClient.get('/application/shops', {
+      params: { shop_name: str, limit: 1 },
+    })
+  );
 
   if (!data.results || data.results.length === 0) {
     throw new Error(
@@ -507,7 +492,7 @@ function attachRateLimitInterceptor(instance) {
 // Retryable HTTP:    429 (rate limit), 500, 502, 503, 504
 // Retryable network: transient transport failures with NO HTTP response — e.g.
 //                    "socket hang up" (ECONNRESET), connection timeouts, DNS
-//                    blips. These are common over the VPN→proxy chain and have
+//                    blips. These are common over multi-hop network routes and have
 //                    err.response === undefined, so they must be matched on
 //                    err.code / err.message rather than a status code.
 // Not retried:       401 (re-authenticate), 403 (scope missing), 404 (not found)
@@ -558,7 +543,7 @@ function isRetryableNetworkError(err) {
  * @param {object}   [opts]
  * @param {Function} [opts.reconcile]   Idempotency probe for NON-idempotent calls
  *   (POST creates). Between a retryable failure and the re-send, this is invoked to
- *   ask Etsy whether the operation already landed — because on the VPN→proxy chain
+ *   ask Etsy whether the operation already landed — because on an interrupted route
  *   the request can SUCCEED while only its RESPONSE is lost, and a blind re-send
  *   would then create a duplicate (for a shipment, a second buyer email). Contract:
  *     • resolves a truthy value → already applied; adopt it, do NOT re-send.
@@ -674,40 +659,59 @@ async function withRetry(fn, maxRetries = 3, opts = {}) {
  *        requests on this client. Use 'critical' for operator-initiated order
  *        fulfilment (ship/complete/edit tracking) so it is never gated by the
  *        background reserve. Defaults to 'normal' (respects the reserve).
- * @param {boolean} [options.requireProxy=false] - Fail-closed OpSec guard. When
- *        true, the underlying group client MUST carry an httpsAgent (i.e. the
- *        VPN→IPFoxy proxy chain). If it doesn't, we throw instead of letting a
- *        shop that must be proxied accidentally egress on the server's own
- *        datacenter IP — the exact footprint that gets shops linked/flagged.
+ * @param {string|number} options.shopId - Shop id. The User-Agent is derived from
+ *        this id, so each shop — including shops added later — is a distinct
+ *        program to Etsy and any other recipient of these requests.
+ * @param {boolean} [options.requireProxy=false] - Fail-closed route guard. When
+ *        true, the underlying group client MUST explicitly confirm that the
+ *        configured group SOCKS5 proxy is enforced. A generic HTTPS agent is not
+ *        sufficient, and its public-egress preflight must already have passed.
+ *        If either marker is absent, throw rather than silently changing the
+ *        configured route or contacting Etsy before route verification.
  * @returns {import('axios').AxiosInstance}
  */
 function buildShopClient(groupProxyClient, apiKey, sharedSecret, accessToken, getToken, options = {}) {
-  // ── OpSec fail-closed: a shop that must be proxied never egresses direct ──────
-  if (options.requireProxy && !groupProxyClient.defaults.httpsAgent) {
+  // Fail closed: a shop configured for a group proxy never egresses directly.
+  if (options.requireProxy && groupProxyClient._proxyEnforced !== true) {
     throw new Error(
       `[etsy/client] Refusing to build a shop client for a proxied group without a ` +
-      `proxy agent. This would send the shop's Etsy traffic from the server's own IP ` +
+      `configured group-proxy route ` +
       `(group_id=${groupProxyClient._groupId ?? 'unknown'}). Check config.json proxy settings.`
+    );
+  }
+  if (options.requireProxy && !groupProxyClient._egressVerifiedAt) {
+    throw new Error(
+      `[etsy/client] Refusing to build a shop client before the group-proxy egress ` +
+      `has passed its preflight check ` +
+      `(group_id=${groupProxyClient._groupId ?? 'unknown'}).`
     );
   }
 
   // Use axios.create() — Object.create() on an axios instance does not propagate
   // defaults into the actual request headers (axios merges from instance.defaults
   // at request time, which requires a real instance, not a prototype clone).
+  // A descriptive per-shop User-Agent is Etsy best practice and keeps each shop
+  // from being attributed to one shared program name.
   const instance = axios.create({
     baseURL:    groupProxyClient.defaults.baseURL,
     httpsAgent: groupProxyClient.defaults.httpsAgent,
+    proxy:      false,
     timeout:    groupProxyClient.defaults.timeout ?? 30_000,
     headers: {
       'Content-Type': 'application/json',
       Accept:         'application/json',
-      'User-Agent':   ETSY_USER_AGENT,
+      'User-Agent':   shopUserAgent(options.shopId),
       // CORRECT FORMAT: keystring:shared_secret (both required per Etsy API docs)
       'x-api-key':    `${apiKey}:${sharedSecret}`,
       // CORRECT FORMAT: Bearer numeric_user_id.oauth_token
       Authorization:  `Bearer ${accessToken}`,
     },
   });
+  instance._groupId = groupProxyClient._groupId;
+  instance._proxyEnforced = groupProxyClient._proxyEnforced === true;
+  instance._routeDescription = groupProxyClient._routeDescription || 'unknown';
+  instance._egressVerifiedAt = groupProxyClient._egressVerifiedAt || 0;
+  instance._verifiedEgressIp = groupProxyClient._verifiedEgressIp || null;
   // Stamp the budget priority so gateClient() can honor it on every request.
   instance.defaults.__etsyPriority = options.priority === PRIORITY_CRITICAL ? PRIORITY_CRITICAL : 'normal';
   attachRateLimitInterceptor(instance);
@@ -757,6 +761,36 @@ function buildShopClient(groupProxyClient, apiKey, sharedSecret, accessToken, ge
       }
       return Promise.reject(error);
     });
+  }
+  if (options.requireProxy) {
+    const requiredAgent = groupProxyClient.defaults.httpsAgent;
+    instance._assertProxyRoute = async (cfg) => {
+      // Re-check a long-lived client's pinned exit on a bounded cadence. The
+      // group cache deduplicates concurrent checks, so this adds at most one
+      // read-only ipify request per group every five minutes.
+      if (typeof groupProxyClient._ensureEgressVerified !== 'function') {
+        const err = new Error('Configured proxy client cannot refresh its egress preflight.');
+        err.code = 'PROXY_EGRESS_GUARD_MISSING';
+        throw err;
+      }
+      await groupProxyClient._ensureEgressVerified();
+      if (
+        cfg?.httpsAgent !== requiredAgent
+        || cfg?.proxy !== false
+        || requiredAgent?.proxyEnforced !== true
+      ) {
+        const err = new Error(
+          `Request attempted to override the verified proxy route ` +
+          `(group_id=${groupProxyClient._groupId ?? 'unknown'}).`
+        );
+        err.code = 'PROXY_ROUTE_OVERRIDE_BLOCKED';
+        throw err;
+      }
+      return cfg;
+    };
+    // Axios runs request interceptors in reverse registration order. Register
+    // this last so route verification occurs before token refresh and QPS pacing.
+    instance.interceptors.request.use(instance._assertProxyRoute);
   }
   return instance;
 }
@@ -2172,6 +2206,7 @@ async function findTaxonomyId(shopClient, keywords) {
 
 module.exports = {
   buildShopClient,
+  shopUserAgent,
   attachRateLimitInterceptor,
   resolveShopId,
   getShop,

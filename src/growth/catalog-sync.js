@@ -78,7 +78,6 @@ function latestReviewTimestamp(db, shopId) {
  * @param {string|number} args.numericShopId
  * @param {string} args.shopId
  * @param {string} [args.shopName]
- * @param {boolean} args.analyticsApproved - caller verified retained Etsy written approval
  * @param {Function} [args.heartbeat]
  * @returns {Promise<{ listings:number, reviews:number, pruned:number, complete:boolean }>}
  */
@@ -88,16 +87,9 @@ async function syncShopCatalogHealth({
   numericShopId,
   shopId,
   shopName,
-  analyticsApproved,
   heartbeat,
 } = {}) {
   const label = `[catalog-health] ${shopName || shopId}`
-  if (analyticsApproved !== true) {
-    const err = new Error('Etsy written authorization is required before API content may be collected for analytics.')
-    err.status = 409
-    err.code = 'ETSY_API_ANALYTICS_NOT_APPROVED'
-    throw err
-  }
   if (!db || !shopClient || !shopId || numericShopId == null) {
     throw new Error('catalog health requires db, shopClient, shopId, numericShopId')
   }
@@ -195,7 +187,7 @@ async function syncShopCatalogHealth({
   }
 
   // An incomplete active-listing walk is not a fresh catalog snapshot. Leave it
-  // due so the next approved run can resume instead of hiding missing listings
+  // due so the next run can resume instead of hiding missing listings
   // behind the normal 12–24 hour cadence.
   if (complete) markCatalogHealthSynced(db, shopId)
   console.log(`${label} listings=${listings} reviews=${reviews} pruned=${pruned} complete=${complete}`)

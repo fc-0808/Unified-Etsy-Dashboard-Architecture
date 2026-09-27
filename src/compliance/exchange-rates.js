@@ -19,10 +19,9 @@
  *      still converts — and because the file sits in the shared database
  *      directory, a station that CAN reach the internet keeps every other
  *      station supplied.
- *   2. THE PROXY THE REST OF THE APP USES. A direct connection is tried first;
- *      if it fails and a VPN SOCKS port is configured, the same local hop the
- *      Etsy sync relies on is tried next. A warehouse behind a filtered
- *      connection then works exactly where the rest of the dashboard works.
+ *   2. THE TRANSPORT THE REST OF THE APP USES. With an OS-level tunnel, the
+ *      normal HTTPS request already follows that route. With an explicit local
+ *      SOCKS5 transport, a failed normal request falls through to that listener.
  *   3. FAILURE IS REPORTED, NOT SWALLOWED. The result always carries where the
  *      table came from and how old it is, so the caller can say "converted at a
  *      rate from 12 Aug" rather than implying it is today's.
@@ -36,6 +35,11 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const {
+  TRANSPORT_MODES,
+  coerceNetworkTransport,
+  describeNetworkTransport,
+} = require('../proxy/transport');
 
 /** Free, key-less, EUR-based daily reference rates. */
 const SOURCE_URL = 'https://open.er-api.com/v6/latest/EUR';
@@ -122,21 +126,29 @@ function getJson(url, { agent = undefined, timeoutMs = REQUEST_TIMEOUT_MS } = {}
 }
 
 /**
- * An agent that dials out through the local VPN's SOCKS5 port — the same first
- * hop the Etsy proxy chain uses. Returns null when no port is configured or the
- * agent library is unavailable, so the caller simply skips that route.
+ * An agent that dials through an explicit local VPN SOCKS5 listener. OS-level
+ * system_tunnel transports need no agent because the normal request already
+ * follows the operating system route.
  *
  * socks-proxy-agent v10 is ESM-only, so this is a dynamic import rather than a
  * require: a require would throw ERR_REQUIRE_ESM, the hop would never be tried,
  * and a warehouse behind a filtered connection would look like it had no rates.
  */
-async function socksAgentFor(vpnPort) {
-  if (!vpnPort) return null;
+async function socksAgentFor(networkTransport) {
+  if (networkTransport == null) return null;
+  const transport = coerceNetworkTransport(networkTransport);
+  if (transport.mode !== TRANSPORT_MODES.LOCAL_SOCKS5) return null;
   try {
     const mod = await import('socks-proxy-agent');
     const Agent = mod.SocksProxyAgent || mod.default;
     if (!Agent) return null;
-    return new Agent(`socks5h://127.0.0.1:${vpnPort}`);
+    return {
+      agent: new Agent(
+        `socks5h://${transport.local_host === '::1' ? '[::1]' : transport.local_host}:` +
+        transport.local_port
+      ),
+      name: describeNetworkTransport(transport),
+    };
   } catch {
     return null;
   }
@@ -147,12 +159,20 @@ async function socksAgentFor(vpnPort) {
  *
  * @param {object}   opts
  * @param {string}   opts.cacheDir      directory for the last-good table (the DB directory)
- * @param {number|null} [opts.vpnPort]  local SOCKS5 port to fall back to
+ * @param {object|null} [opts.networkTransport] normalized application transport
+ * @param {number|null} [opts.vpnPort] deprecated local SOCKS5 compatibility input
  * @param {() => number} [opts.now]     injectable clock (tests)
  * @param {(url: string, opts: object) => Promise<object>} [opts.request]  injectable transport (tests)
  * @param {(msg: string) => void} [opts.log]
  */
-function createRateStore({ cacheDir, vpnPort = null, now = Date.now, request = getJson, log = console.warn } = {}) {
+function createRateStore({
+  cacheDir,
+  networkTransport = null,
+  vpnPort = null,
+  now = Date.now,
+  request = getJson,
+  log = console.warn,
+} = {}) {
   const cachePath = cacheDir ? path.join(cacheDir, CACHE_FILE) : null;
 
   /** @type {{ rates: Record<string, number>, fetchedAt: number, source: string }} */
@@ -196,11 +216,16 @@ function createRateStore({ cacheDir, vpnPort = null, now = Date.now, request = g
     }
   }
 
-  /** Try the open connection, then the VPN hop. Resolves to a clean table or null. */
+  /** Try the system route, then an explicit local-SOCKS fallback when configured. */
   async function fetchTable() {
-    const routes = [{ name: 'direct', agent: undefined }];
-    const socks = await socksAgentFor(vpnPort);
-    if (socks) routes.push({ name: `vpn:${vpnPort}`, agent: socks });
+    const transportInput = networkTransport ?? vpnPort;
+    const normalized = transportInput == null ? null : coerceNetworkTransport(transportInput);
+    const primaryName = normalized?.mode === TRANSPORT_MODES.SYSTEM_TUNNEL
+      ? `${normalized.provider} system tunnel`
+      : 'direct';
+    const routes = [{ name: primaryName, agent: undefined }];
+    const socks = await socksAgentFor(transportInput);
+    if (socks) routes.push({ name: socks.name, agent: socks.agent });
 
     const failures = [];
     for (const route of routes) {

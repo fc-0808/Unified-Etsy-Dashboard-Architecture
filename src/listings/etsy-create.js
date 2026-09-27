@@ -5,11 +5,11 @@
  *
  * Sequence (each step is checkpointed so a retry resumes instead of restarting):
  *   1. createDraftListingForm     → listing_id
- *   2. uploadListingImage × ranks → rank → image_id
+ *   2. uploadListingImage × ranks → rank → image_id + factual per-photo alt text
  *   3. uploadListingVideo         → (optional)
- *   4. putListingInventory        → 12 × 6 variation matrix
- *   5. getListingInventory        → resolve Styles value_ids
- *   6. updateVariationImages      → link styles to images (best-effort)
+ *   4. putListingInventory        → product-type-specific variation matrix
+ *   5. getListingInventory        → resolve priced-axis value_ids
+ *   6. updateVariationImages      → link priced choices to images (best-effort)
  *   7. (optional) updateListing state=active when publishing
  *
  * dryRun mode builds and returns the create + inventory payloads without any
@@ -32,6 +32,30 @@ const {
 const { buildInventory, buildVariationImages, buildCustomVariationImages, normaliseCustomStyles } = require('./variation-builder');
 const { getTaxonomyAttributes, resolveAttributes } = require('./attributes');
 const productTypes = require('./product-types');
+const bandVariantAnalyzer = require('./band-variant-analyzer');
+const seoQuality = require('./seo-quality');
+
+function requirePositiveEtsyId(value, field) {
+  const text = String(value ?? '').trim();
+  if (!/^\d+$/.test(text) || /^0+$/.test(text)) {
+    const err = new Error(`Etsy returned an invalid ${field}; refusing to continue the listing workflow.`);
+    err.code = 'ETSY_INVALID_ID_RESPONSE';
+    throw err;
+  }
+  return value;
+}
+
+function normaliseCustomStylesForProduct(input, productType, validImageRanks) {
+  let clean = normaliseCustomStyles(input);
+  if (productTypes.getProductType(productType).visionStyle !== 'band_variant') return clean;
+  const valid = validImageRanks instanceof Set ? validImageRanks : null;
+  clean = clean.filter((style) =>
+    Number.isInteger(Number(style.imageRank))
+    && Number(style.imageRank) > 0
+    && (!valid || valid.has(Number(style.imageRank)))
+  );
+  return bandVariantAnalyzer.numberBandStyles(clean);
+}
 
 /** Dedupe a list of variation-image links by their Etsy value_id (first wins). */
 function dedupeByValueId(list) {
@@ -126,9 +150,17 @@ async function createListingForProduct(ctx) {
   // The product type parameterises the device-model dimension, allowed styles
   // and materials. Prefer the explicit ctx value, then the cached copy's type.
   const productType = ctx.productType || copy.productType || null;
-  // Operator-defined custom variation values (e.g. "Case1 + Charm1") fully
-  // replace the canonical bundle matrix for this listing when present.
-  const customStyles = normaliseCustomStyles(copy.customStyles);
+  const pt = productTypes.getProductType(productType);
+  // Operator/vision-defined custom variation values (e.g. "Case1 + Charm1" or
+  // "White + Gold Metal") are added to the priced-axis vocabulary.
+  const customStyles = normaliseCustomStylesForProduct(
+    copy.customStyles,
+    productType,
+    new Set((product.images || []).map((image) => Number(image.rank))),
+  );
+  const variationOrder = productTypes.getProductType(productType).visionStyle === 'band_variant'
+    ? customStyles.map((style) => style.label)
+    : copy.variationOrder;
   const { body: inventoryBody, minPrice, listingQuantity, enabledStyles } = buildInventory({
     prices,
     imageAnalysis: copy.imageAnalysis,
@@ -139,12 +171,18 @@ async function createListingForProduct(ctx) {
     enabledModels: copy.enabledModels,
     customStyles,
     // Operator's chosen display order for the "Styles" options (labels).
-    variationOrder: copy.variationOrder,
+    variationOrder,
     productType,
     restockQuantity,
     readinessStateId,
   });
   const createBody = buildCreateBody({ copy, settings, minPrice, listingQuantity, productType });
+  const imageAltTextByRank = new Map(
+    (product.images || []).map((image) => [
+      Number(image.rank),
+      seoQuality.buildImageAltText({ ...copy, customStyles }, image, pt),
+    ])
+  );
 
   // A self-contained inspection payload, persisted with the item so the UI can
   // render image order, copy, the full variation matrix and the resolved shop
@@ -168,6 +206,7 @@ async function createListingForProduct(ctx) {
     // the operator WHY the copy says what it says and flag weak titles for review.
     designAnalysis: copy.designAnalysis || null,
     titleQuality: copy.titleQuality || null,
+    seoQuality: copy.seoQuality || null,
     accessory: copy.accessory || null,
     aiAttributes: copy.aiAttributes || null,
     currency: options.currency || '',
@@ -177,10 +216,18 @@ async function createListingForProduct(ctx) {
     enabledStyles,
     enabledModels: copy.enabledModels || null,
     customStyles: customStyles.length ? customStyles : null,
+    variationOrder: Array.isArray(variationOrder) ? variationOrder : null,
+    // Raw, normalised visual evidence stays local for operator QA. Etsy receives
+    // only the reviewed customStyles values above.
+    bandVariantAnalysis: copy.bandVariantAnalysis || copy.bandColorAnalysis || null,
     productType: productType || copy.productType || null,
     stylePrices: prices,
     inventoryProducts: inventoryBody.products.length,
-    images: (product.images || []).map((im) => ({ rank: im.rank, filename: im.filename })),
+    images: (product.images || []).map((im) => ({
+      rank: im.rank,
+      filename: im.filename,
+      altText: imageAltTextByRank.get(Number(im.rank)) || '',
+    })),
     hasVideo: product.hasVideo,
     videoFilename: product.video ? product.video.filename : null,
     styleImageMapping: copy.styleImageMapping || {},
@@ -214,7 +261,8 @@ async function createListingForProduct(ctx) {
   }
 
   // ── 1. Create draft listing ────────────────────────────────────────────────
-  let listingId = checkpoint.listing_id || null;
+  let listingId = checkpoint.listing_id ?? null;
+  if (listingId != null) listingId = requirePositiveEtsyId(listingId, 'listing_id checkpoint');
   if (!listingId) {
     const acceptListing = (listing) =>
       typeof ctx.isListingClaimed !== 'function'
@@ -241,14 +289,23 @@ async function createListingForProduct(ctx) {
           createdAfter: checkpoint.create_attempted_at,
           acceptListing,
         });
-    listingId = created.listing_id;
+    listingId = requirePositiveEtsyId(created?.listing_id, 'listing_id');
     checkpoint.listing_id = listingId;
     delete checkpoint.create_attempted_at;
     onStep('created', { listing_id: listingId });
   }
 
   // ── 2. Upload images (skip ranks already uploaded) ─────────────────────────
-  const uploadedRanks = new Map(Object.entries(checkpoint.rank_to_image_id || {}).map(([k, v]) => [Number(k), v]));
+  const uploadedRanks = new Map(
+    Object.entries(checkpoint.rank_to_image_id || {})
+      .map(([rank, imageId]) => [Number(rank), imageId])
+      .filter(([rank, imageId]) =>
+        Number.isInteger(rank)
+        && rank > 0
+        && /^\d+$/.test(String(imageId ?? '').trim())
+        && !/^0+$/.test(String(imageId ?? '').trim())
+      )
+  );
   const totalImages = product.images.length;
   for (const img of product.images) {
     if (uploadedRanks.has(img.rank)) continue;
@@ -257,16 +314,15 @@ async function createListingForProduct(ctx) {
       buffer,
       filename: img.filename,
       rank: img.rank,
-      altText: copy.title ? copy.title.slice(0, 250) : undefined,
+      altText: imageAltTextByRank.get(Number(img.rank)) || undefined,
       // Rank is the idempotency key for a new draft's gallery. A transport retry
       // replaces that rank rather than appending a duplicate image.
       overwrite: true,
     });
-    if (res && res.listing_image_id) {
-      uploadedRanks.set(img.rank, res.listing_image_id);
-      checkpoint.rank_to_image_id = Object.fromEntries(uploadedRanks);
-      onStep('image', { rank: img.rank, image_id: res.listing_image_id, done: uploadedRanks.size, total: totalImages });
-    }
+    const imageId = requirePositiveEtsyId(res?.listing_image_id, 'listing_image_id');
+    uploadedRanks.set(img.rank, imageId);
+    checkpoint.rank_to_image_id = Object.fromEntries(uploadedRanks);
+    onStep('image', { rank: img.rank, image_id: imageId, done: uploadedRanks.size, total: totalImages });
   }
 
   // ── 3. Upload video (optional, best-effort) ────────────────────────────────
@@ -405,9 +461,9 @@ async function createListingForProduct(ctx) {
 }
 
 /**
- * Re-push a listing's variation inventory with new per-style prices, preserving
- * the full 12×6 matrix (including disabled styles) and re-linking variation
- * images. Used to update prices on an already-created draft/active listing.
+ * Re-push a listing's complete variation inventory with new per-choice prices,
+ * preserving every product-type axis and re-linking variation images. Used to
+ * update prices on an already-created draft/active listing.
  *
  * @param {object} ctx
  * @param {import('axios').AxiosInstance} ctx.shopClient
@@ -427,7 +483,7 @@ async function repriceListing(ctx) {
     styleImageMapping = {}, rankToImageId, enabledStyles, enabledModels, readinessStateId, productType, variationOrder,
   } = ctx;
 
-  const customStyles = normaliseCustomStyles(ctx.customStyles);
+  const customStyles = normaliseCustomStylesForProduct(ctx.customStyles, productType);
   const { body: inventoryBody, minPrice } = buildInventory({ prices, imageAnalysis, restockQuantity, enabledStyles, enabledModels, customStyles, variationOrder, readinessStateId, productType });
   await putListingInventory(shopClient, listingId, inventoryBody);
 
@@ -450,4 +506,9 @@ async function repriceListing(ctx) {
   return { minPrice, inventoryProducts: inventoryBody.products.length };
 }
 
-module.exports = { createListingForProduct, buildCreateBody, repriceListing };
+module.exports = {
+  createListingForProduct,
+  buildCreateBody,
+  repriceListing,
+  requirePositiveEtsyId,
+};

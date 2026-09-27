@@ -43,6 +43,15 @@
  * authentication but is less suitable for production (unofficial, subject to
  * undocumented rate limits).
  *
+ * Official `tr.order.tracking.get` can also succeed with ONLY forecast/label
+ * events ("Parcel information received") long after last-mile scans exist on
+ * the public feed or on the buyer-visible 4PX number. When that forecast is
+ * older than {@link FORECAST_PUBLIC_FALLBACK_HOURS}, we consult the public
+ * timeline and any alternate 4PX identifier on the receipt (Etsy tracking_code
+ * vs dashboard fourpx_tracking_no) and keep whichever is richer — otherwise a
+ * delivered parcel stays frozen as label-only on every dashboard list that
+ * reads the cached snapshot.
+ *
  * @module src/tracking/checker
  */
 
@@ -65,6 +74,16 @@ const { normalizeFourpxLookupCode } = require('./validation');
 // ── 4PX Official API — tracking request ──────────────────────────────────────
 
 const OFFICIAL_API_METHOD  = 'tr.order.tracking.get';
+/** Official responses that are not usable evidence — always try the public feed. */
+const OFFICIAL_FALLBACK_STATUSES = new Set(['unknown', 'not_found', 'error', 'network_error', 'timeout', 'parse_error']);
+/**
+ * Hours a forecast-only official timeline may sit before we also ask track.4px.com.
+ * Fresh labels (hours old) stay on Open Platform only so we do not double-call
+ * 4PX for every parcel packed this morning. Aged "Parcel information received"
+ * with no scan is the case official still looks pre-transit while
+ * the public feed already has last-mile / delivered events.
+ */
+const FORECAST_PUBLIC_FALLBACK_HOURS = 36;
 // The current official endpoint contract exposes version 1.0.0:
 // https://open.4px.com/apiInfo/detail?id=25
 // The gateway also accepts 2.0.0 today, but pinning the documented version keeps
@@ -625,27 +644,119 @@ async function checkTrackingStatus(trackingCode, carrierName, apiCredentials = {
  * @param {object}      [apiCredentials]
  * @param {string|null} [apiCredentials.appKey]
  * @param {string|null} [apiCredentials.appSecret]
+ * @param {string[]}    [apiCredentials.alternateCodes] Extra 4PX identifiers on
+ *   the same receipt (Etsy tracking_code vs dashboard fourpx_tracking_no).
  * @returns {Promise<FullTrackingResult>}
  */
-async function getFullTrackingEvents(trackingCode, apiCredentials = {}) {
-  if (!trackingCode) return { events: [], status: 'unknown', source: 'none' };
-  const lookupCode = trackingLookupCode(trackingCode);
-  if (!lookupCode) return { events: [], status: 'unsupported', source: 'none' };
+function collectTrackingLookupCodes(primary, alternates = []) {
+  const seen = new Set();
+  const codes = [];
+  const add = (value) => {
+    const code = trackingLookupCode(value);
+    if (!code || seen.has(code)) return;
+    seen.add(code);
+    codes.push(code);
+  };
+  add(primary);
+  for (const value of Array.isArray(alternates) ? alternates : [alternates]) add(value);
+  return codes.slice(0, 3);
+}
 
+function timelineSettled(result) {
+  return !!(result && !OFFICIAL_FALLBACK_STATUSES.has(result.status) && !isForecastOnlyTimeline(result));
+}
+
+async function lookupOneTrackingCode(lookupCode, apiCredentials = {}) {
   const { appKey, appSecret } = apiCredentials;
-
   if (appKey && appSecret) {
     const official = await _officialTrackFull(appKey, appSecret, lookupCode);
-    // A successful official response with no events is not useful evidence. The
-    // public endpoint sometimes sees a newly handed-off parcel first, so use it
-    // for empty/not-found responses as well as transport failures.
-    const FALLBACK_STATUSES = new Set(['unknown', 'not_found', 'error', 'network_error', 'timeout', 'parse_error']);
-    if (!FALLBACK_STATUSES.has(official.status)) {
+    if (!shouldConsultPublicFeed(official)) {
       return _withHealth(official);
     }
-    console.log(`[4px/track] Official API returned ${official.status}; falling back to the public tracking feed`);
+    if (OFFICIAL_FALLBACK_STATUSES.has(official.status)) {
+      console.log(`[4px/track] Official API returned ${official.status}; falling back to the public tracking feed`);
+    } else {
+      console.log('[4px/track] Official timeline is still forecast-only on an aged label; consulting the public tracking feed');
+    }
+    const publicResult = await _publicTrackFull(lookupCode);
+    return preferRicherTrackingTimeline(_withHealth(official), _withHealth(publicResult));
   }
   return _publicTrackFull(lookupCode).then(_withHealth);
+}
+
+async function getFullTrackingEvents(trackingCode, apiCredentials = {}) {
+  const codes = collectTrackingLookupCodes(trackingCode, apiCredentials.alternateCodes);
+  if (!codes.length) return { events: [], status: trackingCode ? 'unsupported' : 'unknown', source: 'none' };
+
+  let best = null;
+  for (const code of codes) {
+    const result = await lookupOneTrackingCode(code, apiCredentials);
+    best = best ? preferRicherTrackingTimeline(best, result) : result;
+    if (timelineSettled(best)) break;
+  }
+  return best;
+}
+
+function timelineStatusRank(status) {
+  return { delivered: 4, exception: 3, in_transit: 2, pre_transit: 1 }[status] || 0;
+}
+
+function latestEventEpoch(result) {
+  const events = result && Array.isArray(result.events) ? result.events : [];
+  if (!events.length) return null;
+  return eventEpoch(events[0]);
+}
+
+/**
+ * True when every event is still label/forecast metadata (or there are none).
+ * That is the Open Platform shape for "Parcel information received" — not
+ * evidence the parcel is still waiting for pickup once last-mile scans exist
+ * on another feed.
+ */
+function isForecastOnlyTimeline(result) {
+  if (!result) return true;
+  if (OFFICIAL_FALLBACK_STATUSES.has(result.status)) return true;
+  const events = Array.isArray(result.events) ? result.events : [];
+  if (!events.length) return true;
+  if (result.status && result.status !== 'pre_transit' && result.status !== 'unknown') return false;
+  return events.every(eventLooksPreTransit);
+}
+
+/**
+ * Whether a successful official response should still be checked against the
+ * public feed. Fresh forecast-only labels skip it; aged ones do not.
+ */
+function shouldConsultPublicFeed(official, nowMs = Date.now()) {
+  if (!official || OFFICIAL_FALLBACK_STATUSES.has(official.status)) return true;
+  if (!isForecastOnlyTimeline(official)) return false;
+  const epoch = latestEventEpoch(official);
+  if (epoch == null) return true;
+  return (nowMs / 1000 - epoch) >= FORECAST_PUBLIC_FALLBACK_HOURS * 3600;
+}
+
+/**
+ * Keep the timeline that has actually moved further. Official wins ties so a
+ * failed public call cannot replace a usable Open Platform snapshot.
+ */
+function preferRicherTrackingTimeline(primary, fallback) {
+  if (!fallback) return primary;
+  if (!primary) return fallback;
+  if (OFFICIAL_FALLBACK_STATUSES.has(fallback.status) && !OFFICIAL_FALLBACK_STATUSES.has(primary.status)) {
+    return primary;
+  }
+  if (OFFICIAL_FALLBACK_STATUSES.has(primary.status) && !OFFICIAL_FALLBACK_STATUSES.has(fallback.status)) {
+    return fallback;
+  }
+  const rankDelta = timelineStatusRank(fallback.status) - timelineStatusRank(primary.status);
+  if (rankDelta > 0) return fallback;
+  if (rankDelta < 0) return primary;
+  const fallbackCount = fallback.events?.length || 0;
+  const primaryCount = primary.events?.length || 0;
+  if (fallbackCount > primaryCount) return fallback;
+  const fallbackEpoch = latestEventEpoch(fallback) || 0;
+  const primaryEpoch = latestEventEpoch(primary) || 0;
+  if (fallbackEpoch > primaryEpoch) return fallback;
+  return primary;
 }
 
 /**
@@ -1241,32 +1352,44 @@ function _withHealth(result, options = {}) {
  *   lastLocation:string|null, deliveredAt:number|null, events:TrackingEvent[],
  *   health:object}>}
  */
-async function getTrackingSnapshot(trackingCode, apiCredentials = {}) {
-  const full = await getFullTrackingEvents(trackingCode, apiCredentials);
+/**
+ * Compact snapshot the worker and GET /api/4px/track persist onto receipts.
+ * One shape so the modal write-back and the background pass cannot diverge.
+ *
+ * @param {FullTrackingResult} full
+ * @param {object} [apiCredentials]
+ */
+function snapshotFromTrackingResult(full = {}, apiCredentials = {}) {
   const events = sortTrackingEventsNewestFirst(full.events);
   const VALID = new Set(['pre_transit', 'in_transit', 'delivered', 'exception']);
-  const ok = VALID.has(full.status);
-
+  const status = full.status || 'unknown';
+  const ok = VALID.has(status);
   const latest = events[0] || null;
   const lastEventAt = latest ? eventEpoch(latest) : null;
-
-  // First physical scan = oldest event that is not forecast/label metadata.
   const firstScanEvent = [...events].reverse().find((event) => !eventLooksPreTransit(event));
   const firstScanAt = firstScanEvent ? eventEpoch(firstScanEvent) : null;
+  const health = full.health && typeof full.health === 'object'
+    ? full.health
+    : analyzeTrackingHealth(events, status, { stuckDays: apiCredentials.stuckDays });
 
   return {
     ok,
-    status: full.status,
-    source: full.source,
+    status,
+    source: full.source || null,
     eventCount: events.length,
     firstScanAt,
     lastEventAt,
     lastEvent: latest ? latest.description : null,
     lastLocation: latest ? latest.location : null,
-    deliveredAt: full.status === 'delivered' ? lastEventAt : null,
+    deliveredAt: status === 'delivered' ? lastEventAt : null,
     events,
-    health: analyzeTrackingHealth(events, full.status, { stuckDays: apiCredentials.stuckDays }),
+    health,
   };
+}
+
+async function getTrackingSnapshot(trackingCode, apiCredentials = {}) {
+  const full = await getFullTrackingEvents(trackingCode, apiCredentials);
+  return snapshotFromTrackingResult(full, apiCredentials);
 }
 
 module.exports = {
@@ -1275,9 +1398,14 @@ module.exports = {
   normalizeOfficialTrackingData,
   normalizePublicTrackingItem,
   getFullTrackingEvents,
+  collectTrackingLookupCodes,
   analyzeTrackingHealth,
   _withHealth,
   getTrackingSnapshot,
+  snapshotFromTrackingResult,
+  isForecastOnlyTimeline,
+  shouldConsultPublicFeed,
+  preferRicherTrackingTimeline,
   isDisposalText,
   timelineHasDisposal,
   isDeliveredText,
@@ -1285,6 +1413,7 @@ module.exports = {
   eventLooksDelivered,
   eventLooksDisposed,
   eventLooksException,
+  eventLooksPreTransit,
   eventEpoch,
   eventLocation,
   inferTrackingStage,
@@ -1298,4 +1427,6 @@ module.exports = {
   NOT_DELIVERED_RE,
   OFFICIAL_API_METHOD,
   OFFICIAL_API_VERSION,
+  FORECAST_PUBLIC_FALLBACK_HOURS,
+  OFFICIAL_FALLBACK_STATUSES,
 };

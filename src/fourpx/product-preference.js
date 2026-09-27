@@ -50,11 +50,13 @@
  * US REMOTE / ISLAND ZIPS
  * ──────────────────────
  * POSTLINK-LW rejects Hawaii / Alaska / Guam / Puerto Rico / USVI ZIPs with
- * 4PX error 010109005 ("remote ZIP codes, no service"). resolveUsIslandZipFallback()
- * only returns S5118 (US-ISLAND-PH) when THAT rejection is paired with an address
- * that independently confirms an S5118 territory (state or ZIP). Continental US
- * S5058 failures never auto-flip. create4pxShipmentForReceipt then retries once
- * on a fresh ref so bulk "Ship with 4PX" does not leave a Failed island row.
+ * 4PX error 010109005 ("remote ZIP codes, no service"). Those addresses must
+ * book US-ISLAND-PH (S5118) on the FIRST create — not after a rejected S5058 —
+ * so we never leave a half-committed `ref_no` that later fails with DS000056.
+ * resolveLogisticsProduct() therefore prefers S5118 when the recipient ZIP/state
+ * independently confirms an S5118 territory. prefersUsIslandPhLane() is the
+ * same gate used when a caller still sent S5058. resolveUsIslandZipFallback()
+ * remains the safety net if 4PX rejects after a missed preflight.
  *
  * @module src/fourpx/product-preference
  */
@@ -247,6 +249,8 @@ function isExpressProduct(product) {
  * Resolve the default 4PX logistics product code for a destination.
  *
  * Selection order (identical to the browser drawer's _fpxPickLogisticsProduct):
+ *   0. US island / territory ZIP or state → US-ISLAND-PH (S5118), even when
+ *      the live catalogue omits it (the create API still accepts it).
  *   1. POSTLINK-LW (S5058) when it is available for the destination.
  *   2. A per-country override (FOURPX_COUNTRY_DEFAULT_PRODUCT), e.g. BE → QC.
  *   3. The caller's configured default (config.fourpx_default_product).
@@ -269,10 +273,12 @@ function isExpressProduct(product) {
  * @param {Array<object>|null} [input.availableProducts=null]  Destination product list, if known.
  * @param {string|null} [input.configDefault=null]      config.fourpx_default_product.
  * @param {boolean} [input.expedited=false]             Buyer paid for a shipping upgrade.
+ * @param {string} [input.postCode='']                  Recipient ZIP (US island detection).
+ * @param {string} [input.state='']                     Recipient state / territory.
  * @returns {string|null}  The chosen logistics product code, or null when a
  *                         catalogue was supplied and no candidate is valid for it.
  */
-function resolveLogisticsProduct({ country, availableProducts = null, configDefault = null, expedited = false } = {}) {
+function resolveLogisticsProduct({ country, availableProducts = null, configDefault = null, expedited = false, postCode = '', state = '' } = {}) {
 	const cc = _normCountry(country);
 	const catalogue = Array.isArray(availableProducts) ? availableProducts : null;
 	const inCatalogue = (code) => !catalogue || (code && catalogue.some((p) => _codeOf(p).toUpperCase() === code.toUpperCase()));
@@ -287,6 +293,14 @@ function resolveLogisticsProduct({ country, availableProducts = null, configDefa
 		const fromCatalogue = catalogue?.find((p) => isExpressProduct(p));
 		if (fromCatalogue) return _codeOf(fromCatalogue) || null;
 		// Fall through to the standard chain below.
+	}
+
+	// US island / territory ZIPs: S5058 is rejected by 4PX (010109005). Book
+	// S5118 on the first attempt so we never mint a second ref after a lost
+	// response. S5118 is often missing from the live US catalogue while still
+	// being orderable — prefer it whenever the address confirms the territory.
+	if (cc === 'US' && isUsIslandPhAddress({ postCode, state })) {
+		return FOURPX_US_ISLAND_PH_CODE;
 	}
 
 	// 1. Prefer POSTLINK-LW (S5058) when the destination offers it.
@@ -492,6 +506,35 @@ function resolveUsIslandZipFallback({
 	return FOURPX_US_ISLAND_PH_CODE;
 }
 
+/**
+ * True when the selected (or default) lane is POSTLINK-LW — or unset — AND the
+ * recipient is an S5118 territory. create4pxShipmentForReceipt uses this to
+ * switch to US-ISLAND-PH before the first 4PX call, so Puerto Rico / Hawaii
+ * never submit S5058, hit 010109005, and mint a second ref_no.
+ *
+ * Express / other deliberately chosen codes are left alone.
+ *
+ * @param {object} [input]
+ * @param {string} [input.country]
+ * @param {string} [input.selectedCode]
+ * @param {string} [input.postCode]
+ * @param {string} [input.state]
+ * @returns {boolean}
+ */
+function prefersUsIslandPhLane({
+	country,
+	selectedCode = '',
+	postCode = '',
+	state = '',
+} = {}) {
+	if (_normCountry(country) !== 'US') return false;
+	if (!isUsIslandPhAddress({ postCode, state })) return false;
+	const from = (selectedCode || '').toString().trim().toUpperCase();
+	if (!from) return true;
+	if (from === FOURPX_US_ISLAND_PH_CODE) return true;
+	return from === FOURPX_POSTLINK_S5058_CODE || from === 'POSTLINK-S5058';
+}
+
 module.exports = {
 	FOURPX_POSTLINK_S5058_CODE,
 	FOURPX_US_ISLAND_PH_CODE,
@@ -511,4 +554,5 @@ module.exports = {
 	isUsIslandPhAddress,
 	isRemoteIslandZipRejection,
 	resolveUsIslandZipFallback,
+	prefersUsIslandPhLane,
 };

@@ -65,7 +65,7 @@ check('tracking numbers are data, never interpolated into executable onclick cod
   assert.ok(!/open4pxTrackModal\('\$\{no\}'\)/.test(html));
   assert.ok(/class="tracking-number fpx-track-link" data-tracking="\$\{safeTrackingCode\}"/.test(html));
   assert.ok(!/open4pxTrackModal\('\$\{o\.tracking_code\}'\)/.test(html));
-  assert.ok(/class="ship-alert-track" data-tracking="\$\{safeTracking\}"/.test(html));
+  assert.ok(/class="ship-comp-track ship-track-link" data-tracking="\$\{safeNo\}"/.test(html));
   assert.ok(/tracking-carrier">\$\{escHtml\(o\.carrier_name\)\}/.test(html));
 });
 

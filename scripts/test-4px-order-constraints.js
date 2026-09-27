@@ -23,10 +23,20 @@ const {
   enforceSenderStreet,
   resolveRecipientState,
   generateRecipientPhone,
+  sanitizeRecipientPostCode,
   normalizeShipOrderResponse,
   planShipOrderReference,
   mintShipOrderFallbackRef,
-  isRefInProcessingRejection,
+	existingTaggedRef,
+	isTransientFourpxTransportError,
+	isRefInProcessingRejection,
+  isRefAlreadyExistsRejection,
+  extractDuplicateRefCandidates,
+  duplicateRefUnrecoverableError,
+  resolveExistingShipOrder,
+  coerceFourpxData,
+  uniqueLookupKeys,
+  shipOrderGetPayloads,
   DEFAULT_RECIPIENT_PHONE,
 } = require('../src/fourpx/orders');
 
@@ -260,9 +270,133 @@ console.log('4PX order field-constraint regression test\n');
   assert(!isRefInProcessingRejection(null), 'null is not DS000007');
 }
 
-console.log('');
-if (failures > 0) {
-  console.error(`${failures} assertion(s) FAILED`);
-  process.exit(1);
+// 7. DS000056 — committed duplicate ref. Recover the existing consignment; never mint.
+{
+  const dup = Object.assign(new Error('ref_no had already exists'), { code: 'DS000056' });
+  const processing = Object.assign(new Error('Ref_no is in processing'), { code: 'DS000007' });
+  assert(isRefAlreadyExistsRejection(dup), 'detects DS000056 by code + message');
+  assert(isRefAlreadyExistsRejection({ code: 'DS000056' }), '…and by code alone');
+  assert(isRefAlreadyExistsRejection('ref_no ETSY-4173275538-ISLMU257AUE had already exists'), '…and by the official "had already exists" wording');
+  assert(!isRefAlreadyExistsRejection(processing), 'DS000007 is not a committed duplicate');
+  assert(!isRefAlreadyExistsRejection(new Error('remote ZIP codes, no service')), 'island ZIP errors are not DS000056');
+  assert(!isRefAlreadyExistsRejection(null), 'null is not DS000056');
+  assert(!isRefInProcessingRejection(dup), 'DS000056 is not "in processing"');
+
+  const fromBody = extractDuplicateRefCandidates({
+    code: 'DS000056',
+    message: 'ref_no had already exists',
+    apiBody: {
+      result: '0',
+      errors: [{ error_code: 'DS000056', error_msg: 'ref_no had already exists', reference_code: 'ETSY-4173275538-ISLMU257AUE' }],
+    },
+  });
+  assert(fromBody.includes('ETSY-4173275538-ISLMU257AUE'), 'extracts island-fallback reference_code from DS000056 apiBody');
+
+  const fromMsg = extractDuplicateRefCandidates(new Error('ref_no ETSY-4171956661 had already exists'));
+  assert(fromMsg.includes('ETSY-4171956661'), 'extracts ETSY-{id} from the error message');
+
+  const payloads = shipOrderGetPayloads('ETSY-1');
+  assert(payloads[0] && payloads[0].request_no === 'ETSY-1', 'order.get first tries official request_no');
+  assert(payloads[1] && payloads[1].ref_no === 'ETSY-1' && !payloads[1].request_no, '…then customer ref_no (XOR, never both)');
+
+  const jsonString = coerceFourpxData(JSON.stringify({
+    consignment_list: [{ ds_consignment_no: 'C9', '4px_tracking_no': '4PX9', customer_ref_no: 'ETSY-9' }],
+  }));
+  const fromString = normalizeShipOrderResponse(JSON.stringify({
+    consignment_list: [{ ds_consignment_no: 'C9', '4px_tracking_no': '4PX9', customer_ref_no: 'ETSY-9' }],
+  }), 'ETSY-9');
+  assert(jsonString.consignment_list && jsonString.consignment_list[0].ds_consignment_no === 'C9', 'coerceFourpxData parses JSON-string envelopes');
+  assert(fromString && fromString.dsConsignmentNo === 'C9' && fromString.refNo === 'ETSY-9', 'normalizes JSON-string consignment_list + customer_ref_no');
+
+  const camelTrack = normalizeShipOrderResponse({
+    consignment_list: [{ oc_id: 'OC1', '4pxTrackingNo': '4PX10', customer_ref_no: 'ETSY-10' }],
+  }, 'ETSY-10');
+  assert(camelTrack && camelTrack.dsConsignmentNo === 'OC1' && camelTrack.trackingNo === '4PX10', 'normalizes oc_id + 4pxTrackingNo aliases');
+
+  const consignmentOnly = normalizeShipOrderResponse({
+    ds_consignment_no: 'C-ONLY',
+    ref_no: 'ETSY-11',
+  }, 'ETSY-11');
+  assert(consignmentOnly && consignmentOnly.dsConsignmentNo === 'C-ONLY' && !consignmentOnly.trackingNo, 'adopts consignment-only get responses (tracking may lag)');
+
+  const keys = uniqueLookupKeys('ETSY-1', 'etsy-1', 'ETSY-1-ISLABC', '');
+  assert(keys.length === 2 && keys[0] === 'ETSY-1' && keys[1] === 'ETSY-1-ISLABC', 'uniqueLookupKeys de-dupes case-insensitively and keeps island refs');
+
+  const unrecoverable = duplicateRefUnrecoverableError(dup, {
+    receiptId: 4173275538,
+    refNo: 'ETSY-4173275538-ISLMU257AUE',
+  });
+  assert(unrecoverable.status === 409 && unrecoverable.code === 'DS000056', 'unrecoverable DS000056 is a 409, not a new create');
+  assert(/do not create a second shipment/i.test(unrecoverable.message), '…and tells the operator not to book a second label');
+  assert(/ETSY-4173275538-ISLMU257AUE/.test(unrecoverable.message), '…naming the committed ref');
+
+  const fs = require('fs');
+  const path = require('path');
+  const serverSrc = fs.readFileSync(path.join(__dirname, '../src/server/index.js'), 'utf8');
+  assert(/isRefAlreadyExistsRejection\(err\)/.test(serverSrc) && /committedDuplicate: true/.test(serverSrc),
+    'create path treats DS000056 as a committed duplicate and polls to adopt');
+  assert(/Never mint a new ref/.test(serverSrc) || /never mint/i.test(serverSrc),
+    '…and documents that a second ref must not be minted');
+  const pageSrc = fs.readFileSync(path.join(__dirname, '../public/index.html'), 'utf8');
+  assert(/DS000056/.test(pageSrc) && /had already exists/.test(pageSrc),
+    'packing drawer humanizes DS000056 instead of showing the raw 4PX string');
+  assert(/FOURPX_CREATE_LOCKED/.test(pageSrc) && /FOURPX_CREATE_AMBIGUOUS/.test(pageSrc),
+    'packing drawer humanizes lock / lost-response errors instead of offering a second create');
+  assert(/_fpxIsUsIslandPhAddress/.test(pageSrc) && /_fpxIslandProduct/.test(pageSrc),
+    'drawer/bulk pre-select US-ISLAND-PH from the recipient ZIP/state');
 }
-console.log('All assertions passed.');
+
+// 8. Tagged-ref reuse + transport faults must never mint a second paid label.
+{
+  const island = mintShipOrderFallbackRef('ETSY-4173275538', 'ISL', 123456);
+  assert(existingTaggedRef(island, 'ETSY-4173275538', 'ISL') === island, 'existingTaggedRef reuses an ISL fallback already on the receipt');
+  assert(existingTaggedRef('ETSY-4173275538', 'ETSY-4173275538', 'ISL') === '', '…and does not treat the base ref as an ISL tag');
+  assert(existingTaggedRef('ETSY-99-PABC', 'ETSY-99', 'P') === 'ETSY-99-PABC', '…and reuses a P-tag from DS000007 recovery');
+  assert(existingTaggedRef('ETSY-99-ISLXYZ', 'ETSY-99', 'P') === '', '…without confusing ISL and P tags');
+
+  assert(sanitizeRecipientPostCode('US', '00912-1234') === '00912', 'US ZIP+4 is sent as 5 digits so 4PX does not reject the hyphen');
+  assert(sanitizeRecipientPostCode('US', '96367-0059') === '96367', 'APO ZIP+4 is stripped to 5 digits before the 4PX create');
+  assert(sanitizeRecipientPostCode('GB', 'SW1A 1AA') === 'SW1A 1AA', 'non-US postcodes are left unchanged');
+  assert(sanitizeRecipientPostCode('US', '') === '', 'empty US ZIP stays empty');
+
+  const timeout = Object.assign(new Error('timeout of 30000ms exceeded'), { code: 'ETIMEDOUT' });
+  const reset = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+  const dup = Object.assign(new Error('ref_no had already exists'), { code: 'DS000056' });
+  const proc = Object.assign(new Error('Ref_no is in processing'), { code: 'DS000007' });
+  assert(isTransientFourpxTransportError(timeout), 'create timeout is a transient transport fault');
+  assert(isTransientFourpxTransportError(reset), 'ECONNRESET / socket hang up is a transient transport fault');
+  assert(!isTransientFourpxTransportError(dup), 'DS000056 is not classified as a transport fault');
+  assert(!isTransientFourpxTransportError(proc), 'DS000007 is not classified as a transport fault');
+  assert(!isTransientFourpxTransportError(null), 'null is not a transport fault');
+}
+
+(async () => {
+  let lookupCount = 0;
+  const recovered = await resolveExistingShipOrder('k', 's', ['ETSY-4173275538', 'ETSY-4173275538-ISLMU257AUE'], {
+    attempts: 3,
+    delayMs: 0,
+    searchRecent: false,
+    tryLabel: false,
+    error: { code: 'DS000056', apiBody: { errors: [{ reference_code: 'ETSY-4173275538-ISLMU257AUE' }] } },
+    lookup: async (key) => {
+      lookupCount += 1;
+      if (lookupCount < 4) return null;
+      if (key !== 'ETSY-4173275538-ISLMU257AUE') return null;
+      return { dsConsignmentNo: 'DS-REC', trackingNo: '4PX-REC', refNo: key, logisticsProductCode: 'S5118' };
+    },
+  });
+  assert(recovered && recovered.dsConsignmentNo === 'DS-REC' && recovered.logisticsProductCode === 'S5118',
+    'resolveExistingShipOrder polls then adopts the island-fallback ref');
+  assert(lookupCount >= 4, '…and does not give up on the first empty get');
+
+  console.log('');
+  if (failures > 0) {
+    console.error(`${failures} assertion(s) FAILED`);
+    process.exit(1);
+  }
+  console.log('All assertions passed.');
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
+

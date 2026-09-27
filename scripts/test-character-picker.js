@@ -33,7 +33,7 @@ const fs = require('fs')
 const path = require('path')
 const vm = require('vm')
 
-const { resolveOperatorCharacter, isGenericName } = require('../src/listings/ai-generator')
+const { resolveOperatorCharacter, isGenericName, suppressedNamesForOverride, replaceSuppressedNames } = require('../src/listings/ai-generator')
 
 let JSDOM = null
 try {
@@ -305,6 +305,19 @@ test('a real character override is unaffected, and gains its catalog franchise',
 	assert.strictEqual(c.characterFranchise, 'Sanrio')
 	assert.strictEqual(c.characterConfidence, 100)
 	assert.strictEqual(c.characterLowConfidence, false)
+})
+
+test('naming the design "bunny" drops the detected Miffy name from the copy', () => {
+	const summary = { character_name: 'Miffy', character_franchise: 'Mercis', design_subject: 'Miffy Rabbit', design_motifs: ['miffy rabbit'] }
+	const c = resolveOperatorCharacter('bunny', summary)
+	assert.strictEqual(c.characterName, 'bunny')
+	assert.strictEqual(c.characterFranchise, '', 'bunny must not inherit the Miffy franchise')
+	assert.ok(c.suppressNames.some((name) => name.toLowerCase() === 'miffy'))
+	const title = replaceSuppressedNames('Miffy Rabbit Pink MAGSAFE Cover', c.suppressNames, 'bunny')
+	const description = replaceSuppressedNames('The case shows Miffy with a pink camera bumper.', c.suppressNames, 'bunny')
+	assert.ok(!/miffy/i.test(title), title)
+	assert.ok(!/miffy/i.test(description), description)
+	assert.ok(/bunny/i.test(title))
 })
 
 test('an off-catalog character keeps the vision pass\'s franchise as a fallback', () => {

@@ -62,7 +62,8 @@ test('Route rendering is chunked, cancellable, and identity-safe', () => {
 test('offscreen mobile cards can skip layout and image decode is async', () => {
 	assert.ok(dashboard.includes('content-visibility: auto'))
 	assert.ok(dashboard.includes('contain-intrinsic-size: auto 200px'))
-	assert.ok(dashboard.includes('contain-intrinsic-size: auto 100px'))
+	assert.ok(dashboard.includes('contain-intrinsic-size: auto 148px'))
+	assert.ok(dashboard.includes('contain-intrinsic-size: auto 120px'))
 	assert.ok((dashboard.match(/loading="lazy" decoding="async"/g) || []).length >= 3)
 })
 

@@ -50,11 +50,12 @@ const CAPABILITIES = Object.freeze({
 	'orders:purchase': 'Flag orders as needing purchase and mark products/components bought',
 	'orders:verify': 'Confirm an order’s products are physically in hand',
 	'orders:pack': 'Mark orders packaged / unpackaged',
-	'orders:ship': 'Ship an order and maintain its tracking number',
+	'orders:ship': 'Ship an order, correct its ship-to address, and maintain its tracking number',
 	'shipping:4px': 'Create, download and print 4PX labels; refresh 4PX tracking',
 	'shipping:pickup': 'Book, reprint and cancel a 4PX door-to-door pickup (揽收预约) for sealed parcels',
 	'exchanges:manage': 'Open and cancel wrong-model exchanges',
 	'exchanges:resolve': 'Mark a wrong-model exchange done / reopen it',
+	'orders:address-review': 'Review military and Australia addresses: mark them ready to shop, or hold them on Issues if they cannot ship',
 
 	// Shopping route
 	'route:images': 'View product, charm, substitution and floor-map images',
@@ -69,10 +70,17 @@ const CAPABILITIES = Object.freeze({
 	// Back office
 	'sourcing:manage': 'Maintain the sourcing library (design suppliers and their product zips)',
 
+	// Packing / shipping supplies (boxes, stickers, mailers, tape…). Employees
+	// share the catalog with the owner: names, photos, prices, supplier links,
+	// and add/retire. Period spend totals and Mark purchased stay owner-only
+	// inside the route handlers.
+	'supplies:manage': 'Count, restock and edit packing-supplies inventory',
+
 	// Owner-only surfaces. These have no ACL rules — `owner` bypasses the ACL —
 	// but they are named here so the UI can gate tabs from the same vocabulary.
 	'operations:checklist': 'View and update the shared manual daily/weekly operations checklist',
 	'finance:read': 'See earnings, payouts and revenue figures',
+	'news:read': 'Read the daily Etsy platform briefing',
 	'listings:manage': 'Create, edit and publish Etsy listings',
 	'shops:admin': 'Manage shops, OAuth tokens and sync settings',
 	'shipping:admin': 'Manage shipping profiles and carrier configuration',
@@ -119,6 +127,7 @@ const ROLE_CAPABILITIES = Object.freeze({
 		'route:merges',
 		'shop:route',
 		'sourcing:manage',
+		'supplies:manage',
 	]),
 
 	shopper: Object.freeze(['app:session', 'route:images', 'route:merges', 'exchanges:resolve', 'shop:route']),
@@ -149,7 +158,11 @@ const API_RULES = Object.freeze([
 
 	// ── Orders ───────────────────────────────────────────────────────────────
 	{ m: 'GET', re: /^\/api\/orders$/, cap: 'orders:read' },
+	{ m: 'GET', re: /^\/api\/orders\/calendar-counts$/, cap: 'orders:read' },
 	{ m: 'GET', re: /^\/api\/orders\/[^/]+\/issues$/, cap: 'orders:read' },
+	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/clear-address-review$/, cap: 'orders:address-review' },
+	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/hold-address-review$/, cap: 'orders:address-review' },
+	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/reopen-address-review$/, cap: 'orders:address-review' },
 	{ m: '*', re: /^\/api\/orders\/[^/]+\/note$/, cap: 'orders:notes' },
 
 	// Purchasing (the buy queue). An employee sourcing on the floor marks
@@ -174,6 +187,10 @@ const API_RULES = Object.freeze([
 	// Shipping. Manual (off-Etsy) orders can be packed and shipped like any
 	// other, but creating/editing/deleting one stays an owner catalog action and
 	// therefore has no rule here.
+	// Buyer messaged a corrected ship-to. The packer who creates the 4PX label
+	// is who has the message in front of them, so this is part of shipping.
+	{ m: 'PUT', re: /^\/api\/orders\/[^/]+\/shipping-address$/, cap: 'orders:ship' },
+	{ m: 'DELETE', re: /^\/api\/orders\/[^/]+\/shipping-address$/, cap: 'orders:ship' },
 	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/ship$/, cap: 'orders:ship' },
 	{ m: 'POST', re: /^\/api\/orders\/[^/]+\/update-tracking$/, cap: 'orders:ship' },
 	// Ship recovery: finish an order that already has a paid 4PX label but was
@@ -197,8 +214,10 @@ const API_RULES = Object.freeze([
 	{ m: 'POST', re: /^\/api\/4px\/bulk-create-order$/, cap: 'shipping:4px' },
 	{ m: 'GET', re: /^\/api\/4px\/bulk-labels\.zip$/, cap: 'shipping:4px' },
 	{ m: 'POST', re: /^\/api\/4px\/bulk-complete$/, cap: 'shipping:4px' },
+	{ m: 'GET', re: /^\/api\/4px\/bulk-complete\/jobs\/[^/]+$/, cap: 'shipping:4px' },
 	{ m: 'GET', re: /^\/api\/4px\/track\/[^/]+$/, cap: 'shipping:4px' },
 	{ m: 'POST', re: /^\/api\/4px\/track\/refresh\/[^/]+$/, cap: 'shipping:4px' },
+	{ m: 'POST', re: /^\/api\/4px\/track\/refresh-batch$/, cap: 'shipping:4px' },
 
 	// 4PX door-to-door pickup (揽收预约). Its own capability rather than a reuse
 	// of `shipping:4px`: booking a collection commits a carrier visit to the
@@ -225,6 +244,10 @@ const API_RULES = Object.freeze([
 	{ m: 'POST', re: /^\/api\/4px\/shipments\/[^/]+\/buyer-notice$/, cap: 'shipping:admin' },
 	{ m: 'GET', re: /^\/api\/4px\/balance$/, cap: 'shipping:admin' },
 	{ m: 'POST', re: /^\/api\/4px\/balance$/, cap: 'shipping:admin' },
+	{ m: 'GET', re: /^\/api\/4px\/compensation-cases$/, cap: 'shipping:admin' },
+	{ m: 'POST', re: /^\/api\/4px\/compensation-cases$/, cap: 'shipping:admin' },
+	{ m: 'PATCH', re: /^\/api\/4px\/compensation-cases\/[^/]+$/, cap: 'shipping:admin' },
+	{ m: 'DELETE', re: /^\/api\/4px\/compensation-cases\/[^/]+$/, cap: 'shipping:admin' },
 
 	// Wrong-model exchanges. `resolve` is the shop-floor half (the shopper has
 	// it too); `manage` opens and cancels them.
@@ -258,6 +281,9 @@ const API_RULES = Object.freeze([
 	// product at the stall is the only reliable judge, so both floor roles get it.
 	{ m: 'POST', re: /^\/api\/route\/product-merges$/, cap: 'route:merges' },
 	{ m: 'DELETE', re: /^\/api\/route\/product-merges$/, cap: 'route:merges' },
+	// Same judgement from the Sourcing supplier drawer: click duplicate catalog
+	// cards and collapse them (writes canonical keys; listing edges when known).
+	{ m: 'POST', re: /^\/api\/route\/product-map\/merge$/, cap: 'route:merges' },
 
 	// Launching a desktop app happens on the SERVER's machine, so it only makes
 	// sense for whoever is sitting at it. Remote staff download instead — the UI
@@ -315,24 +341,37 @@ const API_RULES = Object.freeze([
 	// ABOVE the sourcing catch-all, which would otherwise swallow it.
 	{ m: 'GET', re: /^\/api\/sourcing\/catalog(?:\/|$)/, cap: 'route:read' },
 
+	// Photo lookup: an employee uploads a phone snap and gets ranked catalog
+	// matches (supplier + stall). This is a Sourcing action, not Shopping Mode.
+	// POST is not covered by GET /api/sourcing/catalog, so it must be explicit.
+	// Read-only — no catalog writes.
+	{ m: 'POST', re: /^\/api\/sourcing\/find-by-photo$/, cap: 'sourcing:manage' },
+
 	// ── Sourcing library ─────────────────────────────────────────────────────
 	{ m: '*', re: /^\/api\/sourcing\//, cap: 'sourcing:manage' },
+
+	// ── Shipping supplies inventory ──────────────────────────────────────────
+	{ m: '*', re: /^\/api\/supplies\//, cap: 'supplies:manage' },
 ])
 
 // ── Dashboard tabs ───────────────────────────────────────────────────────────
-// The capability each top-level tab needs. The browser mirrors these in
-// `data-cap` attributes on the tab buttons; scripts/test-access-policy.js
-// asserts the two never drift apart.
+// The capability each top-level tab needs. Key order matches the dashboard
+// information architecture (home → fulfillment → catalog → performance →
+// admin → route last). The browser mirrors these in `data-cap` attributes
+// on the tab buttons; scripts/test-access-policy.js asserts the two never
+// drift apart, and scripts/test-dashboard-nav.js pins the visible order.
 const TAB_CAPABILITY = Object.freeze({
 	overview: 'finance:read',
 	orders: 'orders:read',
+	shipping: 'shipping:admin',
+	supplies: 'supplies:manage',
 	listings: 'listings:manage',
 	bulk: 'listings:manage',
-	events: 'shops:admin',
-	shops: 'shops:admin',
 	earnings: 'finance:read',
 	growth: 'finance:read',
-	shipping: 'shipping:admin',
+	news: 'news:read',
+	events: 'shops:admin',
+	shops: 'shops:admin',
 	route: 'route:read',
 })
 

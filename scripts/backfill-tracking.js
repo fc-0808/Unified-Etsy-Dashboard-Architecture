@@ -100,14 +100,14 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
     console.log(`  ${shop}: pre=${stats.pre} in-transit=${stats.intransit} unknown=${stats.unk}`);
   }
 
-  // Verify Y2KASEshop count
+  // Verify Y2KiPhoneCases count
   const y2kPreTransit = db.prepare(`
     SELECT COUNT(*) as cnt FROM receipts
-    WHERE shop_id = 'Y2KASEshop' AND is_shipped = 1
+    WHERE shop_id = 'Y2KiPhoneCases' AND is_shipped = 1
       AND tracking_code IS NOT NULL
       AND shipment_notified_at IS NOT NULL
       AND shipment_notified_at >= ?
       AND carrier_confirmed_at IS NULL
   `).get(windowCutoff);
-  console.log(`\nY2KASEshop pre-transit count: ${y2kPreTransit.cnt} (expected: ~22)`);
+  console.log(`\nY2KiPhoneCases pre-transit count: ${y2kPreTransit.cnt}`);
 })();

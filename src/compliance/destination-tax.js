@@ -29,15 +29,11 @@
  * ----------------------------------------------------------------------------
  * Whether the identifier may be written on the parcel is NOT uniform:
  *
- *   • EU (IOSS) — Etsy forbids it. "Never write this number on your packages";
- *     it must be transmitted electronically by the carrier. Printing IM… on a
- *     box is a policy breach, not a belt-and-braces extra.
- *   • UK (VAT)  — Etsy instructs the opposite, verbatim on the receipt:
- *     "Please write Etsy's UK VAT number, 370 6004 28, on your package."
+ *   • EU (IOSS) — do not print it. The carrier transmits it electronically.
+ *   • UK (VAT)  — write 370 6004 28 on the package.
  *   • CH / NZ — the identifier belongs on the CN22/CN23 customs form.
  *   • AU — Etsy collects GST at checkout, but on our 4PX lane the carrier
- *     declares it: the packer writes nothing, and nothing forbids the number
- *     either. That is `disclosure: CARRIER`, and the bench shows no notice for
+ *     declares it: the packer writes nothing. That is `disclosure: CARRIER`, and the bench shows no notice for
  *     it. The ARN stays here because it is still the number for the
  *     destination — what changed is who writes it down, not what it is.
  *   • NO (VOEC) — same, and Norway additionally requires the carrier to submit
@@ -77,7 +73,7 @@ const EU27 = Object.freeze([
  * packer does with it. This is the field the bench renders from, so it decides
  * whether a notice appears at all.
  *
- *   ELECTRONIC — carrier data only, and writing it on the parcel is PROHIBITED.
+ *   ELECTRONIC — carrier data only. Do not print it on the parcel.
  *                Worth a notice precisely because it is a "do not".
  *   PACKAGE    — write it on the parcel / customs form. The notice is the task.
  *   BOTH       — carrier data is mandatory and the customs form expects it too.
@@ -273,7 +269,7 @@ const SCHEMES = Object.freeze({
     disclosure: DISCLOSURE.ELECTRONIC,
     customs_currency: 'EUR',
     threshold: Object.freeze({ amount: 150, currency: 'EUR', basis: 'intrinsic value, excluding delivery' }),
-    // Etsy is explicit and this is the one scheme where labelling is a breach.
+    // Electronic only. Do not print this number on the parcel.
     electronic_note: 'It travels with the 4PX shipment, so customs sees the VAT as prepaid.',
     package_instruction: null,
     reference_url: 'https://www.etsy.com/seller-handbook/article/1014946249688',

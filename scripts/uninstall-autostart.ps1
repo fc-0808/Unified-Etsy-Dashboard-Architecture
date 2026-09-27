@@ -20,6 +20,7 @@ Write-Host "  - Scheduled Task '$TaskName' removed (if it existed)"
 $startupDir = [Environment]::GetFolderPath('Startup')
 Remove-Item (Join-Path $startupDir 'EtsyDashboard.vbs')              -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $startupDir 'EtsyDashboard-resurrect.cmd')    -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $startupDir 'EtsyDashboard-resurrect.lnk')    -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $startupDir 'EtsyDashboard-tray.vbs')         -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $startupDir 'EtsyDashboard-tray.lnk')         -ErrorAction SilentlyContinue
 Write-Host '  - Startup-folder launchers removed (resurrect + tray)'
@@ -49,6 +50,7 @@ Write-Host '  - Desktop and Start Menu shortcuts removed'
 $pm2Cmd = Join-Path $ProjectRoot 'node_modules\.bin\pm2.cmd'
 if (Test-Path $pm2Cmd) {
   & $pm2Cmd delete etsy-dashboard 2>$null
+  & $pm2Cmd delete etsy-funnel-watchdog 2>$null
   & $pm2Cmd save --force 2>$null
   & $pm2Cmd kill 2>$null
   Write-Host '  - PM2 process stopped and daemon shut down'

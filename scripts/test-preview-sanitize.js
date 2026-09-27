@@ -345,7 +345,7 @@ function manager(previewJson) {
 			PRIMARY KEY (job_id, product_folder));
 	`)
 	db.prepare('INSERT INTO bulk_jobs (job_id, shop_key, shop_name, input_path, dry_run) VALUES (?,?,?,?,1)')
-		.run('job-1', 'shop', 'KawaiiiPhoneCases', 'C:/does/not/exist')
+		.run('job-1', 'shop', 'IPhoneCasesDesignArt', 'C:/does/not/exist')
 	db.prepare('INSERT INTO bulk_job_items (job_id, product_folder, product_name, seq, preview_json) VALUES (?,?,?,1,?)')
 		.run('job-1', 'C:/does/not/exist/product', 'Pink Cherries', previewJson)
 	return new BulkJobManager({ db, resolveShopClient: async () => { throw new Error('no Etsy in tests') } })
@@ -385,7 +385,7 @@ if (!Database) {
 		const detail = manager(JSON.stringify(realWorldPreview())).buildItemDetail('job-1', 1)
 		assert.strictEqual(detail.item.seq, 1)
 		assert.strictEqual(detail.item.name, 'Pink Cherries')
-		assert.strictEqual(detail.job.shop_name, 'KawaiiiPhoneCases')
+		assert.strictEqual(detail.job.shop_name, 'IPhoneCasesDesignArt')
 		assert.strictEqual(detail.preview.currency, 'HKD')
 	})
 }

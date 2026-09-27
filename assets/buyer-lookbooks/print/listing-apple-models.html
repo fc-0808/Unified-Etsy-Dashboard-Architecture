@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Y2KASE iPhone models</title>
+  <style>
+    @font-face { font-family: Fredoka; src: url("fonts/Fredoka-variable.ttf") format("truetype"); font-weight: 300 700; }
+    html, body { margin: 0; width: 2000px; height: 2000px; overflow: hidden; font-family: Fredoka, sans-serif; font-variant-ligatures: none; color: #4a1848; background: linear-gradient(180deg, #ffe6f8, #ead9ff 50%, #d4f3ff); -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    
+    .frame { box-sizing: border-box; width: 2000px; height: 2000px; padding: 36px 48px 40px; display: flex; flex-direction: column; }
+    .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .top img { height: 100px; width: auto; object-fit: contain; }
+    .meta { font-size: 18px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: #ff2f9f; }
+    h1 { font-size: 48px; font-weight: 700; color: #ff2f9f; margin: 0 0 8px; letter-spacing: -0.02em; }
+    .lede { font-size: 22px; font-weight: 500; margin: 0 0 12px; color: #5a2458; line-height: 1.35; }
+    .note { background: #fff; border: 2px solid #ff2f9f; color: #4a1848; padding: 12px 18px; font-size: 20px; font-weight: 600; border-radius: 14px; margin-bottom: 16px; text-align: center; flex-shrink: 0; }
+    .body { display: grid; grid-template-columns: 1.22fr 0.98fr; gap: 16px; flex: 1; min-height: 0; }
+    .models { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+    .group { background: #fff; border: 2px solid #ffc2e4; border-radius: 18px; padding: 14px 18px; display: grid; grid-template-columns: 160px 1fr; gap: 12px; align-items: center; min-height: 0; flex: 1; }
+    h2 { font-size: 16px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #ff2f9f; margin: 0; }
+    .list { display: flex; flex-wrap: wrap; gap: 8px; }
+    .model { background: #fff5fb; border: 2px solid #ffc2e4; border-radius: 999px; padding: 7px 14px; font-size: 20px; font-weight: 600; color: #4a1848; }
+    .help { background: #fff5fb; border: 2px solid #ff2f9f; border-radius: 18px; padding: 18px 20px; flex: 1.2; display: flex; flex-direction: column; justify-content: center; gap: 8px; }
+    .help b { font-size: 16px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #ff2f9f; }
+    .help p { margin: 0; font-size: 20px; font-weight: 500; line-height: 1.35; color: #5a2458; }
+    .index { background: #fff; border: 2px solid #ffc2e4; border-radius: 18px; padding: 18px 20px 20px; display: flex; flex-direction: column; min-height: 0; }
+    .index h2 { margin-bottom: 12px; flex-shrink: 0; }
+    .index ol { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; flex: 1; min-height: 0; grid-auto-rows: 1fr; }
+    .index li { font-size: 19px; font-weight: 550; color: #4a1848; display: flex; align-items: center; gap: 10px;  }
+    .idx-copy { min-width: 0; }
+    .idx-copy b { display: block; font-size: 24px; font-weight: 650; }
+    .sub { display: block; margin-top: 4px; font-size: 16px; font-weight: 500; color: #7a4aa0; line-height: 1.3; }
+    .index-example { flex: 1; display: flex; flex-direction: column; justify-content: center; margin-top: 10px; background: #fff5fb; border: 2px solid #ff2f9f; border-radius: 16px; padding: 20px 22px; }
+    .index-example b { display: block; font-size: 16px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #ff2f9f; margin-bottom: 10px; }
+    .index-example p { margin: 0; font-size: 30px; font-weight: 650; line-height: 1.35; color: #4a1848; }
+    .index-example p + p { margin-top: 10px; }
+    .color-note { margin-top: 12px !important; font-size: 18px !important; font-weight: 550 !important; color: #7a4aa0 !important; }
+    em { font-style: normal; color: #ff2f9f; }
+    .sku { min-width: 36px; height: 24px; padding: 0 7px; border-radius: 7px; background: #ff2f9f; color: #fff; font-size: 14px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; letter-spacing: 0.04em; flex-shrink: 0; margin-top: 0; }
+    .ms { display: inline-block; margin-left: 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #fff; background: #4a1848; border-radius: 5px; padding: 2px 6px; vertical-align: middle; }
+  
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <div class="top"><img src="logo.jpg" alt="Y2KASE"><div class="meta">iPhone · models</div></div>
+    <h1>iPhones we print</h1>
+    <p class="lede">Reply with the exact name. The listing dropdown is the final check.</p>
+    <div class="note">MagSafe is No. 01 and No. 02 only. Some styles skip Mini, 11 Pro, or older models — those tags are on the style photos.</div>
+    <div class="body">
+      <div class="models">
+      <div class="group"><h2>iPhone 18</h2><div class="list"><span class="model">iPhone 18 Pro</span><span class="model">iPhone 18 Pro Max</span></div></div>
+      <div class="group"><h2>iPhone 17</h2><div class="list"><span class="model">iPhone 17</span><span class="model">iPhone Air</span><span class="model">iPhone 17 Pro</span><span class="model">iPhone 17 Pro Max</span></div></div>
+      <div class="group"><h2>iPhone 16</h2><div class="list"><span class="model">iPhone 16</span><span class="model">iPhone 16 Plus</span><span class="model">iPhone 16 Pro</span><span class="model">iPhone 16 Pro Max</span></div></div>
+      <div class="group"><h2>iPhone 15</h2><div class="list"><span class="model">iPhone 15</span><span class="model">iPhone 15 Pro</span><span class="model">iPhone 15 Pro Max</span><span class="model">iPhone 14/15 Plus</span></div></div>
+      <div class="group"><h2>iPhone 13 / 14</h2><div class="list"><span class="model">iPhone 13/14</span><span class="model">iPhone 14 Pro</span><span class="model">iPhone 14 Pro Max</span><span class="model">iPhone 13 Pro</span><span class="model">iPhone 13 Pro Max</span></div></div>
+      <div class="group"><h2>iPhone 12</h2><div class="list"><span class="model">iPhone 12/12 Pro</span><span class="model">iPhone 12 Pro Max</span></div></div>
+      <div class="group"><h2>iPhone 11</h2><div class="list"><span class="model">iPhone 11</span><span class="model">iPhone 11 Pro</span><span class="model">iPhone 11 Pro Max</span></div></div>
+        <div class="help"><b>How to write it</b><p>Copy the chip text, not a nickname. Mini and 11 Pro are skipped on some styles — those tags are on the photos.</p></div>
+      </div>
+      <div class="index">
+        <h2>Style index</h2>
+        <ol><li><span class="sku">01</span> MagSafe clear <span class="ms">MagSafe</span></li><li><span class="sku">02</span> MagSafe wrap <span class="ms">MagSafe</span></li><li><span class="sku">03</span> Full-wrap film</li><li><span class="sku">04</span> Soft wrap</li><li><span class="sku">05</span> Dual-layer wrap</li><li><span class="sku">06</span> Wave wrap</li><li><span class="sku">07</span> Glass back</li><li><span class="sku">08</span> Crystal glaze</li><li><span class="sku">09</span> Painted glass</li><li><span class="sku">10</span> Metallic glass</li><li><span class="sku">11</span> Aurora glass</li><li><span class="sku">12</span> Iridescent silver</li><li><span class="sku">13</span> Large-cut glass</li><li><span class="sku">14</span> Frosted glass</li><li><span class="sku">15</span> Clear acrylic</li><li><span class="sku">16</span> Acrylic mirror</li><li><span class="sku">17</span> Frosted acrylic</li><li><span class="sku">18</span> Frame mirror</li><li><span class="sku">19</span> Black-frame acrylic</li><li><span class="sku">20</span> Grooved acrylic</li><li><span class="sku">21</span> Lambskin wrap</li><li><span class="sku">22</span> Clear soft</li><li><span class="sku">23</span> Space clear</li><li><span class="sku">24</span> Cream texture</li><li><span class="sku">25</span> Jelly</li><li><span class="sku">26</span> Dual-tone clear</li><li><span class="sku">27</span> Camera-ring soft</li><li><span class="sku">28</span> Square-edge soft</li><li><span class="sku">29</span> Velvet cube</li><li><span class="sku">30</span> Stepped camera</li><li><span class="sku">31</span> Corner-drop clear</li><li><span class="sku">32</span> Bumper plated</li><li><span class="sku">33</span> Macaron silicone</li></ol>
+        
+      </div>
+    </div>
+  </div>
+</body>
+</html>

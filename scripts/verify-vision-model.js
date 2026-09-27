@@ -85,7 +85,7 @@ console.log()
 async function fetchImageAsDataUrl(url) {
   const https = require('https')
   return new Promise((resolve, reject) => {
-    https.get(url, { headers: { 'User-Agent': 'Y2KASEshop-verify/1.0' } }, (res) => {
+    https.get(url, { headers: { 'User-Agent': 'Y2KASE-verify/1.0' } }, (res) => {
       if (res.statusCode !== 200) {
         reject(new Error(`HTTP ${res.statusCode} fetching test image`))
         res.resume()

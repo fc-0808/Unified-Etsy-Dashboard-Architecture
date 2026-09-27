@@ -10,9 +10,9 @@
  *
  * A product type MAY add a second, device-model axis (custom property 513):
  *
- *   iPhone case      12 models × 6 bundles  → "Phone Model"  + "Styles"
- *   AirPods case      7 models × 3 bundles  → "AirPods Model"+ "Styles"
- *   Apple Watch band  (no model axis) × 3   → "Band Size"
+ *   iPhone case      N models × 6 bundles   → "Phone Model"  + "Styles"
+ *   AirPods case      N models × 3 bundles  → "AirPods Model"+ "Styles"
+ *   Apple Watch band   3 fixed sizes × N    → "Band Size" + "Band Style"
  *   iPad case         (no model axis) × 19  → "iPad Model"
  *
  * Values that the product photos don't support (e.g. no grip image → grip
@@ -22,10 +22,11 @@
  */
 
 const productTypes = require('./product-types');
+const bandVariantAnalyzer = require('./band-variant-analyzer');
 
 // Etsy custom variation property IDs (Custom Property 1 / 2). The priced axis
 // (514) exists on every product type but is NAMED per type ("Styles" for a
-// case, "Band Size" for a watch band); the device axis (513) is optional.
+// case, "Band Style" for a watch band); the fit axis (513) is optional.
 const PROP_PHONE_MODEL = productTypes.PROP_DEVICE;
 const PROP_STYLES = productTypes.PROP_CHOICE;
 
@@ -168,9 +169,14 @@ function buildInventory(args = {}) {
   // enabledModels map (default = all). Disabled models are OMITTED entirely so
   // buyers never see an unavailable model in the dropdown. Single-axis types
   // (no device property) yield one pass with no model value at all.
-  const models = args.models && args.models.length
-    ? args.models
-    : enabledModelList(args.enabledModels, pt);
+  // A fixed device axis is a product invariant, not caller input. Ignore even
+  // an explicit `models` override for that line so no internal/API path can
+  // create a watch listing that silently omits one of the three required sizes.
+  const models = productTypes.isDeviceAxisFixed(pt)
+    ? enabledModelList(undefined, pt)
+    : args.models && args.models.length
+      ? args.models
+      : enabledModelList(args.enabledModels, pt);
   const deviceProp = productTypes.hasDeviceAxis(pt) ? pt.deviceProperty : null;
   const modelValues = deviceProp && models.length ? models : [null];
 
@@ -187,23 +193,37 @@ function buildInventory(args = {}) {
   let minPrice = Infinity;
   let listingQuantity = 0;
 
-  // Canonical offerings (Case/Grip/Charm… or the band sizes) and operator-defined
-  // CUSTOM offerings are merged into ONE ordered list of priced-axis values.
+  // Canonical offerings (case bundles / safe fallbacks) and operator- or
+  // vision-defined CUSTOM offerings are merged into one priced-axis list.
   // Custom values are ADDED on top; labels that collide with a canonical value
   // are dropped (Etsy rejects duplicate values).
   const canonicalLabels = new Set(offeredStyles.filter((s) => Number(prices[s.key]) > 0).map((s) => s.label));
-  const customStyles = normaliseCustomStyles(args.customStyles).filter((s) => !canonicalLabels.has(s.label));
+  let customStyles = normaliseCustomStyles(args.customStyles).filter((s) => !canonicalLabels.has(s.label));
+  if (pt.visionStyle === 'band_variant') {
+    customStyles = bandVariantAnalyzer.numberBandStyles(
+      customStyles.filter((style) => Number.isInteger(Number(style.imageRank)) && Number(style.imageRank) > 0)
+    );
+  }
+  // For a vision-driven vocabulary, the canonical value is an outage fallback,
+  // not an extra color. Once concrete values exist, omit that fallback entirely
+  // so neither Etsy nor the buyer sees a ghost "As Shown" option.
+  const emittedStyles = pt.replaceFallbackWithVisionStyles && customStyles.length
+    ? offeredStyles.filter((s) => s.key !== productTypes.fallbackStyleKey(pt))
+    : offeredStyles;
+  if (pt.replaceFallbackWithVisionStyles && customStyles.length) {
+    enabledStyles[productTypes.fallbackStyleKey(pt)] = false;
+  }
 
   // Invariant: a listing must always offer at least one VISIBLE variation (Etsy
   // rejects a listing with none). The operator may disable any single value —
   // including "Case Only" — as long as another value or a custom value is
   // enabled. If they somehow disable everything and define no custom values, we
   // re-enable a sensible default (the type's fallback, else the first priced one).
-  const anyEnabledBundle = offeredStyles.some((s) => Number(prices[s.key]) > 0 && enabledStyles[s.key]);
+  const anyEnabledBundle = emittedStyles.some((s) => Number(prices[s.key]) > 0 && enabledStyles[s.key]);
   if (!anyEnabledBundle && !customStyles.length) {
     const fallbackKey = productTypes.fallbackStyleKey(pt);
-    const fallback = offeredStyles.find((s) => s.key === fallbackKey && Number(prices[s.key]) > 0)
-      || offeredStyles.find((s) => Number(prices[s.key]) > 0);
+    const fallback = emittedStyles.find((s) => s.key === fallbackKey && Number(prices[s.key]) > 0)
+      || emittedStyles.find((s) => Number(prices[s.key]) > 0);
     if (fallback) enabledStyles[fallback.key] = true;
   }
 
@@ -211,7 +231,7 @@ function buildInventory(args = {}) {
   // priced-axis value labels), then append anything not listed. Etsy renders the
   // dropdown options in the order the values first appear in the products array,
   // so this order IS the buyer-facing option order.
-  const canonByLabel = new Map(offeredStyles.map((s) => [s.label, s]));
+  const canonByLabel = new Map(emittedStyles.map((s) => [s.label, s]));
   const customByLabel = new Map(customStyles.map((s) => [s.label, s]));
   const ordered = [];
   const usedCanon = new Set();
@@ -220,7 +240,7 @@ function buildInventory(args = {}) {
     if (canonByLabel.has(label) && !usedCanon.has(label)) { ordered.push({ kind: 'canon', style: canonByLabel.get(label) }); usedCanon.add(label); }
     else if (customByLabel.has(label) && !usedCustom.has(label)) { ordered.push({ kind: 'custom', style: customByLabel.get(label) }); usedCustom.add(label); }
   }
-  for (const s of offeredStyles) if (!usedCanon.has(s.label)) ordered.push({ kind: 'canon', style: s });
+  for (const s of emittedStyles) if (!usedCanon.has(s.label)) ordered.push({ kind: 'canon', style: s });
   for (const s of customStyles) if (!usedCustom.has(s.label)) ordered.push({ kind: 'custom', style: s });
 
   // One product row per (model × value); single-axis types carry the value alone.

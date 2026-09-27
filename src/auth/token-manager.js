@@ -25,6 +25,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const axios = require('axios');
+const { shopUserAgent } = require('../etsy/user-agent');
 
 const ETSY_TOKEN_URL = 'https://api.etsy.com/v3/public/oauth/token';
 const ACCESS_TOKEN_TTL_MS = 3600 * 1000;        // 1 hour (as documented)
@@ -225,8 +226,8 @@ class TokenManager {
    * Get a valid access token for the given shop.
    * Automatically refreshes if the current token is expired or about to expire.
    *
-   * The refresh request is sent through the group's proxy so Etsy's token endpoint
-   * sees the same static HK IP as the regular API calls.
+   * The refresh request is sent through the group's proxy so the token endpoint
+   * uses the same configured static exit as regular API calls.
    *
    * @param {string} shopId
    * @param {string} keystring         - Etsy app keystring (NOT keystring:secret — token endpoint doesn't need secret)
@@ -288,7 +289,7 @@ class TokenManager {
       return this._refreshing.get(shopId);
     }
     const p = (async () => {
-      const newTokens = await this._doRefresh(keystring, refreshToken, proxyClient);
+      const newTokens = await this._doRefresh(keystring, refreshToken, proxyClient, shopId);
       this.storeTokens(shopId, newTokens, { allowMemoryFallback: true });
       return newTokens.access_token;
     })();
@@ -310,9 +311,25 @@ class TokenManager {
    * @param {string} keystring - Just the keystring, no shared secret
    * @param {string} refreshToken
    * @param {import('axios').AxiosInstance} [proxyClient]
+   * @param {string|number} shopId - Stamped into User-Agent so the token endpoint
+   *        attributes the refresh to this shop's program, not a shared one.
    * @returns {Promise<{ access_token: string, refresh_token: string, expires_in: number }>}
    */
-  async _doRefresh(keystring, refreshToken, proxyClient) {
+  async _doRefresh(keystring, refreshToken, proxyClient, shopId) {
+    if (proxyClient?._proxyEnforced === true) {
+      if (typeof proxyClient._ensureEgressVerified === 'function') {
+        await proxyClient._ensureEgressVerified();
+      }
+      if (!proxyClient._egressVerifiedAt) {
+        const err = new Error(
+          'Refusing to refresh an Etsy token before the configured group-proxy ' +
+          'egress has passed its preflight check.'
+        );
+        err.code = 'PROXY_EGRESS_NOT_VERIFIED';
+        throw err;
+      }
+    }
+
     const body = new URLSearchParams({
       grant_type: 'refresh_token',
       client_id: keystring,
@@ -321,7 +338,12 @@ class TokenManager {
 
     const requestConfig = {
       baseURL: '',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': shopUserAgent(shopId),
+      },
+      proxy: false,
+      timeout: 30_000,
     };
 
     const client = proxyClient ?? axios;

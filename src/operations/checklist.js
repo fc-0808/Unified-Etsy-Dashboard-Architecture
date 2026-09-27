@@ -6,8 +6,11 @@
  * This module deliberately has no Etsy client, token manager, HTTP client, or
  * background job dependency. It derives a Monday-to-Sunday schedule, reads the
  * configured shop identities already present in SQLite, and stores human
- * attestations. The work itself remains manual in Etsy Shop Manager.
+ * check-offs. The work itself remains manual in Etsy Shop Manager.
  */
+
+const { SHOP_DISPLAY_ORDER, SHOP_DISPLAY_RANK } = require('../shops/roster')
+// Keep public/index.html → SHOP_DISPLAY_ORDER identical to this roster.
 
 const DEFAULT_TIME_ZONE = 'Asia/Shanghai'
 const MANUAL_SHOP_ID = '__manual__'
@@ -16,23 +19,6 @@ const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/
 const SUBJECT_TYPE = 'shop'
 
 const DAILY = Object.freeze([1, 2, 3, 4, 5, 6, 7])
-// This is the operator-defined working order already used by every dashboard
-// shop table/dropdown (public/index.html → SHOP_DISPLAY_ORDER). Keep unknown or
-// newly-added shops at the end in their stable database order.
-const SHOP_DISPLAY_ORDER = Object.freeze([
-	'Y2KASEofficial',
-	'LUVKASEofficial',
-	'Y2KASEshop',
-	'Y2KiPhoneCases',
-	'KawaiiiPhoneCases',
-	'IPhoneCasesDesignArt',
-	'IPhoneCasesByTwily',
-	'CuteiPhoneCasesFinds',
-	'CuteiPhoneCasesGoods',
-])
-const SHOP_DISPLAY_RANK = new Map(
-	SHOP_DISPLAY_ORDER.map((name, index) => [name.toLowerCase(), index]),
-)
 
 /**
  * Stable task ids are persisted; copy can evolve without invalidating history.

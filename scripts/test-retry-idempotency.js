@@ -5,7 +5,7 @@
  *
  * Anchors the fix for the duplicate-side-effect bug: a non-idempotent POST
  * (e.g. createReceiptShipment, which emails the buyer) could SUCCEED on Etsy
- * while its RESPONSE was lost on the VPN→proxy chain — the old retry loop then
+ * while its RESPONSE was lost on the network route — the old retry loop then
  * blindly re-sent it, producing a second shipment + a second buyer email.
  *
  * The `reconcile` probe closes that hole: before re-sending, it asks Etsy whether

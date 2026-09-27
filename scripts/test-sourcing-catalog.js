@@ -901,14 +901,31 @@ test('the Suppliers products column aligns the count, not the priced chip', () =
 	// "N/M Priced" pill after the number used to push every count to a
 	// different x-position; the countcell grid keeps the number in a fixed slot.
 	// Markets must also share ONE table, otherwise each table independently
-	// chooses where Products, Mall, Address and Notes begin.
+	// chooses where Products begins.
 	assert.ok(page.includes('countcell'), 'fixed-geometry count cell')
 	assert.ok(page.includes('function productCountCell'), 'dedicated renderer for the products column')
 	assert.ok(!/\$\{s\.product_count\}\$\{priced\}/.test(page), 'no longer concatenates count + priced pill')
-	assert.ok(page.includes('supplierTableHtml(tableGroups)'), 'all markets render through one supplier table')
+	assert.ok(page.includes('supplierTableHtml(tableGroups,'), 'all markets render through one supplier table')
 	assert.ok(page.includes('class="market-row"'), 'market grouping is preserved as full-width rows')
 	assert.ok(page.includes('dtable supplier-table'), 'the shared table has stable column geometry')
 	assert.ok(!page.includes('supplierTableHtml(g.rows)'), 'no independently sized table remains per market')
+})
+
+test('every supplier row is one line on the shared column grid', () => {
+	// Overflow:hidden on the <td> itself clips collapsed borders, so a long
+	// shop name made that row's underline look wider than the next. Wrapping
+	// mall/notes made some rows several lines tall. Truncation belongs on an
+	// inner wrapper; the row is a fixed-height line on a 100%-wide table.
+	assert.ok(page.includes('function cellWrap'), 'text cells share one truncation helper')
+	assert.ok(!/style="max-width:240px"/.test(page), 'cells no longer carry a private max-width that fights the column grid')
+	assert.ok(/\.supplier-table \{\s*table-layout: fixed;\s*width: 100%;/.test(page), 'the directory table is explicitly full width')
+	assert.ok(!/\.supplier-table td \{\s*overflow:\s*hidden/.test(page), 'cells do not clip their own borders')
+	assert.ok(page.includes('.supplier-table tr.srow td'), 'data rows have a uniform height')
+	assert.ok(page.includes('min-width: 0'), 'flex shop names can shrink and ellipsize')
+	assert.ok(page.includes('${cellWrap(locPlaceText(s.location))}'), 'location text truncates instead of wrapping the row')
+	assert.ok(!page.includes('col-mall'), 'mall is not a directory column')
+	assert.ok(!page.includes('col-address'), 'address is not a directory column')
+	assert.ok(!page.includes('col-notes'), 'notes is not a directory column')
 })
 
 test('a supplier row opens a detail drawer of its products', () => {
@@ -921,17 +938,29 @@ test('a supplier row opens a detail drawer of its products', () => {
 	assert.ok(page.includes('openProductModal(null, { shop_name:'), 'add pre-fills shop and stall')
 })
 
+test('employees can mark duplicate cards in the supplier drawer', () => {
+	assert.ok(page.includes("'sd-merge-start'"), 'Mark duplicates enters selection mode')
+	assert.ok(page.includes('data-act="sd-merge-toggle"'), 'cards are selectable while marking')
+	assert.ok(page.includes('/api/route/product-map/merge'), 'confirm posts the catalog merge')
+	assert.ok(page.includes('CAN_MERGE'), 'merge UI is gated on route:merges')
+	assert.ok(page.includes('id="sdMergeBar"'), 'a sticky confirm bar appears during selection')
+})
+
 test('the supplier drawer paints one card and one image per canonical product', () => {
 	assert.ok(page.includes('CAT.supplier_product_groups'), 'the page consumes the read-only canonical grouping')
-	assert.ok(page.includes('groups.map(supplierProductRowHtml)'), 'one renderer invocation per physical-product group')
+	assert.ok(page.includes('supplierDrawerListHtml(groups)'), 'the drawer paints through one list renderer')
+	assert.ok(page.includes('supplierProductRowHtml(group'), 'each physical-product group still uses the card renderer')
 	assert.ok(page.includes('const p = group.representative'), 'one deterministic representative supplies the card')
 	assert.ok(page.includes('group.aliases.length > 1'), 'grouped listings are called out rather than silently discarded')
 	assert.ok(page.includes('group.aliases.some((p)'), 'search still finds every hidden listing title')
-	const cardStart = page.indexOf('function supplierProductRowHtml(group)')
+	const cardStart = page.indexOf('function supplierProductRowHtml(group, opts')
 	const aliasesStart = page.indexOf('function supplierAliasDetailsHtml(group)')
 	const aliasEnd = page.indexOf('function toggleSupplierListingDetails', aliasesStart)
 	assert.ok(cardStart >= 0 && aliasesStart > cardStart && aliasEnd > aliasesStart)
-	assert.strictEqual((page.slice(cardStart, aliasesStart).match(/thumbHtml\(p\)/g) || []).length, 1, 'a grouped card renders exactly one image')
+	assert.strictEqual((page.slice(cardStart, aliasesStart).match(/supplierMediaHtml\(p\)/g) || []).length, 1, 'a grouped card renders through one media stack')
+	assert.ok(page.includes('function supplierMediaHtml'), 'drawer media stacks the case photo with an optional charm photo')
+	assert.ok(/\.prow \.pthumb\s*\{[^}]*width:\s*96px/.test(page), 'supplier drawer product thumbs are enlarged')
+	assert.ok(page.includes('pthumb charm') || page.includes("'pthumb charm'"), 'a charm thumb sits beside the product photo')
 	assert.ok(!page.slice(aliasesStart, aliasEnd).includes('thumbHtml'), 'the collapsed source-record manager never repeats product images')
 })
 
@@ -948,8 +977,83 @@ test('supplier product prices explicitly itemise the charm before the total', ()
 	assert.ok(page.includes("price(p.charm_cost, t('priceCharm'), 'charm')"), 'charm cost is no longer hidden in metadata')
 	assert.ok(page.includes("price(p.cost_total, t('priceTotal'), 'total', totalTitle)"), 'the final value is labelled Total')
 	assert.ok(page.includes('Case + Grip + Charm = Total'), 'the four permanent slots document their arithmetic')
-	assert.ok(page.includes("const charmDetails = charmParts.length"), 'charm identity remains visible below the title')
-	assert.ok(page.includes("const charmParts = []"), 'the identity line is rendered separately from pricing')
+	assert.ok(page.includes('function supplierCharmLineHtml'), 'charm identity is a dedicated callout under the title')
+	assert.ok(page.includes('function charmBelongsElsewhere'), 'off-shop charms are detected against the open stall')
+	assert.ok(page.includes('charm-line.elsewhere') || page.includes("' elsewhere'"), 'a separate-stall flag is painted when the booth differs')
+	assert.ok(page.includes("t('sdCharmElsewhere')"), 'the flag uses the Separate stall label')
+	assert.ok(/\.charm-line\s*\{[^}]*flex-wrap:\s*wrap/.test(page), 'charm identity wraps instead of clipping the stall flag')
+	assert.ok(/\.charm-line\s*\{[^}]*overflow:\s*visible/.test(page), 'charm identity is never clipped by overflow')
+	assert.ok(page.includes('class="ctrail"') || page.includes("'ctrail'"), 'shop · stall trail is a dedicated row')
+	assert.ok(page.includes('function routeCharmHref'), 'charms deep-link into the Route catalog')
+	assert.ok(page.includes("data-act=\"route-charm\""), 'charm chips are real Route-catalog controls')
+	assert.ok(page.includes("q.set('view', 'charms')"), 'the deep-link opens Manage charms, not an order assignment')
+	assert.ok(/\.alias-details:not\(\[open\]\)\s*\{[^}]*display:\s*none/.test(page), 'closed listing records do not inflate card height')
+})
+
+test('supplier directory rows share one fixed height', () => {
+	assert.ok(/\.supplier-table tr\.srow\s*\{[^}]*height:\s*44px/.test(page), 'data rows declare a uniform height')
+	assert.ok(page.includes('stall-miss'), 'missing stalls truncate through the same single-line path')
+	assert.ok(/\.cellwrap\s*\{[^}]*white-space:\s*nowrap/.test(page), 'location text never wraps a row taller')
+})
+
+test('charm shops share the supplier directory grid so counts line up', () => {
+	assert.ok(page.includes('const DIRECTORY_COLS'), 'one column list drives both directories')
+	assert.ok(page.includes("['shop', 'stall', 'location', 'products', 'actions']"), 'the grid is Shop · Stall · Location · Count · Actions')
+	assert.ok(page.includes('function directoryColgroupHtml'), 'both tables use the shared colgroup')
+	assert.ok(!page.includes('function charmShopsColgroupHtml'), 'charm shops no longer keep a private column list')
+	assert.ok(page.includes('function directoryHeadHtml'), 'both tables share one header renderer')
+	assert.ok(page.includes('function charmCountCell'), 'charm counts have a dedicated cell')
+	assert.ok(page.includes('emptyCoverageSlot'), 'charm counts reserve the same coverage slot as products')
+	assert.ok(page.includes('dtable supplier-table">${directoryColgroupHtml()}'), 'charm shops still render through supplier-table')
+	assert.ok(!page.includes('countcell-n'), 'charm counts no longer use a right-edge-only layout')
+	assert.ok(!page.includes('col-mall'), 'mall is gone from both directories')
+	assert.ok(!page.includes('col-address'), 'address is gone from both directories')
+	assert.ok(!page.includes('col-notes'), 'notes is gone from both directories')
+	assert.ok(/#supArea,\s*#cshopArea \{[^}]*overflow:\s*visible/.test(page), 'charm shops stay in page flow instead of an inner scroller')
+	assert.ok(!page.includes('scrollbar-gutter'), 'no reserved scrollbar gutter on the directories')
+})
+
+test('the Suppliers page filters buildings with a scrolling option rail, not a dropdown', () => {
+	assert.ok(!/id="supBuilding"/.test(page), 'the hidden market <select> is gone')
+	assert.ok(!page.includes('function fillBuildingFilter'), 'the select filler is gone with it')
+	assert.ok(page.includes('id="supBuildingRail"'), 'buildings are a horizontal option rail')
+	assert.ok(page.includes("paintFacetRail(rail, items, supBuildingFilter, 'sup-building'"), 'a building chip is a real control')
+	assert.ok(/\.facet-rail\s*\{[^}]*overflow-x:\s*auto/.test(page), 'the rail scrolls instead of wrapping into a chip cloud')
+	assert.ok(page.includes("role=\"radiogroup\""), 'the rail is a single-select chooser')
+	assert.ok(page.includes('UNLOCATED_BUILDING'), 'stalls the directory could not locate are a first-class option')
+	assert.ok(page.includes('showMarketHeaders: !supBuildingFilter'), 'in-table market headers do not repeat a building the rail already named')
+	assert.ok(page.includes('class="sup-controls"'), 'search + buildings share one sticky strip')
+	assert.ok(/\.sup-controls\s*\{[^}]*position:\s*sticky/.test(page), 'the building chooser pins under the top chrome')
+	assert.ok(page.includes('top: var(--chrome)'), 'it clears the sticky topbar + disclaimer')
+	assert.ok(page.includes('--sup-controls-h'), 'table headers sit below the measured sticky strip')
+	assert.ok(page.includes('function syncSupControlsHeight'), 'the sticky offset is measured, not guessed')
+})
+
+test('a supplier drawer filters phone cases from AirPods cases on its own type rail', () => {
+	assert.ok(page.includes('id="sdTypeRail"'), 'the drawer has a product-type rail')
+	assert.ok(page.includes('id="sdGapRail"'), 'and a needs-attention rail for missing prices')
+	assert.ok(page.includes("paintFacetRail(typeRail, items, sdTypeFilter, 'sd-type'"), 'type chips are delegated controls')
+	assert.ok(page.includes('function supplierDrawerListHtml'), 'All-types view groups cards under type headers')
+	assert.ok(page.includes('sd-type-group'), 'type sections are marked up as groups')
+	assert.ok(page.includes('hideType: true'), 'grouped cards do not repeat the type badge their header already states')
+	assert.ok(page.includes("sdTypeFilter = ''"), 'opening another stall does not inherit the previous type filter')
+})
+
+test('phone item layout separates reading from labeled 44px CRUD', () => {
+	assert.ok(page.includes('function iconActionButton'), 'CRUD shares one labeled-button helper')
+	assert.ok(page.includes('class="act-label"') || page.includes("'act-label'"), 'action labels exist in the markup')
+	assert.ok(page.includes('function catalogUsesCards'), 'the catalog drops table mode on a phone')
+	assert.ok(page.includes("matchMedia('(max-width: 768px)')"), 'compact mode follows the viewport')
+	assert.ok(/@media \(max-width: 768px\)/.test(page), 'a phone breakpoint exists')
+	assert.ok(/@media \(max-width: 768px\)[\s\S]*\.iconbtn \.act-label\s*\{[^}]*display:\s*inline/.test(page), 'phone CRUD shows words, not only icons')
+	assert.ok(/@media \(max-width: 768px\)[\s\S]*min-height:\s*44px/.test(page), 'phone CRUD meets a 44px tap target')
+	assert.ok(/@media \(max-width: 768px\)[\s\S]*\.prow \.acts\s*\{[\s\S]*grid-column:\s*1 \/ -1/.test(page), 'drawer CRUD sits under the product, not in a 66px column')
+	assert.ok(/@media \(max-width: 768px\)[\s\S]*\.pcard \.pactions[\s\S]*grid-area:\s*acts/.test(page), 'catalog card CRUD is a footer')
+	assert.ok(/@media \(max-width: 768px\)[\s\S]*grid-template-areas:[\s\S]*'acts acts'/.test(page), 'directory rows become cards with a CRUD footer')
+	assert.ok(page.includes('td class="act" data-act="stop"'), 'a near-miss on Edit/Delete does not open the stall')
+	assert.ok(page.includes('function directoryRowActions'), 'supplier and charm-shop rows share the same CRUD footer')
+	assert.ok(page.includes('td class="col-shop"'), 'directory cells are named so the card layout does not depend on column index')
+	assert.ok(!/@media \(max-width: 640px\)[\s\S]*\.prow \.acts\s*\{[\s\S]*grid-column:\s*3/.test(page), 'the old 66px icon column is gone')
 })
 
 // ── Runner ──────────────────────────────────────────────────────────────────

@@ -84,7 +84,7 @@ function completeOnEtsy(db, receiptId, tracking) {
 
 function seed(db) {
 	db.prepare('INSERT INTO groups (group_id, label) VALUES (?,?)').run('G1', 'Group 1')
-	db.prepare('INSERT INTO shops (shop_id, group_id, shop_name) VALUES (?,?,?)').run('SHOP_A', 'G1', 'Y2KASEshop')
+	db.prepare('INSERT INTO shops (shop_id, group_id, shop_name) VALUES (?,?,?)').run('SHOP_A', 'G1', 'Y2KiPhoneCases')
 
 	const ins = db.prepare(`
     INSERT INTO receipts
@@ -335,6 +335,8 @@ try {
 
 		const notFound = Object.assign(new Error('Receipt not found'), { status: 404 })
 		assert(ec.classifyCompletionError(notFound).permanent === true, 'a 404 from Etsy is permanent — retrying it 12 times helps nobody')
+		const badKey = new Error('API key not found or not active, or incorrect shared secret for API key.')
+		assert(ec.classifyCompletionError(badKey).permanent === false, 'a rejected API key is a credential fault, not a missing order — the operator can fix the key and retry')
 
 		const rate = Object.assign(new Error('Too many requests'), { status: 429 })
 		assert(ec.classifyCompletionError(rate).permanent === false, 'a rate limit is transient and keeps retrying')

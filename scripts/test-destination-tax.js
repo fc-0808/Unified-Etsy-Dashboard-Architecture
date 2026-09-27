@@ -86,8 +86,13 @@ const ESCAPERS = ['toDisplayString', 'escHtml', 'escAttr'].map(liftFunction).joi
 const I18N_DICT = (() => {
 	const start = source.indexOf('const I18N_DICT = {')
 	assert.ok(start >= 0, 'could not find I18N_DICT in public/index.html')
-	const after = source.indexOf('const I18N_PATTERNS', start)
-	assert.ok(after > start, 'I18N_DICT is no longer followed by I18N_PATTERNS — the bound below is wrong')
+	const after = (() => {
+		const supply = source.indexOf('const I18N_SUPPLY_UOM', start)
+		if (supply > start) return supply
+		const patterns = source.indexOf('const I18N_PATTERNS', start)
+		assert.ok(patterns > start, 'I18N_DICT is no longer followed by I18N_PATTERNS — the bound below is wrong')
+		return patterns
+	})()
 	const literal = source.slice(source.indexOf('{', start), source.lastIndexOf('}', after) + 1)
 	return new Function(`return (${literal})`)()
 })()
@@ -458,7 +463,8 @@ test('it never instructs writing the number down — for any EU state', async ()
 	for (const iso of tax.EU27) {
 		const { el, html } = await notice({ country: iso })
 		assert.ok(el, `${iso} produced no notice`)
-		assert.ok(!/write (this|it) (number )?on the (parcel|customs form)/i.test(html), `${iso} tells the packer to write the IOSS number down`)
+		// "Do not write it on the parcel" is the prohibition, not an instruction.
+		assert.ok(!/(?<!\b(?:do not|never) )write (this|it) (number )?on the (parcel|customs form)/i.test(html), `${iso} tells the packer to write the IOSS number down`)
 		assert.ok(el.classList.contains('customs-notice--electronic'), `${iso} is not marked electronic-only`)
 	}
 })

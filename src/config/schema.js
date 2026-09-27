@@ -12,13 +12,17 @@
 
 const crypto = require('crypto');
 const fs = require('fs');
+const net = require('net');
 const os = require('os');
 const path = require('path');
 const {
+  TRANSPORT_MODES,
+  normalizeNetworkTransport,
+  parseSocks5ProxyUrl,
+} = require('../proxy/transport');
+const {
   MIN_SYNC_INTERVAL_MINUTES,
   MIN_INV_WATCH_INTERVAL_MINUTES,
-  analyzeSuspensionRisks,
-  enforceConfigCompliance,
 } = require('../compliance/suspension-guard');
 const { normalizeTaxIdOverrides } = require('../compliance/destination-tax');
 // The 4PX pickup-address rules (field names, aliases, documented length limits)
@@ -51,8 +55,6 @@ const CONFIG_PATH = process.env.DASHBOARD_CONFIG_PATH
  * @property {string}  [refresh_token]        - Optional backup refresh token. Primary store is tokens.json.
  *                                              Run 'npm run oauth:setup' — tokens.json is auto-populated.
  * @property {string}  [adspower_profile_id]  - Legacy operator metadata only.
- *                                              This application must not automate or scrape Etsy's website;
- *                                              use documented Open API endpoints and manual browser actions.
  * @property {object}  [email_imap]   - IMAP credentials for email-notification sync (read-only fallback).
  */
 
@@ -61,10 +63,11 @@ const CONFIG_PATH = process.env.DASHBOARD_CONFIG_PATH
  * @property {string}       group_id  - Unique identifier (e.g. "group_hk_passport")
  * @property {string}       label     - Human-readable display name
  * @property {string|null|false} proxy - SOCKS5 URL for proxied groups, or "direct"/null/false for no proxy
+ * @property {string|string[]} [expected_egress_ip] - Optional static proxy exit-IP pin(s)
  * @property {ShopConfig[]} shops     - Shops belonging to this group
  */
 
-/** Values that mean "route API traffic directly (no VPN/IPFoxy chain)". */
+/** Values that mean "route API traffic directly (no group proxy)". */
 const DIRECT_PROXY_MARKERS = new Set(['', 'direct', 'none', 'false']);
 const DEFAULT_OPERATIONS_TIMEZONE = 'Asia/Shanghai';
 
@@ -92,7 +95,7 @@ function defaultDbPath() {
 }
 
 /**
- * Whether a group routes Etsy API calls through the VPN → IPFoxy chain.
+ * Whether a group routes Etsy API calls through its configured SOCKS5 proxy.
  * @param {{ proxy?: string|null|false }} group
  * @returns {boolean}
  */
@@ -105,7 +108,10 @@ function usesGroupProxy(group) {
 
 /**
  * @typedef {object} AppConfig
- * @property {number}        vpn_local_port               - Local VPN SOCKS5 port (default 7897)
+ * @property {object}        network_transport            - OS tunnel or explicit local SOCKS5 first hop
+ * @property {number|null}   vpn_local_port               - Deprecated compatibility alias for local_socks5
+ * @property {number|null}   browser_expected_static_proxy_count - Audit-only expected AdsPower mapping count
+ * @property {Array<{profile_id:string,expected_egress_ip:string,label:string|null}>} browser_profiles
  * @property {number}        sync_interval_minutes        - Background receipt sync interval (default 60)
  * @property {number}        max_orders_per_sync          - Orders fetched per shop per sync (default 100)
  * @property {number}        pre_transit_days             - Upper bound (in days) for how far back we query
@@ -134,9 +140,7 @@ function usesGroupProxy(group) {
  *                                                          data directory, kept outside
  *                                                          cloud-synced source trees.
  * @property {GroupConfig[]} groups                       - All shop groups
- * @property {boolean}       etsy_multi_key_approved     - Written Etsy approval for multiple keys in this application (default false).
  * @property {boolean}       catalog_health_sync          - Explicit opt-in daily API listing/review snapshot (default false).
- * @property {boolean}       etsy_api_analytics_approved  - True only with Etsy's written authorization for API analytics (default false).
  * @property {number}        catalog_health_interval_hours - Minimum hours between catalog-health walks per shop (default 24, min 12).
  * @property {boolean}       auto_restock_enabled         - Auto-restock zero-stock offerings (default false, opt-in).
  *                                                          Set true only when every automatic quantity increase
@@ -237,6 +241,18 @@ function validateShop(shop, groupId, shopIndex) {
       );
     }
   }
+  if (
+    shop.adspower_profile_id != null
+    && (
+      typeof shop.adspower_profile_id !== 'string'
+      || shop.adspower_profile_id.trim() === ''
+    )
+  ) {
+    throw new Error(
+      `config.json: groups[${groupId}].shops[${shopIndex}].adspower_profile_id ` +
+      'must be a non-empty string when provided.'
+    );
+  }
 }
 
 /**
@@ -251,13 +267,50 @@ function validateGroup(group, index) {
   if (!group.label || typeof group.label !== 'string') {
     throw new Error(`config.json: groups[${group.group_id}].label is missing.`);
   }
+  if (
+    group.adspower_profile_id != null
+    && (
+      typeof group.adspower_profile_id !== 'string'
+      || group.adspower_profile_id.trim() === ''
+    )
+  ) {
+    throw new Error(
+      `config.json: groups[${group.group_id}].adspower_profile_id must be ` +
+      'a non-empty string when provided.'
+    );
+  }
   if (usesGroupProxy(group)) {
     if (!group.proxy || typeof group.proxy !== 'string') {
       throw new Error(`config.json: groups[${group.group_id}].proxy is missing.`);
     }
-    if (!group.proxy.startsWith('socks5://')) {
+    try {
+      // Parse the whole URL here so malformed ports/hosts fail at startup. The
+      // parser deliberately never echoes credentials into the error message.
+      parseSocks5ProxyUrl(group.proxy);
+    } catch (err) {
       throw new Error(
-        `config.json: groups[${group.group_id}].proxy must be a socks5:// URL, or "direct" for no proxy. Got: ${group.proxy}`
+        `config.json: groups[${group.group_id}].${err.message} ` +
+        'Use a socks5:// URL, or "direct" for no group proxy.'
+      );
+    }
+    if (group.expected_egress_ip == null || group.expected_egress_ip === '') {
+      throw new Error(
+        `config.json: groups[${group.group_id}].expected_egress_ip is required ` +
+        'for every proxied group so route changes fail closed.'
+      );
+    }
+  }
+  if (group.expected_egress_ip != null && group.expected_egress_ip !== '') {
+    const expected = Array.isArray(group.expected_egress_ip)
+      ? group.expected_egress_ip
+      : [group.expected_egress_ip];
+    if (
+      expected.length === 0
+      || expected.some((ip) => typeof ip !== 'string' || net.isIP(ip.trim()) === 0)
+    ) {
+      throw new Error(
+        `config.json: groups[${group.group_id}].expected_egress_ip must be ` +
+        'an IP address or a non-empty array of IP addresses.'
       );
     }
   }
@@ -395,6 +448,58 @@ function normalizeOperationsTimezone(raw) {
 }
 
 /**
+ * Non-secret inventory used only by the read-only AdsPower network audit.
+ * Browser credentials, cookies, fingerprints and proxy passwords never belong
+ * in config.json.
+ */
+function normalizeBrowserProfiles(raw) {
+  if (raw == null) return [];
+  if (!Array.isArray(raw)) {
+    throw new Error('config.json: browser_profiles must be an array.');
+  }
+  const profileIds = new Set();
+  const exitIps = new Set();
+  return raw.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`config.json: browser_profiles[${index}] must be an object.`);
+    }
+    const profileId = String(entry.profile_id || '').trim();
+    const expectedIp = String(entry.expected_egress_ip || '').trim();
+    const label = entry.label == null ? null : String(entry.label).trim();
+    if (!profileId || profileId.length > 100 || /[\u0000-\u001f\u007f]/.test(profileId)) {
+      throw new Error(
+        `config.json: browser_profiles[${index}].profile_id must be a non-empty printable string.`
+      );
+    }
+    if (net.isIP(expectedIp) === 0) {
+      throw new Error(
+        `config.json: browser_profiles[${index}].expected_egress_ip must be an IP address.`
+      );
+    }
+    if (label != null && (!label || label.length > 100 || /[\u0000-\u001f\u007f]/.test(label))) {
+      throw new Error(
+        `config.json: browser_profiles[${index}].label must be 1-100 printable characters.`
+      );
+    }
+    if (profileIds.has(profileId)) {
+      throw new Error(`config.json: duplicate browser profile_id "${profileId}".`);
+    }
+    if (exitIps.has(expectedIp)) {
+      throw new Error(
+        `config.json: browser_profiles must not share expected static exit ${expectedIp}.`
+      );
+    }
+    profileIds.add(profileId);
+    exitIps.add(expectedIp);
+    return {
+      profile_id: profileId,
+      expected_egress_ip: expectedIp,
+      label,
+    };
+  });
+}
+
+/**
  * Load and validate config.json.
  * Throws a descriptive error if the file is missing or invalid.
  *
@@ -425,21 +530,67 @@ function loadConfig() {
 
   raw.groups.forEach((group, i) => validateGroup(group, i));
 
-  // ── OpSec: enforce Etsy's Personal Access "5 shops per app key" limit ─────────
-  // Etsy caps each app (keystring) at 5 authorized shops. Exceeding it is itself a
-  // review/anti-abuse trigger. analyzeSuspensionRisks() collects every signal;
-  // enforceConfigCompliance() refuses to start on critical violations. Platform
-  // allocations are not locally overridable.
-  const complianceRisks = analyzeSuspensionRisks({
-    groups: raw.groups,
-    sync_interval_minutes: raw.sync_interval_minutes,
-    inv_watch_interval_minutes: raw.inv_watch_interval_minutes,
-    auto_restock_enabled: raw.auto_restock_enabled,
-    etsy_multi_key_approved: raw.etsy_multi_key_approved,
-    catalog_health_sync: raw.catalog_health_sync,
-    etsy_api_analytics_approved: raw.etsy_api_analytics_approved,
-  });
-  enforceConfigCompliance(raw, complianceRisks);
+  // Duplicate group IDs can make an in-memory proxy client for one group get
+  // reused by another. Duplicate shop IDs similarly make routing ownership
+  // ambiguous. Both are configuration errors, so reject them before networking.
+  const groupIds = new Set();
+  const shopIds = new Set();
+  for (const group of raw.groups) {
+    if (groupIds.has(group.group_id)) {
+      throw new Error(`config.json: duplicate group_id "${group.group_id}".`);
+    }
+    groupIds.add(group.group_id);
+    for (const shop of group.shops) {
+      if (shopIds.has(shop.shop_id)) {
+        throw new Error(
+          `config.json: shop_id "${shop.shop_id}" appears in more than one group.`
+        );
+      }
+      shopIds.add(shop.shop_id);
+    }
+  }
+
+  const hasNetworkTransport = Object.prototype.hasOwnProperty.call(raw, 'network_transport');
+  const hasLegacyVpnPort = Object.prototype.hasOwnProperty.call(raw, 'vpn_local_port');
+  if (hasNetworkTransport && hasLegacyVpnPort) {
+    throw new Error(
+      'config.json: use network_transport or the deprecated vpn_local_port, not both.'
+    );
+  }
+  const networkTransport = hasNetworkTransport
+    ? normalizeNetworkTransport(raw.network_transport, { useLegacyDefault: false })
+    : normalizeNetworkTransport(null, {
+        legacyVpnPort: hasLegacyVpnPort ? raw.vpn_local_port : null,
+        useLegacyDefault: true,
+      });
+  if (hasLegacyVpnPort) {
+    console.warn(
+      '[config] vpn_local_port is deprecated. Replace it with a network_transport block.'
+    );
+  }
+  if (
+    raw.browser_expected_static_proxy_count != null
+    && (
+      !Number.isInteger(raw.browser_expected_static_proxy_count)
+      || raw.browser_expected_static_proxy_count < 1
+      || raw.browser_expected_static_proxy_count > 100
+    )
+  ) {
+    throw new Error(
+      'config.json: browser_expected_static_proxy_count must be an integer from 1 to 100.'
+    );
+  }
+  const browserProfiles = normalizeBrowserProfiles(raw.browser_profiles);
+  if (
+    raw.browser_expected_static_proxy_count != null
+    && browserProfiles.length > 0
+    && browserProfiles.length !== raw.browser_expected_static_proxy_count
+  ) {
+    throw new Error(
+      'config.json: browser_profiles length does not match ' +
+      'browser_expected_static_proxy_count.'
+    );
+  }
 
   // ── Marketplace import-tax identifiers ───────────────────────────────────────
   // Validated here, at the only moment a typo is still cheap: from this point on
@@ -466,7 +617,15 @@ function loadConfig() {
 
   // Apply defaults for optional fields
   const config = {
-    vpn_local_port: raw.vpn_local_port ?? 7897,
+    network_transport: networkTransport,
+    // Compatibility for external integrations that have not migrated yet.
+    vpn_local_port: networkTransport.mode === TRANSPORT_MODES.LOCAL_SOCKS5
+      ? networkTransport.local_port
+      : null,
+    // Audit expectation only. It never launches a browser or changes a profile.
+    browser_expected_static_proxy_count:
+      raw.browser_expected_static_proxy_count ?? null,
+    browser_profiles: browserProfiles,
     sync_interval_minutes: typeof raw.sync_interval_minutes === 'number'
       ? Math.max(MIN_SYNC_INTERVAL_MINUTES, Math.floor(raw.sync_interval_minutes))
       : 60,
@@ -483,9 +642,9 @@ function loadConfig() {
     // keeping the list bounded to recent shipments. Operators who prefer a tighter list
     // can lower this value (e.g. 5) at the cost of missing slow-scan packages.
     pre_transit_days: raw.pre_transit_days ?? 30,
-    // Window (in days) during which Etsy allows the tracking number on a shipped
-    // receipt to be edited/re-submitted. Etsy's policy is ~3 days from the ship
-    // notification; after that, re-submitting tracking is rejected by their API.
+    // Window (in days) during which the tracking number on a shipped receipt can
+    // be edited/re-submitted. About 3 days from the ship notification; after that,
+    // re-submitting tracking is rejected by the API.
     // We use this to gate the "Edit tracking" action in the Orders tab so operators
     // get a clear, pre-emptive message instead of an opaque Etsy 4xx error. The
     // value is advisory on our side — Etsy remains the source of truth and any call
@@ -630,15 +789,10 @@ function loadConfig() {
     fourpx_pickup_awaiting_days: normalizeAwaitingDays(raw.fourpx_pickup_awaiting_days),
 
     // ── Growth data collection ─────────────────────────────────────────────────
-    // Manual aggregate Stats imports are the safe default and need no Etsy call.
-    // The Aug 18 2026 API Terms require Etsy's written authorization before API
-    // content is requested for analytics. Both booleans must be explicitly true;
-    // the compliance guard rejects a sync flag without the approval attestation.
-    // Growth is manual-first. Merely opening the tab never calls Etsy, and the
-    // optional catalog walk stays OFF unless the operator explicitly opts in.
-    etsy_multi_key_approved: raw.etsy_multi_key_approved === true,
+    // Manual aggregate Stats imports are the default and need no Etsy call.
+    // Opening the tab never calls Etsy. The optional catalog walk stays off
+    // unless catalog_health_sync is explicitly true.
     catalog_health_sync: raw.catalog_health_sync === true,
-    etsy_api_analytics_approved: raw.etsy_api_analytics_approved === true,
     catalog_health_interval_hours: typeof raw.catalog_health_interval_hours === 'number'
       ? Math.max(12, Math.min(168, Math.floor(raw.catalog_health_interval_hours)))
       : 24,
@@ -699,7 +853,7 @@ function loadConfig() {
     // so it belongs on the same stock and the same 1-bit crisp path. Giving it
     // its own printer settings would only create a second thing to misconfigure.
 
-    // ── EU IOSS / VAT compliance ───────────────────────────────────────────────
+    // ── EU IOSS / VAT identifiers ──────────────────────────────────────────────
     // fourpx_ioss_no:  Import One-Stop Shop (IOSS) registration number used for
     //                  EU-bound parcels with a declared value ≤ €150. 4PX maps it
     //                  to the order's `ioss_no` field (per the official model). For

@@ -130,7 +130,7 @@ function airpodsCharmTx(title, listingId, model) {
 function seed() {
 	const db = initDb(dbPath)
 	db.prepare('INSERT INTO groups (group_id, label) VALUES (?,?)').run('G1', 'Group 1')
-	db.prepare('INSERT INTO shops (shop_id, group_id, shop_name) VALUES (?,?,?)').run('S1', 'G1', 'Y2KASEshop')
+	db.prepare('INSERT INTO shops (shop_id, group_id, shop_name) VALUES (?,?,?)').run('S1', 'G1', 'Y2KiPhoneCases')
 	const ins = db.prepare(`
     INSERT INTO receipts (receipt_id, shop_id, group_id, name, buyer_user_id, status, is_paid, is_shipped, etsy_created_at, all_transactions, source)
     VALUES (@id, 'S1', 'G1', @name, @buyer, 'Paid', 1, 0, @created, @tx, 'etsy')`)
@@ -156,7 +156,7 @@ function seed() {
 					group_id: 'G1',
 					label: 'Test Group',
 					proxy: 'direct',
-					shops: [{ shop_id: 'S1', shop_name: 'Y2KASEshop', api_key: 'integrationtestkey000001', shared_secret: 'integrationsecret0001' }],
+					shops: [{ shop_id: 'S1', shop_name: 'Y2KiPhoneCases', api_key: 'integrationtestkey000001', shared_secret: 'integrationsecret0001' }],
 				},
 			],
 		}),

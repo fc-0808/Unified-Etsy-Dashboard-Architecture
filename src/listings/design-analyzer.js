@@ -129,7 +129,7 @@ Be a forensic describer, not a marketer. Name fruits, animals, flowers, foods, o
 
 FIELDS
   "visual_summary"    2-3 sentences: exactly what a shopper sees on the back of the product. Mention the subject, the supporting elements, the layout and the colours.
-  "subject_primary"   The single most prominent depicted thing, 1-3 words, Title Case (e.g. "Strawberry Cow", "Melting Smiley", "Cherry Bow", "Pixel Heart"). If a third-party character dominates, identify its exact name for operator rights review; identification does not imply permission. NEVER a banned word. "" only if the product is genuinely plain with nothing depicted.
+  "subject_primary"   The single most prominent depicted thing, 1-3 words, Title Case (e.g. "Strawberry Cow", "Melting Smiley", "Cherry Bow", "Pixel Heart"). If a third-party character dominates, identify its exact name. NEVER a banned word. "" only if the product is genuinely plain with nothing depicted.
   "subject_secondary" The next most prominent thing, same rules, or "".
   "motifs"            EVERY distinct depicted element, each with "prominence" 1-10 (10 = the hero of the artwork, 1 = a small background detail). 3-10 entries. Lowercase nouns, 1-3 words each. Include repeated background elements (polka dots, gingham, glitter flecks, tiny stars) — those are real buyer queries.
   "printed_text"      EXACT transcription of any words, letters, numbers or slogans visible ON the product (not on packaging or watermarks). Empty array if none. Transcribe faithfully, including deliberate misspellings.

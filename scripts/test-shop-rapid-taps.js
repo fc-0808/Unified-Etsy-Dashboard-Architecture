@@ -256,6 +256,21 @@ test('foreground return has one ordered drain-and-reconcile path', () => {
 	assert.ok(!/visibilitychange[\s\S]{0,220}?load\(false\)/.test(shopSource))
 })
 
+test('a charm supplier-location change invalidates grouping and refetches context', () => {
+	const sigStart = shopSource.indexOf('function routeSig(')
+	const sigEnd = shopSource.indexOf('function anyOverlayOpen(', sigStart)
+	const signature = shopSource.slice(sigStart, sigEnd)
+	assert.ok(signature.includes('r.charm_shop'), 'a changed charm shop must change the route signature')
+	assert.ok(signature.includes('r.charm_stall'), 'a moved charm booth must change the route signature')
+	assert.ok(signature.includes('r.charm_uses_supplier_location'), 'moving between 龙胜 and a supplier market must change the route signature')
+
+	const eventStart = shopSource.indexOf('sse.onmessage =')
+	const eventEnd = shopSource.indexOf('sse.onerror =', eventStart)
+	const eventHandler = shopSource.slice(eventStart, eventEnd)
+	assert.ok(eventHandler.includes('charmAssignmentChanged'))
+	assert.ok(eventHandler.includes('if (charmAssignmentChanged) scheduleRouteRefetch()'))
+})
+
 test('mobile assignment side effects are transactionally complete', () => {
 	const start = serverSource.indexOf("app.post('/api/shop/assign'")
 	const end = serverSource.indexOf("app.post('/api/shop/cost'", start)

@@ -12,6 +12,7 @@
  */
 
 const { fetchAndCacheImage } = require('./image-fetcher');
+const { variationImageApiUrl } = require('../listings/variation-images');
 
 /** Card thumbnails — ~104 px wide on a retina phone. */
 const SHOP_CARD_WIDTH = 300;
@@ -68,6 +69,69 @@ function shopRouteImageUrl(row) {
 }
 
 /**
+ * Resolve the image URL sent to a dashboard browser for one order line.
+ *
+ * The server may reach Etsy's CDN while another LAN device cannot (corporate
+ * DNS, browser privacy filters, VPN policy, or intermittent CDN routing). Every
+ * image with a trustworthy local identity is therefore served through this
+ * dashboard:
+ *
+ *   • operator-uploaded `/api/*` image → already same-origin, preserve it;
+ *   • Etsy variation photo → variation endpoint, preserving the exact style;
+ *   • ordinary listing hero → listing endpoint backed by listing_image_data;
+ *   • catalog design switch → replacement listing endpoint, never the listing
+ *     the buyer switched away from;
+ *   • no trustworthy listing identity → keep a narrowed CDN fallback rather
+ *     than risk serving a confidently wrong product.
+ *
+ * @param {object} args
+ * @param {string|null} [args.imageUrl] resolved line image
+ * @param {number|null} [args.orderedListingId] listing the buyer ordered
+ * @param {boolean} [args.switched=false] whether this is a design replacement
+ * @param {number|null} [args.replacementListingId] replacement catalog listing
+ * @param {{style_value?:string,cached_at?:number}|null} [args.variationImage]
+ * @param {number} [args.width=SHOP_CARD_WIDTH]
+ * @returns {string|null}
+ */
+function orderLineImageUrl({
+  imageUrl = null,
+  orderedListingId = null,
+  switched = false,
+  replacementListingId = null,
+  variationImage = null,
+  width = SHOP_CARD_WIDTH,
+} = {}) {
+  const url = imageUrl == null ? '' : String(imageUrl).trim();
+  if (!url) return null;
+  if (url.startsWith('/api/')) return url;
+
+  const boundedWidth = Number.isFinite(Number(width)) && Number(width) > 0
+    ? Math.min(Math.floor(Number(width)), 960)
+    : SHOP_CARD_WIDTH;
+
+  // A mapped variation is not interchangeable with the listing hero. For
+  // example, "Case Only" and "Case + Grip + Charm" intentionally use different
+  // photos under one listing.
+  if (!switched && variationImage) {
+    const variationUrl = variationImageApiUrl(
+      orderedListingId,
+      variationImage.style_value,
+      variationImage.cached_at,
+    );
+    if (variationUrl) return `${variationUrl}&w=${boundedWidth}`;
+  }
+
+  // A switched line may use only its replacement identity. Falling back to the
+  // ordered listing would show the exact design the buyer rejected.
+  const candidateId = Number(switched ? replacementListingId : orderedListingId);
+  if (Number.isInteger(candidateId) && candidateId > 0) {
+    return `/api/route/listing-image/${candidateId}?w=${boundedWidth}`;
+  }
+
+  return etsyThumb(url);
+}
+
+/**
  * Look up the cached Etsy CDN URL for a listing.
  *
  * @param {import('better-sqlite3').Database} db
@@ -104,6 +168,7 @@ module.exports = {
   SHOP_CARD_WIDTH,
   SHOP_ZOOM_WIDTH,
   etsyThumb,
+  orderLineImageUrl,
   shopRouteImageUrl,
   resolveListingCdnUrl,
   ensureListingImageBytes,

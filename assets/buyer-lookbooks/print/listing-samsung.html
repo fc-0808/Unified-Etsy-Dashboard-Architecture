@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Y2KASE Galaxy styles</title>
+  <style>
+    @font-face { font-family: Fredoka; src: url("fonts/Fredoka-variable.ttf") format("truetype"); font-weight: 300 700; }
+    html, body { margin: 0; width: 2000px; height: 2000px; overflow: hidden; font-family: Fredoka, sans-serif; font-variant-ligatures: none; color: #4a1848; background: linear-gradient(180deg, #ffe6f8, #ead9ff 50%, #d4f3ff); -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    
+    .frame { box-sizing: border-box; width: 2000px; height: 2000px; padding: 40px 54px 44px; display: flex; flex-direction: column; }
+    .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .top img { height: 130px; width: auto; object-fit: contain; }
+    .meta { font-size: 18px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: #ff2f9f; }
+    h1 { font-size: 56px; font-weight: 700; color: #ff2f9f; margin: 0 0 8px; letter-spacing: -0.02em; }
+    .lede { font-size: 26px; font-weight: 500; margin: 0 0 18px; line-height: 1.35; color: #5a2458; }
+    .lede em { font-style: normal; font-weight: 700; color: #ff2f9f; }
+    .warn { background: #fff; color: #4a1848; border: 3px solid #ff2f9f; padding: 14px 22px; font-size: 22px; font-weight: 600; border-radius: 16px; margin-bottom: 18px; text-align: center; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; flex: 1; min-height: 0; }
+    .card { background: #fff; border: 2px solid #ffc2e4; border-radius: 22px; overflow: hidden; display: grid; grid-template-columns: 46% 1fr; }
+    .photo { position: relative; min-height: 0; }
+    .sku { position: absolute; top: 12px; left: 12px; z-index: 1; min-width: 52px; height: 36px; padding: 0 10px; border-radius: 10px; background: #ff2f9f; color: #fff; font-size: 20px; font-weight: 700; display: flex; align-items: center; justify-content: center; letter-spacing: 0.04em; }
+    .card img { width: 100%; height: 100%; object-fit: cover; object-position: center; background: #fff5fb; }
+    .body { padding: 22px 26px; display: flex; flex-direction: column; justify-content: center; }
+    h2 { font-size: 30px; font-weight: 650; margin: 0 0 6px; color: #ff2f9f; }
+    p { margin: 0 0 10px; font-size: 20px; font-weight: 500; line-height: 1.3; color: #5a2458; }
+    .facts { margin: 0 0 10px; display: grid; gap: 4px; }
+    .facts div { display: grid; grid-template-columns: 96px 1fr; gap: 8px; align-items: baseline; }
+    .facts dt { font-size: 14px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: #7a4aa0; }
+    .facts dd { margin: 0; font-size: 20px; font-weight: 550; color: #4a1848; line-height: 1.25; }
+    .card.magsafe { border-color: #ff2f9f; }
+    .ms-badge { position: absolute; top: 12px; right: 12px; z-index: 1; background: #4a1848; color: #fff; font-size: 16px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; padding: 6px 10px; border-radius: 8px; }
+    .tag { display: inline-block; margin-top: 4px; font-size: 15px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; background: #ff2f9f; color: #fff; padding: 5px 12px; border-radius: 999px; }
+  
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <div class="top"><img src="logo.jpg" alt="Y2KASE"><div class="meta">Galaxy · 6 styles</div></div>
+    <h1>Galaxy S-series cases</h1>
+    <p class="lede">MagSafe is <em>No. 05</em> only, and only on Galaxy S-series. Each card lists color, feel, material, and print. Reply with your Galaxy, the style number, and a color if the card lists one.</p>
+    <div class="warn">MagSafe is No. 05 only (S-series). Dual-wrap is S21 through S26 Ultra only.</div>
+    <div class="grid">
+      <div class="card"><div class="photo"><span class="sku">01</span><img src="samples/clear-soft.jpg" alt=""></div><div class="body"><h2>Clear soft</h2><p>Flexible clear TPU. Bright print on the back.</p><dl class="facts"><div><dt>Color</dt><dd>Clear · precise or large hole</dd></div><div><dt>Feel</dt><dd>Fully soft clear</dd></div><div><dt>Material</dt><dd>TPU</dd></div><div><dt>Print</dt><dd>Back print</dd></div></dl></div></div>
+      <div class="card"><div class="photo"><span class="sku">02</span><img src="samples/full-wrap.jpg" alt=""></div><div class="body"><h2>Full-wrap film</h2><p>The thinnest wrap. Print continues around the edges.</p><dl class="facts"><div><dt>Color</dt><dd>Your artwork · gloss or matte · precise or large hole</dd></div><div><dt>Feel</dt><dd>Ultra-thin, hard</dd></div><div><dt>Material</dt><dd>PC film</dd></div><div><dt>Print</dt><dd>Full wrap</dd></div></dl></div></div>
+      <div class="card"><div class="photo"><span class="sku">03</span><img src="samples/glass-back.jpg" alt=""></div><div class="body"><h2>Glass back</h2><p>Poster look on hard glass.</p><dl class="facts"><div><dt>Color</dt><dd>Black bumper</dd></div><div><dt>Feel</dt><dd>Soft bumper, rigid back</dd></div><div><dt>Material</dt><dd>Glass + PC + TPU</dd></div><div><dt>Print</dt><dd>Back print</dd></div></dl></div></div>
+      <div class="card"><div class="photo"><span class="sku">04</span><img src="samples/stepped.jpg" alt=""></div><div class="body"><h2>Stepped camera</h2><p>Raised camera bumper for extra protection on Galaxy.</p><dl class="facts"><div><dt>Color</dt><dd>Multiple colors</dd></div><div><dt>Feel</dt><dd>Fully soft silicone</dd></div><div><dt>Material</dt><dd>Silicone</dd></div><div><dt>Print</dt><dd>Back print</dd></div></dl></div></div>
+      <div class="card magsafe"><div class="photo"><span class="sku">05</span><span class="ms-badge">MagSafe</span><img src="samples/magsafe-clear.jpg" alt=""></div><div class="body"><h2>MagSafe clear</h2><p>Clear MagSafe case. Galaxy S-series only.</p><dl class="facts"><div><dt>Color</dt><dd>Clear</dd></div><div><dt>Feel</dt><dd>Soft bumper, rigid back</dd></div><div><dt>Material</dt><dd>Acrylic + TPU</dd></div><div><dt>Print</dt><dd>Back print</dd></div><div><dt>MagSafe</dt><dd>Built-in</dd></div></dl><span class="tag">S-series only</span></div></div>
+      <div class="card"><div class="photo"><span class="sku">06</span><img src="samples/dual-wrap.jpg" alt=""></div><div class="body"><h2>Dual-layer wrap</h2><p>Glossy wrap. Galaxy S21 through S26 Ultra only.</p><dl class="facts"><div><dt>Color</dt><dd>Your artwork · gloss only</dd></div><div><dt>Feel</dt><dd>Soft inside, hard outside, slight curve</dd></div><div><dt>Material</dt><dd>TPU + PC</dd></div><div><dt>Print</dt><dd>Full wrap</dd></div></dl><span class="tag">S21–S26 Ultra</span></div></div>
+    </div>
+  </div>
+</body>
+</html>

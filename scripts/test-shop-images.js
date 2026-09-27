@@ -1,12 +1,14 @@
 'use strict';
 
 /**
- * Regression tests for shopping-route product image URLs.
+ * Regression tests for same-origin product image URLs.
  *
  * Root cause #1 (same-origin): the /shop service worker cache-firsts image
  * fetches, but CSP connect-src is 'self', so SW fetch() to i.etsystatic.com
  * fails and every direct CDN thumbnail hits onerror → placeholder. Listing
- * photos must be same-origin (/api/route/listing-image/:id).
+ * photos must be same-origin (/api/route/listing-image/:id). The desktop Orders
+ * and 4PX surfaces have the same requirement on employee LAN devices: the host
+ * can reach/cache Etsy while a second device's DNS/VPN may block the CDN.
  *
  * Root cause #2 (WHICH listing): the proxy used to be built from the row's
  * `listing_id` — the listing the buyer ORDERED. After a design switch the line
@@ -17,7 +19,12 @@
  */
 
 const assert = require('assert');
-const { etsyThumb, shopRouteImageUrl, SHOP_CARD_WIDTH } = require('../src/route/shop-images');
+const {
+  etsyThumb,
+  orderLineImageUrl,
+  shopRouteImageUrl,
+  SHOP_CARD_WIDTH,
+} = require('../src/route/shop-images');
 
 const ETSY = 'https://i.etsystatic.com/12345678/r/il/abc123/4567890123/il_570xN.4567890123_qwer.jpg';
 /** The photo of the design the buyer switched AWAY from — must never be served. */
@@ -69,6 +76,83 @@ assert.strictEqual(
   shopRouteImageUrl({ listing_id: 1, product_listing_id: 1, image_url: null }),
   null,
   'null image_url stays null',
+);
+
+// ── Desktop Orders / 4PX drawer ─────────────────────────────────────────────
+// These surfaces used to render the CDN URL verbatim. That worked on the host
+// browser but selectively failed on a LAN employee laptop.
+
+assert.strictEqual(
+  orderLineImageUrl({ imageUrl: ETSY, orderedListingId: 4242 }),
+  `/api/route/listing-image/4242?w=${SHOP_CARD_WIDTH}`,
+  'ordinary Orders thumbnails use the server-side listing cache',
+);
+
+assert.strictEqual(
+  orderLineImageUrl({
+    imageUrl: REPLACEMENT_CDN,
+    orderedListingId: 4242,
+    variationImage: {
+      style_value: 'Case + Grip + Charm',
+      cached_at: 1700000000,
+    },
+  }),
+  `/api/route/variation-image/4242?k=Case%20%2B%20Grip%20%2B%20Charm&v=1700000000&w=${SHOP_CARD_WIDTH}`,
+  'an Orders thumbnail proxies the exact Etsy variation instead of the listing hero',
+);
+
+assert.strictEqual(
+  orderLineImageUrl({
+    imageUrl: '/api/route/style-image/7?v=1700000000',
+    orderedListingId: 4242,
+    variationImage: { style_value: 'Case Only', cached_at: 1 },
+  }),
+  '/api/route/style-image/7?v=1700000000',
+  'an operator-uploaded style image remains on its content-addressed endpoint',
+);
+
+assert.strictEqual(
+  orderLineImageUrl({
+    imageUrl: '/api/route/manual-image/12?v=1700000000',
+    orderedListingId: 4242,
+  }),
+  '/api/route/manual-image/12?v=1700000000',
+  'an uploaded manual-order photo stays on its sidecar endpoint',
+);
+
+{
+  const switched = orderLineImageUrl({
+    imageUrl: REPLACEMENT_CDN,
+    orderedListingId: ORIGINAL_LISTING,
+    switched: true,
+    replacementListingId: REPLACEMENT_LISTING,
+  });
+  assert.strictEqual(
+    switched,
+    `/api/route/listing-image/${REPLACEMENT_LISTING}?w=${SHOP_CARD_WIDTH}`,
+    'a switched Orders line proxies its replacement listing',
+  );
+  assert.ok(
+    !switched.includes(String(ORIGINAL_LISTING)),
+    'a switched Orders line never proxies the rejected original listing',
+  );
+}
+
+assert.strictEqual(
+  orderLineImageUrl({
+    imageUrl: REPLACEMENT_CDN,
+    orderedListingId: ORIGINAL_LISTING,
+    switched: true,
+    replacementListingId: null,
+  }),
+  etsyThumb(REPLACEMENT_CDN),
+  'an unidentifiable switch keeps its replacement CDN fallback rather than guessing the original',
+);
+
+assert.strictEqual(
+  orderLineImageUrl({ imageUrl: null, orderedListingId: 4242 }),
+  null,
+  'a missing image does not create a same-origin endpoint that can only 404',
 );
 
 // ── Switched lines — the bug this file exists to keep dead ───────────────────

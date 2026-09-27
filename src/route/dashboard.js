@@ -36,12 +36,14 @@ const {
   getCharmLibrary, getCharmShopDirectory,
   getOpenIssueMap, getOpenExchangeMap, getSubstitutionMap,
   getListingStyleImageMap, getListingVariationImageMap,
+  loadProductMapTitleAliasesByProductId,
   MANUAL_SHOP_ID,
 } = require('../db/setup');
 const {
   lookupStyleKeyed,
   lookupVariationImage,
   parseStyleValueId,
+  manualSidecarImageUrl,
   resolveUnswitchedLineImage,
   resolveSwitchedLineImage,
   variationImageApiUrl,
@@ -51,6 +53,7 @@ const stallLocation = require('./stall-location');
 const charmNotes = require('./charm-notes');
 const sourcing = require('./sourcing');
 const productTypes = require('../listings/product-types');
+const addressReview = require('../orders/address-review');
 
 /** Valid component purchase statuses — mirror of OSP's STATUS_OPTIONS.
  *   Wrong Stall       (错档口位) — the recorded stall is wrong; must re-source.
@@ -561,15 +564,13 @@ function substitutionSupersedesIssue(sub, issue) {
  * Derive which components an order line needs from its Style string.
  * Mirrors OSP's `_style_has`: "stand"/"kickstand" counts as a grip.
  *
- * A SINGLE-AXIS line (an Apple Watch band, an iPad case) has no bundle string to
- * read: its only variation is the fit, so the style is empty and nothing would
- * be derived. Such a line still has exactly one physical unit to buy, and a line
- * with zero components is invisible to the shopping route (rowHasShoppingWork)
- * — the item would silently never be bought. So when the style says nothing,
- * the line's device family decides: a single-unit line occupies the primary unit
- * slot (`case`), which every downstream surface already knows how to shop,
- * status and pack. `line` is optional; without it the historical behaviour is
- * exact.
+ * A non-bundle line (Apple Watch band / iPad case) has no component words to
+ * parse: its style may be empty (iPad) or a visual value such as "White + Gold
+ * Metal" (watch), neither of which says what physical unit to buy. Such a line
+ * still has exactly one unit, and a line with zero components is invisible to
+ * the shopping route. When no component word is found, the device family
+ * decides: a single-unit line occupies the primary `case` slot that downstream
+ * surfaces already know how to shop, status and pack.
  *
  * @param {string} style
  * @param {{phoneModel?:string, phone_model?:string, title?:string}} [line]
@@ -614,15 +615,14 @@ function isAirpodsProduct(phoneModel, title) {
 }
 
 /**
- * Extract the fit (phone model / band size) + bundle style from an Etsy
+ * Extract the fit (phone model / band size) + priced choice from an Etsy
  * variations array. Etsy v3 transactions store:
  * [{ formatted_name, formatted_value }, ...].
  *
  * Which property means what is decided by productTypes.variationPropertyRole —
  * the same registry the Bulk Listing Creator writes those properties from — so
  * a new product line's axis is understood here the moment it is declared. An
- * Apple Watch band's "Band Size" is a FIT: it is what a shopper must match at
- * the stall, and what a model fix corrects.
+ * Apple Watch band's "Band Size" is its FIT and "Band Style" is its CHOICE.
  *
  * @param {any} variations
  * @returns {{ phoneModel: string, style: string }}
@@ -670,6 +670,11 @@ function parseVariations(variations) {
  *        fulfilment issue (out of production / model unavailable). Default false —
  *        such lines are held out of the purchasing dashboard + route generation so
  *        a product the buyer may cancel/swap is never bought.
+ * @param {boolean}[filters.include_address_review] - include receipts whose
+ *        shipping address is waiting on an owner review (military / Australia).
+ *        Default false — those orders must not appear on the shopping floor.
+ *        A single-receipt lookup (`receipt_id`) always includes them, tagged,
+ *        so Add Order can still show why the line is held.
  * @returns {Array<object>} one row per order line-item
  */
 function buildRouteRows(db, config, filters = {}) {
@@ -803,6 +808,14 @@ function buildRouteRows(db, config, filters = {}) {
     whereClause = `r.is_paid = 1 AND ${scopeClause}${shopClause}`;
   }
 
+  // Military / Australia address review: hold the WHOLE receipt out of the
+  // shopping route until an owner approves the destination. A single-receipt
+  // lookup (Add Order) keeps the rows so the operator can see the hold.
+  const allowAddressHold = filters.include_address_review === true || filters.receipt_id != null;
+  if (!allowAddressHold && addressReview.receiptsHaveColumns(db)) {
+    whereClause = `(${whereClause}) AND ${addressReview.excludeOpenSql('r')}`;
+  }
+
   // De-dupe linked manual orders. A manual order created from the Route tab has
   // BOTH a `receipts` row (so it shows in the Orders tab) AND one or more linked
   // `route_manual_items` sidecars (which carry each product's image + purchasing
@@ -813,12 +826,15 @@ function buildRouteRows(db, config, filters = {}) {
   // no matching row and still flow through.
   whereClause = `(${whereClause}) AND r.receipt_id NOT IN (SELECT receipt_id FROM route_manual_items)`;
 
+  const hasAddressReviewCols = addressReview.receiptsHaveColumns(db);
+  const addressSelect = hasAddressReviewCols ? `, ${addressReview.selectSql('r')}` : '';
+
   const receiptSql = (scopedWhere) => `
     SELECT r.receipt_id, r.shop_id, r.name AS buyer_name, r.buyer_email,
            r.buyer_user_id, r.message_from_buyer, r.team_note,
            r.shipping_country_iso, r.etsy_created_at, r.all_transactions,
            r.is_shipped, r.carrier_confirmed_at, r.shipment_notified_at,
-           r.packaged_at,
+           r.packaged_at${addressSelect},
            s.shop_name
     FROM receipts r
     JOIN shops s ON s.shop_id = r.shop_id
@@ -874,7 +890,7 @@ function buildRouteRows(db, config, filters = {}) {
       db,
       manualReceiptIds,
       (ph) => `SELECT receipt_id, name, buyer_email, shipping_country_iso, etsy_created_at,
-                      message_from_buyer, team_note, packaged_at
+                      message_from_buyer, team_note, packaged_at${hasAddressReviewCols ? `, ${addressReview.selectSql('')}` : ''}
                FROM receipts WHERE receipt_id IN (${ph})`,
     ).forEach((r) => { manualOrderById[r.receipt_id] = r; });
   } catch { /* receipts may lack rows for legacy sidecars */ }
@@ -1176,6 +1192,9 @@ function buildRouteRows(db, config, filters = {}) {
     const issue = substitutionSupersedesIssue(sub, rawIssue) ? null : rawIssue;
     if (issue && !filters.include_issues) return;
 
+    const addressHold = addressReview.shapeForApi(meta);
+    if (addressHold && addressHold.required && !allowAddressHold) return;
+
     // Open wrong-model exchange for this line (we hold it, but in the wrong model).
     // It stays visible but is flagged so callers can hold it out of the buy set and
     // route it into the "To exchange" bucket instead.
@@ -1411,6 +1430,7 @@ function buildRouteRows(db, config, filters = {}) {
       is_pre_transit: meta.is_pre_transit || false,
       label_days_ago: meta.label_days_ago || 0,
       packaged_at:   meta.packaged_at || null,
+      address_review: addressHold,
       // Supplier match (from OSP catalog) — null when enrichment is off.
       supplier_shop:        supplier ? supplier.shop_name : '',
       supplier_stall:       supplier ? supplier.stall : '',
@@ -1460,6 +1480,11 @@ function buildRouteRows(db, config, filters = {}) {
       is_pre_transit: isPreTransit,
       label_days_ago: labelDaysAgo,
       packaged_at:   r.packaged_at || null,
+      address_review_required_at: r.address_review_required_at,
+      address_review_cleared_at: r.address_review_cleared_at,
+      address_review_cleared_by: r.address_review_cleared_by,
+      address_review_reason: r.address_review_reason,
+      address_review_note: r.address_review_note,
     };
 
     for (const t of txs) {
@@ -1516,6 +1541,11 @@ function buildRouteRows(db, config, filters = {}) {
       // showing up as shopping work (notably on the "Charms to buy" list).
       // Legacy sidecars with no linked receipt stay null, as before.
       packaged_at:   linked?.packaged_at || null,
+      address_review_required_at: linked?.address_review_required_at,
+      address_review_cleared_at: linked?.address_review_cleared_at,
+      address_review_cleared_by: linked?.address_review_cleared_by,
+      address_review_reason: linked?.address_review_reason,
+      address_review_note: linked?.address_review_note,
     }, {
       title:      m.title,
       item_key:   m.item_key,
@@ -1525,17 +1555,73 @@ function buildRouteRows(db, config, filters = {}) {
       style:      m.style || '',
       // Catalog picks store a CDN url; custom uploads are served from our
       // own endpoint. Fall back to the cached listing image when neither set.
-      image_url:  m.image_url
-        ? m.image_url
-        // Content-addressed (see substitution image): busts the mobile
-        // service-worker cache when a manual order's photo is replaced.
-        : (m.has_image_data ? `/api/route/manual-image/${m.id}?v=${m.updated_at || m.created_at || 0}` : (m.listing_id ? (imageMap[m.listing_id] || null) : null)),
+      // Catalog picks store a CDN url; custom uploads are served from our
+      // own endpoint. Fall back to the cached listing image when neither set.
+      image_url:  manualSidecarImageUrl(m) || (m.listing_id ? (imageMap[m.listing_id] || null) : null),
       is_manual:  true,
       manual_id:  m.id,
     });
   }
 
   return out;
+}
+
+/**
+ * Listing photos follow the Etsy title. After a catalog rename, try previous
+ * titles before dropping the picker card.
+ */
+function _resolveCatalogImageFromAliases(resolver, row, aliases) {
+  const resolve = (titleNorm, title) => {
+    try { return resolver.resolve(titleNorm, title); }
+    catch { return null; }
+  };
+  const live = resolve(row.title_norm, row.title);
+  if (live && live.url && !live.approx) return live;
+  for (const alias of aliases || []) {
+    const image = resolve(alias.title_norm, alias.title);
+    if (image && image.url && !image.approx) return image;
+  }
+  if (live && live.url) return live;
+  for (const alias of aliases || []) {
+    const image = resolve(alias.title_norm, alias.title);
+    if (image && image.url) return image;
+  }
+  return live || null;
+}
+
+function _observedHistoryForProduct(historyByTitle, titleNorm, aliases) {
+  const buckets = [];
+  const live = historyByTitle.get(titleNorm);
+  if (live) buckets.push(live);
+  for (const alias of aliases || []) {
+    const bucket = historyByTitle.get(alias.title_norm);
+    if (bucket) buckets.push(bucket);
+  }
+  if (!buckets.length) return null;
+  if (buckets.length === 1) return buckets[0];
+  const merged = {
+    phone_models: new Set(),
+    styles: new Set(),
+    listing_counts: new Map(),
+    shop_counts: new Map(),
+    shop_id_counts: new Map(),
+    order_count: 0,
+  };
+  for (const bucket of buckets) {
+    bucket.phone_models.forEach((value) => merged.phone_models.add(value));
+    bucket.styles.forEach((value) => merged.styles.add(value));
+    for (const [key, count] of bucket.listing_counts) {
+      merged.listing_counts.set(key, (merged.listing_counts.get(key) || 0) + count);
+    }
+    for (const [key, count] of bucket.shop_counts) {
+      merged.shop_counts.set(key, (merged.shop_counts.get(key) || 0) + count);
+    }
+    for (const [key, count] of bucket.shop_id_counts) {
+      merged.shop_id_counts.set(key, (merged.shop_id_counts.get(key) || 0) + count);
+    }
+    merged.order_count += bucket.order_count;
+  }
+  return merged;
 }
 
 /**
@@ -1618,10 +1704,13 @@ function buildProductCatalog(db) {
   try { resolver = buildCatalogImageResolver(db); }
   catch { resolver = { resolve: () => null }; }
 
+  const titleAliasesByProduct = loadProductMapTitleAliasesByProductId(db);
+
   const candidates = getProductMap(db)
     .map(row => {
-      const observed = historyByTitle.get(row.title_norm);
-      const image = resolver.resolve(row.title_norm, row.title);
+      const aliases = titleAliasesByProduct.get(Number(row.id)) || [];
+      const observed = _observedHistoryForProduct(historyByTitle, row.title_norm, aliases);
+      const image = _resolveCatalogImageFromAliases(resolver, row, aliases);
       // All three visual catalog surfaces follow the same contract: a selectable
       // product needs a photo. The row remains active in product_map and can be
       // fixed without manufacturing a misleading placeholder design.

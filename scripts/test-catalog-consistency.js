@@ -198,18 +198,23 @@ console.log('\nUnified active Product Catalog\n')
 			assert.strictEqual(routeDashboard.buildProductCatalog(db).products.length, 1)
 		})
 
-		test('active product titles cannot be renamed out from under historical orders', () => {
-			assert.throws(
-				() =>
-					updateProductMapRowById(db, {
-						id: a.id,
-						title: titleA + ' renamed',
-						shop_name: 'Moon Lab',
-						stall: 'A2-18',
-					}),
-				(error) => error && error.code === 'IMMUTABLE',
-			)
-			assert.strictEqual(getProductMapRow(db, { id: a.id }).title, titleA)
+		test('renaming the catalog title keeps historical orders and photos attached', () => {
+			const renamed = titleA + ' (warehouse name)'
+			const result = updateProductMapRowById(db, {
+				id: a.id,
+				title: renamed,
+				shop_name: 'Moon Lab',
+				stall: 'A2-18',
+			})
+			assert.strictEqual(result.renamed, true)
+			assert.strictEqual(getProductMapRow(db, { id: a.id }).title, renamed)
+			assert.strictEqual(getProductMapRow(db, { title: titleA }).id, a.id)
+			const route = routeDashboard.buildRouteRows(db, {}, { enrich_supplier: false })[0]
+			assert.strictEqual(route.supplier_shop, 'Moon Lab')
+			assert.strictEqual(route.supplier_stall, 'A2-18')
+			assert.strictEqual(route.catalog_status, 'active')
+			const picker = routeDashboard.buildProductCatalog(db)
+			assert.ok(picker.products.some((p) => p.title === renamed && p.image_url === 'https://example.test/moon-a.png'))
 		})
 	} finally {
 		db.close()

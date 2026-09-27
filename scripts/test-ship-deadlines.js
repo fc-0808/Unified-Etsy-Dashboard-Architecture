@@ -120,7 +120,7 @@ const TX = (dates) => JSON.stringify(dates.map((d, i) => ({ title: `Line ${i}`, 
 
 function seed(db) {
 	db.prepare('INSERT INTO groups (group_id, label) VALUES (?,?)').run('G1', 'Group 1')
-	db.prepare('INSERT INTO shops (shop_id, group_id, shop_name) VALUES (?,?,?)').run('S1', 'G1', 'Y2KASEshop')
+	db.prepare('INSERT INTO shops (shop_id, group_id, shop_name) VALUES (?,?,?)').run('S1', 'G1', 'Y2KiPhoneCases')
 	db.prepare('INSERT INTO shops (shop_id, group_id, shop_name) VALUES (?,?,?)').run('S2', 'G1', 'OtherShop')
 
 	const ins = db.prepare(`
@@ -218,7 +218,7 @@ async function getJson(qs) {
 		JSON.stringify({
 			db_path: dbPath,
 			sync_interval_minutes: 1440,
-			groups: [{ group_id: 'G1', label: 'Deadline test', proxy: 'direct', shops: [{ shop_id: 'S1', shop_name: 'Y2KASEshop', api_key: 'deadlinetestkey000000001', shared_secret: 'deadlinetestsecret000001' }] }],
+			groups: [{ group_id: 'G1', label: 'Deadline test', proxy: 'direct', shops: [{ shop_id: 'S1', shop_name: 'Y2KiPhoneCases', api_key: 'deadlinetestkey000000001', shared_secret: 'deadlinetestsecret000001' }] }],
 		}),
 		'utf8',
 	)

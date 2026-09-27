@@ -1,0 +1,306 @@
+/* Orders date picker — placement counts on each day.
+   Lives outside the 50k-line dashboard stylesheet so the popover can be
+   restyled without hunting through filter-bar rules. */
+
+#ordersFilters .date-range-wrap.has-orders-cal input[type='date']::-webkit-calendar-picker-indicator {
+	pointer-events: none;
+}
+
+#ordersFilters .date-range-wrap.has-orders-cal input[type='date'].is-cal-editing {
+	color: var(--accent);
+}
+
+#ordersFilters .date-range-wrap.has-orders-cal.is-cal-open {
+	border-color: rgba(245, 100, 0, 0.55);
+	box-shadow: 0 0 0 2px rgba(245, 100, 0, 0.1);
+}
+
+.orders-cal {
+	position: fixed;
+	z-index: 9800;
+	width: 318px;
+	padding: 12px 12px 10px;
+	background: var(--card, #1c1e2a);
+	border: 1px solid var(--border, #2a2d3a);
+	border-radius: 12px;
+	box-shadow:
+		0 18px 48px rgba(0, 0, 0, 0.48),
+		0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+	color: var(--text, #e8eaf0);
+	font-family: var(--font, system-ui, sans-serif);
+	user-select: none;
+}
+
+.orders-cal[hidden] {
+	display: none !important;
+}
+
+.orders-cal-head {
+	display: grid;
+	grid-template-columns: 32px 1fr 32px;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 10px;
+}
+
+.orders-cal-title {
+	text-align: center;
+	font-size: 13px;
+	font-weight: 650;
+	letter-spacing: 0.01em;
+	line-height: 1.2;
+	color: var(--text, #e8eaf0);
+}
+
+.orders-cal-field {
+	display: block;
+	margin-top: 2px;
+	font-size: 10px;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--muted, #7b8099);
+}
+
+.orders-cal-nav {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 32px;
+	height: 32px;
+	padding: 0;
+	border: 1px solid transparent;
+	border-radius: 8px;
+	background: transparent;
+	color: var(--muted, #7b8099);
+	cursor: pointer;
+}
+
+.orders-cal-nav:hover {
+	background: rgba(255, 255, 255, 0.05);
+	color: var(--text, #e8eaf0);
+	border-color: var(--border, #2a2d3a);
+}
+
+.orders-cal-nav:focus-visible,
+.orders-cal-foot-btn:focus-visible,
+.orders-cal-day:focus-visible {
+	outline: 2px solid var(--accent, #f56400);
+	outline-offset: 1px;
+}
+
+.orders-cal-weekdays,
+.orders-cal-grid {
+	display: grid;
+	grid-template-columns: repeat(7, 1fr);
+	gap: 2px;
+}
+
+.orders-cal-weekdays {
+	margin-bottom: 4px;
+}
+
+.orders-cal-wd {
+	height: 20px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 10px;
+	font-weight: 650;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--muted, #7b8099);
+}
+
+.orders-cal-day {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 1px;
+	min-height: 44px;
+	width: 100%;
+	padding: 4px 0 5px;
+	border: 0;
+	border-radius: 8px;
+	background: transparent;
+	color: var(--text, #e8eaf0);
+	cursor: pointer;
+	font-family: inherit;
+}
+
+.orders-cal-num {
+	font-size: 12.5px;
+	font-weight: 550;
+	line-height: 1.15;
+	font-variant-numeric: tabular-nums;
+}
+
+.orders-cal-count {
+	min-height: 11px;
+	font-size: 9px;
+	font-weight: 700;
+	line-height: 1;
+	letter-spacing: 0.02em;
+	font-variant-numeric: tabular-nums;
+	color: #8aa4ff;
+}
+
+.orders-cal-count:empty {
+	visibility: hidden;
+}
+
+.orders-cal-count.is-loading {
+	visibility: visible;
+	width: 10px;
+	height: 3px;
+	margin-top: 2px;
+	border-radius: 99px;
+	background: rgba(255, 255, 255, 0.18);
+	animation: orders-cal-pulse 0.9s ease-in-out infinite;
+}
+
+.orders-cal-day.is-outside {
+	color: rgba(232, 234, 240, 0.38);
+}
+
+.orders-cal-day.is-outside .orders-cal-count {
+	opacity: 0.7;
+}
+
+.orders-cal-day[data-heat='1'] {
+	background: rgba(108, 143, 255, 0.1);
+}
+.orders-cal-day[data-heat='2'] {
+	background: rgba(108, 143, 255, 0.18);
+}
+.orders-cal-day[data-heat='3'] {
+	background: rgba(108, 143, 255, 0.28);
+}
+.orders-cal-day[data-heat='4'] {
+	background: rgba(108, 143, 255, 0.4);
+}
+
+.orders-cal-day[data-heat='3'] .orders-cal-count,
+.orders-cal-day[data-heat='4'] .orders-cal-count {
+	color: #c5d2ff;
+}
+
+.orders-cal-day.is-in-range:not(.is-selected) {
+	background: rgba(245, 100, 0, 0.12);
+	border-radius: 0;
+}
+
+.orders-cal-day.is-range-start:not(.is-range-end) {
+	border-radius: 8px 0 0 8px;
+}
+
+.orders-cal-day.is-range-end:not(.is-range-start) {
+	border-radius: 0 8px 8px 0;
+}
+
+.orders-cal-day.is-today:not(.is-selected) {
+	box-shadow: inset 0 0 0 1px rgba(245, 100, 0, 0.85);
+}
+
+.orders-cal-day.is-selected {
+	background: var(--accent, #f56400);
+	color: #fff;
+	box-shadow: none;
+}
+
+.orders-cal-day.is-selected .orders-cal-count {
+	color: rgba(255, 255, 255, 0.9);
+}
+
+.orders-cal-day:hover:not(.is-selected) {
+	box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+
+.orders-cal-day.is-today:hover:not(.is-selected) {
+	box-shadow:
+		inset 0 0 0 1px rgba(245, 100, 0, 0.85),
+		inset 0 0 0 2px rgba(255, 255, 255, 0.08);
+}
+
+.orders-cal-foot {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	margin-top: 10px;
+	padding-top: 8px;
+	border-top: 1px solid var(--border, #2a2d3a);
+}
+
+.orders-cal-summary {
+	min-width: 0;
+	font-size: 11px;
+	font-weight: 550;
+	color: var(--muted, #7b8099);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.orders-cal-summary.is-error {
+	color: var(--yellow, #f59e0b);
+}
+
+.orders-cal-actions {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	flex: 0 0 auto;
+}
+
+.orders-cal-foot-btn {
+	padding: 4px 8px;
+	border: 0;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--muted, #7b8099);
+	font-family: inherit;
+	font-size: 11.5px;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.orders-cal-foot-btn:hover {
+	color: var(--text, #e8eaf0);
+	background: rgba(255, 255, 255, 0.05);
+}
+
+@keyframes orders-cal-pulse {
+	0%,
+	100% {
+		opacity: 0.35;
+	}
+	50% {
+		opacity: 1;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.orders-cal-count.is-loading {
+		animation: none;
+	}
+}
+
+@media (max-width: 768px) {
+	.orders-cal {
+		width: min(360px, calc(100vw - 24px));
+		padding: 14px 12px 12px;
+	}
+	.orders-cal-day {
+		min-height: 48px;
+	}
+	.orders-cal-num {
+		font-size: 13.5px;
+	}
+	.orders-cal-count {
+		font-size: 10px;
+		min-height: 12px;
+	}
+}

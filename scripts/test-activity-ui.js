@@ -55,6 +55,9 @@ assert(!/<a\b[^>]*\bclass=["'][^"']*\baudit-product-media\b/.test(ACTIVITY), 'up
 assert(/const RENDER_BATCH = 150/.test(ACTIVITY) && /allRows\.slice\(0, _renderLimit\)/.test(ACTIVITY), 'long feeds render in bounded batches')
 assert(/requestSeq !== _loadSeq/.test(ACTIVITY), 'stale range responses cannot overwrite the latest selection')
 assert(/const DEFAULT_USER = 'hope'/.test(ACTIVITY) && /_activeUser = DEFAULT_USER/.test(ACTIVITY), 'every open defaults to Hope’s activity')
+assert(/function describeRouteAssign\(details\)/.test(ACTIVITY), 'route/assign activity names the actual change, not a catch-all')
+assert(!/Updated routing for/.test(ACTIVITY), 'the catch-all “Updated routing for” sentence is gone')
+assert(/typeof e\.action === 'string' && e\.action\.trim\(\)/.test(ACTIVITY), 'server-attached action sentences win over the local RULES table')
 assert(/const DEFAULT_RANGE = 'today'/.test(ACTIVITY) && /_range = DEFAULT_RANGE/.test(ACTIVITY), 'every open defaults to today’s local-day range')
 assert(/class="earn-seg-btn active" data-range="today" aria-pressed="true"/.test(PAGE), 'the static range state also starts on Today')
 

@@ -24,12 +24,17 @@ const Database = require('better-sqlite3')
 
 // Swap ONE export before bulk-runner destructures it at require time. Every
 // other helper (retitleForModels, filterModelsInDescription, …) stays real.
+const fs = require('fs')
+const path = require('path')
 const aiGenerator = require('../src/listings/ai-generator')
 const realGenerate = aiGenerator.generateCopyFromAnalysis
 let aiGate = null // when set, the stub parks here until the test releases it
+let aiThrow = null
+let aiResult = null
 let aiCalls = []
 aiGenerator.generateCopyFromAnalysis = async (args) => {
 	aiCalls.push(args)
+	if (aiThrow) throw new Error(aiThrow)
 	if (aiGate) await aiGate
 	return {
 		title: 'Kuromi Star AirPods Case with Charm',
@@ -45,6 +50,7 @@ aiGenerator.generateCopyFromAnalysis = async (args) => {
 		secondaryColor: 'Pink',
 		enabledModels: args.enabledModels,
 		styleImageMapping: args.styleImageMapping || {},
+		...(aiResult || {}),
 	}
 }
 
@@ -359,6 +365,190 @@ async function main() {
 		const { preview } = readPreview(db)
 		assert(labelsOf(preview.customStyles).length === 5, 'the later save wins over the values the request carried')
 		assert(preview.description === 'Regenerated description.', 'the regenerated copy is applied on top of it')
+		db.close()
+	}
+
+	// ── 8. A finished run connects after the request, so the result is replayed ─
+	{
+		console.log('\nA subscriber that connects after regeneration already finished')
+		const { db, mgr } = makeManager()
+		seedItem(db)
+		mgr.startRegenerateItemCopy(JOB_ID, 1, { characterName: 'Kuromi' })
+		let title = ''
+		for (let i = 0; i < 50 && title !== 'Kuromi Star AirPods Case with Charm'; i++) {
+			title = db.prepare('SELECT title FROM bulk_job_items WHERE job_id = ?').get(JOB_ID).title
+			if (title !== 'Kuromi Star AirPods Case with Charm') await new Promise((r) => setTimeout(r, 10))
+		}
+		const chunks = []
+		mgr.subscribe(JOB_ID, {
+			write(chunk) { chunks.push(String(chunk)) },
+			on() {},
+		})
+		const joined = chunks.join('\n')
+		assert(joined.includes('"type":"regen_done"'), 'a late subscriber is replayed regen_done')
+		assert(joined.includes('Kuromi Star AirPods Case with Charm'), 'the replay carries the new title')
+		const detail = mgr.buildItemDetail(JOB_ID, 1)
+		assert(detail.item.regenerating === false, 'the detail says the regeneration is finished')
+		assert(detail.item.regen_error == null, 'a success leaves no regen error')
+		db.close()
+	}
+
+	// ── 9. A fast failure is still visible to the inspector that connects late ─
+	{
+		console.log('\nA failure that happens before anyone is listening')
+		const { db, mgr } = makeManager()
+		seedItem(db)
+		aiThrow = 'model down'
+		try {
+			mgr.startRegenerateItemCopy(JOB_ID, 1, { characterName: 'Kuromi' })
+			await new Promise((r) => setImmediate(r))
+			await new Promise((r) => setImmediate(r))
+			const chunks = []
+			mgr.subscribe(JOB_ID, {
+				write(chunk) { chunks.push(String(chunk)) },
+				on() {},
+			})
+			const joined = chunks.join('\n')
+			assert(joined.includes('"type":"regen_failed"'), 'a late subscriber is replayed regen_failed')
+			assert(joined.includes('model down'), 'the replay carries the error')
+			const detail = mgr.buildItemDetail(JOB_ID, 1)
+			assert(detail.item.regen_error === 'model down', 'the inspector detail reports the failure')
+			assert(detail.item.regenerating === false, 'the failed regeneration is not left running')
+		} finally {
+			aiThrow = null
+		}
+		db.close()
+	}
+
+	{
+		console.log('\nThe inspector opens the progress stream before it asks to regenerate')
+		const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8')
+		const start = html.indexOf('async function bulkInspectorRegenerate()')
+		const end = html.indexOf('async function bulkInspectorRefreshAfterRegen')
+		const fn = html.slice(start, end)
+		const streamAt = fn.indexOf('bulkEnsureBulkStream()')
+		const fetchAt = fn.indexOf('/regenerate')
+		assert(start !== -1 && end > start, 'the regenerate handler is in the page')
+		assert(streamAt !== -1 && streamAt < fetchAt, 'the live stream is opened before the regenerate request')
+		assert(fn.includes('await bulkInspectorRefreshAfterRegen(seq)'), 'the inspector reloads after the rewrite is stored')
+		assert(fn.includes('bulkPaintRegenCopy(json, seq)'), 'the response is painted onto the listing that was clicked')
+		assert(fn.includes('bulkSetRowRegenerating(seq, true)'), 'the clicked row is marked before the request')
+		assert(fn.includes('bulkFinishRegenRow(seq, json)'), 'the clicked row drops the spinner when the rewrite is stored')
+		assert(!fn.includes('it.regenerating = true'), 'a finished rewrite is not put back into Regenerating')
+		const server = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'index.js'), 'utf8')
+		assert(server.includes('await pending.completion'), 'the regenerate request waits until the new copy is stored')
+		assert(html.includes('function bulkSameSeq('), 'listing sequence is compared numerically')
+		assert(html.includes('keepLive = ev.state === \'done\''), 'a finished run does not drop the progress stream')
+	}
+
+	// ── 10. Unchecking MagSafe rewrites the stored copy before the model runs ─
+	{
+		console.log('\nUnchecking MagSafe removes it from the title and description immediately')
+		const applied = aiGenerator.applyMagsafeToCopy({
+			title: 'Baby Elephant MAGSAFE Cover for iPhone 18 17 16 15 Pro Max, Lavender Party Hat',
+			description: [
+				'Baby Elephant MAGSAFE silicone phone case with a large raised 3D lavender elephant wearing a party hat.',
+				'This design includes the confirmed MagSafe ring, so it is made for magnetic charging compatibility. It also includes a 3D elephant grip accessory for a more secure hold.',
+				'- Confirmed MagSafe ring included',
+			].join('\n'),
+			tags: ['magsafe iphone case', 'elephant case', 'magsafe case'],
+		}, false)
+		assert(!/mag[\s-]?safe/i.test(applied.title), 'the title loses MAGSAFE')
+		assert(applied.title.includes('Baby Elephant Cover for iPhone 18'), 'the rest of the title stays')
+		assert(!/mag[\s-]?safe/i.test(applied.description), 'the description loses every MagSafe mention')
+		assert(applied.description.includes('3D elephant grip'), 'the grip sentence stays')
+		assert(!applied.description.includes('Confirmed'), 'a MagSafe-only bullet is dropped')
+		assert(applied.tags.length === 1 && applied.tags[0] === 'elephant case', 'MagSafe tags are dropped')
+
+		const { db, mgr } = makeManager()
+		const images = [{ rank: 1, has_magsafe_ring: true }]
+		seedItem(db, {
+			preview: {
+				title: 'Baby Elephant MAGSAFE Cover for iPhone 18',
+				description: 'Baby Elephant MAGSAFE case.\n- Confirmed MagSafe ring included',
+				tags: ['magsafe case', 'elephant'],
+				accessory: { hasMagsafe: true, magsafeConfidence: 85, magsafeEvidence: 'ring visible' },
+				imageAnalysis: images,
+			},
+			ai: { imageAnalysis: images },
+		})
+		const result = mgr.startRegenerateItemCopy(JOB_ID, 1, { characterName: 'kawaii character', magsafe: false })
+		assert(!/mag[\s-]?safe/i.test(result.title), 'the request returns the title with MagSafe already removed')
+		assert(!/mag[\s-]?safe/i.test(result.description), 'the request returns the description with MagSafe already removed')
+		const { preview, title } = readPreview(db)
+		assert(title === result.title, 'the listing row title is updated before the model returns')
+		assert(preview.accessory.hasMagsafe === false, 'the accessory flag follows the checkbox')
+		assert(preview.accessory.magsafeConfidence == null, 'a turned-off ring does not keep its old confidence')
+		assert(preview.imageAnalysis.every((img) => img.has_magsafe_ring === false), 'cached image flags follow the checkbox')
+		assert(!/mag[\s-]?safe/i.test(JSON.stringify(preview.tags)), 'stored tags no longer advertise MagSafe')
+		await new Promise((r) => setImmediate(r))
+		await new Promise((r) => setImmediate(r))
+		db.close()
+	}
+
+	// ── 11. A model that writes MAGSAFE back is overwritten by the checkbox ──
+	{
+		console.log('\nThe model cannot put MagSafe back after the operator turned it off')
+		const { db, mgr } = makeManager()
+		seedItem(db, {
+			preview: {
+				title: 'Baby Elephant MAGSAFE Cover for iPhone 18',
+				description: 'Includes a MagSafe ring.',
+				tags: ['magsafe case'],
+				accessory: { hasMagsafe: true },
+			},
+		})
+		aiResult = {
+			title: 'Baby Elephant MAGSAFE Cover for iPhone 18 Pro Max',
+			description: 'A lavender elephant. This design includes the confirmed MagSafe ring, so it is made for magnetic charging compatibility. Soft bumper.',
+			tags: ['magsafe case', 'elephant'],
+		}
+		try {
+			const done = nextEvent(mgr, 'regen_done')
+			mgr.subscribe(JOB_ID, { write() {}, on() {} })
+			mgr.startRegenerateItemCopy(JOB_ID, 1, { characterName: 'kawaii character', magsafe: false })
+			await done
+			const { preview, ai, title } = readPreview(db)
+			assert(!/mag[\s-]?safe/i.test(title), 'the saved title has no MagSafe')
+			assert(!/mag[\s-]?safe/i.test(preview.description), 'the saved description has no MagSafe')
+			assert(preview.description.includes('Soft bumper'), 'the rest of the description stays')
+			assert(!preview.tags.some((tag) => /mag[\s-]?safe/i.test(tag)), 'the saved tags have no MagSafe')
+			assert(preview.accessory.hasMagsafe === false, 'the accessory stays off after the model returns')
+			assert(ai.accessory.hasMagsafe === false, 'the cached analysis stays off')
+		} finally {
+			aiResult = null
+		}
+		db.close()
+	}
+
+	// ── 12. A failed rewrite still keeps the MagSafe removal ──────────────────
+	{
+		console.log('\nMagSafe stays removed when the rewrite fails')
+		const { db, mgr } = makeManager()
+		seedItem(db, {
+			preview: {
+				title: 'Baby Elephant MAGSAFE Cover for iPhone 18',
+				description: 'Confirmed MagSafe ring included. Soft bumper.',
+				tags: ['magsafe case'],
+				accessory: { hasMagsafe: true, magsafeConfidence: 85 },
+			},
+		})
+		aiThrow = 'model down'
+		try {
+			const result = mgr.startRegenerateItemCopy(JOB_ID, 1, { magsafe: false, characterName: 'kawaii character' })
+			assert(!/mag[\s-]?safe/i.test(result.title), 'the failed request still returns the stripped title')
+			await new Promise((r) => setImmediate(r))
+			await new Promise((r) => setImmediate(r))
+			const { preview, title } = readPreview(db)
+			assert(!/mag[\s-]?safe/i.test(title), 'the stripped title is still stored after the failure')
+			assert(!/mag[\s-]?safe/i.test(preview.description), 'the stripped description is still stored after the failure')
+			assert(preview.description.includes('Soft bumper'), 'the product sentence survives the failure')
+			const detail = mgr.buildItemDetail(JOB_ID, 1)
+			assert(detail.item.regen_error === 'model down', 'the failure is still reported')
+			assert(detail.item.regen_operator_saved === true, 'the inspector knows the checkbox was already saved')
+		} finally {
+			aiThrow = null
+		}
 		db.close()
 	}
 

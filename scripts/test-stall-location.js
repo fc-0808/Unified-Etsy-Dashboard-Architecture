@@ -286,15 +286,41 @@ for (const mirror of mirrors) {
 	})
 }
 
-// ── Charms are shopped in their own market ──────────────────────────────────
-group('Charm market (龙胜)')
+// ── Dedicated charm market vs supplier-backed charm booths ─────────────────
+group('Charm market location')
 
 // Compile the charm re-home out of shop.html, standing on the same parser block
 // the page uses, so the test runs the shipped logic rather than a copy.
-const charmLoc = (() => {
+const shopCharmApi = (() => {
 	const stallBlock = extract('public/shop.html', START, END)
 	const charmBlock = extract('public/shop.html', '// ══ CHARM LOCATION ══', '// ══ END CHARM LOCATION ══')
-	return new Function(`${stallBlock}\n${charmBlock}\nreturn charmLoc`)()
+	return new Function(`${stallBlock}\n${charmBlock}\nreturn { charmLoc }`)()
+})()
+const charmLoc = shopCharmApi.charmLoc
+
+// Compile the real stop index / merge policy against a supplied route snapshot.
+// Lightweight section predicates and exact-stall overlap are enough for these
+// fixtures; the production implementation receives the page's richer aliases.
+function makeCharmStopApi(rows) {
+	const stallBlock = extract('public/shop.html', START, END)
+	const routingBlock = extract('public/shop.html', '// ══ CHARM STOP ROUTING ══', '// ══ END CHARM STOP ROUTING ══')
+	return new Function(
+		'ROWS',
+		`${stallBlock}
+		const inCgSection = (r) => !!(r.has_case || r.has_grip || r.charm_integral)
+		const inCharmSection = (r) => !!r.has_charm && !r.charm_integral
+		const supKeyOf = (r) => locationSortKey(r.supplier_stall || '', r.supplier_shop || '')
+		const stallCodesOverlap = (a, b) => normalizeStall(a).toLowerCase() === normalizeStall(b).toLowerCase()
+		${routingBlock}
+		return { cgStopIndex, charmMergeStop }`,
+	)(rows)
+}
+
+// The desktop Assign-Charm picker carries a second plain-HTML mirror.
+const desktopCharmLoc = (() => {
+	const stallBlock = extract('public/index.html', START, END)
+	const charmBlock = extract('public/index.html', '// ══ CHARM LOCATION ══', '// ══ END CHARM LOCATION ══')
+	return new Function(`${stallBlock}\n${charmBlock}\nreturn _charmLoc`)()
 })()
 
 test('a bare charm code is shopped in 龙胜, not the home case/grip market', () => {
@@ -304,6 +330,80 @@ test('a bare charm code is shopped in 龙胜, not the home case/grip market', ()
 	assert.strictEqual(loc.isHome, false)
 	assert.strictEqual(loc.code, '2C666', 'the booth code is untouched')
 	assert.strictEqual(loc.floor, 2, 'and so is the floor')
+})
+
+test('an exact supplier-backed charm booth keeps the supplier market', () => {
+	for (const [name, resolve] of [
+		['server', server.charmLocation],
+		['Shopping Mode', charmLoc],
+		['Assign Charm', desktopCharmLoc],
+	]) {
+		const loc = resolve('A205', true)
+		assert.strictEqual(loc.buildingId, 'tongxin', `${name} must keep A205 in 通信`)
+		assert.strictEqual(loc.buildingLabel.zh, '通信')
+		assert.strictEqual(loc.code, 'A205')
+		assert.strictEqual(loc.floor, 2)
+	}
+})
+
+test('charm location mirrors agree for dedicated and supplier-backed booths', () => {
+	for (const stall of CORPUS) {
+		for (const usesSupplierLocation of [false, true]) {
+			const expected = server.charmLocation(stall, usesSupplierLocation)
+			assert.deepStrictEqual(charmLoc(stall, usesSupplierLocation), expected, `Shopping Mode charm location for ${JSON.stringify(stall)}`)
+			assert.deepStrictEqual(desktopCharmLoc(stall, usesSupplierLocation), expected, `Assign Charm location for ${JSON.stringify(stall)}`)
+		}
+	}
+})
+
+test('only an exact located shop + stall match gets supplier semantics', () => {
+	const enriched = server.enrichCharmShopLocations(
+		[
+			{ shop_name: '鑫宜', stall: 'A205' },
+			{ shop_name: 'Other merchant', stall: 'A205' },
+			{ shop_name: '鑫宜', stall: 'A206' },
+			{ shop_name: 'Case Fold', stall: 'Ａ２-２９' },
+			{ shop_name: 'No stall', stall: '' },
+		],
+		[
+			{ shop_name: '鑫宜', stall: 'A205' },
+			{ shop_name: 'case fold', stall: 'A2-29' },
+			{ shop_name: 'No stall', stall: '' },
+		],
+	)
+	assert.deepStrictEqual(
+		enriched.map((row) => row.uses_supplier_location),
+		[true, false, false, true, false],
+		'same code alone, same shop alone, and unlocated rows must not change markets',
+	)
+})
+
+test('Shopping Mode routes supplier-backed Charm Only into Cases & Grips', () => {
+	const supplierCharm = {
+		has_case: false,
+		has_grip: false,
+		has_charm: true,
+		charm_integral: false,
+		charm_shop: '鑫宜',
+		charm_stall: 'A205',
+		charm_floor: 2,
+		charm_uses_supplier_location: true,
+	}
+	const dedicatedCharm = {
+		...supplierCharm,
+		charm_shop: '彩虹',
+		charm_stall: '2D21',
+		charm_uses_supplier_location: false,
+	}
+	const api = makeCharmStopApi([supplierCharm, dedicatedCharm])
+	const stopKey = api.charmMergeStop(supplierCharm)
+	assert.ok(stopKey, 'Charm Only at a regular supplier must resolve to a supplier stop')
+	const stop = api.cgStopIndex().byKey.get(stopKey)
+	assert.deepStrictEqual(
+		{ shop: stop.shop, stall: stop.stall, building: server.parseStall(stop.stall).buildingId },
+		{ shop: '鑫宜', stall: 'A205', building: 'tongxin' },
+	)
+	assert.strictEqual(api.charmMergeStop(dedicatedCharm), null, 'a dedicated charm vendor must remain in Charms')
 })
 
 test('a charm stall that names another market keeps it', () => {
@@ -367,13 +467,20 @@ function makeList(groups) {
 
 /**
  * A rendered stop, as render() hands it to the tree. Charm stops arrive already
- * re-homed to 龙胜 (render() calls charmLoc), so the fixture mirrors that.
+ * resolved through the same charm context flag render() receives from the API.
  */
-const stop = (stall, shop, remaining, section = 'cg') => ({ loc: section === 'charm' ? charmLoc(stall) : server.parseStall(stall), stall, shop, section, remaining })
+const stop = (stall, shop, remaining, section = 'cg', usesSupplierLocation = false) => ({
+	loc: section === 'charm' ? charmLoc(stall, usesSupplierLocation) : server.parseStall(stall),
+	stall,
+	shop,
+	section,
+	remaining,
+})
 
 const ROUTE = [
 	stop('A2-29', 'HAN', 3),
 	stop('A2-33', '壳引力', 7),
+	stop('A205', '鑫宜', 1),
 	stop('5C26', 'inin', 1),
 	stop('康乐北区5A40-42', '热点', 7),
 	stop('太平洋1B111', '潮品汇', 1),
@@ -395,17 +502,21 @@ test('stops are filed Section → Building → Floor → Stall', () => {
 	)
 	const tongxin = cg.children[0]
 	assert.deepStrictEqual(tongxin.children.map((f) => f.label), ['2楼', '5楼'])
-	assert.deepStrictEqual(tongxin.children[0].children.map((l) => `${l.label} ${l.sub}`), ['HAN A2-29', '壳引力 A2-33'])
+	assert.deepStrictEqual(tongxin.children[0].children.map((l) => `${l.label} ${l.sub}`), ['HAN A2-29', '壳引力 A2-33', '鑫宜 A205'])
 })
 
-test('the charm section files its stops under 龙胜, not 通信', () => {
+test('supplier-backed A205 is under Cases & Grips, not the Charms section', () => {
 	const { tree } = makeTree(ROUTE)
+	const supplierLeaves = tree[0].children
+		.flatMap((building) => building.children)
+		.flatMap((floor) => floor.children || [floor])
+	assert.ok(supplierLeaves.some((leaf) => leaf.label === '鑫宜' && leaf.sub === 'A205'))
 	const charm = tree[1]
 	assert.strictEqual(charm.label, '挂件')
-	assert.deepStrictEqual(charm.children.map((b) => b.label), ['龙胜'], 'charms are shopped in their own market')
-	const floor = charm.children[0].children[0]
-	assert.strictEqual(floor.label, '2楼')
-	assert.deepStrictEqual(floor.children.map((l) => `${l.label} ${l.sub}`), ['彩虹 2D21', '一乐潮品 2C666'])
+	assert.deepStrictEqual(charm.children.map((b) => b.label), ['龙胜'])
+	const dedicatedFloor = charm.children[0].children[0]
+	assert.strictEqual(dedicatedFloor.label, '2楼')
+	assert.deepStrictEqual(dedicatedFloor.children.map((l) => `${l.label} ${l.sub}`), ['彩虹 2D21', '一乐潮品 2C666'])
 })
 
 test('a market prefix is dropped from the leaf a shopper reads', () => {
@@ -426,11 +537,11 @@ test('stalls with no readable floor hang off their market directly', () => {
 test('counts roll up from stalls to floors to markets to the section', () => {
 	const { tree } = makeTree(ROUTE)
 	const cg = tree[0]
-	assert.strictEqual(cg.remaining, 3 + 7 + 1 + 1 + 7 + 1 + 2 + 2)
+	assert.strictEqual(cg.remaining, 3 + 7 + 1 + 1 + 7 + 1 + 1 + 2 + 2)
 	const tongxin = cg.children[0]
-	assert.strictEqual(tongxin.remaining, 11)
-	assert.strictEqual(tongxin.children[0].remaining, 10, '2楼 = HAN 3 + 壳引力 7')
-	assert.strictEqual(tree[1].remaining, 12, 'charms are their own section')
+	assert.strictEqual(tongxin.remaining, 12)
+	assert.strictEqual(tongxin.children[0].remaining, 11, '2楼 = HAN 3 + 壳引力 7 + 鑫宜 1')
+	assert.strictEqual(tree[1].remaining, 12, 'only dedicated charm-market purchases remain in Charms')
 })
 
 test('every leaf still points at the card it names', () => {
@@ -491,7 +602,7 @@ test('a market node renders its caret, name and count — and nothing else', () 
 	assert.ok(html.includes('class="trow building"'), 'markets are their own row type')
 	assert.ok(html.includes('data-toggle="sec:cg:bld:tongxin"'), 'and are collapsible by a stable id')
 	assert.ok(html.includes('<span class="tcaret">▾</span>'))
-	assert.ok(html.includes('>11</span>'))
+	assert.ok(html.includes('>12</span>'))
 	assert.ok(html.includes('data-gidx="0"'), 'leaves keep the index render() gave them')
 	// The row is read at arm's length in a market aisle: market name, how much is
 	// left, nothing competing with either.

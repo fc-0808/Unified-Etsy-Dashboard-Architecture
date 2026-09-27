@@ -11,7 +11,7 @@ const fs = require('fs')
 const path = require('path')
 
 const ROOT = path.resolve(__dirname, '..')
-const FILES = ['public/index.html', 'public/shop.html', 'public/sourcing.html', 'public/login.html'].map((f) =>
+const FILES = ['public/index.html', 'public/shop.html', 'public/sourcing.html', 'public/login.html', 'public/orders-calendar.js'].map((f) =>
 	path.join(ROOT, f),
 )
 
@@ -27,7 +27,12 @@ const MUST_BE_CLEAN = [
 	'>Packing Mode<',
 	'>Need to purchase<',
 	'>To pack &amp; ship<',
+	'>Not yet shipped<',
 	'>Recently packaged<',
+	'>Address review<',
+	'>To review<',
+	'>Mark reviewed<',
+	">Can't ship<",
 	'Activity log</div>',
 	'>Ship with 4PX<',
 	'>Mark packaged<',

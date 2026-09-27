@@ -31,13 +31,14 @@ const baseConfig = {
 try {
   fs.writeFileSync(configPath, JSON.stringify(baseConfig), 'utf8');
   const { defaultDbPath, loadConfig, isAutoRestockEnabled, patchRuntimeSettings, refreshConfigInPlace } = require('../src/config/schema');
-  const { analyzeSuspensionRisks, enforceConfigCompliance } = require('../src/compliance/suspension-guard');
-
   const defaults = loadConfig();
+  assert.equal(defaults.network_transport.mode, 'local_socks5');
+  assert.equal(defaults.network_transport.local_host, '127.0.0.1');
+  assert.equal(defaults.network_transport.local_port, 7897);
+  assert.equal(defaults.vpn_local_port, 7897);
+  assert.equal(defaults.browser_expected_static_proxy_count, null);
   assert.equal(defaults.auto_restock_enabled, false);
-  assert.equal(defaults.etsy_multi_key_approved, false);
   assert.equal(defaults.catalog_health_sync, false);
-  assert.equal(defaults.etsy_api_analytics_approved, false);
   assert.equal(defaults.catalog_health_interval_hours, 24);
   assert.equal(isAutoRestockEnabled(defaults), false);
   assert.equal(isAutoRestockEnabled({}), false);
@@ -49,69 +50,189 @@ try {
     'default database path must not use a synchronized folder'
   );
 
-  const multiKeyConfig = {
-    groups: [{
-      group_id: 'multi',
-      label: 'Multi',
-      proxy: 'direct',
-      shops: [
-        { shop_id: '1', shop_name: 'One', api_key: 'key-one' },
-        { shop_id: '2', shop_name: 'Two', api_key: 'key-two' },
-      ],
-    }],
-  };
-  const multiKeyRisk = analyzeSuspensionRisks(multiKeyConfig)
-    .find((risk) => risk.code === 'MULTIPLE_API_KEYS_ONE_APPLICATION');
-  assert.equal(multiKeyRisk?.level, 'high');
-  const approvedRisk = analyzeSuspensionRisks({ ...multiKeyConfig, etsy_multi_key_approved: true })
-    .find((risk) => risk.code === 'MULTIPLE_API_KEYS_APPROVAL_RECORDED');
-  assert.equal(approvedRisk?.level, 'info');
-  const overflowRisks = analyzeSuspensionRisks({
-    groups: [{
-      group_id: 'overflow',
-      label: 'Overflow',
-      proxy: 'direct',
-      shops: Array.from({ length: 6 }, (_, i) => ({
-        shop_id: String(i + 1),
-        shop_name: `Shop ${i + 1}`,
-        api_key: 'one-key',
-      })),
-    }],
-  });
-  assert.throws(
-    () => enforceConfigCompliance({ allow_overloaded_api_keys: true }, overflowRisks),
-    /no runtime override/i,
-    'a local flag must never bypass Etsy shop/key allocation'
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({
+      ...baseConfig,
+      network_transport: {
+        mode: 'system_tunnel',
+        provider: 'System VPN',
+        interface_name: 'VPN',
+      },
+      browser_expected_static_proxy_count: 3,
+    }),
+    'utf8'
   );
+  const systemTunnel = loadConfig();
+  assert.deepEqual(systemTunnel.network_transport, {
+    mode: 'system_tunnel',
+    provider: 'System VPN',
+    interface_name: 'VPN',
+    local_host: null,
+    local_port: null,
+  });
+  assert.equal(systemTunnel.vpn_local_port, null);
+  assert.equal(systemTunnel.browser_expected_static_proxy_count, 3);
+  assert.deepEqual(systemTunnel.browser_profiles, []);
 
   fs.writeFileSync(
     configPath,
-    JSON.stringify({ ...baseConfig, catalog_health_sync: true }),
+    JSON.stringify({
+      ...baseConfig,
+      browser_expected_static_proxy_count: 2,
+      browser_profiles: [
+        {
+          profile_id: 'profile-1',
+          expected_egress_ip: '203.0.113.10',
+          label: 'Profile 1',
+        },
+        {
+          profile_id: 'profile-2',
+          expected_egress_ip: '203.0.113.11',
+        },
+      ],
+    }),
+    'utf8'
+  );
+  const browserInventory = loadConfig();
+  assert.equal(browserInventory.browser_profiles.length, 2);
+  assert.equal(browserInventory.browser_profiles[1].label, null);
+
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({
+      ...baseConfig,
+      browser_expected_static_proxy_count: 2,
+      browser_profiles: [{
+        profile_id: 'profile-1',
+        expected_egress_ip: '203.0.113.10',
+      }],
+    }),
+    'utf8'
+  );
+  assert.throws(() => loadConfig(), /length does not match/);
+
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({
+      ...baseConfig,
+      browser_expected_static_proxy_count: 0,
+    }),
+    'utf8'
+  );
+  assert.throws(() => loadConfig(), /browser_expected_static_proxy_count/);
+
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({
+      ...baseConfig,
+      vpn_local_port: 7897,
+      network_transport: { mode: 'system_tunnel', provider: 'System VPN' },
+    }),
+    'utf8'
+  );
+  assert.throws(() => loadConfig(), /not both/);
+
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({
+      ...baseConfig,
+      network_transport: {
+        mode: 'system_tunnel',
+        provider: 'System VPN',
+        local_port: 65532,
+      },
+    }),
     'utf8'
   );
   assert.throws(
     () => loadConfig(),
-    /written authorization/i,
-    'API analytics must fail closed without Etsy written approval'
+    /does not use local_host\/local_port/,
+    'a VPN UI local port must not be mistaken for a SOCKS5 listener'
   );
 
   fs.writeFileSync(
     configPath,
     JSON.stringify({
       ...baseConfig,
+      groups: [
+        baseConfig.groups[0],
+        { ...baseConfig.groups[0], label: 'Duplicate' },
+      ],
+    }),
+    'utf8'
+  );
+  assert.throws(() => loadConfig(), /duplicate group_id/);
+
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({
+      ...baseConfig,
+      groups: [{
+        ...baseConfig.groups[0],
+        proxy: 'socks5://private-user:private-password@proxy.test',
+      }],
+    }),
+    'utf8'
+  );
+  assert.throws(
+    () => loadConfig(),
+    (err) => /proxy port is missing/.test(err.message)
+      && !/private-user|private-password/.test(err.message),
+    'proxy validation errors must not print credentials'
+  );
+
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({
+      ...baseConfig,
+      groups: [{
+        ...baseConfig.groups[0],
+        proxy: 'socks5://private-user:private-password@proxy.test:1080',
+      }],
+    }),
+    'utf8'
+  );
+  assert.throws(
+    () => loadConfig(),
+    /expected_egress_ip is required/,
+    'a proxied group must never start without a static exit pin'
+  );
+
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({
+      ...baseConfig,
+      groups: [{
+        ...baseConfig.groups[0],
+        expected_egress_ip: 'not-an-ip',
+      }],
+    }),
+    'utf8'
+  );
+  assert.throws(() => loadConfig(), /expected_egress_ip/);
+
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({ ...baseConfig, catalog_health_sync: true }),
+    'utf8'
+  );
+  const catalogOn = loadConfig();
+  assert.equal(catalogOn.catalog_health_sync, true);
+
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({
+      ...baseConfig,
       auto_restock_enabled: true,
-      etsy_multi_key_approved: true,
       catalog_health_sync: true,
-      etsy_api_analytics_approved: true,
       route_engine_data_dir: 'route-data',
     }),
     'utf8'
   );
   const explicit = loadConfig();
   assert.equal(explicit.auto_restock_enabled, true);
-  assert.equal(explicit.etsy_multi_key_approved, true);
   assert.equal(explicit.catalog_health_sync, true);
-  assert.equal(explicit.etsy_api_analytics_approved, true);
   assert.equal(isAutoRestockEnabled(explicit), true);
   assert.equal(explicit.route_engine_data_dir, path.join(tempRoot, 'route-data'));
   const enginePaths = require('../src/route/engine-paths');
@@ -143,7 +264,7 @@ try {
   fs.writeFileSync(configPath, JSON.stringify(placeholderConfig), 'utf8');
   assert.throws(() => loadConfig(), /placeholder value/);
 
-  console.log('PASS — database location and Etsy inventory writes use safe opt-in defaults');
+  console.log('PASS — transport, database, and Etsy writes use fail-closed defaults');
 } finally {
   try { fs.rmSync(tempRoot, { recursive: true, force: true }); } catch {}
 }

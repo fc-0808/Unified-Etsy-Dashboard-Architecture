@@ -45,7 +45,7 @@ function receipt(over = {}) {
 	_seq += 1;
 	return {
 		receipt_id: over.receipt_id ?? 1000 + _seq,
-		shop_id: 'Y2KASEshop',
+		shop_id: 'Y2KiPhoneCases',
 		buyer_user_id: 271657320,
 		buyer_name: 'Andrea Landeros',
 		shipping_zip: '79927',

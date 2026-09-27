@@ -4,18 +4,15 @@
  * Buyer-outreach desk for stuck and disposed 4PX parcels.
  *
  * Etsy Open API v3 cannot send shop-to-buyer messages, so the dashboard drafts
- * a policy-safe template, the operator pastes it on Etsy, then attests here.
- * These tests pin the rules that keep that desk honest:
+ * a template and the operator pastes it on Etsy, then records the send here.
  *
  *   · only stuck and disposed are eligible (delayed/healthy stay watch-only);
- *   · templates pass the same Etsy-policy scanner as Issues, with 4PX codes
- *     present but not flagged as phone numbers;
+ *   · carrier last-event text is never quoted into the buyer message;
  *   · mark-sent writes an append-only log and a receipts snapshot;
  *   · a stuck send does not cover a later disposal (follow_up);
  *   · undo of a follow-up restores the stuck snapshot, not a blank desk;
  *   · a relapse (recover then stuck again) clears the snapshot so the new
  *     incident starts unmessaged, without wiping history;
- *   · hostile copy is refused;
  *   · the board filter and stats card agree with the snapshot.
  *
  * Run: node scripts/test-shipping-buyer-notice.js
@@ -28,7 +25,6 @@ const path = require('path');
 
 const {
   composeShippingBuyerNotice,
-  checkShippingNoticeCompliance,
 } = require('../src/support/shipping-buyer-notice');
 
 const {
@@ -109,10 +105,10 @@ seedParcel({ id: 305, name: 'Relapse Buyer', health: 'critical', event: 'No move
 
 syncShippingAlertLedger(db);
 
-console.log('Templates — policy-safe copy with a real 4PX tracking code');
+console.log('Templates — buyer copy with a real 4PX tracking code');
 
 check('stuck template names the buyer, shop, tracking, and stays on Etsy', () => {
-  const { kind, message, compliance } = composeShippingBuyerNotice({
+  const { kind, message } = composeShippingBuyerNotice({
     kind: 'stuck',
     shopName: 'Y2K Shop',
     buyerName: 'Ada Lovelace',
@@ -127,11 +123,10 @@ check('stuck template names the buyer, shop, tracking, and stays on Etsy', () =>
   assert.ok(!message.includes('Held by customs'), 'carrier last-event text is never quoted to the buyer');
   assert.ok(/keep all replies here on Etsy/i.test(message));
   assert.ok(!/whatsapp|wechat|http:\/\/|4px\.com|\+\d{8}/i.test(message));
-  assert.strictEqual(compliance.ok, true, JSON.stringify(compliance.violations || []));
 });
 
 check('disposed template asks the carrier about the address without promising a refund', () => {
-  const { kind, message, compliance } = composeShippingBuyerNotice({
+  const { kind, message } = composeShippingBuyerNotice({
     kind: 'disposed',
     shopName: 'Y2K Shop',
     buyerName: 'Chen, Wei',
@@ -144,24 +139,18 @@ check('disposed template asks the carrier about the address without promising a 
   assert.ok(/disposed or undeliverable/i.test(message));
   assert.ok(!/refund/i.test(message));
   assert.ok(/keep all communication here on Etsy/i.test(message));
-  assert.strictEqual(compliance.ok, true, JSON.stringify(compliance.violations || []));
 });
 
-check('a 4PX tracking code is not mistaken for a phone number', () => {
-  const result = checkShippingNoticeCompliance('Your tracking number is 4PX3003038549111CN.');
-  assert.strictEqual(result.ok, true, JSON.stringify(result.violations || []));
-});
-
-check('carrier last-event phone numbers cannot poison the one-click attestation', () => {
+check('carrier last-event text is not copied into the buyer message', () => {
   const hostile = [
     'Delivery failed Note: We were unable to access the delivery. Tel:15985123456',
     '??????????:15985123456 CN',
     'Call 1-800-555-0100 for pickup',
   ];
   for (const lastEvent of hostile) {
-    const { message, compliance } = composeShippingBuyerNotice({
+    const { message } = composeShippingBuyerNotice({
       kind: 'stuck',
-      shopName: 'Y2KASEshop',
+      shopName: 'Y2KiPhoneCases',
       buyerName: 'Angela Lin',
       trackingNo: '4PX3003056719299CN',
       lastEvent,
@@ -169,7 +158,7 @@ check('carrier last-event phone numbers cannot poison the one-click attestation'
     });
     assert.ok(!message.includes('15985'), `event digits must not appear: ${lastEvent}`);
     assert.ok(!message.includes('800-555'), `event phone must not appear: ${lastEvent}`);
-    assert.strictEqual(compliance.ok, true, JSON.stringify({ lastEvent, violations: compliance.violations }));
+    assert.ok(!message.includes(lastEvent), 'carrier last-event text is not quoted');
   }
 });
 
@@ -212,18 +201,16 @@ check('mark sent writes the log, snapshot, and Etsy order URL', () => {
   assert.strictEqual(result.history[0].notice_kind, 'stuck');
 });
 
-check('hostile copy is refused and does not dirty the snapshot', () => {
-  const before = getShippingBuyerNotice(db, 302);
+check('a custom message is stored as written', () => {
   const result = recordShippingBuyerNotice(db, 302, {
-    message: 'Hi, WhatsApp me at +1 415 555 0100 or paypal.me/shop',
+    message: 'Hi Wei, please reply here if the carrier needs a corrected address.',
     notifiedBy: 'owner',
   });
-  assert.strictEqual(result.ok, false);
-  assert.strictEqual(result.status, 400);
-  assert.ok(result.compliance && result.compliance.ok === false);
-  const after = getShippingBuyerNotice(db, 302);
-  assert.strictEqual(after.outreach_status, 'needed');
-  assert.strictEqual(after.notified_at, before.notified_at);
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.last_message, 'Hi Wei, please reply here if the carrier needs a corrected address.');
+  const cleared = clearShippingBuyerNotice(db, 302);
+  assert.strictEqual(cleared.ok, true);
+  assert.strictEqual(cleared.outreach_status, 'needed');
 });
 
 check('undo of a first send returns the parcel to needed', () => {

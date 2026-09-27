@@ -49,9 +49,6 @@ const ETSY_GUIDANCE = Object.freeze({
   marketplaceInsights: 'https://help.etsy.com/hc/en-us/articles/35122361353239-How-Do-I-Use-Etsy-s-Marketplace-Insights-Tool',
   stats: 'https://help.etsy.com/hc/en-us/articles/115015774268-How-to-Use-Etsy-Stats-for-Your-Shop',
   shareAndSave: 'https://help.etsy.com/hc/en-us/articles/16981332744087-How-to-Save-on-Etsy-Fees-with-the-Share-Save-Program',
-  service: 'https://help.etsy.com/hc/en-us/articles/360036207794-What-are-Etsy-s-Customer-Service-Standards',
-  sellerPolicy: 'https://www.etsy.com/legal/sellers',
-  ipPolicy: 'https://www.etsy.com/legal/ip/',
 })
 
 function growthPct(current, previous) {
@@ -167,10 +164,11 @@ function lateShipMetrics(db, fromSec, toSec, nowSec) {
 function listingStateCounts(db) {
   return db.prepare(
     `
-    SELECT shop_id, state, COUNT(*) AS n
-    FROM listings
-    WHERE shop_id != ?
-    GROUP BY shop_id, state
+    SELECT l.shop_id, l.state, COUNT(*) AS n
+    FROM listings l
+    JOIN shops s ON s.shop_id = l.shop_id
+    WHERE l.shop_id != ?
+    GROUP BY l.shop_id, l.state
   `
   ).all(MANUAL_SHOP_ID)
 }
@@ -309,48 +307,56 @@ function buildWatchlist(db, nowSec) {
   const endingBefore = nowSec + T.endingSoonDays * 24 * 3600
   const expired = db.prepare(
     `
-    SELECT listing_id, shop_id, title, listing_url, state, views, ending_timestamp
-    FROM listings WHERE state = 'expired' AND shop_id != ?
-    ORDER BY views DESC LIMIT ?
+    SELECT l.listing_id, l.shop_id, l.title, l.listing_url, l.state, l.views, l.ending_timestamp
+    FROM listings l
+    JOIN shops s ON s.shop_id = l.shop_id
+    WHERE l.state = 'expired' AND l.shop_id != ?
+    ORDER BY l.views DESC LIMIT ?
   `
   ).all(MANUAL_SHOP_ID, T.watchlistLimit)
 
   const soldOut = db.prepare(
     `
-    SELECT listing_id, shop_id, title, listing_url, state, views
-    FROM listings WHERE state = 'sold_out' AND shop_id != ?
-    ORDER BY views DESC LIMIT ?
+    SELECT l.listing_id, l.shop_id, l.title, l.listing_url, l.state, l.views
+    FROM listings l
+    JOIN shops s ON s.shop_id = l.shop_id
+    WHERE l.state = 'sold_out' AND l.shop_id != ?
+    ORDER BY l.views DESC LIMIT ?
   `
   ).all(MANUAL_SHOP_ID, T.watchlistLimit)
 
   const endingSoon = db.prepare(
     `
-    SELECT listing_id, shop_id, title, listing_url, state, views, ending_timestamp, should_auto_renew
-    FROM listings
-    WHERE shop_id != ? AND state = 'active'
-      AND ending_timestamp IS NOT NULL
-      AND ending_timestamp <= ?
-      AND COALESCE(should_auto_renew, 0) = 0
-    ORDER BY ending_timestamp ASC LIMIT ?
+    SELECT l.listing_id, l.shop_id, l.title, l.listing_url, l.state, l.views, l.ending_timestamp, l.should_auto_renew
+    FROM listings l
+    JOIN shops s ON s.shop_id = l.shop_id
+    WHERE l.shop_id != ? AND l.state = 'active'
+      AND l.ending_timestamp IS NOT NULL
+      AND l.ending_timestamp <= ?
+      AND COALESCE(l.should_auto_renew, 0) = 0
+    ORDER BY l.ending_timestamp ASC LIMIT ?
   `
   ).all(MANUAL_SHOP_ID, endingBefore, T.watchlistLimit)
 
   const zeroViews = db.prepare(
     `
-    SELECT listing_id, shop_id, title, listing_url, state, views, created_timestamp
-    FROM listings
-    WHERE shop_id != ? AND state = 'active' AND COALESCE(views, 0) = 0
-      AND created_timestamp IS NOT NULL
-      AND created_timestamp < ?
-    ORDER BY created_timestamp ASC LIMIT ?
+    SELECT l.listing_id, l.shop_id, l.title, l.listing_url, l.state, l.views, l.created_timestamp
+    FROM listings l
+    JOIN shops s ON s.shop_id = l.shop_id
+    WHERE l.shop_id != ? AND l.state = 'active' AND COALESCE(l.views, 0) = 0
+      AND l.created_timestamp IS NOT NULL
+      AND l.created_timestamp < ?
+    ORDER BY l.created_timestamp ASC LIMIT ?
   `
   ).all(MANUAL_SHOP_ID, nowSec - 7 * 24 * 3600, T.watchlistLimit)
 
   const titleCandidates = db.prepare(
     `
-    SELECT listing_id, shop_id, title, listing_url, tags, views, state
-    FROM listings WHERE shop_id != ? AND state = 'active'
-    ORDER BY views DESC LIMIT 80
+    SELECT l.listing_id, l.shop_id, l.title, l.listing_url, l.tags, l.views, l.state
+    FROM listings l
+    JOIN shops s ON s.shop_id = l.shop_id
+    WHERE l.shop_id != ? AND l.state = 'active'
+    ORDER BY l.views DESC LIMIT 80
   `
   ).all(MANUAL_SHOP_ID)
 
@@ -560,7 +566,7 @@ function buildListingCadencePlan(shops, watchlist) {
     if ((shop.expired_count || 0) > 0) blockers.push('expired listings')
     if ((shop.late_ship_rate_pct || 0) >= T.lateShipPct) blockers.push('late dispatch')
     if (shop.review_average != null && shop.review_count >= T.ratingMinReviews && shop.review_average < T.ratingWarn) blockers.push('rating')
-    if ((rightsReview.get(shop.shop_id) || 0) > 0) blockers.push('third-party rights review')
+    if ((rightsReview.get(shop.shop_id) || 0) > 0) blockers.push('identified characters')
 
     const weakCount = weakTitles.get(shop.shop_id) || 0
     const zeroViewCount = zeroViews.get(shop.shop_id) || 0
@@ -596,7 +602,7 @@ function buildListingCadencePlan(shops, watchlist) {
       headline = 'Repair conversion before adding volume'
       rationale = 'Traffic is reaching the shop, but conversion weakened. More listings would multiply an offer or presentation problem.'
       nextSteps = [
-        'Improve the first photo, price/value proposition, delivery promise, and return-policy clarity on the most visited listings.',
+        'Improve the first photo, price/value proposition, and delivery promise on the most visited listings.',
         'Use all relevant attributes and 13 varied tags; keep the title clear and scannable.',
         'Publish at most one distinct test after the existing offer is improved.',
       ]
@@ -679,12 +685,11 @@ function buildListingCadencePlan(shops, watchlist) {
     shops: plans,
     quality_gate: [
       'Serve a genuinely distinct buyer intent—not a near-duplicate created for recency.',
-      'For every third-party character, brand, image, or protected design, retain documented authorization; supplier availability is not a license.',
       'Use a clear item-first title; Etsy suggests considering fewer than 15 words.',
       'Choose the most specific category and complete every relevant attribute.',
       'Use all 13 tag slots with varied, natural multi-word phrases.',
       'Lead with one clear, well-lit product image; Etsy recommends 2000px or more.',
-      'Add multiple useful photos and an explicit return policy, even if no returns are accepted.',
+      'Add multiple useful photos.',
       'Check Etsy Search Visibility and resolve customer-service quality issues before scaling.',
     ],
     traffic_methods: [
@@ -702,7 +707,7 @@ function buildListingCadencePlan(shops, watchlist) {
       },
       {
         title: 'Earn the click and the sale',
-        action: 'Improve the first photo, item clarity, price/value, processing promise, multiple photos, and return-policy confidence before buying or attracting more traffic.',
+        action: 'Improve the first photo, item clarity, price/value, processing promise, and photo set before buying or attracting more traffic.',
         evidence: 'official',
         url: ETSY_GUIDANCE.visibility,
       },
@@ -714,9 +719,9 @@ function buildListingCadencePlan(shops, watchlist) {
       },
       {
         title: 'Protect shop-wide service quality',
-        action: 'Monitor message response, on-time shipping/tracking, review rating, and case rate. Falling below Etsy customer-service standards can reduce search visibility.',
-        evidence: 'official',
-        url: ETSY_GUIDANCE.service,
+        action: 'Monitor message response, on-time shipping, review rating, and case rate before adding more listings.',
+        evidence: 'operating practice',
+        url: null,
       },
       {
         title: 'Run controlled experiments',
@@ -731,8 +736,6 @@ function buildListingCadencePlan(shops, watchlist) {
       { label: 'Etsy Search Visibility page', url: ETSY_GUIDANCE.visibility },
       { label: 'Marketplace Insights', url: ETSY_GUIDANCE.marketplaceInsights },
       { label: 'Share & Save', url: ETSY_GUIDANCE.shareAndSave },
-      { label: 'Etsy Seller Policy', url: ETSY_GUIDANCE.sellerPolicy },
-      { label: 'Etsy IP Policy', url: ETSY_GUIDANCE.ipPolicy },
     ],
   }
 }
@@ -751,7 +754,14 @@ function isolateScope(shops) {
 
 function buildCoverage(db, nowSec, windowDays) {
   const shops = shopRows(db)
-  const listingCount = db.prepare('SELECT COUNT(*) AS n FROM listings WHERE shop_id != ?').get(MANUAL_SHOP_ID)?.n || 0
+  const listingCount = db.prepare(
+    `
+    SELECT COUNT(*) AS n
+    FROM listings l
+    JOIN shops s ON s.shop_id = l.shop_id
+    WHERE l.shop_id != ?
+    `,
+  ).get(MANUAL_SHOP_ID)?.n || 0
   const reviewCount = db.prepare('SELECT COUNT(*) AS n FROM etsy_reviews WHERE shop_id != ?').get(MANUAL_SHOP_ID)?.n || 0
   const manual = db.prepare(
     `SELECT COUNT(*) AS imports, COUNT(DISTINCT shop_id) AS shops, MAX(imported_at) AS latest
@@ -1030,7 +1040,7 @@ function buildGrowthReport(db, opts = {}) {
         shop_name: insight.import.shop_name,
         title: `${counts.traffic_losses} established listing(s) lost at least 30% of views`,
         why: 'The decline is based on equal manually entered periods. It can reflect demand, seasonality, search relevance, competition, or listing quality; it does not identify a single algorithm cause.',
-        how: 'Inspect the listing’s Etsy search terms and traffic source in Shop Manager, verify inventory and policy status, then test a clearer first image or one evidence-backed title/tag change. Do not mass-renew or keyword-stuff.',
+        how: 'Inspect the listing’s Etsy search terms and traffic source in Shop Manager, verify inventory, then test a clearer first image or one evidence-backed title/tag change. Do not mass-renew or keyword-stuff.',
         listings: trafficRows,
       }))
     }
@@ -1094,8 +1104,8 @@ function buildGrowthReport(db, opts = {}) {
       severity: 'high',
       code: 'third_party_rights_review',
       title: `${watchlist.rights_review_total} active listing(s) reference identified third-party characters`,
-      why: 'The character catalog identifies likely rights holders; it does not grant a license. Etsy may terminate selling privileges after repeat or multiple infringement notices.',
-      how: 'Before publishing, renewing, or promoting them, verify documented authorization and Creativity Standards eligibility. A supplier selling the product is not proof of IP permission; exclude or remove any item you cannot substantiate.',
+      why: 'These titles match names in the local character catalog.',
+      how: 'Review the titles and photos before the next publish or renewal.',
       listings: watchlist.rights_review,
     }))
     actions.sort((a, b) => (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9))

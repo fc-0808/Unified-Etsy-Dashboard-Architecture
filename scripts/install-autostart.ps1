@@ -40,17 +40,21 @@ if (-not (Test-Path $pm2Cmd)) {
 # -- 2. Start (or cleanly restart) under PM2 ------------------------------------
 Write-Host '  [2/6] Starting dashboard under PM2...'
 
-# Remove any stale PM2 entry first so re-running this installer is idempotent.
-& $pm2Cmd delete etsy-dashboard 2>$null | Out-Null
+. (Join-Path $PSScriptRoot 'dashboard-node.ps1')
+Set-DashboardNodePath | Out-Null
+
+# Remove stale PM2 entries first so re-running this installer is idempotent.
+Invoke-DashboardPm2 delete etsy-dashboard | Out-Null
+Invoke-DashboardPm2 delete etsy-funnel-watchdog | Out-Null
 
 # Kill any leftover FOREGROUND server still holding port 4000 (e.g. a stray `npm start`).
 $conns = Get-NetTCPConnection -LocalPort 4000 -State Listen -ErrorAction SilentlyContinue
 foreach ($c in $conns) { Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Milliseconds 800
 
-& $pm2Cmd start (Join-Path $ProjectRoot 'ecosystem.config.js')
-& $pm2Cmd save
-Write-Host '        Dashboard is running under PM2.'
+Invoke-DashboardPm2 start (Join-Path $ProjectRoot 'ecosystem.config.js')
+Invoke-DashboardPm2 save
+Write-Host '        Dashboard + public-link watchdog are running under PM2.'
 
 # -- 3. Register login auto-start (Startup folder, no admin needed) -------------
 Write-Host '  [3/6] Registering login auto-start...'
@@ -75,7 +79,7 @@ $lnk.Save()
 # Also try a Scheduled Task (adds restart-on-failure). Non-fatal if admin required.
 $taskOk = $false
 try {
-  $resurrectCmd = "Set-Location '$ProjectRoot'; & '$pm2Cmd' resurrect"
+  $resurrectCmd = "Set-Location '$ProjectRoot'; & '$psExeEarly' -WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File '$resurrectPs'"
   $encoded      = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($resurrectCmd))
   $action   = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-WindowStyle Hidden -NonInteractive -EncodedCommand $encoded"
   $trigger  = New-ScheduledTaskTrigger -AtLogOn
@@ -184,7 +188,9 @@ Write-Host '  Stop:          npm run auto:stop'
 Write-Host '  Remove:        npm run auto:uninstall'
 Write-Host ''
 Write-Host '  The server resurrects on every login and restarts itself on crash.'
-Write-Host '  For PROXIED shops keep VPN + IPFoxy connected; the direct shop'
-Write-Host '  always works. Keep the PC powered on for overnight syncing.'
+Write-Host '  The public mobile link is verified every 2 minutes and self-heals'
+Write-Host '  stale Tailscale ingress without re-enabling an intentionally stopped Funnel.'
+Write-Host '  For PROXIED shops keep the configured VPN/TUN + IPFoxy connected;'
+Write-Host '  direct groups remain independent. Keep the PC powered on for syncing.'
 Write-Host '------------------------------------------------------------'
 Write-Host ''

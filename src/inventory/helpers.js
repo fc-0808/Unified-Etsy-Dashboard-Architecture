@@ -6,25 +6,20 @@
 
 const productTypes = require('../listings/product-types');
 
-// A listing has up to two variation dimensions: the device/phone model
-// (e.g. "iPhone 17 Pro Max") and the priced choice (e.g. "Case+Grip+Charm", or
-// an Apple Watch band's "38/40/41mm"). Only the priced dimension matters for
-// restock grouping — a restock applies across every model — so we always strip
-// the model dimension. Etsy shops name these dimensions inconsistently ("Style"
-// vs "Styles", "Phone Model" vs "iPhone Model"), which is exactly why labels
-// were previously inconsistent.
+// A listing has a fit dimension (e.g. iPhone model / watch size) and a priced
+// choice (e.g. case bundle / numbered band style). Only the priced dimension matters for
+// restock grouping, so we strip the fit dimension. Etsy shops name these axes
+// inconsistently, which is why the registry supplies their canonical names.
 const MODEL_PROP_RE  = /\b(model|phone|device|fits|compatib)/i;
 
-// A single-axis line's ONE property is both its fit and its priced dimension
-// ("Band Size", "iPad Model"), so it is the style dimension here even though it
-// reads like a model. Those names come from the product-type registry rather
-// than a second hand-maintained list, so declaring a new single-axis line makes
-// its restocks group correctly without an edit in this file.
-const SIZE_AXIS_ALTERNATION = productTypes
-  .sizeAxisPropertyNames()
+// Include every canonical priced-axis name: "Styles", "Band Style", and the
+// single-axis "iPad Model". Legacy one-axis Band Size listings still work via
+// the one-property fallback below.
+const PRICED_AXIS_ALTERNATION = productTypes
+  .pricedAxisPropertyNames()
   .map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*'))
   .join('|');
-const STYLE_PROP_RE = new RegExp(`^\\s*(styles?${SIZE_AXIS_ALTERNATION ? `|${SIZE_AXIS_ALTERNATION}` : ''})\\b`, 'i');
+const STYLE_PROP_RE = new RegExp(`^\\s*(styles?${PRICED_AXIS_ALTERNATION ? `|${PRICED_AXIS_ALTERNATION}` : ''})\\b`, 'i');
 
 /**
  * Derive the canonical { styleVal, secondaryVal } from an Etsy product's

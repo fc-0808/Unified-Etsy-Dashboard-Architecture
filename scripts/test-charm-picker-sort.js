@@ -9,7 +9,11 @@
  *   · Same-stall charms sit together (彩虹 · 2D21 before 一樂潮品 · 2C666 when
  *     stall order says so — never interleaved by numeric code).
  *   · Bare charm stall codes re-home to 龙胜 (not 通信), matching Shopping Mode.
- *   · Charms with no supplier/stall sink into one trailing section.
+ *   · A charm booth also present in the supplier directory keeps its supplier
+ *     market, so a Charm Only item at A205 is filed under 通信 rather than 龙胜.
+ *   · Dedicated charm shops lead the picker; supplier booths that also sell
+ *     charms follow — even when those booths walk earlier in the shopping
+ *     route (经济 / 通信 before 龙胜). Unsourced charms stay last.
  *   · Within a stall+shop, codes stay numeric-stable (CH-00002 before CH-00010).
  *   · One section per shop AND stall — a merchant with two booths is two stops.
  *   · The grid container is the SCROLLER holding the sections; leaving it set to
@@ -77,6 +81,7 @@ function compilePickerSort() {
 			charmLoc: _charmLoc,
 			charmLocationSortKey: _charmLocationSortKey,
 			charmSupplierSortKey: _charmSupplierSortKey,
+			charmPickerKind: _charmPickerKind,
 			sortCharmsForPicker: _sortCharmsForPicker,
 			charmGroupsForPicker: _charmGroupsForPicker,
 		};
@@ -94,7 +99,12 @@ function fnSource(name, chars = 2600) {
 	return PAGE.slice(at, at + chars);
 }
 
-const charm = (code, shop, stall) => ({ code, default_charm_shop: shop, default_charm_shop_stall: stall });
+const charm = (code, shop, stall, usesSupplierLocation = false) => ({
+	code,
+	default_charm_shop: shop,
+	default_charm_shop_stall: stall,
+	default_charm_shop_uses_supplier_location: usesSupplierLocation,
+});
 
 console.log(`\n${BOLD}Charm picker supplier/location sort${RESET}\n`);
 
@@ -103,6 +113,14 @@ test('bare charm stall codes re-home to 龙胜 (not 通信)', () => {
 	assert.strictEqual(loc.buildingId, 'longsheng', `expected longsheng, got ${loc.buildingId}`);
 	assert.strictEqual(loc.code, '2D21');
 	assert.strictEqual(loc.isHome, false);
+});
+
+test('supplier-backed A205 keeps 通信 location semantics', () => {
+	const loc = api.charmLoc('A205', true);
+	assert.strictEqual(loc.buildingId, 'tongxin', `expected tongxin, got ${loc.buildingId}`);
+	assert.strictEqual(loc.code, 'A205');
+	assert.strictEqual(loc.floor, 2);
+	assert.strictEqual(loc.isHome, true);
 });
 
 test('explicit market prefixes keep their building', () => {
@@ -197,6 +215,51 @@ test('a section carries its market and floor for the header', () => {
 	assert.strictEqual(g.floor, 2, `expected floor 2, got ${g.floor}`);
 });
 
+test('a supplier-backed charm section still files under 通信, not 龙胜', () => {
+	const [g] = api.charmGroupsForPicker([charm('CH-00101', '鑫宜', 'A205', true)]);
+	assert.strictEqual(g.kind, 'supplier');
+	assert.strictEqual(g.market.en, 'Tongxin');
+	assert.strictEqual(g.market.zh, '通信');
+	assert.strictEqual(g.floor, 2);
+});
+
+test('dedicated charm shops lead; earlier-walking supplier booths follow', () => {
+	// The live Assign Charm dropdown: 经济 and 通信 walk before 龙胜, which used
+	// to bury 一樂潮品 / 彩虹 under case suppliers. Charm shops must lead.
+	const groups = api.charmGroupsForPicker([
+		charm('CH-00101', '贝贝利', '经济5D06-07', true),
+		charm('CH-00013', '一樂潮品', '2C666'),
+		charm('CH-00002', '彩虹', '2D21'),
+		charm('CH-00200', '鑫宜', 'A205', true),
+		charm('CH-00099', '', ''),
+	]);
+	assert.deepStrictEqual(
+		groups.map((g) => [g.shop, g.kind]),
+		[
+			['一樂潮品', 'charm'],
+			['彩虹', 'charm'],
+			['贝贝利', 'supplier'],
+			['鑫宜', 'supplier'],
+			['', 'unset'],
+		],
+	);
+	assert.strictEqual(groups[0].market.zh, '龙胜');
+	assert.strictEqual(groups[2].market.zh, '经济');
+	assert.strictEqual(groups[3].market.zh, '通信');
+	assert.strictEqual(api.charmPickerKind(charm('CH-00013', '一樂潮品', '2C666')), 'charm');
+	assert.strictEqual(api.charmPickerKind(charm('CH-00101', '鑫宜', 'A205', true)), 'supplier');
+});
+
+test('a named shop with no stall stays with charm shops, after located stalls', () => {
+	const groups = api.charmGroupsForPicker([
+		charm('CH-00040', 'Star Beads', ''),
+		charm('CH-00002', '彩虹', '2D21'),
+		charm('CH-00101', '鑫宜', 'A205', true),
+	]);
+	assert.deepStrictEqual(groups.map((g) => g.shop), ['彩虹', 'Star Beads', '鑫宜']);
+	assert.deepStrictEqual(groups.map((g) => g.kind), ['charm', 'charm', 'supplier']);
+});
+
 test('a shop with no stall recorded is still its own section, floor unknown', () => {
 	const [g] = api.charmGroupsForPicker([charm('CH-00001', '彩虹', '')]);
 	assert.strictEqual(g.located, true, 'a named shop is a real section');
@@ -272,6 +335,19 @@ test('the supplier dropdown is drawn from the same sections as the grid', () => 
 	assert.ok(manage.includes('_renderCharmJumpRail'), 'manage mode must stand the dropdown down — a flat list has no sections to jump between');
 });
 
+test('pick mode marks the hand-off from charm shops to other shops', () => {
+	const src = fnSource('renderCharmGrid', 4200);
+	assert.ok(src.includes('charm-band-head'), 'the grid must name where charm shops end and other shops begin');
+	assert.ok(src.includes("kind === 'supplier'"), 'the Other-shops band is driven by group kind, not by market order');
+});
+
+test('the supplier dropdown labels charm shops above other shops when both exist', () => {
+	const src = fnSource('_charmJumpOptionsHtml', 1800);
+	assert.ok(src.includes('optgroup'), 'a mixed library must group the dropdown the same way the grid is banded');
+	assert.ok(src.includes('Charm shops'), 'the first group must be the dedicated charm shops');
+	assert.ok(src.includes('Other shops'), 'supplier booths must sit under Other shops, not mixed into the charm list');
+});
+
 // ── Presentation contract ───────────────────────────────────────────────────
 
 test('the supplier dropdown sits above the scroller and never clips', () => {
@@ -306,6 +382,7 @@ test('the picker is mobile-responsive: sections reflow under 768px', () => {
 	assert.ok(block.includes('.charm-group-grid'), 'the section grid must retune its columns on a phone');
 	assert.ok(block.includes('.charm-group-head'), 'the section header must reflow on a phone');
 	assert.ok(block.includes('.cj-select'), 'the supplier dropdown must stay usable on a phone');
+	assert.ok(block.includes('.charm-band-head'), 'the Other-shops band must retune its padding on a phone');
 });
 
 console.log('');

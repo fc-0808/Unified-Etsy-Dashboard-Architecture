@@ -177,7 +177,7 @@ function testPersistence() {
 	section('Persisting the upgrade across Etsy re-syncs')
 	const db = initDb(':memory:')
 	db.prepare('INSERT INTO groups (group_id, label) VALUES (?,?)').run('G1', 'Group 1')
-	db.prepare('INSERT INTO shops (shop_id, group_id, shop_name) VALUES (?,?,?)').run('S1', 'G1', 'Y2KASEshop')
+	db.prepare('INSERT INTO shops (shop_id, group_id, shop_name) VALUES (?,?,?)').run('S1', 'G1', 'Y2KiPhoneCases')
 
 	const receipt = (over = {}) => ({
 		receipt_id: 5001,
@@ -328,7 +328,7 @@ const TX = (lines) => JSON.stringify(lines.map((l, i) => ({ title: `Line ${i}`, 
 
 function seed(db) {
 	db.prepare('INSERT INTO groups (group_id, label) VALUES (?,?)').run('G1', 'Group 1')
-	db.prepare('INSERT INTO shops (shop_id, group_id, shop_name) VALUES (?,?,?)').run('S1', 'G1', 'Y2KASEshop')
+	db.prepare('INSERT INTO shops (shop_id, group_id, shop_name) VALUES (?,?,?)').run('S1', 'G1', 'Y2KiPhoneCases')
 	db.prepare('INSERT INTO shops (shop_id, group_id, shop_name) VALUES (?,?,?)').run('S2', 'G1', 'OtherShop')
 
 	const ins = db.prepare(`
@@ -376,7 +376,7 @@ async function testServer() {
 		JSON.stringify({
 			db_path: dbPath,
 			sync_interval_minutes: 1440,
-			groups: [{ group_id: 'G1', label: 'Express test', proxy: 'direct', shops: [{ shop_id: 'S1', shop_name: 'Y2KASEshop', api_key: 'expresstestkey0000000001', shared_secret: 'expresstestsecret000001' }] }],
+			groups: [{ group_id: 'G1', label: 'Express test', proxy: 'direct', shops: [{ shop_id: 'S1', shop_name: 'Y2KiPhoneCases', api_key: 'expresstestkey0000000001', shared_secret: 'expresstestsecret000001' }] }],
 		}),
 		'utf8',
 	)
@@ -575,11 +575,11 @@ function testPage() {
 	section('The 4PX drawer is wired to it')
 	assert(/id="fpxExpressNotice"/.test(PAGE), 'the drawer states the upgrade before a label is paid for')
 	assert(/function _fpxIsExpeditedOrder\(\)/.test(PAGE), '…decided from the server’s shaped object')
-	assert(/_fpxPickLogisticsProduct\(countryCode, _fpxProducts, _fpxIsExpeditedOrder\(\)\)/.test(PAGE), 'the pre-selected lane accounts for the upgrade')
+	assert(/_fpxPickLogisticsProduct\(countryCode, _fpxProducts, _fpxIsExpeditedOrder\(\), \{/.test(PAGE), 'the pre-selected lane accounts for the upgrade')
 	assert(/is-downgrade/.test(PAGE), '…and a non-express choice is called out as a downgrade')
 	assert(/_fpxRenderExpressNotice\(\)/.test(PAGE) && /_fpxRenderExpressNotice\(\)\s*\n\s*\/\/ Animate trigger/.test(PAGE), 'the warning tracks the operator’s actual choice, not just the pre-selection')
 	assert(/expedited: !!\(o\.shipping_upgrade && o\.shipping_upgrade\.expedited\)/.test(PAGE), 'the bulk ship wizard carries the upgrade per order')
-	assert(/_fpxPickLogisticsProduct\(e\.country, products, e\.expedited\)/.test(PAGE), '…so a bulk run cannot silently default a paid upgrade onto the economy lane')
+	assert(/_fpxPickLogisticsProduct\(e\.country, products, e\.expedited, \{/.test(PAGE), '…so a bulk run cannot silently default a paid upgrade onto the economy lane')
 	assert(/fbx-chip express/.test(PAGE) && /expressDowngrade/.test(PAGE), '…and the wizard marks the rows plus warns about the batch as a whole')
 	// Express gets the same treatment as multi-product: a filter chip to isolate
 	// the subset, a sky row accent so they stand out in All, and a count that

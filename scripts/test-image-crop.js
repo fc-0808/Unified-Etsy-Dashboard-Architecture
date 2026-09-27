@@ -561,6 +561,15 @@ async function manager({ dryRun = 1, listingId = null } = {}) {
 			],
 			imageOrder: ['1.png', '2.png', '3.png'],
 			styleImageMapping: { case_only: [2], case_charm: [3] },
+			customStyles: [
+				{ id: 'band-1', label: 'Band 1', price: 350.11, imageRank: 2 },
+				{ id: 'band-2', label: 'Band 2', price: 350.11, imageRank: 3 },
+			],
+			imageAnalysis: [
+				{ index: 1, description: 'First product view.' },
+				{ index: 2, description: 'Second product view.' },
+				{ index: 3, description: 'Third product view.' },
+			],
 		}),
 	)
 
@@ -591,6 +600,32 @@ if (!sharp || !Database) {
 		await mgr.cropItemImage('job-1', 1, 1, { left: 0, top: 0, width: 300, height: 300 })
 		assert.strictEqual((await sharp(path.join(folder, '3.png')).metadata()).width, 300, 'cropped the wrong photo')
 		assert.strictEqual((await sharp(path.join(folder, '1.png')).metadata()).width, 900, 'cropped an innocent photo')
+	})
+
+	test('reordering photos keeps numbered variation links on the same files', async () => {
+		const { mgr, preview } = await manager()
+		mgr.updateItemImages('job-1', 1, ['3.png', '1.png', '2.png'])
+		assert.deepStrictEqual(
+			preview().customStyles.map((style) => style.imageRank),
+			[3, 1],
+			'custom variation ranks were not remapped through filenames',
+		)
+		assert.deepStrictEqual(
+			preview().imageAnalysis.map((entry) => [entry.index, entry.description]),
+			[[1, 'Third product view.'], [2, 'First product view.'], [3, 'Second product view.']],
+			'alt-text evidence no longer follows its image',
+		)
+		assert.ok(preview().images.every((image) => image.altText), 'reordered preview lost image alt text')
+	})
+
+	test('removing a linked photo clears only that variation link', async () => {
+		const { mgr, preview } = await manager()
+		mgr.updateItemImages('job-1', 1, ['1.png', '3.png'])
+		assert.deepStrictEqual(
+			preview().customStyles.map((style) => style.imageRank),
+			[null, 2],
+			'the removed photo stayed linked or disturbed another band',
+		)
 	})
 
 	test('a crop leaves the image plan and the variation photo links untouched', async () => {

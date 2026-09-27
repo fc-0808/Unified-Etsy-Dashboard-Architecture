@@ -23,16 +23,24 @@ const { normalizeTrackingCode, normalizeCarrierName } = require('../tracking/val
 // Imported (rather than re-expressed as SQL LIKE patterns) so the cached-row
 // repair below and the live carrier classifier can never disagree about what
 // counts as a delivered parcel.
-const { analyzeTrackingHealth, isDeliveredText, eventShowsPostCustomsProgress, CUSTOMS_CLEAR_RE } = require('../tracking/checker')
-const { composeShippingBuyerNotice, checkShippingNoticeCompliance, ETSY_SOLD_ORDER_URL } = require('../support/shipping-buyer-notice')
+const { analyzeTrackingHealth, isDeliveredText, eventShowsPostCustomsProgress, CUSTOMS_CLEAR_RE, eventLooksPreTransit, FORECAST_PUBLIC_FALLBACK_HOURS } = require('../tracking/checker')
+const { composeShippingBuyerNotice, ETSY_SOLD_ORDER_URL } = require('../support/shipping-buyer-notice')
 const stallLocation = require('../route/stall-location')
 const charmNotes = require('../route/charm-notes')
 const etsyCompletion = require('../orders/etsy-completion')
+const bulkCompleteJob = require('../orders/bulk-complete-job')
 const operationsChecklist = require('../operations/checklist')
+const goodsFloat = require('../finance/goods-float')
+const shippingCompensation = require('../orders/shipping-compensation')
 // Reads Etsy's per-transaction `shipping_upgrade` and turns it into the stored
 // express facts. Namespaced so the call sites below name the contract they are
 // persisting rather than looking like local helpers.
 const shippingUpgrade = require('../orders/shipping-upgrade')
+const addressReview = require('../orders/address-review')
+// Local ship-to correction. Kept out of upsertReceipt's INSERT list so an Etsy
+// re-sync cannot put the checkout address back on a parcel the buyer already
+// asked us to redirect. addressForReview() is what the hold below must judge.
+const addressOverride = require('../orders/address-override')
 // The pickup-window policy lives with the rest of the 揽收预约 rules, so the
 // query below and the config loader cannot drift apart on what "still waiting
 // for a driver" means.
@@ -498,7 +506,7 @@ function initDb(dbPath) {
     -- ─────────────────────────────────────────────
     -- Shipping buyer-outreach log (stuck / disposed parcels).
     -- Etsy v3 has no messaging API, so this is NOT a send record — it is the
-    -- operator's attestation that they pasted a message into the Etsy thread.
+    -- operator's record that they pasted a message into the Etsy thread.
     -- Append-only: a stuck notice stays when the parcel later becomes disposed,
     -- so the modal can say "you already wrote about the stall; this is the
     -- disposal follow-up". The current snapshot lives on receipts
@@ -559,6 +567,19 @@ function initDb(dbPath) {
       canonical_key TEXT,
       computed_at INTEGER DEFAULT (strftime('%s', 'now'))
     );
+
+    -- Dense visual embedding of each cached listing photo (float32 vector).
+    -- Phone-snap locate cosine-searches this index instead of guessing from
+    -- titles. Invalidated by sha when listing_image_data bytes change.
+    CREATE TABLE IF NOT EXISTS listing_vemb (
+      listing_id  INTEGER PRIMARY KEY,
+      algo        TEXT    NOT NULL,
+      dim         INTEGER NOT NULL,
+      sha         TEXT    NOT NULL,
+      embedding   BLOB    NOT NULL,
+      computed_at INTEGER DEFAULT (strftime('%s', 'now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_listing_vemb_algo ON listing_vemb(algo);
 
     -- ─────────────────────────────────────────────
     -- Operator-declared "same product" merges (human-in-the-loop override).
@@ -788,6 +809,51 @@ function initDb(dbPath) {
       PRIMARY KEY (listing_id, product_id)
     );
 
+    -- Catalog generation rollout — additive "new iPhone / AirPods model"
+    -- jobs across shops. Persisted so a paced, QPD-aware run can pause
+    -- overnight and resume without repeating completed listings.
+    CREATE TABLE IF NOT EXISTS catalog_rollout_jobs (
+      job_id         TEXT PRIMARY KEY,
+      rollout_id     TEXT NOT NULL,
+      state          TEXT NOT NULL, -- preview|running|paused|done|error|cancelled
+      dry_run        INTEGER NOT NULL DEFAULT 0,
+      update_copy    INTEGER NOT NULL DEFAULT 1,
+      listing_state  TEXT NOT NULL DEFAULT 'active',
+      delay_ms       INTEGER NOT NULL DEFAULT 2500,
+      shop_gap_ms    INTEGER NOT NULL DEFAULT 10000,
+      shop_names     TEXT,
+      options_json   TEXT,
+      total          INTEGER NOT NULL DEFAULT 0,
+      needed         INTEGER NOT NULL DEFAULT 0,
+      processed      INTEGER NOT NULL DEFAULT 0,
+      updated        INTEGER NOT NULL DEFAULT 0,
+      skipped        INTEGER NOT NULL DEFAULT 0,
+      failed         INTEGER NOT NULL DEFAULT 0,
+      error          TEXT,
+      created_at     INTEGER NOT NULL,
+      updated_at     INTEGER NOT NULL,
+      started_at     INTEGER,
+      finished_at    INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS catalog_rollout_items (
+      job_id         TEXT NOT NULL,
+      shop_id        TEXT NOT NULL,
+      shop_name      TEXT NOT NULL,
+      listing_id     INTEGER NOT NULL,
+      product_type   TEXT,
+      title          TEXT,
+      status         TEXT NOT NULL, -- pending|in_progress|updated|skipped|failed|would_update
+      added_models   TEXT,
+      existing_models TEXT,
+      clone_sources  TEXT,
+      error          TEXT,
+      plan_json      TEXT,
+      updated_at     INTEGER,
+      PRIMARY KEY (job_id, listing_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_catalog_rollout_items_job
+      ON catalog_rollout_items(job_id, status);
+
     -- ─────────────────────────────────────────────
     -- Events log — auto-restock, zero-stock alerts, manual actions
     -- ─────────────────────────────────────────────
@@ -957,6 +1023,18 @@ function initDb(dbPath) {
       updated_at  INTEGER DEFAULT (strftime('%s','now'))
     );
 
+    -- Previous product_map titles kept after an in-place rename. Orders, photos
+    -- and Excel rows still arrive under the Etsy listing title; this table is
+    -- how those historical keys resolve to the row whose display title changed.
+    CREATE TABLE IF NOT EXISTS product_map_title_aliases (
+      title_norm TEXT    NOT NULL PRIMARY KEY,
+      product_id INTEGER NOT NULL,
+      title      TEXT    NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_map_title_aliases_product
+      ON product_map_title_aliases(product_id);
+
     -- ─────────────────────────────────────────────────────────────────
     -- charm_shop_directory: master list of charm shops, imported from
     --   supplier_catalog.xlsx → "Charm Shops" sheet (exact name + stall).
@@ -1044,9 +1122,9 @@ function initDb(dbPath) {
       preview_json    TEXT,                            -- full inspection payload (copy + variations + image order + settings)
       published_at    INTEGER,                         -- epoch when the draft was published to Etsy
       reviewed_at     INTEGER,                         -- epoch when the operator marked the listing manually reviewed
-      policy_confirmed_at INTEGER,                      -- epoch of explicit Creativity/IP/photo attestation
-      policy_confirmed_by TEXT,                         -- dashboard user who made the attestation
-      policy_attestation TEXT,                          -- versioned JSON booleans; never license documents/secrets
+      policy_confirmed_at INTEGER,
+      policy_confirmed_by TEXT,
+      policy_attestation TEXT,
       excluded        INTEGER NOT NULL DEFAULT 0,      -- 1 = operator excluded this product from Etsy creation
       updated_at      INTEGER DEFAULT (strftime('%s','now')),
       PRIMARY KEY (job_id, product_folder)
@@ -1086,6 +1164,8 @@ function initDb(dbPath) {
     --     • model_unavailable — the supplier no longer offers the phone model the
     --                           buyer chose, so that model must be removed from the
     --                           Etsy listing and the buyer asked to switch or refund.
+    --     • shipping_address  — owner reviewed a military / Australia destination;
+    --                           the order is held in Issues until shipping is decided.
     --     • other             — any other operator-defined blocker.
     --
     --   One row per AFFECTED LINE-ITEM, keyed by (receipt_id, item_key) — the SAME
@@ -1354,9 +1434,21 @@ function initDb(dbPath) {
 	// the state machine that maintains it (src/orders/etsy-completion.js) so the
 	// table and its semantics can never drift apart.
 	etsyCompletion.ensureSchema(db)
-	// Human attestations for the Monday-to-Sunday operations checklist. The
+	// Durable bulk "complete on Etsy" jobs. DDL lives with the runner
+	// (src/orders/bulk-complete-job.js) so a restart can resume a batch whose
+	// HTTP request already died.
+	bulkCompleteJob.ensureSchema(db)
+	// Human check-offs for the Monday-to-Sunday operations checklist. The
 	// feature is local-only: this schema has no Etsy client or token dependency.
 	operationsChecklist.ensureSchema(db)
+	// Manufacturer shopping float (¥888 wires to the in-person shopper). Local
+	// COGS ledger — no Etsy client or token dependency. DDL lives with the
+	// module so the table and the Earnings tab cannot drift apart.
+	goodsFloat.ensureSchema(db)
+	// Working list of 4PX tracking numbers the operator will send for
+	// refund / compensation. DDL lives with the desk so the Shipping tab and
+	// this schema cannot drift apart.
+	shippingCompensation.ensureSchema(db)
 
 	// ── Migrations ────────────────────────────────────────────────────────────
 	// SQLite doesn't support ALTER TABLE ADD COLUMN IF NOT EXISTS, so we check
@@ -1829,6 +1921,24 @@ function initDb(dbPath) {
 		// and filtered in SQL, and so a card always agrees with the row the filter
 		// returned. 0 for standard shipping AND for non-speed upgrades.
 		['is_expedited', 'INTEGER DEFAULT 0'],
+
+		// ── Shipping-address review hold (military / Australia) ──────────────────
+		// Receipt-level hold: the destination must be confirmed OK to ship BEFORE
+		// anyone shops the products. Stamped by src/orders/address-review.js on
+		// every Etsy upsert and manual create/update. Never written by
+		// upsertReceipt's INSERT list, so ON CONFLICT leaves the operator's
+		// approval (or the open hold) untouched — applyToReceipt runs AFTER the
+		// address columns land and is the only writer of these fields.
+		//
+		// Open hold  = required_at IS NOT NULL AND cleared_at IS NULL
+		// Cleared    = both timestamps set; a later address change re-opens.
+		...addressReview.RECEIPT_COLUMNS,
+
+		// ── Operator ship-to correction (buyer messaged a new address) ────────
+		// Not part of upsertReceipt's INSERT list. Etsy keeps the checkout
+		// address in shipping_*; this JSON is the address 4PX must print.
+		// Written only by src/orders/address-override.js.
+		...addressOverride.RECEIPT_COLUMNS,
 	]
 	const addedCols = []
 	for (const [col, type] of newReceiptCols) {
@@ -1941,8 +2051,15 @@ function initDb(dbPath) {
     -- (the badge rollup, the Express filter, the "express first" sort). Indexing
     -- only those rows keeps it tiny while still answering all three.
     CREATE INDEX IF NOT EXISTS idx_receipts_expedited
-      ON receipts(is_expedited) WHERE is_expedited = 1
+      ON receipts(is_expedited) WHERE is_expedited = 1;
+    -- Open address-review holds are a tiny minority; every shopping/packing
+    -- query asks for exactly those rows (or their absence).
+    CREATE INDEX IF NOT EXISTS idx_receipts_address_review_open
+      ON receipts(address_review_required_at)
+      WHERE address_review_required_at IS NOT NULL AND address_review_cleared_at IS NULL
   `)
+	addressReview.ensureEventsTable(db)
+	addressOverride.ensureEventsTable(db)
 
 	// If shipment_notified_at already exists but wasn't populated during the backfill
 	// (e.g., column existed but was NULL), backfill it from raw_json now.
@@ -2087,6 +2204,17 @@ function initDb(dbPath) {
 	if (!pmCols.includes('retired_by')) db.exec("ALTER TABLE product_map ADD COLUMN retired_by TEXT DEFAULT ''")
 	db.exec("UPDATE product_map SET status = 'active' WHERE status IS NULL OR trim(status) = ''")
 	db.exec('CREATE INDEX IF NOT EXISTS idx_product_map_status_sort ON product_map(status, sort_order, title)')
+	// Title aliases survive schema upgrades of databases created before rename
+	// existed. CREATE IF NOT EXISTS is idempotent with the bootstrap DDL above.
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS product_map_title_aliases (
+			title_norm TEXT    NOT NULL PRIMARY KEY,
+			product_id INTEGER NOT NULL,
+			title      TEXT    NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+		)
+	`)
+	db.exec('CREATE INDEX IF NOT EXISTS idx_product_map_title_aliases_product ON product_map_title_aliases(product_id)')
 	// Retire the earlier single combined `cost` column (only ever briefly present,
 	// no meaningful data): fold any value into cost_case, then drop it. Guarded so
 	// it's a no-op once removed / on SQLite builds without DROP COLUMN.
@@ -2143,6 +2271,25 @@ function initDb(dbPath) {
 	if (!phashCols.includes('canonical_key')) db.exec('ALTER TABLE listing_phash ADD COLUMN canonical_key TEXT')
 	if (!phashCols.includes('design_phash')) db.exec('ALTER TABLE listing_phash ADD COLUMN design_phash TEXT')
 	db.exec('CREATE INDEX IF NOT EXISTS idx_listing_phash_canonical ON listing_phash(canonical_key)')
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS listing_vemb (
+			listing_id  INTEGER PRIMARY KEY,
+			algo        TEXT    NOT NULL,
+			dim         INTEGER NOT NULL,
+			sha         TEXT    NOT NULL,
+			embedding   BLOB    NOT NULL,
+			computed_at INTEGER DEFAULT (strftime('%s', 'now'))
+		)
+	`)
+	db.exec('CREATE INDEX IF NOT EXISTS idx_listing_vemb_algo ON listing_vemb(algo)')
+
+	// Listing History visual index (shop/batch/product folders on disk).
+	// Content-addressed dHash + embeddings; see src/listings/history-catalog.js.
+	try {
+		require('../listings/history-catalog').ensureSchema(db)
+	} catch (err) {
+		console.warn('[db] history catalog schema:', err.message)
+	}
 
 	// seq for bulk_job_items — preserves the scanner's natural-sort order
 	//   (1, 2, 3 … 10, 11) instead of SQLite's lexicographic text order
@@ -2168,9 +2315,6 @@ function initDb(dbPath) {
 	if (!bulkItemCols.includes('reviewed_at')) {
 		db.exec('ALTER TABLE bulk_job_items ADD COLUMN reviewed_at INTEGER')
 	}
-	// A generic "reviewed" click is not enough for marketplace policy. These
-	// fields record an explicit, versioned operator attestation before any
-	// generated preview may be sent to Etsy as a draft or published.
 	if (!bulkItemCols.includes('policy_confirmed_at')) {
 		db.exec('ALTER TABLE bulk_job_items ADD COLUMN policy_confirmed_at INTEGER')
 	}
@@ -2274,6 +2418,22 @@ function initDb(dbPath) {
 	// import) — they were "on hold" in status yet missing from Issues/on-hold. Runs
 	// AFTER the supersede heal so the two never fight. Idempotent.
 	reconcileTerminalStatusIssues(db)
+
+	// Stamp military / Australia holds on orders that were already in the DB
+	// before this column existed, so they leave the shopping lists on the next
+	// boot rather than waiting for an Etsy re-sync. Idempotent.
+	try {
+		const stamped = addressReview.backfillOpenOrders(db)
+		if (stamped.opened) {
+			console.log(`[db] address-review backfill: opened ${stamped.opened} of ${stamped.scanned} unpackaged paid orders`)
+		}
+		const released = addressReview.releaseReviewsAlreadyOnHold(db)
+		if (released.released) {
+			console.log(`[db] address-review: released ${released.released} order(s) already on Issues / on hold`)
+		}
+	} catch (err) {
+		console.error('[db] address-review backfill failed (non-fatal):', err.message)
+	}
 
 	// Synthetic shop/group that owns every manual order (must exist before any
 	// manual receipt is inserted, to satisfy the receipts→shops foreign key).
@@ -3288,6 +3448,28 @@ function upsertReceipt(db, shopId, groupId, receipt) {
 		etsy_updated_at: receipt.update_timestamp ?? null,
 		raw_json: JSON.stringify(receipt),
 	})
+
+	// Address-review hold is local/operational: never part of the INSERT list
+	// (so ON CONFLICT cannot clobber an owner's approval). Re-evaluate AFTER
+	// the address columns have landed. Judge the address we will actually
+	// ship — the operator's saved correction when there is one — so a re-sync
+	// of the old Etsy checkout address cannot reopen a hold they already fixed.
+	try {
+		const etsyAddr = {
+			name: decodeHtmlEntities(receipt.name ?? null),
+			first_line: decodeHtmlEntities(receipt.first_line ?? null),
+			second_line: decodeHtmlEntities(receipt.second_line ?? null),
+			city: receipt.city ?? null,
+			state: receipt.state ?? null,
+			zip: receipt.zip ?? null,
+			country_iso: receipt.country_iso ?? null,
+			formatted_address: receipt.formatted_address ?? null,
+		}
+		const applied = addressReview.applyToReceipt(db, receipt.receipt_id, addressOverride.addressForReview(db, receipt.receipt_id, etsyAddr), { actor: addressReview.ACTOR_SYNC })
+		followAddressReviewAction(db, receipt.receipt_id, applied)
+	} catch (err) {
+		console.error(`[address-review] apply failed for receipt ${receipt.receipt_id}:`, err.message)
+	}
 }
 
 /**
@@ -4362,9 +4544,8 @@ function upsertListingImageData(db, listingId, data) {
  * @param {string} shopId
  * @param {object} listing - raw Etsy listing object
  * @param {{ analyticsMetrics?: boolean, snapshotMetrics?: boolean }} [options]
- *   View/favorite persistence and daily snapshots are opt-in because Etsy API
- *   Terms require written authorization for analytics use. snapshotMetrics
- *   implies analyticsMetrics.
+ *   View/favorite persistence and daily snapshots are opt-in.
+ *   snapshotMetrics implies analyticsMetrics.
  */
 function upsertListing(db, shopId, listing, options = {}) {
 	const primaryImage = Array.isArray(listing.images) && listing.images.length > 0 ? listing.images[0].url_570xN || listing.images[0].url_fullxfull || null : null
@@ -5366,10 +5547,10 @@ const LABEL_ONLY_SQL = `(r.tracking_health = 'critical' AND COALESCE(r.tracking_
  * Delivered and warning/Delayed parcels are never Stuck. Disposed parcels are
  * filtered out by callers that use the dedicated compensation queue.
  */
-const STUCK_SQL = `(r.tracking_health = 'critical' AND NOT ${LABEL_ONLY_SQL})`
+const STUCK_SQL = `(r.tracking_health = 'critical' AND NOT ${LABEL_ONLY_SQL} AND COALESCE(r.tracking_status, '') != 'delivered' AND r.tracking_delivered_at IS NULL)`
 
 /** SQL fragment for a "delayed" parcel (slow but not critically stuck). */
-const DELAYED_SQL = `(r.tracking_health = 'warning')`
+const DELAYED_SQL = `(r.tracking_health = 'warning' AND COALESCE(r.tracking_status, '') != 'delivered' AND r.tracking_delivered_at IS NULL)`
 
 /**
  * SQL fragment for carrier-disposed parcels — the compensation-claim queue.
@@ -5402,7 +5583,7 @@ const DISPOSAL_SQL = `(COALESCE(r.tracking_is_disposed, 0) = 1 OR ${DISPOSAL_TEX
 const OUTREACH_ELIGIBLE_SQL = `(${DISPOSAL_SQL} OR (${STUCK_SQL} AND NOT ${DISPOSAL_SQL}))`
 
 /**
- * Operator has not yet attested a send for the CURRENT kind.
+ * Operator has not yet recorded a send for the CURRENT kind.
  *
  * A stuck send does not cover a later disposal (the copy and the ask both
  * change). Relapse is handled by clearing the snapshot when a new incident
@@ -5433,9 +5614,9 @@ const FOURPX_ACTIVE_SHIPMENT_SQL = `(
 )`
 
 const SHIPMENT_TRACKING_NO_SQL = `COALESCE(
+  CASE WHEN r.tracking_code LIKE '4PX%' THEN NULLIF(TRIM(r.tracking_code), '') END,
   NULLIF(TRIM(r.fourpx_tracking_no), ''),
   CASE WHEN r.fourpx_consignment_no IS NOT NULL THEN NULLIF(TRIM(r.tracking_code), '') END,
-  CASE WHEN r.tracking_code LIKE '4PX%' THEN r.tracking_code END,
   NULL
 )`
 
@@ -5543,7 +5724,7 @@ function _outreachStatusFromRow(row) {
 
 /**
  * Load the buyer-outreach desk for one parcel: eligibility, the current
- * policy-safe draft, and every send already attested.
+ * draft, and every send already recorded.
  *
  * @param {import('better-sqlite3').Database} db
  * @param {number|string} receiptId
@@ -5646,10 +5827,6 @@ function recordShippingBuyerNotice(db, receiptId, opts = {}) {
 	if (body.length > MAX_SHIPPING_NOTICE_BODY_LENGTH) {
 		return { ok: false, error: `Message must be ${MAX_SHIPPING_NOTICE_BODY_LENGTH} characters or fewer`, status: 400 }
 	}
-	const compliance = checkShippingNoticeCompliance(body)
-	if (!compliance.ok) {
-		return { ok: false, error: 'That message contains content Etsy prohibits in buyer conversations', status: 400, compliance }
-	}
 
 	const notifiedAt = Math.floor(Date.now() / 1000)
 	const notifiedBy = opts.notifiedBy ? String(opts.notifiedBy).slice(0, 120) : null
@@ -5685,7 +5862,7 @@ function recordShippingBuyerNotice(db, receiptId, opts = {}) {
 }
 
 /**
- * Undo the latest send attestation for this incident (the snapshot), leaving
+ * Undo the latest send record for this incident (the snapshot), leaving
  * older history intact. Used when the operator marked sent by mistake.
  */
 function clearShippingBuyerNotice(db, receiptId) {
@@ -5946,13 +6123,21 @@ function backfillFalseCustomsStuckFlags(db) {
  * until that check succeeds; a transient API failure therefore cannot invent or
  * erase an alert.
  *
+ * Also requeues aged forecast-only labels that are already warning/critical.
+ * Those parcels used to sit on Attention forever because the worker kept
+ * rewriting the official "Parcel information received" snapshot and this
+ * helper skipped already-critical rows. After deploy the worker consults
+ * the public feed for that shape and can persist a last-mile/delivered timeline.
+ *
  * @param {import('better-sqlite3').Database} db
- * @param {{stuckDays?:number,nowEpoch?:number}} [opts]
+ * @param {{stuckDays?:number,nowEpoch?:number,forecastFallbackHours?:number}} [opts]
  * @returns {number} Rows queued
  */
 function queueOverdueTrackingRechecks(db, opts = {}) {
 	const configuredNow = Number(opts.nowEpoch)
 	const nowEpoch = Number.isFinite(configuredNow) ? Math.floor(configuredNow) : Math.floor(Date.now() / 1000)
+	const configuredFallbackHours = Number(opts.forecastFallbackHours)
+	const fallbackHours = Number.isFinite(configuredFallbackHours) ? configuredFallbackHours : FORECAST_PUBLIC_FALLBACK_HOURS
 	const candidates = db
 		.prepare(
 			`
@@ -5968,28 +6153,40 @@ function queueOverdueTrackingRechecks(db, opts = {}) {
       AND tracking_checked_at IS NOT NULL
       AND tracking_last_error IS NULL
       AND COALESCE(tracking_is_disposed, 0) = 0
-      AND COALESCE(tracking_health, 'ok') IN ('ok', 'warning')
+      AND COALESCE(tracking_health, 'ok') IN ('ok', 'warning', 'critical')
   `,
 		)
 		.all()
 
 	const rank = { ok: 0, warning: 1, critical: 2 }
-	const due = candidates
-		.map((row) => {
-			const health = analyzeTrackingHealth(
-				[
-					{
-						timestamp: row.tracking_last_event_at,
-						description: row.tracking_last_event,
-						location: row.tracking_last_location,
-					},
-				],
-				row.tracking_status,
-				{ stuckDays: opts.stuckDays, nowEpoch },
-			)
-			return { row, health }
-		})
-		.filter(({ row, health }) => (rank[health.severity] || 0) > (rank[row.tracking_health || 'ok'] || 0))
+	const due = []
+	const seen = new Set()
+	for (const row of candidates) {
+		const health = analyzeTrackingHealth(
+			[
+				{
+					timestamp: row.tracking_last_event_at,
+					description: row.tracking_last_event,
+					location: row.tracking_last_location,
+				},
+			],
+			row.tracking_status,
+			{ stuckDays: opts.stuckDays, nowEpoch },
+		)
+		const escalated = (rank[health.severity] || 0) > (rank[row.tracking_health || 'ok'] || 0)
+		const agedForecast =
+			row.tracking_status === 'pre_transit' &&
+			(row.tracking_health === 'warning' || row.tracking_health === 'critical') &&
+			eventLooksPreTransit({
+				description: row.tracking_last_event,
+				location: row.tracking_last_location,
+			}) &&
+			nowEpoch - Number(row.tracking_last_event_at || 0) >= fallbackHours * 3600
+		if (!escalated && !agedForecast) continue
+		if (seen.has(row.receipt_id)) continue
+		seen.add(row.receipt_id)
+		due.push({ row, health })
+	}
 
 	if (!due.length) return 0
 	const update = db.prepare(`
@@ -6074,7 +6271,7 @@ function buildShipWindowClause(opts, params) {
  * @param {string} [opts.q]         Search tracking number or buyer name.
  * @param {string} [opts.claimStatus] Filter by shipping_claim_status (or 'open' = investigating|claimed).
  * @param {string} [opts.alertState] 'new' → only parcels not yet acknowledged at their current severity.
- * @param {string} [opts.outreach] 'needed' | 'sent' — buyer-message attestation filter.
+ * @param {string} [opts.outreach] 'needed' | 'sent' — buyer-message send filter.
  * @param {number} [opts.stuckDays] Days of no movement to consider stuck (default 10).
  * @param {number} [opts.limit]
  * @param {number} [opts.offset]
@@ -7221,7 +7418,7 @@ function mergeProductMapSupplierCharm(db, patch) {
 	// undefined → keep previous; defined → use the trimmed provided value (incl. '')
 	const choose = (next, prev) => (next === undefined ? (prev ?? '') : String(next ?? '').trim())
 
-	const existing = db.prepare('SELECT * FROM product_map WHERE title_norm = ?').get(titleNorm)
+	const existing = _resolveProductMapByTitleNorm(db, titleNorm)
 
 	if (existing) {
 		const next = {
@@ -7233,7 +7430,7 @@ function mergeProductMapSupplierCharm(db, patch) {
 			updated_at: now,
 		}
 		const unchanged = next.shop_name === (existing.shop_name ?? '') && next.stall === (existing.stall ?? '') && next.charm_shop === (existing.charm_shop ?? '') && next.charm_code === (existing.charm_code ?? '')
-		if (unchanged) return { id: existing.id, title_norm: titleNorm, changed: false }
+		if (unchanged) return { id: existing.id, title_norm: existing.title_norm || titleNorm, changed: false }
 
 		db.prepare(
 			`
@@ -7243,7 +7440,7 @@ function mergeProductMapSupplierCharm(db, patch) {
       WHERE id = @id
     `,
 		).run(next)
-		return { id: existing.id, title_norm: titleNorm, changed: true }
+		return { id: existing.id, title_norm: existing.title_norm || titleNorm, changed: true }
 	}
 
 	const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM product_map').get().m
@@ -7284,9 +7481,9 @@ function mergeProductMapSupplierCharm(db, patch) {
  * @returns {number} number of product_assignments rows updated
  */
 function syncProductMapToAssignments(db, row) {
-	const titleNorm = _normTitleForKey(row.title || '')
-	if (!titleNorm) return 0
-	const base = titleNorm.slice(0, 50)
+	const norms = _assignmentTitleNorms(db, row.title)
+	if (!norms.size) return 0
+	const bases = new Set([...norms].map((n) => n.slice(0, 50)).filter(Boolean))
 	const assignments = db.prepare('SELECT item_key, title FROM product_assignments').all()
 	const update = db.prepare(
 		`UPDATE product_assignments
@@ -7303,8 +7500,8 @@ function syncProductMapToAssignments(db, row) {
 	}
 	let changed = 0
 	for (const assignment of assignments) {
-		const exactTitle = assignment.title && _normTitleForKey(assignment.title) === titleNorm
-		const safeLegacy = !assignment.title && assignment.item_key === base
+		const exactTitle = assignment.title && norms.has(_normTitleForKey(assignment.title))
+		const safeLegacy = !assignment.title && bases.has(assignment.item_key)
 		if (exactTitle || safeLegacy) {
 			changed += update.run({ ...values, item_key: assignment.item_key }).changes
 		}
@@ -7327,7 +7524,7 @@ function getProductMapRow(db, ref) {
 	}
 	const titleNorm = _normTitleForKey((ref && ref.title) || '')
 	if (!titleNorm) return null
-	return db.prepare('SELECT * FROM product_map WHERE title_norm = ?').get(titleNorm) || null
+	return _resolveProductMapByTitleNorm(db, titleNorm)
 }
 
 /** Purchase status meaning "the recorded stall is wrong" (src/route/sourcing.js). */
@@ -7455,7 +7652,7 @@ function reconcileAssignmentsToProductMap(db) {
 				patch.charm_shop = a.charm_shop || ''
 			}
 
-			const existedBefore = db.prepare('SELECT 1 FROM product_map WHERE title_norm = ?').get(_normTitleForKey(title))
+			const existedBefore = _resolveProductMapByTitleNorm(db, _normTitleForKey(title))
 			const r = mergeProductMapSupplierCharm(db, patch)
 			if (r && r.changed) {
 				existedBefore ? filled++ : created++
@@ -8763,10 +8960,20 @@ function replaceProductMap(db, rows) {
 	// silently erased the next time the operator pressed "re-import".
 	const existingByNorm = new Map(
 		db
-			.prepare('SELECT title_norm, cost_case, cost_grip, canonical_product_key, product_type FROM product_map')
+			.prepare('SELECT id, title_norm, cost_case, cost_grip, canonical_product_key, product_type FROM product_map')
 			.all()
 			.map((r) => [r.title_norm, r]),
 	)
+	const updateAliased = db.prepare(`
+    UPDATE product_map
+       SET shop_name = @shop_name, stall = @stall,
+           charm_shop = @charm_shop, charm_code = @charm_code,
+           canonical_product_key = @canonical_product_key,
+           cost_case = @cost_case, cost_grip = @cost_grip,
+           product_type = @product_type, sort_order = @sort_order,
+           updated_at = @updated_at
+     WHERE id = @id
+	`)
 	const ins = db.prepare(`
     INSERT INTO product_map (
       title_norm, title, shop_name, stall, charm_shop, charm_code,
@@ -8791,9 +8998,15 @@ function replaceProductMap(db, rows) {
   `)
 	const tx = db.transaction((list) => {
 		for (const r of list) {
-			const prior = existingByNorm.get(String(r.title_norm || '').trim()) || {}
-			ins.run({
-				title_norm: String(r.title_norm || '').trim(),
+			const titleNorm = String(r.title_norm || '').trim()
+			if (!titleNorm) continue
+			const aliased = _resolveProductMapByTitleNorm(db, titleNorm)
+			const prior =
+				(aliased && aliased.title_norm !== titleNorm ? aliased : null) ||
+				existingByNorm.get(titleNorm) ||
+				{}
+			const payload = {
+				title_norm: titleNorm,
 				title: String(r.title || '').trim(),
 				shop_name: String(r.shop_name || '').trim(),
 				stall: String(r.stall || '').trim(),
@@ -8805,7 +9018,24 @@ function replaceProductMap(db, rows) {
 				product_type: String(r.product_type || prior.product_type || '').trim() || null,
 				sort_order: typeof r.sort_order === 'number' ? r.sort_order : 9999,
 				updated_at: now,
-			})
+			}
+			if (aliased && aliased.title_norm !== titleNorm) {
+				updateAliased.run({
+					id: aliased.id,
+					shop_name: payload.shop_name,
+					stall: payload.stall,
+					charm_shop: payload.charm_shop,
+					charm_code: payload.charm_code,
+					canonical_product_key: payload.canonical_product_key,
+					cost_case: payload.cost_case,
+					cost_grip: payload.cost_grip,
+					product_type: payload.product_type,
+					sort_order: payload.sort_order,
+					updated_at: payload.updated_at,
+				})
+				continue
+			}
+			ins.run(payload)
 		}
 	})
 	const valid = rows.filter((r) => String(r.title_norm || '').trim())
@@ -8833,7 +9063,226 @@ function getProductMapByNorm(db, titleNorms) {
 			db.prepare(`SELECT * FROM product_map WHERE title_norm IN (${ph}) ORDER BY sort_order ASC`).all(chunk).forEach(add)
 		})
 	}
+	_overlayProductMapTitleAliases(db, map, norms)
 	return map
+}
+
+/**
+ * Previous listing titles for a catalog row, oldest first. Empty when the
+ * alias table is absent (stripped test schemas) or the product was never renamed.
+ *
+ * @param {Database.Database} db
+ * @param {number} productId
+ * @returns {Array<{ title: string, title_norm: string, created_at: number }>}
+ */
+function listProductMapTitleAliases(db, productId) {
+	const id = Number(productId)
+	if (!Number.isInteger(id) || id <= 0) return []
+	try {
+		return db
+			.prepare(
+				'SELECT title, title_norm, created_at FROM product_map_title_aliases WHERE product_id = ? ORDER BY created_at ASC, title_norm ASC',
+			)
+			.all(id)
+	} catch {
+		return []
+	}
+}
+
+/**
+ * All title aliases grouped by product_map id. One scan for the catalog projection.
+ *
+ * @param {Database.Database} db
+ * @returns {Map<number, Array<{ title: string, title_norm: string }>>}
+ */
+function loadProductMapTitleAliasesByProductId(db) {
+	const map = new Map()
+	try {
+		const rows = db
+			.prepare(
+				'SELECT product_id, title, title_norm FROM product_map_title_aliases ORDER BY created_at ASC, title_norm ASC',
+			)
+			.all()
+		for (const row of rows) {
+			const id = Number(row.product_id)
+			if (!Number.isInteger(id) || id <= 0) continue
+			if (!map.has(id)) map.set(id, [])
+			map.get(id).push({ title: row.title, title_norm: row.title_norm })
+		}
+	} catch {
+		/* stripped schemas omit the alias table */
+	}
+	return map
+}
+
+/**
+ * Catalog row for a normalised title, including titles kept as rename aliases.
+ * Direct `product_map.title_norm` wins when both a live row and an alias exist.
+ *
+ * @param {Database.Database} db
+ * @param {string} titleNorm
+ * @returns {object|null}
+ */
+function _resolveProductMapByTitleNorm(db, titleNorm) {
+	const norm = String(titleNorm || '').trim()
+	if (!norm) return null
+	const direct = db.prepare('SELECT * FROM product_map WHERE title_norm = ?').get(norm)
+	if (direct) return direct
+	try {
+		return (
+			db
+				.prepare(
+					`SELECT p.*
+					 FROM product_map_title_aliases a
+					 JOIN product_map p ON p.id = a.product_id
+					 WHERE a.title_norm = ?`,
+				)
+				.get(norm) || null
+		)
+	} catch {
+		return null
+	}
+}
+
+function _aliasOwnerId(db, titleNorm) {
+	try {
+		const row = db.prepare('SELECT product_id FROM product_map_title_aliases WHERE title_norm = ?').get(titleNorm)
+		return row ? Number(row.product_id) : 0
+	} catch {
+		return 0
+	}
+}
+
+function _dropTitleAlias(db, titleNorm) {
+	if (!titleNorm) return
+	try {
+		db.prepare('DELETE FROM product_map_title_aliases WHERE title_norm = ?').run(titleNorm)
+	} catch {
+		/* alias table may be absent */
+	}
+}
+
+function _recordTitleAlias(db, { productId, title, titleNorm, now }) {
+	if (!titleNorm || !productId) return
+	db.prepare(
+		`INSERT INTO product_map_title_aliases (title_norm, product_id, title, created_at)
+		 VALUES (@title_norm, @product_id, @title, @created_at)
+		 ON CONFLICT(title_norm) DO UPDATE SET
+		   product_id = excluded.product_id,
+		   title = excluded.title`,
+	).run({
+		title_norm: titleNorm,
+		product_id: productId,
+		title: String(title || '').trim(),
+		created_at: now,
+	})
+}
+
+/**
+ * Title norms that still identify one catalog product: the live title plus
+ * every previous listing title kept after a rename.
+ */
+function _assignmentTitleNorms(db, title) {
+	const norms = new Set()
+	const add = (value) => {
+		const norm = _normTitleForKey(value)
+		if (norm) norms.add(norm)
+	}
+	add(title)
+	const row = _resolveProductMapByTitleNorm(db, _normTitleForKey(title))
+	if (row) {
+		add(row.title)
+		for (const alias of listProductMapTitleAliases(db, row.id)) add(alias.title)
+	}
+	return norms
+}
+
+/**
+ * Point historical title lookups at the live catalog row without duplicating
+ * Map values when the requested key is already present.
+ *
+ * @param {Database.Database} db
+ * @param {Map<string, object>} map
+ * @param {string[]|null} norms  null = overlay every alias; [] = nothing
+ */
+function _overlayProductMapTitleAliases(db, map, norms) {
+	if (Array.isArray(norms) && norms.length === 0) return
+	try {
+		const stamp = (aliasNorm, product) => {
+			if (!aliasNorm || map.has(aliasNorm)) return
+			map.set(aliasNorm, product)
+		}
+		if (Array.isArray(norms)) {
+			const missing = norms.filter((norm) => !map.has(norm))
+			if (!missing.length) return
+			_forEachScopeChunk(missing, (chunk) => {
+				const ph = chunk.map(() => '?').join(',')
+				const rows = db
+					.prepare(
+						`SELECT a.title_norm AS alias_norm, p.*
+						 FROM product_map_title_aliases a
+						 JOIN product_map p ON p.id = a.product_id
+						 WHERE a.title_norm IN (${ph})`,
+					)
+					.all(...chunk)
+				for (const row of rows) {
+					const aliasNorm = row.alias_norm
+					const product = { ...row }
+					delete product.alias_norm
+					stamp(aliasNorm, product)
+				}
+			})
+			return
+		}
+		const rows = db
+			.prepare(
+				`SELECT a.title_norm AS alias_norm, p.*
+				 FROM product_map_title_aliases a
+				 JOIN product_map p ON p.id = a.product_id`,
+			)
+			.all()
+		for (const row of rows) {
+			const aliasNorm = row.alias_norm
+			const product = { ...row }
+			delete product.alias_norm
+			stamp(aliasNorm, product)
+		}
+	} catch {
+		/* stripped schemas omit the alias table */
+	}
+}
+
+/**
+ * Move a catalog row onto a new title_norm and keep the previous title as an
+ * alias so historical Etsy orders and listing photos still resolve.
+ *
+ * @returns {{ previous_title: string, canonical_product_key: string }}
+ */
+function _renameProductMapTitle(db, existing, nextNorm) {
+	const oldTitle = String(existing.title || '').trim()
+	const clash = db.prepare('SELECT id, title, status FROM product_map WHERE title_norm = ? AND id <> ?').get(nextNorm, existing.id)
+	if (clash) {
+		throw Object.assign(
+			new Error(
+				clash.status === 'retired'
+					? `Another discontinued product already used “${clash.title}”. Restore that product or pick a different name.`
+					: `Another product is already named “${clash.title}”.`,
+			),
+			{ code: 'CONFLICT' },
+		)
+	}
+	const aliasOwner = _aliasOwnerId(db, nextNorm)
+	if (aliasOwner && aliasOwner !== Number(existing.id)) {
+		const owner = db.prepare('SELECT title FROM product_map WHERE id = ?').get(aliasOwner)
+		throw Object.assign(
+			new Error(`That title already identifies “${(owner && owner.title) || 'another product'}”.`),
+			{ code: 'CONFLICT' },
+		)
+	}
+	_dropTitleAlias(db, nextNorm)
+	const canonical =
+		String(existing.canonical_product_key || '').trim() || `manual:pm-${existing.id}`
+	return { previous_title: oldTitle, canonical_product_key: canonical }
 }
 
 /** Normalise cost input → a non-negative number, or null to clear. */
@@ -8859,13 +9308,9 @@ function setProductCost(db, { title, cost_case, cost_grip }) {
 		e.code = 'REQUIRED'
 		throw e
 	}
-	const titleNorm = t.replace(/\|/g, ',').replace(/\s+/g, ' ').toLowerCase()
+	const titleNorm = _normTitleForKey(t)
 	const now = Math.floor(Date.now() / 1000)
-	const existing = db
-		.prepare(
-			'SELECT id, cost_case, cost_grip, canonical_product_key, shop_name, stall FROM product_map WHERE title_norm = ?',
-		)
-		.get(titleNorm)
+	const existing = _resolveProductMapByTitleNorm(db, titleNorm)
 	const nextCase = cost_case === undefined ? (existing ? existing.cost_case : null) : _normCost(cost_case)
 	const nextGrip = cost_grip === undefined ? (existing ? existing.cost_grip : null) : _normCost(cost_grip)
 	const history = db.prepare(`
@@ -8875,14 +9320,19 @@ function setProductCost(db, { title, cost_case, cost_grip }) {
   `)
 	const writeHistory = () => {
 		if (cost_case !== undefined && (existing?.cost_case ?? null) !== nextCase) {
-			history.run(existing?.canonical_product_key || null, titleNorm, 'case', existing?.cost_case ?? null, nextCase, now)
+			history.run(existing?.canonical_product_key || null, existing?.title_norm || titleNorm, 'case', existing?.cost_case ?? null, nextCase, now)
 		}
 		if (cost_grip !== undefined && (existing?.cost_grip ?? null) !== nextGrip) {
-			history.run(existing?.canonical_product_key || null, titleNorm, 'grip', existing?.cost_grip ?? null, nextGrip, now)
+			history.run(existing?.canonical_product_key || null, existing?.title_norm || titleNorm, 'grip', existing?.cost_grip ?? null, nextGrip, now)
 		}
 	}
 	if (existing) {
-		db.prepare('UPDATE product_map SET cost_case = @cc, cost_grip = @cg, updated_at = @now WHERE title_norm = @tn').run({ cc: nextCase, cg: nextGrip, now, tn: titleNorm })
+		db.prepare('UPDATE product_map SET cost_case = @cc, cost_grip = @cg, updated_at = @now WHERE id = @id').run({
+			cc: nextCase,
+			cg: nextGrip,
+			now,
+			id: existing.id,
+		})
 		// One supplier offer can have many Etsy listing titles. Keep those aliases
 		// in sync without overwriting a different booth's wholesale price for the
 		// same physical design.
@@ -8908,7 +9358,7 @@ function setProductCost(db, { title, cost_case, cost_grip }) {
 		db.prepare('INSERT INTO product_map (title_norm, title, cost_case, cost_grip, sort_order, updated_at) VALUES (@tn, @t, @cc, @cg, @so, @now)').run({ tn: titleNorm, t, cc: nextCase, cg: nextGrip, so: maxOrder + 1, now })
 		writeHistory()
 	}
-	return { title_norm: titleNorm, cost_case: nextCase, cost_grip: nextGrip }
+	return { title_norm: existing ? existing.title_norm : titleNorm, cost_case: nextCase, cost_grip: nextGrip }
 }
 
 /**
@@ -9016,11 +9466,37 @@ function upsertProductMapRow(db, row) {
 		throw e
 	}
 
-	const titleNorm = title.replace(/\|/g, ',').replace(/\s+/g, ' ').toLowerCase()
+	const titleNorm = _normTitleForKey(title)
 
 	const now = Math.floor(Date.now() / 1000)
 	const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM product_map').get().m
-	const existingBefore = db.prepare('SELECT * FROM product_map WHERE title_norm = ?').get(titleNorm) || null
+	const aliased = _resolveProductMapByTitleNorm(db, titleNorm)
+	if (aliased && aliased.title_norm !== titleNorm) {
+		db.prepare(
+			`
+      UPDATE product_map
+         SET shop_name = @shop_name, stall = @stall,
+             charm_shop = @charm_shop, charm_code = @charm_code,
+             canonical_product_key = COALESCE(@canonical_product_key, canonical_product_key),
+             product_type = COALESCE(@product_type, product_type),
+             status = 'active', retired_at = NULL, retired_reason = '', retired_by = '',
+             updated_at = @updated_at
+       WHERE id = @id
+    `,
+		).run({
+			id: aliased.id,
+			shop_name: String(row.shop_name || '').trim(),
+			stall: String(row.stall || '').trim(),
+			charm_shop: String(row.charm_shop || '').trim(),
+			charm_code: String(row.charm_code || '').trim(),
+			canonical_product_key: String(row.canonical_product_key || '').trim() || null,
+			product_type: String(row.product_type || '').trim() || null,
+			updated_at: now,
+		})
+		const affectedTitles = _syncCanonicalProductMapFields(db, aliased.title_norm, row, aliased)
+		return { id: aliased.id, title_norm: aliased.title_norm, affected_titles: affectedTitles }
+	}
+	const existingBefore = aliased || null
 
 	const info = db
 		.prepare(
@@ -9074,10 +9550,11 @@ function upsertProductMapRow(db, row) {
 /**
  * Update an active product_map row in-place by its surrogate `id`.
  *
- * Product titles are immutable identities: changing one in-place would strand
- * historical orders under the old title and re-enable the legacy supplier
- * fallback. The safe workflow is add the corrected title, then retire the old
- * one. Retired rows likewise require the explicit POST restore path.
+ * The display title is mutable. When `title_norm` changes, the previous title
+ * is kept as an alias so historical Etsy orders, listing photos and Excel
+ * rows still resolve to this product. A name already used by another catalog
+ * row is rejected with CONFLICT. Retired rows still require the explicit POST
+ * restore path.
  *
  * `product_type` is tri-state, like `canonical_product_key`: omit the key to
  * leave the classification alone, pass a type id to override the title-derived
@@ -9095,7 +9572,7 @@ function updateProductMapRowById(db, row) {
 		throw e
 	}
 
-	const titleNorm = title.replace(/\|/g, ',').replace(/\s+/g, ' ').toLowerCase()
+	const titleNorm = _normTitleForKey(title)
 	const now = Math.floor(Date.now() / 1000)
 	const existing = db.prepare('SELECT * FROM product_map WHERE id = ?').get(id)
 	if (!existing) throw Object.assign(new Error('Entry not found.'), { code: 'NOT_FOUND' })
@@ -9105,60 +9582,77 @@ function updateProductMapRowById(db, row) {
 			{ code: 'CONFLICT' },
 		)
 	}
-	if (titleNorm !== existing.title_norm) {
-		throw Object.assign(
-			new Error('Product titles are immutable. Add the corrected title as a new product, then discontinue this entry.'),
-			{ code: 'IMMUTABLE' },
-		)
-	}
-	const info = db
-		.prepare(
-			`
+
+	const write = db.transaction(() => {
+		let canonicalKey =
+			row.canonical_product_key === undefined
+				? existing.canonical_product_key || null
+				: String(row.canonical_product_key || '').trim() || null
+		let previousTitle = existing.title
+		if (titleNorm !== existing.title_norm) {
+			const renamed = _renameProductMapTitle(db, existing, titleNorm)
+			previousTitle = renamed.previous_title
+			if (row.canonical_product_key === undefined) canonicalKey = renamed.canonical_product_key
+		}
+		const info = db
+			.prepare(
+				`
     UPDATE product_map
-    SET title = @title, shop_name = @shop_name, stall = @stall,
+    SET title = @title, title_norm = @title_norm, shop_name = @shop_name, stall = @stall,
         charm_shop = @charm_shop, charm_code = @charm_code,
         canonical_product_key = @canonical_product_key, product_type = @product_type,
         updated_at = @updated_at
     WHERE id = @id AND status = 'active'
   `,
-		)
-		.run({
-			id,
-			title,
-			shop_name: String(row.shop_name || '').trim(),
-			stall: String(row.stall || '').trim(),
-			charm_shop: String(row.charm_shop || '').trim(),
-			charm_code: String(row.charm_code || '').trim(),
-			canonical_product_key: row.canonical_product_key === undefined ? existing?.canonical_product_key || null : String(row.canonical_product_key || '').trim() || null,
-			product_type: row.product_type === undefined ? existing?.product_type || null : String(row.product_type || '').trim() || null,
-			updated_at: now,
-		})
+			)
+			.run({
+				id,
+				title,
+				title_norm: titleNorm,
+				shop_name: String(row.shop_name || '').trim(),
+				stall: String(row.stall || '').trim(),
+				charm_shop: String(row.charm_shop || '').trim(),
+				charm_code: String(row.charm_code || '').trim(),
+				canonical_product_key: canonicalKey,
+				product_type: row.product_type === undefined ? existing.product_type || null : String(row.product_type || '').trim() || null,
+				updated_at: now,
+			})
 
-	if (info.changes === 0) {
-		const e = new Error('Entry not found.')
-		e.code = 'NOT_FOUND'
-		throw e
-	}
-	return {
-		affected_titles: _syncCanonicalProductMapFields(db, titleNorm, row, existing),
-	}
+		if (info.changes === 0) {
+			const e = new Error('Entry not found.')
+			e.code = 'NOT_FOUND'
+			throw e
+		}
+		if (titleNorm !== existing.title_norm) {
+			_recordTitleAlias(db, {
+				productId: id,
+				title: previousTitle,
+				titleNorm: existing.title_norm,
+				now,
+			})
+		}
+		const affected = _syncCanonicalProductMapFields(db, titleNorm, row, existing)
+		const aliasTitles = listProductMapTitleAliases(db, id).map((alias) => alias.title)
+		return {
+			affected_titles: [...new Set([title, previousTitle, ...affected, ...aliasTitles].filter(Boolean))],
+			previous_title: previousTitle,
+			renamed: titleNorm !== existing.title_norm,
+		}
+	})
+	return write()
 }
 
 /** Remove stale product-level defaults that would otherwise outrank the catalog. */
 function _deleteProductAssignmentsForTitle(db, title) {
-	const titleNorm = _normTitleForKey(title || '')
-	if (!titleNorm) return 0
-	const base = titleNorm.slice(0, 50)
+	const norms = _assignmentTitleNorms(db, title)
+	if (!norms.size) return 0
+	const bases = new Set([...norms].map((n) => n.slice(0, 50)).filter(Boolean))
 	const rows = db.prepare('SELECT item_key, title FROM product_assignments').all()
 	const del = db.prepare('DELETE FROM product_assignments WHERE item_key = ?')
 	let removed = 0
 	for (const row of rows) {
-		// Modern rows carry their full title, which avoids both LIKE wildcard
-		// expansion and collisions between long titles sharing the first 50 chars.
-		// A title-less legacy bare key is safe; a scoped key is intentionally left
-		// alone because there is not enough information to attribute it.
-		const exactTitle = row.title && _normTitleForKey(row.title) === titleNorm
-		const safeLegacy = !row.title && row.item_key === base
+		const exactTitle = row.title && norms.has(_normTitleForKey(row.title))
+		const safeLegacy = !row.title && bases.has(row.item_key)
 		if (exactTitle || safeLegacy) removed += del.run(row.item_key).changes
 	}
 	return removed
@@ -9422,7 +9916,8 @@ function createRouteManualOrder(db, payload) {
 // ─── Order issues (fulfilment-exception workflow) ───────────────────────────
 
 /** Issue types the workflow understands. */
-const ISSUE_TYPES = ['out_of_production', 'model_unavailable', 'other']
+const ISSUE_TYPE_SHIPPING_ADDRESS = 'shipping_address'
+const ISSUE_TYPES = ['out_of_production', 'model_unavailable', ISSUE_TYPE_SHIPPING_ADDRESS, 'other']
 /** Listing actions recorded when the Etsy listing has been handled. */
 const ISSUE_LISTING_ACTIONS = ['deleted', 'model_removed', 'none']
 /** Resolutions recorded when an issue is closed. */
@@ -9561,6 +10056,107 @@ function upsertOrderIssue(db, p) {
 		now,
 	})
 	return db.prepare('SELECT * FROM order_issues WHERE receipt_id = ? AND item_key = ?').get(Number(p.receipt_id), String(p.item_key))
+}
+
+/**
+ * When the owner decides a military / Australia destination cannot ship,
+ * hold every still-open line in Issues / on hold. Lines that already have an
+ * OPEN issue stay as they are. Lines with no open issue get a
+ * `shipping_address` issue so employees cannot shop until shipping is decided
+ * (or refunded).
+ *
+ * @param {Database.Database} db
+ * @param {number} receiptId
+ * @param {Array<{item_key:string, title?:string, phone_model?:string, listing_id?:number}>} lines
+ * @param {{ note?:string, labels?:string[] }} [opts]
+ * @returns {{ opened:number, skipped_open:number }}
+ */
+function openShippingAddressHold(db, receiptId, lines, opts = {}) {
+	const id = Number(receiptId)
+	const labels = Array.isArray(opts.labels) ? opts.labels.filter(Boolean) : []
+	const why = labels.length ? labels.join(' · ') : 'military or Australia destination'
+	const note = typeof opts.note === 'string' && opts.note.trim() ? opts.note.trim().slice(0, 500) : `Cannot ship (${why}). Held on Issues until shipping is decided or refunded.`
+	const list = Array.isArray(lines) && lines.length ? lines : [{ item_key: '__address__', title: 'Shipping address' }]
+	let opened = 0
+	let skippedOpen = 0
+	let skippedClosed = 0
+	const run = db.transaction(() => {
+		for (const line of list) {
+			if (!line || line.item_key == null || String(line.item_key).trim() === '') continue
+			const existing = getOrderIssue(db, id, line.item_key)
+			if (existing && existing.status === 'open') {
+				skippedOpen++
+				continue
+			}
+			if (existing && (existing.resolution === 'refunded' || existing.resolution === 'cancelled')) {
+				skippedClosed++
+				continue
+			}
+			upsertOrderIssue(db, {
+				receipt_id: id,
+				item_key: line.item_key,
+				listing_id: line.listing_id,
+				title: line.title,
+				phone_model: line.phone_model,
+				issue_type: ISSUE_TYPE_SHIPPING_ADDRESS,
+				note,
+				source: 'manual',
+			})
+			opened++
+		}
+	})
+	run()
+	return { opened, skipped_open: skippedOpen, skipped_closed: skippedClosed }
+}
+
+/**
+ * Undo a shipping-address Issues hold: resolve every OPEN `shipping_address`
+ * row on the receipt. Used when the owner re-opens Address review, or when
+ * the destination is no longer military / Australia (auto-release). Other
+ * issue types (out of production, model unavailable) are left alone.
+ *
+ * @param {Database.Database} db
+ * @param {number} receiptId
+ * @param {{ resolution?: string }} [opts]
+ * @returns {{ closed: number }}
+ */
+function closeShippingAddressHolds(db, receiptId, opts = {}) {
+	const id = Number(receiptId)
+	const now = Math.floor(Date.now() / 1000)
+	const resolution = ISSUE_RESOLUTIONS.includes(opts.resolution) ? opts.resolution : 'other'
+	let closed = 0
+	try {
+		const info = db
+			.prepare(
+				`
+      UPDATE order_issues
+         SET status = 'resolved',
+             resolution = @resolution,
+             resolved_at = @now,
+             updated_at = @now
+       WHERE receipt_id = @id
+         AND issue_type = @type
+         AND status = 'open'
+    `,
+			)
+			.run({ id, now, resolution, type: ISSUE_TYPE_SHIPPING_ADDRESS })
+		closed = info.changes || 0
+	} catch {
+		/* table may not exist yet */
+	}
+	return { closed }
+}
+
+/**
+ * Keep Address review and Issues / on hold complementary. Re-opening review
+ * (or auto-releasing a now-civilian address) must drop the shipping-address
+ * issues so the order is not listed on both queues.
+ */
+function followAddressReviewAction(db, receiptId, result) {
+	if (!result || !result.action) return
+	if (result.action === addressReview.EVENT_REOPENED || result.action === addressReview.EVENT_AUTO_RELEASED) {
+		closeShippingAddressHolds(db, receiptId)
+	}
 }
 
 /**
@@ -10452,6 +11048,14 @@ function listingIdsNeedingVariationRefresh(db, listingIds, ttlSec) {
 		})
 }
 
+const MANUAL_ITEM_META_SQL = `
+      SELECT id, receipt_id, item_key, title, phone_model, style, quantity,
+             shop_name, listing_id, image_url,
+             (image_data IS NOT NULL AND length(image_data) > 0) AS has_image_data,
+             image_mime, source, created_at
+      FROM route_manual_items
+`
+
 /**
  * Return all manual route items (metadata only — no image BLOB), newest first.
  * @param {Database.Database} db
@@ -10459,20 +11063,36 @@ function listingIdsNeedingVariationRefresh(db, listingIds, ttlSec) {
  */
 function getManualItems(db) {
 	try {
-		return db
-			.prepare(
-				`
-      SELECT id, receipt_id, item_key, title, phone_model, style, quantity,
-             shop_name, listing_id, image_url,
-             (image_data IS NOT NULL) AS has_image_data, image_mime, source, created_at
-      FROM route_manual_items
-      ORDER BY created_at DESC, id DESC
-    `,
-			)
-			.all()
+		return db.prepare(`${MANUAL_ITEM_META_SQL} ORDER BY created_at DESC, id DESC`).all()
 	} catch {
 		return []
 	}
+}
+
+/**
+ * Metadata for the manual sidecars belonging to a page of receipts. One chunked
+ * query — never an N+1 per order. Empty when none of the receipts is a
+ * Route-created manual order (Etsy receipts have no sidecar).
+ *
+ * @param {Database.Database} db
+ * @param {Iterable<number>} receiptIds
+ * @returns {Array}
+ */
+function getManualItemsForReceipts(db, receiptIds) {
+	const ids = _integerScope(receiptIds) || []
+	if (!ids.length) return []
+	const out = []
+	try {
+		_forEachScopeChunk(ids, (chunk) => {
+			const ph = chunk.map(() => '?').join(',')
+			db.prepare(`${MANUAL_ITEM_META_SQL} WHERE receipt_id IN (${ph}) ORDER BY id ASC`)
+				.all(chunk)
+				.forEach((row) => out.push(row))
+		})
+	} catch {
+		return []
+	}
+	return out
 }
 
 /**
@@ -10827,6 +11447,12 @@ function insertManualOrder(db, payload) {
       )
     `,
 		).run({ ...v, receipt_id: receiptId, shop_id: shopId, group_id: groupId, now })
+		try {
+			const applied = addressReview.applyToReceipt(db, receiptId, v, { actor: 'manual', now })
+			followAddressReviewAction(db, receiptId, applied)
+		} catch (err) {
+			console.error(`[address-review] apply failed for manual receipt ${receiptId}:`, err.message)
+		}
 		return { receipt_id: receiptId }
 	})
 	return tx()
@@ -10884,6 +11510,14 @@ function updateManualOrder(db, receiptId, payload) {
   `,
 		)
 		.run({ ...v, receipt_id: rid, now })
+	if (info.changes > 0) {
+		try {
+			const applied = addressReview.applyToReceipt(db, rid, v, { actor: 'manual', now })
+			followAddressReviewAction(db, rid, applied)
+		} catch (err) {
+			console.error(`[address-review] apply failed for manual receipt ${rid}:`, err.message)
+		}
+	}
 	return info.changes > 0
 }
 
@@ -11229,12 +11863,15 @@ module.exports = {
 	mergeProductMapSupplierCharm,
 	syncProductMapToAssignments,
 	getProductMapRow,
+	listProductMapTitleAliases,
+	loadProductMapTitleAliasesByProductId,
 	resolveWrongStallForProduct,
 	reconcileAssignmentsToProductMap,
 	upsertProductMapRow,
 	updateProductMapRowById,
 	deleteProductMapRow,
 	ISSUE_TYPES,
+	ISSUE_TYPE_SHIPPING_ADDRESS,
 	ISSUE_LISTING_ACTIONS,
 	ISSUE_RESOLUTIONS,
 	getOpenIssueMap,
@@ -11243,6 +11880,8 @@ module.exports = {
 	getIssueById,
 	getOrderIssue,
 	upsertOrderIssue,
+	openShippingAddressHold,
+	closeShippingAddressHolds,
 	patchOrderIssue,
 	deleteOrderIssue,
 	EXCHANGE_COMPONENTS,
@@ -11275,6 +11914,7 @@ module.exports = {
 	migrateRouteManualItemsSharedReceipt,
 	healManualLineKeyAliases,
 	getManualItems,
+	getManualItemsForReceipts,
 	getManualItemImage,
 	deleteManualItemByReceipt,
 	deleteManualOrderLine,

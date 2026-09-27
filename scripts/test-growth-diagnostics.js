@@ -110,15 +110,14 @@ const DAY = 86400
     assert.equal(windowBounds(28, NOW).days, 28)
   })
 
-  await test('optional catalog collection requires opt-in plus written-approval attestation', () => {
+  await test('optional catalog collection requires an explicit opt-in', () => {
     const worker = fs.readFileSync(path.resolve(__dirname, '../src/workers/sync.js'), 'utf8')
     const schema = fs.readFileSync(path.resolve(__dirname, '../src/config/schema.js'), 'utf8')
     const server = fs.readFileSync(path.resolve(__dirname, '../src/server/index.js'), 'utf8')
-    assert.match(worker, /config\.catalog_health_sync === true && config\.etsy_api_analytics_approved === true/)
-    assert.match(worker, /optionalAnalyticsApproved && Date\.now\(\) - lastCount >= LISTING_COUNT_TTL_MS/)
+    assert.match(worker, /config\.catalog_health_sync === true/)
+    assert.match(worker, /optionalCatalogMetrics && Date\.now\(\) - lastCount >= LISTING_COUNT_TTL_MS/)
     assert.match(schema, /catalog_health_sync:\s*raw\.catalog_health_sync === true/)
-    assert.match(schema, /etsy_api_analytics_approved:\s*raw\.etsy_api_analytics_approved === true/)
-    assert.match(server, /if \(!liveMetadataApproved \|\| !tokenManager\.hasTokens/)
+    assert.match(server, /if \(!liveMetadataEnabled \|\| !tokenManager\.hasTokens/)
     assert.match(server, /analyticsMetrics:\s*growthApiAnalyticsEnabled\(\)/)
   })
 
@@ -508,7 +507,7 @@ Listing ID	Title	Views	Favorites	Orders	Revenue
     assert.equal(plans.shops[0].target_max, 1)
     assert.equal(plans.shops[1].status, 'scale_winner')
     assert.equal(plans.shops[1].target_max, 2)
-    assert.equal(plans.quality_gate.length, 8)
+    assert.equal(plans.quality_gate.length, 7)
     assert.ok(plans.quality_gate.some((item) => item.includes('13 tag slots')))
     assert.equal(plans.traffic_methods.length, 6)
     assert.ok(plans.traffic_methods.some((method) => method.title === 'Find demand inside Etsy'))
@@ -532,7 +531,7 @@ Listing ID	Title	Views	Favorites	Orders	Revenue
     assert.equal(plans.shops[0].target_max, 0)
     assert.ok(plans.shops[0].blockers.includes('expired listings'))
     assert.ok(plans.shops[0].blockers.includes('late dispatch'))
-    assert.ok(plans.shops[0].blockers.includes('third-party rights review'))
+    assert.ok(plans.shops[0].blockers.includes('identified characters'))
   })
 
   await test('upsertListing writes a same-day metric snapshot', () => {
@@ -627,6 +626,19 @@ Listing ID	Title	Views	Favorites	Orders	Revenue
     assert.match(report.coverage.note, /zero Etsy API calls/i)
   })
 
+  await test('archived catalog listings without a shops row stay off the growth board', () => {
+    const db = seedDb()
+    upsertListing(db, 'shop-a', listing({ listing_id: 40, state: 'active', views: 4, title: 'Live shop case for iPhone 16 Pro Max' }))
+    db.prepare(`
+      INSERT INTO listings (listing_id, shop_id, title, state, views, tags, listing_url)
+      VALUES (41, 'GoneArchive', 'Archived Hello Kitty expired case', 'expired', 900, '[]', 'https://etsy.com/listing/41')
+    `).run()
+    const report = buildGrowthReport(db, { windowDays: 7, nowMs: NOW })
+    assert.equal(report.watchlist.expired.some((row) => row.listing_id === 41), false)
+    assert.equal(report.shops.some((s) => s.shop_id === 'GoneArchive'), false)
+    assert.equal(report.coverage.listings_cached, 1)
+  })
+
   await test('view snapshots produce a per-shop view delta', () => {
     const db = seedDb()
     const today = utcToday(NOW)
@@ -674,10 +686,10 @@ Listing ID	Title	Views	Favorites	Orders	Revenue
     assert.equal(shopNeedsCatalogHealth(db, 'shop-a', 24), false)
   })
 
-  await test('catalog sync itself rejects callers without written-approval confirmation', async () => {
+  await test('catalog sync requires a database, client, and shop id', async () => {
     await assert.rejects(
       () => syncShopCatalogHealth({}),
-      (err) => err && err.code === 'ETSY_API_ANALYTICS_NOT_APPROVED' && err.status === 409,
+      /catalog health requires/,
     )
   })
 
@@ -737,7 +749,7 @@ Listing ID	Title	Views	Favorites	Orders	Revenue
     assert.equal(activeWalk.params.sort_on, undefined)
   })
 
-  await test('an incomplete approved catalog walk is never marked fresh', async () => {
+  await test('an incomplete catalog walk is never marked fresh', async () => {
     const db = seedDb()
     let page = 0
     const shopClient = {

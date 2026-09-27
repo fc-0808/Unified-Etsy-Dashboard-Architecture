@@ -142,7 +142,7 @@ async function main() {
 
 		const page = await request('/')
 		check(page.status === 200 && page.body.includes('id="tab-growth"'), 'dashboard serves the Growth panel')
-		check(page.body.includes("'earnings', 'growth', 'shipping'"), 'showTab registry includes Growth between Earnings and Shipping')
+		check(page.body.includes("'earnings', 'growth', 'news'"), 'showTab registry includes News after Growth')
 		check(page.body.includes('class="growth-hero"') && page.body.includes('id="growthDataPanel"'), 'Growth uses the shared hero and live-status hierarchy')
 		check(page.body.includes('id="growthPageState"') && page.body.includes('id="growthDashboard" hidden'), 'Growth has explicit loading/error and ready states')
 		check(page.body.includes('id="growthCadence"') && page.body.includes('Official guidance'), 'Growth includes the evidence-backed listing experiment planner')
@@ -153,8 +153,7 @@ async function main() {
 		check(response.status === 200, 'GET /api/growth succeeds before any imports', `status ${response.status}`)
 		check(response.body?.collection?.mode === 'manual', 'Growth defaults to manual collection mode')
 		check(response.body?.collection?.api_calls_on_page_load === 0, 'Growth declares zero API calls on page load')
-		check(response.body?.collection?.authorization_guaranteed_by_manual_mode === false, 'manual mode does not overstate contractual authorization')
-		check(response.body?.compliance?.status === 'ok', 'Growth carries the local marketplace-compliance summary')
+		check(response.body?.collection?.api_enabled === false, 'Growth API collection is off by default')
 
 		const rightsDb = new Database(dbPath)
 		rightsDb.prepare(
@@ -174,9 +173,8 @@ async function main() {
 		response = await request('/api/growth/status')
 		check(
 			response.status === 200 &&
-			response.body?.api_enabled === false &&
-			response.body?.analytics_approval_recorded === false,
-			'optional Etsy analytics is disabled without written-approval attestation',
+			response.body?.api_enabled === false,
+			'optional API collection is disabled unless catalog_health_sync is on',
 		)
 
 		response = await request('/api/growth/sync', {
@@ -185,8 +183,8 @@ async function main() {
 			body: JSON.stringify({ shop_id: 'shop-a', confirm_api_calls: true }),
 		})
 		check(
-			response.status === 409 && response.body?.code === 'ETSY_API_ANALYTICS_NOT_APPROVED',
-			'API analytics cannot run without both approval and collection gates',
+			response.status === 409 && response.body?.code === 'CATALOG_HEALTH_SYNC_DISABLED',
+			'API collection stays off until catalog_health_sync is enabled',
 			`status ${response.status}`,
 		)
 
@@ -287,8 +285,8 @@ async function main() {
 		check(response.body?.listing_insights?.[0]?.zero_api_calls === true, 'report returns local per-listing funnel insights')
 		check(response.body?.actions?.some((action) => action.code === 'manual_listing_conversion'), 'report prioritizes viewed listings with no orders')
 		check(response.body?.cadence?.principle?.includes('not a daily-listing hack'), 'API returns the quality-first listing cadence plan')
-		check(response.body?.cadence?.evidence?.length === 7, 'cadence plan cites official Etsy search, traffic, and policy guidance')
-		check(response.body?.cadence?.quality_gate?.length === 8, 'cadence plan includes the official pre-publish quality gate')
+		check(response.body?.cadence?.evidence?.length === 5, 'cadence plan cites search and traffic guidance')
+		check(response.body?.cadence?.quality_gate?.length === 7, 'cadence plan includes the pre-publish checklist')
 		check(response.body?.cadence?.traffic_methods?.length === 6, 'cadence plan includes a practical traffic-growth playbook')
 
 		response = await request('/api/growth/manual?shop_id=shop-a')

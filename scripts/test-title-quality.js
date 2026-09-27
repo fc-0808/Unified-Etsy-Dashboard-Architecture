@@ -11,6 +11,8 @@
 const assert = require('assert')
 const tq = require('../src/listings/title-quality')
 const da = require('../src/listings/design-analyzer')
+const sq = require('../src/listings/seo-quality')
+const productTypes = require('../src/listings/product-types')
 
 const GREEN = '\x1b[32m', RED = '\x1b[31m', DIM = '\x1b[2m', BOLD = '\x1b[1m', RESET = '\x1b[0m'
 
@@ -148,6 +150,15 @@ test('a good title scores strictly higher than the boilerplate it replaces', () 
 	assert.ok(good.score > bad.score, `good=${good.score} bad=${bad.score}`)
 })
 
+test('an item name plus subject alone is sent back for richer objective detail', () => {
+	const verdict = tq.scoreTitle(
+		'Strawberry Cow iPhone Case for iPhone 17 16 15 14 13 Pro Max',
+		{ ...STRAWBERRY, designTerms: ['Strawberry Cow', 'Cherry Bow', 'glitter quicksand'] },
+	)
+	assert.strictEqual(verdict.ok, false)
+	assert.ok(verdict.issues.some((issue) => issue.code === 'design_coverage_thin'))
+})
+
 group('Edge cases and safety')
 
 test('a plain product with no design signal is not failed forever', () => {
@@ -174,18 +185,55 @@ test('a title over Etsy\'s 140-char cap is fatal', () => {
 	assert.ok(verdict.issues.some((i) => i.code === 'too_long' && i.fatal))
 })
 
-test('current Etsy guidance rewards scannable titles instead of filling 140 characters', () => {
+test('a readable title is not flagged as too wordy, and vibe stuffing still is', () => {
 	const concise = tq.scoreTitle('Strawberry Cow Pink Glitter iPhone Case with Cherry Bow for iPhone 17 Pro Max', {
 		...STRAWBERRY,
 		devicePhrase: '',
 	})
 	assert.ok(!concise.issues.some((i) => i.code === 'too_wordy'))
-	assert.ok(!concise.issues.some((i) => i.code === 'too_short'))
 	const stuffed = tq.scoreTitle('Strawberry Cow Pink Glitter Sparkle Cherry Bow Kawaii Cute Aesthetic Premium Amazing Perfect Gift iPhone Case Cover Accessory for Her Friend Sister', {
 		...STRAWBERRY,
 		devicePhrase: '',
 	})
-	assert.ok(stuffed.issues.some((i) => i.code === 'too_wordy'))
+	assert.ok(stuffed.issues.some((i) => i.code === 'aesthetic_spam'))
+})
+
+test('unused design phrases fill the title toward 140 characters without repeating words', () => {
+	const short = 'Baby Elephant Lavender Party Hat Cover for iPhone 18 17 16 15 Pro Max'
+	const expanded = tq.expandTitleForSearch(short, {
+		designTerms: ['stars', 'tiny bows', 'white matte bumper', 'Baby Elephant'],
+		searchPhrases: ['gift for her', 'lavender baby elephant', 'silicone phone case'],
+		hasMagsafe: false,
+		hasGrip: true,
+		hasCharm: true,
+	})
+	assert.ok(expanded.length > short.length)
+	assert.ok(expanded.length <= 140)
+	assert.ok(expanded.length >= 110, `expected at least 110 characters, got ${expanded.length}: ${expanded}`)
+	assert.ok(expanded.startsWith(short))
+	assert.ok(!/mag[\s-]?safe/i.test(expanded))
+	assert.ok(!/\bgift\b/i.test(expanded))
+	assert.ok(/\bgrip\b/i.test(expanded))
+	assert.ok(/\bcharm\b/i.test(expanded))
+	const stems = tq.tokenise(expanded)
+	assert.strictEqual(new Set(stems).size, stems.length, 'a word was repeated')
+})
+
+test('repeating case/cover or band/strap/bracelet synonyms is penalized', () => {
+	const context = tq.buildTitleContext({
+		designAnalysis: { subjectPrimary: 'Cross Heart', motifs: [{ term: 'enamel link', prominence: 9 }] },
+		devicePhrase: 'Apple Watch Band',
+	})
+	const verdict = tq.scoreTitle('Cross Heart Enamel Link Bracelet Band, Gold Metal Strap for Apple Watch Band', context)
+	assert.ok(verdict.issues.some((issue) => issue.code === 'item_noun_stacking'))
+})
+
+test('the watch title contract uses the strongest query once', () => {
+	assert.strictEqual(productTypes.titleListingPhraseFor('apple_watch_band'), 'Apple Watch Band')
+	assert.strictEqual(
+		productTypes.titleListingPhraseFor('iphone_case'),
+		'Cover for iPhone 18 17 16 15 14 13 Pro Max',
+	)
 })
 
 test('plural and singular forms match each other', () => {
@@ -206,6 +254,8 @@ test('the exact device phrase is required', () => {
 	const without = tq.scoreTitle('Strawberry Cow Glitter Case for iPhone 12 Pink Bow Cherry Polka Dot Doodle Gift for Her Berry Sweet', STRAWBERRY)
 	assert.strictEqual(withDevice.devicePhrasePresent, true)
 	assert.strictEqual(without.devicePhrasePresent, false)
+	assert.strictEqual(without.ok, false)
+	assert.ok(without.issues.some((issue) => issue.code === 'device_missing' && issue.fatal))
 })
 
 group('Deterministic title tidy-up')
@@ -253,6 +303,121 @@ test('leaves an already-clean title untouched', () => {
 test('handles empty input', () => {
 	assert.strictEqual(tq.tidyTitle(''), '')
 	assert.strictEqual(tq.tidyTitle(null), '')
+})
+
+group('Etsy SEO metadata guardrails')
+
+test('tag cleanup preserves valid characters and never chops a trailing word', () => {
+	assert.strictEqual(sq.cleanTag("Women's cross-heart accessory"), "women's cross-heart")
+	assert.ok(sq.cleanTag('粉色 手表 表带').length <= 20, 'Unicode tag was discarded')
+})
+
+test('tag finalization produces 13 unique, compliant and grounded phrases', () => {
+	const pt = productTypes.getProductType('apple_watch_band')
+	const tags = sq.finaliseSeoTags({
+		generated: ['cross heart band', 'cross heart band', 'gold enamel links', 'magsafe case', 'christian cross'],
+		brandTags: ['y2kaseshop'],
+		productType: pt,
+		design: {
+			subjectPrimary: 'Cross Heart',
+			subjectSecondary: '',
+			motifs: [{ term: 'enamel link' }, { term: 'raised cross' }],
+			searchPhrases: ['cross heart enamel watch band', 'gold cross apple watch bracelet'],
+			titleKeywords: [],
+		},
+		productSummary: {},
+		primaryColor: 'Gold',
+		secondaryColor: 'White',
+		hasMagsafe: false,
+	})
+	assert.strictEqual(tags.length, 13)
+	assert.strictEqual(new Set(tags).size, 13)
+	assert.ok(tags.every((tag) => tag.length <= 20))
+	assert.ok(tags.includes('apple watch band'))
+	assert.ok(tags.includes('watch band 41mm'))
+	assert.ok(!tags.some((tag) => /magsafe/.test(tag)), 'unsupported MagSafe tag survived')
+})
+
+test('every registry-owned SEO tag fits Etsy without truncation', () => {
+	for (const pt of Object.values(productTypes.PRODUCT_TYPES)) {
+		for (const tag of [...(pt.universalTags || []), ...(pt.deviceTagExamples || []), ...(pt.seoFallbackTags || [])]) {
+			assert.ok(tag.length <= 20, `${pt.id}: "${tag}" is ${tag.length} characters`)
+			assert.strictEqual(sq.cleanTag(tag), tag.toLowerCase(), `${pt.id}: "${tag}" would be rewritten`)
+		}
+	}
+})
+
+const GOOD_DESCRIPTION = `A cross heart enamel Apple Watch band pairs polished metal links with raised white panels for a distinctive jewelry-inspired finish.
+
+The alternating cross and heart motifs create a precise geometric rhythm across the bracelet. Polished hardware frames the glossy enamel panels, while the linked construction gives the band a structured appearance. Choose the numbered Band Style by its linked photo, then select the Band Size that matches your watch.
+
+✨ Key Features
+• Raised cross and heart enamel panels
+• Polished metal link construction
+• Numbered, photo-linked band choices
+• Secure matching clasp hardware
+• Designed for everyday Apple Watch styling
+
+📱 Device Compatibility
+• Apple Watch 38mm, 40mm & 41mm
+• Apple Watch 42mm (Series 10 & 11)
+• Apple Watch 42mm, 44mm, 45mm, 46mm & 49mm
+
+🎨 Band Style
+• Use each numbered option's photo to choose the exact design.
+
+📦 What's Included
+• 1 x Apple Watch band in the size you select
+• 1 x matching buckle / clasp hardware
+
+❤️ The Y2KASE Promise
+Your order is checked against the selected size and numbered band photo before dispatch for a clear, dependable buying experience.
+
+🚚 Shipping & Processing
+Prepared for dispatch in 3-5 business days with worldwide tracked delivery. Review both required variation selections before checkout so the correct band is prepared for your order.`
+
+test('description audit rewards a product-first opening and useful sections', () => {
+	const audit = sq.auditDescription(GOOD_DESCRIPTION, {
+		productType: productTypes.getProductType('apple_watch_band'),
+		subject: 'Cross Heart',
+		productSummary: { design_motifs: ['enamel link'] },
+	})
+	assert.strictEqual(audit.ok, true, audit.critique)
+	assert.ok(audit.wordCount >= 140)
+})
+
+test('description audit rejects thin keyword copy with no buyer information', () => {
+	const audit = sq.auditDescription('Cute trendy gift. Apple watch band, watch strap, bracelet, cute band.', {
+		productType: productTypes.getProductType('apple_watch_band'),
+		subject: 'Cross Heart',
+	})
+	assert.strictEqual(audit.ok, false)
+	assert.ok(audit.issues.some((issue) => issue.code === 'too_thin'))
+	assert.ok(audit.issues.some((issue) => issue.code === 'missing_compatibility'))
+})
+
+test('color resolution never emits the same primary and secondary attribute', () => {
+	assert.deepStrictEqual(
+		sq.resolveListingColors('Gold', 'Gold', { case_secondary_color: 'White' }, ['Gold', 'White']),
+		{ primaryColor: 'Gold', secondaryColor: 'White' },
+	)
+})
+
+test('image alt text describes each photo instead of copying the listing title', () => {
+	const copy = {
+		title: 'Cross Heart Enamel Apple Watch Band',
+		customStyles: [{ label: 'Band 1', imageRank: 2 }],
+		imageAnalysis: [
+			{ index: 1, description: 'Four enamel link bands arranged side by side.' },
+			{ index: 2, description: 'Close view of white cross and heart enamel links with a gold clasp.' },
+		],
+	}
+	const first = sq.buildImageAltText(copy, { rank: 1 }, productTypes.getProductType('apple_watch_band'))
+	const second = sq.buildImageAltText(copy, { rank: 2 }, productTypes.getProductType('apple_watch_band'))
+	assert.notStrictEqual(first, second)
+	assert.ok(second.includes('Band 1 variation'))
+	assert.ok(!second.includes(copy.title), 'listing title was pasted into alt text')
+	assert.ok(first.length <= 500 && second.length <= 500)
 })
 
 group('Design fingerprint sanitiser')

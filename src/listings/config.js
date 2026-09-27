@@ -45,6 +45,7 @@ const config = {
 		// Optional extra headers forwarded to the vision provider (e.g. OpenRouter attribution).
 		visionReferer: (process.env.OPENROUTER_REFERER || '').trim(),
 		visionTitle: (process.env.OPENROUTER_TITLE || '').trim(),
+		embedModel: (process.env.FIND_BY_PHOTO_EMBED_MODEL || 'google/gemini-embedding-2').trim() || 'google/gemini-embedding-2',
 
 		// Image fidelity for the character-ID pass. "high" is a good default;
 		// "original" = full-fidelity (more tokens) for tricky cases.
@@ -106,6 +107,22 @@ const config = {
 		// decodes up to 12 photos through sharp).
 		concurrency: Math.min(8, Math.max(1, int(process.env.BULK_CONCURRENCY, 3))),
 		restockQuantity: Math.max(0, int(process.env.BULK_RESTOCK_QUANTITY, 3)),
+	},
+
+	history: {
+		// Listing History root. Each Etsy shop archives only under History/<shop>/
+		// e.g. iPhoneCasesDesignArt → …\History\iPhoneCasesDesignArt\
+		root: (process.env.LISTINGS_HISTORY_ROOT || '').trim(),
+		imagesPerFolder: Math.min(8, Math.max(1, int(process.env.HISTORY_INDEX_IMAGES, 3))),
+		visionRerank: bool(process.env.HISTORY_VISION_RERANK, true),
+	},
+
+	// History → IP-character archive (copy only). Destinations are siblings of
+	// History (Sanrio/Hello Kitty/…, Miffy/…). Vision is the last, paid step.
+	characterSort: {
+		listingsRoot: (process.env.LISTINGS_ROOT || '').trim(),
+		autoConfidence: Math.min(100, Math.max(0, int(process.env.CHARACTER_SORT_AUTO, 80))),
+		reviewConfidence: Math.min(100, Math.max(0, int(process.env.CHARACTER_SORT_REVIEW, 55))),
 	},
 
 	// Character identification tuning. A dedicated catalog-aware verification pass

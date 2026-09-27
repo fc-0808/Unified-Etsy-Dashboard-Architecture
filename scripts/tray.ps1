@@ -30,6 +30,8 @@ $DashboardUrl = 'http://localhost:4000'
 $pm2Cmd       = Join-Path $ProjectRoot 'node_modules\.bin\pm2.cmd'
 $LogFile      = Join-Path $ProjectRoot 'data\logs\dashboard-out.log'
 $AppName      = 'Etsy Dashboard'
+. (Join-Path $PSScriptRoot 'dashboard-node.ps1')
+Set-DashboardNodePath | Out-Null
 
 # ── Icon factory (pure GDI+ — no external .ico file required) ────────────────
 function New-EtsyIcon {
@@ -72,15 +74,15 @@ $script:IsRunning = $false
 
 function Test-ServerReady {
   try {
-    $r = Invoke-WebRequest -Uri $DashboardUrl -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
-    return $r.StatusCode -eq 200
+    $r = Invoke-WebRequest -Uri "$DashboardUrl/api/health" -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
+    return ($r.StatusCode -eq 200 -and $r.Content -match '"ok"\s*:\s*true')
   } catch { return $false }
 }
 
 # ── PM2 helpers ───────────────────────────────────────────────────────────────
 function Invoke-RestartServer {
   if (Test-Path $pm2Cmd) {
-    & $pm2Cmd restart etsy-dashboard 2>$null | Out-Null
+    Invoke-DashboardPm2 restart etsy-dashboard | Out-Null
   }
 }
 

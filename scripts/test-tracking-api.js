@@ -14,12 +14,13 @@ const path = require('path')
 const http = require('http')
 const { spawn } = require('child_process')
 const { initDb } = require('../src/db/setup')
+const { getFreeTestPort } = require('./free-test-port')
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ued-tracking-api-'))
 const dbPath = path.join(tmpDir, 'test.db')
 const configPath = path.join(tmpDir, 'config.json')
-const port = 4900 + (process.pid % 500)
-const base = `http://127.0.0.1:${port}`
+let port = null
+let base = null
 
 let failures = 0
 function check(condition, message) {
@@ -66,6 +67,8 @@ function rawStatus(pathname, headers = {}) {
 }
 
 ;(async () => {
+	port = await getFreeTestPort()
+	base = `http://127.0.0.1:${port}`
 	fs.writeFileSync(
 		configPath,
 		JSON.stringify({

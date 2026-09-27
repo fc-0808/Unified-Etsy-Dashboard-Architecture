@@ -145,7 +145,7 @@ async function main() {
 		const started = Date.now()
 		let result
 		try {
-			result = await generateListingCopy(scanned, { shopName: 'Y2KASEshop', brandTags: ['y2kase'] })
+			result = await generateListingCopy(scanned, { shopName: 'Y2KiPhoneCases', brandTags: ['y2kase'] })
 		} catch (err) {
 			fail(`Pipeline FAILED: ${err.message}`)
 			if (err.status) info(`HTTP status: ${err.status}`)

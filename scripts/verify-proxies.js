@@ -1,45 +1,66 @@
 'use strict';
 
 /**
- * Verify that every group's proxy chain is working correctly.
+ * Verify that every configured group route is working correctly.
  *
  * For each group, this script:
- *   1. Establishes the VPN → IPFoxy chain
- *   2. Fetches the public exit IP from api.ipify.org
- *   3. Confirms it differs from your home IP
- *   4. Reports results in a clear table
+ *   1. Establishes the configured system-tunnel or local-SOCKS transport
+ *   2. Requires the group's IPFoxy SOCKS5 proxy
+ *   3. Fetches the public exit IP from api.ipify.org
+ *   4. Confirms proxied groups differ from the system-route IP and one another
+ *   5. Enforces expected_egress_ip pins when configured
  *
  * Run: npm run proxy:verify
- *
- * Prerequisites: VPN (饿饭加速器) must be connected before running.
  */
 
+const net = require('net');
 const axios = require('axios');
 const { loadConfig, usesGroupProxy } = require('../src/config/schema');
-const { createGroupClient } = require('../src/proxy/factory');
+const { describeGroupRoute, verifyGroupProxy } = require('../src/proxy/factory');
+const { describeNetworkTransport, TRANSPORT_MODES } = require('../src/proxy/transport');
 
-async function getHomeIp() {
+async function getSystemRouteIp() {
   try {
-    const { data } = await axios.get('https://api.ipify.org?format=json', { timeout: 8000 });
-    return data.ip;
+    const { data } = await axios.get('https://api.ipify.org?format=json', {
+      proxy: false,
+      timeout: 8000,
+    });
+    const ip = String(data?.ip || '').trim();
+    return net.isIP(ip) ? ip : null;
   } catch {
-    return '(unable to detect)';
+    return null;
   }
 }
 
-async function checkGroup(group, vpnPort, homeIp) {
+async function checkGroup(group, networkTransport, systemRouteIp) {
   const direct = !usesGroupProxy(group);
   const start = Date.now();
   try {
-    const client = createGroupClient(group, vpnPort, true);
-    const { data } = await client.get('https://api.ipify.org?format=json', {
-      baseURL: '',
-      timeout: 20_000,
-    });
-    const exitIp = data.ip;
+    const exitIp = await verifyGroupProxy(group, networkTransport);
     const elapsed = Date.now() - start;
-    const ok = direct ? Boolean(exitIp) : exitIp !== homeIp;
-    return { group_id: group.group_id, label: group.label, exitIp, ok, elapsed, error: null, direct };
+    const validIp = net.isIP(exitIp) !== 0;
+    const expected = group.expected_egress_ip == null || group.expected_egress_ip === ''
+      ? []
+      : (Array.isArray(group.expected_egress_ip)
+          ? group.expected_egress_ip
+          : [group.expected_egress_ip]).map((ip) => String(ip).trim());
+    const expectedOk = expected.length === 0 || expected.includes(exitIp);
+    const proxyChangedEgress = direct || !systemRouteIp || exitIp !== systemRouteIp;
+    const ok = validIp && expectedOk && proxyChangedEgress;
+    let error = null;
+    if (!validIp) error = 'invalid IP response';
+    else if (!expectedOk) error = `expected ${expected.join(' or ')}`;
+    else if (!proxyChangedEgress) error = 'same as system route';
+    return {
+      group_id: group.group_id,
+      label: group.label,
+      exitIp,
+      ok,
+      elapsed,
+      error,
+      direct,
+      route: describeGroupRoute(group, networkTransport),
+    };
   } catch (err) {
     const elapsed = Date.now() - start;
     return {
@@ -49,6 +70,11 @@ async function checkGroup(group, vpnPort, homeIp) {
       ok: false,
       elapsed,
       error: err.message,
+      direct,
+      route: (() => {
+        try { return describeGroupRoute(group, networkTransport); }
+        catch { return direct ? 'direct' : 'invalid route'; }
+      })(),
     };
   }
 }
@@ -65,15 +91,32 @@ async function main() {
   console.log('\n' + '═'.repeat(70));
   console.log('  Etsy Dashboard — Proxy Chain Verification');
   console.log('═'.repeat(70));
-  console.log('\n  Detecting home IP...');
+  console.log(`\n  Transport: ${describeNetworkTransport(config.network_transport)}`);
+  console.log('  Detecting the public IP of the current Windows system route...');
 
-  const homeIp = await getHomeIp();
-  console.log(`  Home IP (visible without proxy): ${homeIp}`);
-  console.log(`\n  Testing ${config.groups.length} groups — each uses VPN:${config.vpn_local_port} → IPFoxy...\n`);
+  const systemRouteIp = await getSystemRouteIp();
+  console.log(`  System-route IP: ${systemRouteIp || '(unable to detect)'}`);
+  console.log(`\n  Testing ${config.groups.length} configured group route(s)...\n`);
 
   const results = await Promise.all(
-    config.groups.map((g) => checkGroup(g, config.vpn_local_port, homeIp))
+    config.groups.map((g) => checkGroup(g, config.network_transport, systemRouteIp))
   );
+
+  // Distinct group proxies are expected to have distinct static exits. Detect a
+  // subscription/assignment mistake before any Etsy request is made.
+  const groupsByExit = new Map();
+  for (const result of results.filter((r) => !r.direct && r.ok)) {
+    if (!groupsByExit.has(result.exitIp)) groupsByExit.set(result.exitIp, []);
+    groupsByExit.get(result.exitIp).push(result);
+  }
+  for (const [ip, sameExit] of groupsByExit) {
+    if (sameExit.length < 2) continue;
+    const groupIds = sameExit.map((r) => r.group_id).join(', ');
+    for (const result of sameExit) {
+      result.ok = false;
+      result.error = `shared exit ${ip} (${groupIds})`;
+    }
+  }
 
   const colW = [24, 32, 18, 10];
   const header = [
@@ -91,11 +134,11 @@ async function main() {
     const status = r.direct
       ? (r.ok ? '✓  DIRECT' : '✗  ERROR')
       : r.ok
-        ? '✓  ISOLATED'
+        ? '✓  VERIFIED'
         : r.error
           ? '✗  ERROR'
           : '✗  SAME IP';
-    const ip = r.exitIp ?? r.error?.slice(0, 30) ?? '—';
+    const ip = r.exitIp || r.error?.slice(0, 30) || '—';
     const row = [
       r.group_id.padEnd(colW[0]),
       ip.padEnd(colW[1]),
@@ -108,13 +151,34 @@ async function main() {
 
   console.log('\n' + '─'.repeat(72));
   if (allPassed) {
-    console.log('  All groups verified. Network isolation confirmed.');
-    console.log('  Each group exits through a different static HK IP.\n');
+    console.log('  All configured routes verified.');
+    console.log('  Every proxied group used IPFoxy and returned a distinct public exit.\n');
+    const unpinned = config.groups.filter((group) =>
+      usesGroupProxy(group)
+      && (group.expected_egress_ip == null || group.expected_egress_ip === '')
+    );
+    if (unpinned.length) {
+      console.log(
+        `  Recommendation: ${unpinned.length} proxied group(s) have no expected_egress_ip pin.\n` +
+        '  Confirm each static address in the IPFoxy portal, then add it to config.json\n' +
+        '  so a provider-side address change fails closed.\n'
+      );
+    }
   } else {
     console.log('  One or more groups failed. Check:');
-    console.log('  1. Is your VPN (饿饭加速器) connected at port ' + config.vpn_local_port + '?');
-    console.log('  2. Are the IPFoxy proxy URLs in config.json correct?');
-    console.log('  3. Is your IPFoxy subscription active?\n');
+    if (config.network_transport.mode === TRANSPORT_MODES.SYSTEM_TUNNEL) {
+      console.log(
+        `  1. Is ${config.network_transport.provider} connected in Virtual Network Card / TUN mode?`
+      );
+    } else {
+      console.log(
+        `  1. Is ${config.network_transport.provider} listening on ` +
+        `${config.network_transport.local_host}:${config.network_transport.local_port}?`
+      );
+    }
+    console.log('  2. Are the existing IPFoxy proxy URLs and subscriptions active?');
+    console.log('  3. Do expected_egress_ip pins match the IPFoxy portal?');
+    console.log('  4. Do different groups accidentally resolve to the same static exit?\n');
     process.exit(1);
   }
 }

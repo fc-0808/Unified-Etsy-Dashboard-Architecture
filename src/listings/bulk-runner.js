@@ -4,7 +4,7 @@
  * Bulk Listing Creator — job orchestration.
  *
  * Owns the lifecycle of a bulk-create run: scan input → generate a LOCAL preview
- * → operator review + marketplace-policy attestation → create Etsy drafts one
+ * → operator review → create Etsy drafts one
  * product at a time (respecting the per-group proxy + QPS/QPD budget). Progress is persisted
  * to SQLite (bulk_jobs / bulk_job_items) and streamed to subscribers (SSE).
  *
@@ -22,7 +22,7 @@ const { scanInputRoot, scanProductFolder, MAX_IMAGES, IMAGE_EXTS } = require('./
 const imageEditor = require('./image-editor');
 const { getPricesForCurrency } = require('./pricing');
 const { resolveDefaultPrices } = require('./shop-prices');
-const { generateListingCopy, generateCopyFromAnalysis, filterModelsInDescription, retitleForModels } = require('./ai-generator');
+const { generateListingCopy, generateCopyFromAnalysis, filterModelsInDescription, retitleForModels, applyMagsafeToCopy, resolveOperatorCharacter } = require('./ai-generator');
 const { getShopListingSettings, reconcileShopSection } = require('./shop-settings');
 const { createListingForProduct, repriceListing } = require('./etsy-create');
 const { getTaxonomyAttributes } = require('./attributes');
@@ -30,49 +30,12 @@ const { computeEnabledStyles, normaliseEnabledStyles, normaliseCustomStyles, nor
 const { updateListing } = require('../etsy/client');
 const productTypes = require('./product-types');
 const { getProductType } = productTypes;
+const bandVariantAnalyzer = require('./band-variant-analyzer');
+const seoQuality = require('./seo-quality');
 const { sanitisePreview } = require('./sanitize');
 const { config } = require('./config');
 
 function now() { return Math.floor(Date.now() / 1000); }
-
-const POLICY_ATTESTATION_VERSION = 1;
-const POLICY_ATTESTATION_FIELDS = Object.freeze([
-  'original_or_authorized',
-  'creativity_standards',
-  'production_partner_disclosed',
-  'images_and_claims_accurate',
-]);
-
-/**
- * Marketplace-policy sign-off required before any generated listing leaves the
- * local preview. This is an operator attestation, not a legal determination and
- * never a substitute for retaining actual licenses/source-design evidence.
- */
-function normalizePolicyAttestation(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    const e = new Error(
-      'Policy attestation required: confirm original design or documented authorization, ' +
-      'Creativity Standards eligibility, production-partner disclosure, and accurate images/claims.'
-    );
-    e.status = 409;
-    e.code = 'POLICY_ATTESTATION_REQUIRED';
-    throw e;
-  }
-  const missing = POLICY_ATTESTATION_FIELDS.filter((field) => value[field] !== true);
-  if (missing.length) {
-    const e = new Error(`Policy attestation is incomplete: ${missing.join(', ')}.`);
-    e.status = 409;
-    e.code = 'POLICY_ATTESTATION_REQUIRED';
-    throw e;
-  }
-  return Object.freeze({
-    version: POLICY_ATTESTATION_VERSION,
-    original_or_authorized: true,
-    creativity_standards: true,
-    production_partner_disclosed: true,
-    images_and_claims_accurate: true,
-  });
-}
 
 // Derive a safe single brand tag from a shop display name (<=20 chars, tag-safe).
 function defaultBrandTag(shopName) {
@@ -83,6 +46,23 @@ function defaultBrandTag(shopName) {
 /** The product type for a job (from options_json). Defaults to iPhone case. */
 function jobProductType(job) {
   try { return JSON.parse(job.options_json || '{}').productType || 'iphone_case'; } catch { return 'iphone_case'; }
+}
+
+/** Apply any product-specific policy to operator/AI custom variation rows. */
+function normaliseProductCustomStyles(input, productType, preview) {
+  let clean = normaliseCustomStyles(input);
+  if (getProductType(productType).visionStyle !== 'band_variant') return clean;
+  const validRanks = new Set(
+    (preview && Array.isArray(preview.images) ? preview.images : [])
+      .map((image) => Number(image.rank))
+      .filter((rank) => Number.isInteger(rank) && rank > 0)
+  );
+  clean = clean.filter((style) =>
+    Number.isInteger(Number(style.imageRank))
+    && Number(style.imageRank) > 0
+    && (!validRanks.size || validRanks.has(Number(style.imageRank)))
+  );
+  return bandVariantAnalyzer.numberBandStyles(clean);
 }
 
 /**
@@ -132,11 +112,15 @@ class BulkJobManager {
    * @param {object} deps
    * @param {import('better-sqlite3').Database} deps.db
    * @param {(shopName:string)=>Promise<{shopClient:object,numericShopId:string,shopCfg:object}>} deps.resolveShopClient
+   * @param {(shopName:string)=>object|null} [deps.resolveShopConfig] local-only shop lookup for dry runs
    */
-  constructor({ db, resolveShopClient }) {
+  constructor({ db, resolveShopClient, resolveShopConfig = null }) {
     this.db = db;
     this.resolveShopClient = resolveShopClient;
+    this.resolveShopConfig = resolveShopConfig;
     this._subscribers = new Map(); // job_id → Set<res>
+    this._regenState = new Map();  // 'regen:job:seq' → { status, event, at }
+    this._regenTasks = new Map();  // same key → in-flight promise, so a second click waits for the same rewrite
     this._running = new Set();     // job_ids currently executing
     this._control = new Map();     // job_id → 'pause' | 'cancel' (cooperative signal)
     this._itemRevs = new Map();    // job_id\0folder → write revision (lost-update guard)
@@ -243,13 +227,52 @@ class BulkJobManager {
   subscribe(jobId, res) {
     if (!this._subscribers.has(jobId)) this._subscribers.set(jobId, new Set());
     this._subscribers.get(jobId).add(res);
-    res.on('close', () => {
-      const set = this._subscribers.get(jobId);
-      if (set) { set.delete(res); if (!set.size) this._subscribers.delete(jobId); }
-    });
+    if (typeof res.on === 'function') {
+      res.on('close', () => {
+        const set = this._subscribers.get(jobId);
+        if (set) { set.delete(res); if (!set.size) this._subscribers.delete(jobId); }
+      });
+    }
+    // A finished run has no live stream until the operator asks for one, and
+    // that connection opens after the regenerate request has already started.
+    // Replay the latest regen event so a fast failure — or a copy that
+    // finished during the handshake — still reaches the inspector.
+    this._replayRegen(jobId, res);
+  }
+
+  _regenKey(jobId, seq) {
+    return 'regen:' + jobId + ':' + seq;
+  }
+
+  _regenError(jobId, seq) {
+    const state = this._regenState.get(this._regenKey(jobId, seq));
+    if (!state || state.status !== 'failed') return null;
+    return state.event.error || 'Regenerate failed';
+  }
+
+  _rememberRegen(jobId, event) {
+    if (event.seq == null) return;
+    const status = event.type === 'regen_start' ? 'running' : event.type === 'regen_done' ? 'done' : 'failed';
+    this._regenState.set(this._regenKey(jobId, event.seq), { status, event, at: Date.now() });
+    const cutoff = Date.now() - 120000;
+    for (const [key, state] of this._regenState) {
+      if (state.status !== 'running' && state.at < cutoff) this._regenState.delete(key);
+    }
+  }
+
+  _replayRegen(jobId, res) {
+    const prefix = 'regen:' + jobId + ':';
+    for (const [key, state] of this._regenState) {
+      if (!key.startsWith(prefix) || !state.event) continue;
+      if (state.status !== 'running' && Date.now() - state.at > 120000) continue;
+      try { res.write(`data: ${JSON.stringify(state.event)}\n\n`); } catch { /* dropped client */ }
+    }
   }
 
   _emit(jobId, event) {
+    if (event && (event.type === 'regen_start' || event.type === 'regen_done' || event.type === 'regen_failed')) {
+      this._rememberRegen(jobId, event);
+    }
     const set = this._subscribers.get(jobId);
     if (!set) return;
     const payload = `data: ${JSON.stringify(event)}\n\n`;
@@ -363,6 +386,7 @@ class BulkJobManager {
     if (!job) { const e = new Error('Job not found'); e.status = 404; throw e; }
     const item = this.getItemBySeq(jobId, seq);
     if (!item) { const e = new Error('Item not found'); e.status = 404; throw e; }
+    const pt = getProductType(jobProductType(job));
 
     let preview = null;
     try { preview = item.preview_json ? JSON.parse(item.preview_json) : null; } catch { preview = null; }
@@ -379,8 +403,16 @@ class BulkJobManager {
         characterFranchise: ai.characterFranchise || '', characterConfidence: ai.characterConfidence,
         characterEvidence: ai.characterEvidence || '', characterAlternatives: ai.characterAlternatives || [],
         characterLowConfidence: ai.characterLowConfidence || false,
-        designAnalysis: ai.designAnalysis || null, titleQuality: ai.titleQuality || null,
-        images: [], enabledStyles: computeEnabledStyles(ai.imageAnalysis || []), stylePrices: {},
+        designAnalysis: ai.designAnalysis || null,
+        titleQuality: ai.titleQuality || null,
+        seoQuality: ai.seoQuality || null,
+        images: [],
+        enabledStyles: ai.enabledStyles || computeEnabledStyles(ai.imageAnalysis || [], jobProductType(job)),
+        enabledModels: ai.enabledModels || null,
+        customStyles: ai.customStyles || null,
+        variationOrder: ai.variationOrder || null,
+        bandVariantAnalysis: ai.bandVariantAnalysis || ai.bandColorAnalysis || null,
+        stylePrices: ai.stylePrices || {},
         styleImageMapping: ai.styleImageMapping || {}, imageAnalysis: ai.imageAnalysis || [], settings: {},
       };
     }
@@ -403,10 +435,20 @@ class BulkJobManager {
     // fixes historical jobs with no migration and costs a few microseconds.
     sanitisePreview(preview);
 
+    // Jobs produced by the short-lived colour-label implementation are upgraded
+    // on read: image links/prices stay intact, while buyer labels become the
+    // deterministic Band 1 / Band 2 vocabulary now owned by this product line.
+    if (preview && pt.visionStyle === 'band_variant' && Array.isArray(preview.customStyles)) {
+      preview.customStyles = bandVariantAnalyzer.numberBandStyles(preview.customStyles);
+      preview.variationOrder = preview.customStyles.map((style) => style.label);
+      if (!preview.bandVariantAnalysis && preview.bandColorAnalysis) {
+        preview.bandVariantAnalysis = preview.bandColorAnalysis;
+      }
+    }
+
     // Product-type metadata so the Inspector renders the CORRECT device models +
     // style bundles for THIS job (e.g. AirPods models/styles), independent of
     // whatever product type the setup card currently has selected.
-    const pt = getProductType(jobProductType(job));
     return {
       job: {
         job_id: job.job_id, shop_name: job.shop_name, dry_run: job.dry_run === 1,
@@ -421,6 +463,10 @@ class BulkJobManager {
         policy_confirmed_at: item.policy_confirmed_at,
         policy_confirmed_by: item.policy_confirmed_by,
         excluded: item.excluded === 1,
+        updated_at: item.updated_at,
+        regenerating: this._running.has('regen:' + jobId + ':' + item.seq),
+        regen_error: this._regenError(jobId, item.seq),
+        regen_operator_saved: !!(this._regenState.get(this._regenKey(jobId, item.seq))?.event?.operator_copy_saved),
       },
       preview: preview || {},
     };
@@ -477,7 +523,7 @@ class BulkJobManager {
    * are happy to create/publish.
    * @param {boolean} reviewed
    */
-  setItemReviewed(jobId, seq, reviewed, { attestation = null, reviewedBy = null } = {}) {
+  setItemReviewed(jobId, seq, reviewed) {
     const job = this.getJob(jobId);
     if (!job) { const e = new Error('Job not found'); e.status = 404; throw e; }
     const item = this.getItemBySeq(jobId, seq);
@@ -489,33 +535,23 @@ class BulkJobManager {
       throw e;
     }
     const ts = reviewed ? now() : null;
-    const normalized = reviewed ? normalizePolicyAttestation(attestation) : null;
-    const fields = {
-      reviewed_at: ts,
-      policy_confirmed_at: ts,
-      policy_confirmed_by: reviewed && reviewedBy ? String(reviewedBy).slice(0, 128) : null,
-      policy_attestation: normalized ? JSON.stringify(normalized) : null,
-    };
+    const fields = { reviewed_at: ts };
     this._updateItem(jobId, item.product_folder, fields);
     this._emit(jobId, {
       type: 'reviewed',
       folder: item.product_folder,
       seq: item.seq,
       reviewed_at: ts,
-      policy_confirmed_at: ts,
-      policy_confirmed_by: fields.policy_confirmed_by,
     });
     return {
       ok: true,
       seq: item.seq,
       reviewed_at: ts,
-      policy_confirmed_at: ts,
-      policy_confirmed_by: fields.policy_confirmed_by,
     };
   }
 
   /** Bulk toggle review sign-off for a set of items (no Etsy calls). */
-  setItemsReviewed(jobId, seqs, reviewed, { attestation = null, reviewedBy = null } = {}) {
+  setItemsReviewed(jobId, seqs, reviewed) {
     const job = this.getJob(jobId);
     if (!job) { const e = new Error('Job not found'); e.status = 404; throw e; }
     const wanted = Array.isArray(seqs) ? seqs.map(Number).filter((n) => Number.isFinite(n)) : [];
@@ -529,23 +565,14 @@ class BulkJobManager {
       throw e;
     }
     const ts = reviewed ? now() : null;
-    const normalized = reviewed ? normalizePolicyAttestation(attestation) : null;
-    const policyConfirmedBy = reviewed && reviewedBy ? String(reviewedBy).slice(0, 128) : null;
     let updated = 0;
     for (const item of selected) {
-      this._updateItem(jobId, item.product_folder, {
-        reviewed_at: ts,
-        policy_confirmed_at: ts,
-        policy_confirmed_by: policyConfirmedBy,
-        policy_attestation: normalized ? JSON.stringify(normalized) : null,
-      });
+      this._updateItem(jobId, item.product_folder, { reviewed_at: ts });
       this._emit(jobId, {
         type: 'reviewed',
         folder: item.product_folder,
         seq: item.seq,
         reviewed_at: ts,
-        policy_confirmed_at: ts,
-        policy_confirmed_by: policyConfirmedBy,
       });
       updated++;
     }
@@ -554,8 +581,6 @@ class BulkJobManager {
       updated,
       reviewed,
       reviewed_at: ts,
-      policy_confirmed_at: ts,
-      policy_confirmed_by: policyConfirmedBy,
     };
   }
 
@@ -710,11 +735,65 @@ class BulkJobManager {
       }
       return out;
     };
+    const remapRank = (raw) => {
+      const fn = oldRankToName.get(Number(raw));
+      const next = fn ? newNameToRank.get(fn) : undefined;
+      return Number.isFinite(next) && next > 0 ? next : null;
+    };
+    const remapCustomStyles = (styles) => (Array.isArray(styles)
+      ? styles.map((style) => ({ ...style, imageRank: remapRank(style.imageRank) }))
+      : styles);
+    const remapBandAnalysis = (analysis) => {
+      if (!analysis || !Array.isArray(analysis.variants)) return analysis;
+      return {
+        ...analysis,
+        variants: analysis.variants.map((variant) => {
+          const imageIndexes = [...new Set(
+            (variant.imageIndexes || []).map(remapRank).filter((rank) => rank != null)
+          )].sort((a, b) => a - b);
+          const primary = remapRank(variant.primaryImageIndex);
+          return {
+            ...variant,
+            imageIndexes,
+            primaryImageIndex: primary != null && imageIndexes.includes(primary)
+              ? primary
+              : (imageIndexes[0] || null),
+          };
+        }),
+      };
+    };
+    const remapImageAnalysis = (entries) => (Array.isArray(entries)
+      ? entries
+          .map((entry) => ({ ...entry, index: remapRank(entry && entry.index) }))
+          .filter((entry) => entry.index != null)
+          .sort((a, b) => a.index - b.index)
+      : entries);
 
     preview.images = newImages;
     preview.imageOrder = order;
     preview.styleImageMapping = remapStyleImages(preview.styleImageMapping);
     ai.styleImageMapping = preview.styleImageMapping;
+    preview.customStyles = remapCustomStyles(preview.customStyles);
+    ai.customStyles = Array.isArray(preview.customStyles)
+      ? preview.customStyles
+      : remapCustomStyles(ai.customStyles);
+    preview.bandVariantAnalysis = remapBandAnalysis(preview.bandVariantAnalysis);
+    ai.bandVariantAnalysis = remapBandAnalysis(ai.bandVariantAnalysis);
+    preview.bandColorAnalysis = remapBandAnalysis(preview.bandColorAnalysis);
+    ai.bandColorAnalysis = remapBandAnalysis(ai.bandColorAnalysis);
+    preview.imageAnalysis = remapImageAnalysis(preview.imageAnalysis);
+    ai.imageAnalysis = remapImageAnalysis(ai.imageAnalysis);
+    // Keep the local preview's accessibility text aligned with the reordered
+    // gallery. The real Etsy create recomputes from the same remapped facts.
+    const altCopy = { ...ai, ...preview };
+    preview.images = newImages.map((image) => ({
+      ...image,
+      altText: seoQuality.buildImageAltText(
+        altCopy,
+        image,
+        getProductType(jobProductType(job)),
+      ),
+    }));
     // Crop records are keyed by filename; drop the ones whose photo just left
     // the plan so preview_json can't accumulate entries nothing can act on.
     // (The `_originals/` backup itself stays on disk — like `_removed/`, an
@@ -731,8 +810,13 @@ class BulkJobManager {
       ai_json: JSON.stringify(ai),
     });
     this._invalidateReview(jobId, item, 'images_changed');
-    this._emit(jobId, { type: 'images', folder: item.product_folder, seq: item.seq, images: newImages });
-    return { ok: true, images: newImages, styleImageMapping: preview.styleImageMapping };
+    this._emit(jobId, { type: 'images', folder: item.product_folder, seq: item.seq, images: preview.images });
+    return {
+      ok: true,
+      images: preview.images,
+      styleImageMapping: preview.styleImageMapping,
+      customStyles: preview.customStyles || null,
+    };
   }
 
   /**
@@ -1007,17 +1091,10 @@ class BulkJobManager {
 
   // ── Publishing ─────────────────────────────────────────────────────────────
   _requireReviewedForPublish(item) {
-    if (item?.reviewed_at && item?.policy_confirmed_at) return;
-    const policyMissing = item?.reviewed_at && !item?.policy_confirmed_at;
-    const e = new Error(
-      policyMissing
-        ? 'Marketplace policy attestation is required before this reviewed listing can be sent live.'
-        : 'Manual review and marketplace policy attestation are required before publishing this listing. ' +
-          'Confirm original design or documented authorization, Creativity Standards eligibility, ' +
-          'production-partner disclosure, and accurate images/claims first.'
-    );
+    if (item?.reviewed_at) return;
+    const e = new Error('Manual review is required before publishing this listing.');
     e.status = 409;
-    e.code = policyMissing ? 'POLICY_ATTESTATION_REQUIRED' : 'REVIEW_REQUIRED';
+    e.code = 'REVIEW_REQUIRED';
     throw e;
   }
 
@@ -1065,10 +1142,10 @@ class BulkJobManager {
 
     const targets = this.getItems(jobId).filter((it) => it.listing_id && !it.published_at);
     if (!targets.length) { const e = new Error('No unpublished draft listings to publish.'); e.status = 400; throw e; }
-    const unreviewed = targets.filter((item) => !item.reviewed_at || !item.policy_confirmed_at);
+    const unreviewed = targets.filter((item) => !item.reviewed_at);
     if (unreviewed.length) {
       const e = new Error(
-        `${unreviewed.length} draft listing(s) still require manual review and marketplace policy attestation before publishing.`
+        `${unreviewed.length} draft listing(s) still need a manual review before publishing.`
       );
       e.status = 409;
       e.code = 'REVIEW_REQUIRED';
@@ -1168,12 +1245,30 @@ class BulkJobManager {
    * the matrix, so they can't drift apart.
    */
   _effectiveMinPrice(preview) {
-    const canonMin = this._recomputeMinPrice(preview);
+    const enabled = preview.enabledStyles || {};
+    const prices = preview.stylePrices || {};
+    const canonicalPrices = Object.entries(enabled)
+      .filter(([, on]) => Boolean(on))
+      .map(([key]) => Number(prices[key]))
+      .filter((n) => Number.isFinite(n) && n > 0);
     const custom = Array.isArray(preview.customStyles) ? preview.customStyles : [];
     const customPrices = custom.map((s) => Number(s.price)).filter((n) => Number.isFinite(n) && n > 0);
-    if (!customPrices.length) return canonMin;
-    const min = Math.min(canonMin, ...customPrices);
-    return Number.isFinite(min) ? min : canonMin;
+    const offered = [...canonicalPrices, ...customPrices];
+    return offered.length ? Math.min(...offered) : this._recomputeMinPrice(preview);
+  }
+
+  /**
+   * A vision-driven axis has per-listing labels but one shop-level standard
+   * price. Applying that standard price intentionally rebases every detected
+   * option; ordinary product types keep independent per-style prices.
+   */
+  _applyVisionStylePrice(preview, cleanPrices, productType) {
+    const pt = getProductType(productType);
+    if (!pt.visionStyle || !Array.isArray(preview.customStyles)) return;
+    const baseKey = productTypes.fallbackStyleKey(pt);
+    const amount = Number(cleanPrices && cleanPrices[baseKey]);
+    if (!Number.isFinite(amount) || amount <= 0) return;
+    preview.customStyles = preview.customStyles.map((style) => ({ ...style, price: amount }));
   }
 
   /**
@@ -1197,10 +1292,11 @@ class BulkJobManager {
     try { ai = item.ai_json ? JSON.parse(item.ai_json) : {}; } catch { ai = {}; }
 
     preview.stylePrices = { ...(preview.stylePrices || {}), ...clean };
+    this._applyVisionStylePrice(preview, clean, productType);
     if (!preview.enabledStyles || !Object.keys(preview.enabledStyles).length) {
       preview.enabledStyles = computeEnabledStyles(preview.imageAnalysis || ai.imageAnalysis || [], productType);
     }
-    preview.minPrice = this._recomputeMinPrice(preview);
+    preview.minPrice = this._effectiveMinPrice(preview);
     this._updateItem(jobId, item.product_folder, { preview_json: JSON.stringify(preview) });
     this._invalidateReview(jobId, item, 'prices_changed');
 
@@ -1230,8 +1326,8 @@ class BulkJobManager {
   }
 
   /**
-   * Apply operator-adjusted variation styles (which of the 6 bundles to offer)
-   * and optional prices to one item. Persists to the preview, recomputes the
+   * Apply operator-adjusted priced choices (case bundles or numbered bands) and
+   * optional prices/photos to one item. Persists to the preview, recomputes the
    * enabled-offering matrix, and re-pushes inventory for a live listing.
    */
   async updateItemVariations(jobId, seq, { enabledStyles, stylePrices, styleImageMapping, enabledModels, customStyles, variationOrder } = {}) {
@@ -1245,24 +1341,34 @@ class BulkJobManager {
     try { preview = item.preview_json ? JSON.parse(item.preview_json) : {}; } catch { preview = {}; }
     let ai = {};
     try { ai = item.ai_json ? JSON.parse(item.ai_json) : {}; } catch { ai = {}; }
+    // Copy regeneration writes the same preview blob. If it lands after this
+    // save has already parsed the row, the write below must keep that newer
+    // title and description instead of putting the old copy back.
+    const revAtStart = this._itemRev(jobId, item.product_folder);
 
     // Custom variation values (e.g. "Case1 + Charm1") are ADDED on top of the
     // bundles. An explicitly empty array clears them; `undefined` = no change.
     let aiCustomDirty = false;
     if (customStyles !== undefined) {
-      const cleanCustom = normaliseCustomStyles(customStyles);
+      const cleanCustom = normaliseProductCustomStyles(customStyles, productType, preview);
       preview.customStyles = cleanCustom.length ? cleanCustom : null;
       ai.customStyles = preview.customStyles;
       aiCustomDirty = true;
     }
-    // The operator's chosen display order for the "Styles" options (an array of
-    // value labels). Controls the buyer-facing dropdown order on Etsy.
+    // Buyer-facing order for the priced-axis values. Numbered band labels are
+    // regenerated from this row order below.
     if (variationOrder !== undefined) {
       preview.variationOrder = Array.isArray(variationOrder) && variationOrder.length ? variationOrder.map(String) : null;
       ai.variationOrder = preview.variationOrder;
       aiCustomDirty = true;
     }
     const activeCustom = Array.isArray(preview.customStyles) ? preview.customStyles : null;
+    if (getProductType(productType).visionStyle === 'band_variant' && activeCustom) {
+      preview.variationOrder = activeCustom.map((style) => style.label);
+      ai.customStyles = activeCustom;
+      ai.variationOrder = preview.variationOrder;
+      aiCustomDirty = true;
+    }
 
     const styleKeys = productTypes.styleKeysFor(productType);
     if (enabledStyles && typeof enabledStyles === 'object') {
@@ -1279,6 +1385,9 @@ class BulkJobManager {
     // fallback and replaces the old unconditional force that resurrected
     // "Case Only" for valid custom-only listings.
     const hasActiveCustom = Array.isArray(activeCustom) && activeCustom.length > 0;
+    if (hasActiveCustom && getProductType(productType).replaceFallbackWithVisionStyles) {
+      preview.enabledStyles[productTypes.fallbackStyleKey(productType)] = false;
+    }
     if (!hasActiveCustom && !styleKeys.some((k) => preview.enabledStyles[k])) {
       preview.enabledStyles[productTypes.fallbackStyleKey(productType)] = true;
     }
@@ -1310,6 +1419,32 @@ class BulkJobManager {
       aiDirty = true;
     }
     preview.minPrice = this._effectiveMinPrice(preview);
+    if (this._itemRev(jobId, item.product_folder) !== revAtStart) {
+      const fresh = this.getItemBySeq(jobId, item.seq) || item;
+      let freshPreview = {};
+      try { freshPreview = fresh.preview_json ? JSON.parse(fresh.preview_json) : {}; } catch { freshPreview = {}; }
+      const copyFields = ['title', 'description', 'tags', 'primaryColor', 'secondaryColor', 'character', 'characterDetected', 'characterFranchise', 'characterConfidence', 'characterEvidence', 'characterAlternatives', 'characterLowConfidence', 'designAnalysis', 'titleQuality', 'seoQuality', 'aiAttributes'];
+      for (const key of copyFields) {
+        if (Object.prototype.hasOwnProperty.call(freshPreview, key)) preview[key] = freshPreview[key];
+      }
+      if (preview.title) preview.title = retitleForModels(preview.title, preview.enabledModels, productType);
+      if (preview.description) preview.description = filterModelsInDescription(preview.description, preview.enabledModels, productType);
+      if (aiDirty || aiModelsDirty || aiCustomDirty) {
+        let freshAi = {};
+        try { freshAi = fresh.ai_json ? JSON.parse(fresh.ai_json) : {}; } catch { freshAi = {}; }
+        ai = freshAi;
+        if (aiModelsDirty) {
+          ai.enabledModels = preview.enabledModels;
+          ai.title = preview.title;
+          ai.description = preview.description;
+        }
+        if (aiCustomDirty) {
+          ai.customStyles = preview.customStyles || null;
+          ai.variationOrder = preview.variationOrder || null;
+        }
+        if (aiDirty) ai.styleImageMapping = preview.styleImageMapping;
+      }
+    }
     this._updateItem(jobId, item.product_folder, {
       preview_json: JSON.stringify(preview),
       ...(aiDirty || aiModelsDirty || aiCustomDirty ? { ai_json: JSON.stringify(ai) } : {}),
@@ -1382,11 +1517,16 @@ class BulkJobManager {
           let ai = {};
           try { ai = item.ai_json ? JSON.parse(item.ai_json) : {}; } catch { ai = {}; }
           preview.stylePrices = { ...(preview.stylePrices || {}), ...clean };
+          this._applyVisionStylePrice(preview, clean, productType);
+          if (Array.isArray(preview.customStyles)) ai.customStyles = preview.customStyles;
           if (!preview.enabledStyles || !Object.keys(preview.enabledStyles).length) {
             preview.enabledStyles = computeEnabledStyles(preview.imageAnalysis || ai.imageAnalysis || [], productType);
           }
-          preview.minPrice = this._recomputeMinPrice(preview);
-          this._updateItem(jobId, item.product_folder, { preview_json: JSON.stringify(preview) });
+          preview.minPrice = this._effectiveMinPrice(preview);
+          this._updateItem(jobId, item.product_folder, {
+            preview_json: JSON.stringify(preview),
+            ...(Array.isArray(preview.customStyles) ? { ai_json: JSON.stringify(ai) } : {}),
+          });
           this._invalidateReview(jobId, item, 'prices_changed');
           updated++;
 
@@ -1440,6 +1580,11 @@ class BulkJobManager {
     const productType = jobProductType(job);
     if (!productTypes.hasDeviceAxis(productType)) {
       const e = new Error(`${getProductType(productType).label} listings have no device-model axis.`);
+      e.status = 400;
+      throw e;
+    }
+    if (productTypes.isDeviceAxisFixed(productType)) {
+      const e = new Error(`${getProductType(productType).deviceProperty.name} is fixed and always includes every required option.`);
       e.status = 400;
       throw e;
     }
@@ -1557,17 +1702,104 @@ class BulkJobManager {
     // Per-item guard: allow different items to regenerate in parallel, but block
     // a duplicate regeneration of the SAME item.
     const key = 'regen:' + jobId + ':' + item.seq;
-    if (this._running.has(key)) { const e = new Error('This listing is already regenerating.'); e.status = 409; throw e; }
+    if (this._regenTasks.has(key)) {
+      return { started: true, already: true, seq: item.seq, completion: this._regenTasks.get(key) };
+    }
+
+    // The checkbox and the character choice are stored before the model runs.
+    // Unchecking MagSafe therefore changes the title and description even when
+    // the rewrite fails.
+    let applied = null
+    if (typeof opts.magsafe === 'boolean' || opts.characterName) {
+      applied = this._commitOperatorMagsafe(jobId, item, preview, ai, opts.magsafe, opts.characterName)
+    }
     this._running.add(key);
 
-    this._runRegenerateItemCopy(jobId, item, job, opts)
-      .catch((err) => this._emit(jobId, {
+    const task = this._runRegenerateItemCopy(jobId, item, job, opts)
+      .finally(() => {
+        this._running.delete(key);
+        this._regenTasks.delete(key);
+      });
+    this._regenTasks.set(key, task);
+    task.catch((err) => {
+      const message = err.response?.data?.error || err.message || String(err)
+      console.error('[bulk] regenerate copy failed:', item.product_folder, message)
+      this._emit(jobId, {
         type: 'regen_failed', folder: item.product_folder, seq: item.seq,
-        error: err.response?.data?.error || err.message,
-      }))
-      .finally(() => this._running.delete(key));
+        error: message,
+        operator_copy_saved: applied != null,
+      })
+    });
 
-    return { started: true, seq: item.seq };
+    return {
+      started: true,
+      seq: item.seq,
+      title: applied ? applied.title : undefined,
+      description: applied ? applied.description : undefined,
+      tags: applied ? applied.tags : undefined,
+      magsafe: typeof opts.magsafe === 'boolean' ? opts.magsafe : undefined,
+      completion: task,
+    };
+  }
+
+  /**
+   * Write the operator's MagSafe choice onto the current listing immediately.
+   * Returns the copy that was stored.
+   */
+  _commitOperatorMagsafe(jobId, item, preview, ai, magsafe, characterName) {
+    let applied = null
+    if (typeof magsafe === 'boolean') {
+      applied = applyMagsafeToCopy(preview, magsafe)
+      preview.title = applied.title
+      preview.description = applied.description
+      preview.tags = applied.tags
+      const flagImages = (list) => {
+        if (!Array.isArray(list)) return
+        for (const img of list) if (img) img.has_magsafe_ring = magsafe
+      }
+      flagImages(preview.imageAnalysis)
+      flagImages(ai.imageAnalysis)
+      const accessory = { ...(preview.accessory || {}) }
+      accessory.hasMagsafe = magsafe
+      if (magsafe) {
+        if (!accessory.magsafeEvidence || /turned off by the operator/i.test(accessory.magsafeEvidence)) {
+          accessory.magsafeEvidence = 'Turned on by the operator.'
+        }
+      } else {
+        accessory.magsafeConfidence = null
+        accessory.magsafeEvidence = 'Turned off by the operator.'
+      }
+      preview.accessory = accessory
+      ai.accessory = accessory
+    }
+    const character = characterName ? resolveOperatorCharacter(characterName, ai.productSummary || {}) : null
+    if (character) {
+      preview.character = character.characterName
+      preview.characterDetected = character.characterDetected
+      preview.characterFranchise = character.characterFranchise
+      preview.characterConfidence = character.characterConfidence
+      preview.characterEvidence = character.characterEvidence
+      preview.characterAlternatives = character.characterAlternatives
+      preview.characterLowConfidence = character.characterLowConfidence
+    }
+    ai.title = preview.title
+    ai.description = preview.description
+    ai.tags = preview.tags
+    if (character) {
+      ai.characterName = character.characterName
+      ai.characterDetected = character.characterDetected
+      ai.characterFranchise = character.characterFranchise
+      ai.characterConfidence = character.characterConfidence
+      ai.characterEvidence = character.characterEvidence
+      ai.characterAlternatives = character.characterAlternatives
+      ai.characterLowConfidence = character.characterLowConfidence
+    }
+    this._updateItem(jobId, item.product_folder, {
+      preview_json: JSON.stringify(preview),
+      ai_json: JSON.stringify(ai),
+      title: preview.title,
+    })
+    return applied || { title: preview.title, description: preview.description, tags: preview.tags }
   }
 
   /**
@@ -1601,10 +1833,18 @@ class BulkJobManager {
       try { designImages = scanProductFolder(item.product_folder).images || null; } catch { designImages = null; }
     }
 
-    // Resolve which iPhone models to advertise: an explicit override wins,
-    // otherwise reuse the item's existing selection (default all 12).
+    // Resolve which device models to advertise. An explicit override wins, then
+    // the item's saved selection. A listing that has never been chosen starts
+    // from the upload default (iPhone 18 Pro / 18 Pro Max plus 15–17), not from
+    // "every catalog model".
+    const explicitModels = (enabledModels && typeof enabledModels === 'object' && Object.keys(enabledModels).length)
+      ? enabledModels
+      : null;
+    const savedModels = (preview.enabledModels && Object.keys(preview.enabledModels).length)
+      ? preview.enabledModels
+      : ((ai.enabledModels && Object.keys(ai.enabledModels).length) ? ai.enabledModels : null);
     const modelsForCopy = normaliseEnabledModels(
-      (enabledModels && typeof enabledModels === 'object') ? enabledModels : (preview.enabledModels || ai.enabledModels),
+      explicitModels || savedModels || productTypes.defaultEnabledModels(productType),
       productType,
     );
     // Operator's corrected style matrix drives the "What's Included" bundles +
@@ -1612,14 +1852,19 @@ class BulkJobManager {
     const stylesForCopy = (enabledStyles && typeof enabledStyles === 'object' && Object.keys(enabledStyles).length)
       ? enabledStyles
       : (preview.enabledStyles || ai.enabledStyles || null);
-    // Operator-defined CUSTOM variation values ("Case 1 + Charm 1", …). "Apply &
+    // Operator/vision-defined CUSTOM values ("Case 1 + Charm 1", "Band 1", …). "Apply &
     // regenerate copy" commits the whole editor, so a list in the request IS what
     // was on screen and wins over the persisted one — both for the copy the AI
     // writes and for what we store below. Absent (older client / other caller) =
     // no opinion, keep whatever is saved.
-    const explicitCustom = customStyles !== undefined ? normaliseCustomStyles(customStyles) : null;
+    const explicitCustom = customStyles !== undefined
+      ? normaliseProductCustomStyles(customStyles, productType, preview)
+      : null;
+    const savedCustom = Array.isArray(preview.customStyles)
+      ? preview.customStyles
+      : (Array.isArray(ai.customStyles) ? ai.customStyles : null);
     const customForCopy = explicitCustom
-      || (Array.isArray(preview.customStyles) ? preview.customStyles : (Array.isArray(ai.customStyles) ? ai.customStyles : null));
+      || (savedCustom ? normaliseProductCustomStyles(savedCustom, productType, preview) : null);
 
     // Only an EXPLICIT operator MagSafe toggle overrides the cached (dedicated-pass)
     // detection — never auto-clear it, so a correctly detected MagSafe survives a
@@ -1691,6 +1936,7 @@ class BulkJobManager {
     next.characterLowConfidence = copy.characterLowConfidence || false;
     next.designAnalysis = copy.designAnalysis || next.designAnalysis || null;
     next.titleQuality = copy.titleQuality || null;
+    next.seoQuality = copy.seoQuality || null;
     next.aiAttributes = copy.aiAttributes || next.aiAttributes || null;
     // The MagSafe override mutates `imageAnalysis` in place. That array came from
     // the snapshot, so mirror the corrected flag onto the freshly-read preview's
@@ -1719,7 +1965,9 @@ class BulkJobManager {
       if (enabledStyles && typeof enabledStyles === 'object' && Object.keys(enabledStyles).length) {
         const normStyles = normaliseEnabledStyles(enabledStyles, productType);
         const custom = Array.isArray(next.customStyles) ? next.customStyles : null;
-        if (!(custom && custom.length) && !productTypes.styleKeysFor(productType).some((k) => normStyles[k])) {
+        if (custom && custom.length && getProductType(productType).replaceFallbackWithVisionStyles) {
+          normStyles[productTypes.fallbackStyleKey(productType)] = false;
+        } else if (!(custom && custom.length) && !productTypes.styleKeysFor(productType).some((k) => normStyles[k])) {
           normStyles[productTypes.fallbackStyleKey(productType)] = true;
         }
         next.enabledStyles = normStyles;
@@ -1732,6 +1980,34 @@ class BulkJobManager {
       if (next.title) next.title = retitleForModels(next.title, finalModels, productType);
       if (next.description) next.description = filterModelsInDescription(next.description, finalModels, productType);
     }
+    if (getProductType(productType).visionStyle === 'band_variant' && Array.isArray(next.customStyles)) {
+      next.customStyles = bandVariantAnalyzer.numberBandStyles(next.customStyles);
+      next.variationOrder = next.customStyles.map((style) => style.label);
+    }
+    if (getProductType(productType).replaceFallbackWithVisionStyles && Array.isArray(next.customStyles) && next.customStyles.length) {
+      next.enabledStyles = normaliseEnabledStyles(next.enabledStyles, productType);
+      next.enabledStyles[productTypes.fallbackStyleKey(productType)] = false;
+    }
+    // The model can put MagSafe back into a title it was told to omit. The
+    // checkbox wins over that text, on the title, the description and the tags.
+    if (typeof magsafe === 'boolean') {
+      const applied = applyMagsafeToCopy(next, magsafe)
+      next.title = applied.title
+      next.description = applied.description
+      next.tags = applied.tags
+      const accessory = { ...(next.accessory || {}) }
+      accessory.hasMagsafe = magsafe
+      if (!magsafe) {
+        accessory.magsafeConfidence = null
+        accessory.magsafeEvidence = 'Turned off by the operator.'
+      } else if (!accessory.magsafeEvidence || /turned off by the operator/i.test(accessory.magsafeEvidence)) {
+        accessory.magsafeEvidence = 'Turned on by the operator.'
+      }
+      next.accessory = accessory
+      if (Array.isArray(next.imageAnalysis)) {
+        for (const img of next.imageAnalysis) if (img) img.has_magsafe_ring = magsafe
+      }
+    }
     next.minPrice = this._effectiveMinPrice(next);
 
     // Cached AI copy: layer the regenerated copy over the CURRENT cached object
@@ -1740,6 +2016,9 @@ class BulkJobManager {
     const newAi = { ...freshAi, ...copy };
     newAi.title = next.title;
     newAi.description = next.description;
+    newAi.tags = next.tags;
+    newAi.accessory = next.accessory;
+    if (typeof magsafe === 'boolean') newAi.imageAnalysis = next.imageAnalysis || newAi.imageAnalysis;
     newAi.styleImageMapping = next.styleImageMapping;
     newAi.enabledModels = next.enabledModels;
     newAi.customStyles = next.customStyles || null;
@@ -1768,7 +2047,13 @@ class BulkJobManager {
       enabledStyles: next.enabledStyles, enabledModels: next.enabledModels,
       customStyles: next.customStyles || null, variationOrder: next.variationOrder || null,
     });
-    return { ok: true, pushed, title: next.title, character: copy.characterName, characterConfidence: copy.characterConfidence };
+    return {
+      ok: true, pushed, seq: item.seq,
+      title: next.title, description: next.description, tags: next.tags || [],
+      character: copy.characterName, characterConfidence: copy.characterConfidence,
+      characterLowConfidence: !!next.characterLowConfidence,
+      magsafe: typeof magsafe === 'boolean' ? magsafe : undefined,
+    };
   }
   _updateJob(jobId, fields) {
     const keys = Object.keys(fields);
@@ -1802,7 +2087,7 @@ class BulkJobManager {
   createAndStart({ shopName, inputPath, targetState = 'draft', dryRun = true, overrides = {}, brandTags, stylePrices, productType }) {
     if (dryRun !== true) {
       const e = new Error(
-        'Bulk listing jobs must start as a local dry-run preview. Review and attest every item before creating Etsy drafts.'
+        'Bulk listing jobs must start as a local dry-run preview. Review every item before creating Etsy drafts.'
       );
       e.status = 409;
       e.code = 'SAFE_PREVIEW_REQUIRED';
@@ -1862,7 +2147,7 @@ class BulkJobManager {
     const job = this.getJob(jobId);
     if (!job) { const e = new Error('Job not found'); e.status = 404; throw e; }
     if (this._running.has(jobId)) { const e = new Error('Job already running'); e.status = 409; throw e; }
-    this._requirePolicyForRealJob(jobId, job);
+    this._requireReviewForRealJob(jobId, job);
     const opts = JSON.parse(job.options_json || '{}');
     this.run(jobId, {
       overrides: overrides || opts.overrides || {},
@@ -1898,14 +2183,14 @@ class BulkJobManager {
       !item.listing_id &&
       item.ai_json
     );
-    const policyPending = candidates.filter((item) => !item.reviewed_at || !item.policy_confirmed_at);
-    if (policyPending.length) {
+    const unreviewed = candidates.filter((item) => !item.reviewed_at);
+    if (unreviewed.length) {
       const e = new Error(
-        `${policyPending.length} listing preview(s) still require manual review and marketplace policy attestation. ` +
+        `${unreviewed.length} listing preview(s) still need a manual review. ` +
         'Nothing has been sent to Etsy.'
       );
       e.status = 409;
-      e.code = 'POLICY_ATTESTATION_REQUIRED';
+      e.code = 'REVIEW_REQUIRED';
       throw e;
     }
     let prepared = 0;
@@ -1935,10 +2220,24 @@ class BulkJobManager {
       if (preview.styleImageMapping) ai.styleImageMapping = preview.styleImageMapping;
       // Honour the operator's EXACT custom-variation state — including an explicit
       // clear (null) — so promoting never resurrects custom values they removed.
-      if (preview.customStyles !== undefined) ai.customStyles = preview.customStyles; // operator-defined variation values
-      if (preview.variationOrder !== undefined) ai.variationOrder = preview.variationOrder; // operator's variation display order
+      if (preview.customStyles !== undefined) {
+        ai.customStyles = preview.customStyles == null
+          ? null
+          : normaliseProductCustomStyles(preview.customStyles, productType, preview);
+        if (getProductType(productType).visionStyle === 'band_variant' && Array.isArray(ai.customStyles)) {
+          ai.variationOrder = ai.customStyles.map((style) => style.label);
+        }
+      }
+      if (
+        preview.variationOrder !== undefined
+        && getProductType(productType).visionStyle !== 'band_variant'
+      ) {
+        ai.variationOrder = preview.variationOrder; // operator's variation display order
+      }
+      if (preview.bandVariantAnalysis) ai.bandVariantAnalysis = preview.bandVariantAnalysis;
       if (Array.isArray(preview.imageAnalysis) && preview.imageAnalysis.length) ai.imageAnalysis = preview.imageAnalysis;
       if (preview.aiAttributes) ai.aiAttributes = preview.aiAttributes;
+      if (preview.seoQuality) ai.seoQuality = preview.seoQuality;
 
       this._updateItem(jobId, item.product_folder, {
         ai_json: JSON.stringify(ai),
@@ -1991,7 +2290,7 @@ class BulkJobManager {
     const job = this.getJob(jobId);
     if (!job) { const e = new Error('Job not found'); e.status = 404; throw e; }
     if (this._running.has(jobId)) { const e = new Error('Job already running'); e.status = 409; throw e; }
-    this._requirePolicyForRealJob(jobId, job);
+    this._requireReviewForRealJob(jobId, job);
     this._control.delete(jobId);
     const opts = JSON.parse(job.options_json || '{}');
     this.run(jobId, {
@@ -2005,19 +2304,57 @@ class BulkJobManager {
     return this.getJob(jobId);
   }
 
-  _requirePolicyForRealJob(jobId, job) {
+  _requireReviewForRealJob(jobId, job) {
     if (job?.dry_run === 1) return;
     const unsafe = this.getItems(jobId).filter((item) =>
-      item.excluded !== 1 &&
-      (!item.reviewed_at || !item.policy_confirmed_at)
+      item.excluded !== 1 && !item.reviewed_at
     );
     if (!unsafe.length) return;
     const e = new Error(
-      `${unsafe.length} listing(s) lack marketplace policy attestation. ` +
-      'The real Etsy-write job will remain paused; review locally or start a new safe preview.'
+      `${unsafe.length} listing(s) still need a manual review. ` +
+      'The Etsy-write job will remain paused until they are reviewed.'
     );
     e.status = 409;
-    e.code = 'POLICY_ATTESTATION_REQUIRED';
+    e.code = 'REVIEW_REQUIRED';
+    throw e;
+  }
+
+  /**
+   * Resolve only what this run type is allowed to touch. A dry run must never
+   * construct an authenticated client because doing so can refresh OAuth or
+   * resolve a shop ID before cacheOnly has a chance to enforce local preview.
+   */
+  async _resolveRunShopContext(job) {
+    const dryRun = job.dry_run === 1;
+    let shopCfg = typeof this.resolveShopConfig === 'function'
+      ? this.resolveShopConfig(job.shop_name)
+      : null;
+    if (dryRun) {
+      shopCfg = shopCfg || { shop_id: job.shop_key, shop_name: job.shop_name };
+      return {
+        dryRun,
+        shopClient: null,
+        numericShopId: shopCfg.shop_id,
+        shopCfg,
+        scopes: null,
+      };
+    }
+    const live = await this.resolveShopClient(job.shop_name);
+    return { dryRun, ...live };
+  }
+
+  _validateRealListingDefaults(defaults) {
+    const positiveId = (value) => Number.isInteger(Number(value)) && Number(value) > 0;
+    const missing = [];
+    if (!positiveId(defaults?.taxonomy_id)) missing.push('taxonomy_id');
+    if (!positiveId(defaults?.readiness_state_id)) missing.push('readiness_state_id');
+    if (!missing.length) return;
+    const e = new Error(
+      `Shop listing settings are incomplete (${missing.join(', ')}). ` +
+      'Refresh Shop settings and configure the missing taxonomy/processing profile before creating drafts.'
+    );
+    e.status = 409;
+    e.code = 'SHOP_LISTING_SETTINGS_INCOMPLETE';
     throw e;
   }
 
@@ -2049,8 +2386,13 @@ class BulkJobManager {
       this._updateJob(jobId, { state: 'running', error: null, started_at: job.started_at || now() });
       this._emit(jobId, { type: 'job', state: 'running' });
 
-      // Resolve shop client + settings once per run.
-      const { shopClient, numericShopId, shopCfg, scopes } = await this.resolveShopClient(job.shop_name);
+      const {
+        dryRun,
+        shopClient,
+        numericShopId,
+        shopCfg,
+        scopes,
+      } = await this._resolveRunShopContext(job);
 
       // Pre-flight: a real (non-dry) run creates/edits listings, which needs the
       // listings_w OAuth scope. If the token is KNOWN to lack it, fail the whole
@@ -2089,6 +2431,7 @@ class BulkJobManager {
       // Layer: resolved shop defaults < the run's stored overrides < non-empty live overrides.
       const defaults = { ...settings.defaults, ...storedOverrides, ...cleanOverrides };
       const mergedSettings = { ...settings, defaults };
+      if (!dryRun) this._validateRealListingDefaults(defaults);
 
       // Reconcile the storefront section against the shop's CURRENT sections.
       // The section is chosen once (often at dry-run time) and then baked into
@@ -2114,9 +2457,11 @@ class BulkJobManager {
       // Taxonomy attribute menu (Theme/Occasion/Celebration/Pattern allowed values)
       // so Phase 2 can pick valid Etsy "feature section" values. One cached call.
       let attributeMenu = null;
-      try {
-        ({ menu: attributeMenu } = await getTaxonomyAttributes(shopClient, defaults.taxonomy_id));
-      } catch { attributeMenu = null; }
+      if (!dryRun) {
+        try {
+          ({ menu: attributeMenu } = await getTaxonomyAttributes(shopClient, defaults.taxonomy_id));
+        } catch { attributeMenu = null; }
+      }
 
       // Default variation prices = the shop's CURRENT prices (cached inventory),
       // with the master sheet filling any gap, and any explicit run-config
@@ -2129,13 +2474,12 @@ class BulkJobManager {
         db: this.db, shopId: shopCfg.shop_id, sheetPrices, productType,
       });
       const jobOpts = JSON.parse(job.options_json || '{}');
-      const runStylePrices = this._sanitizePrices(jobOpts.stylePrices || {});
+      const runStylePrices = this._sanitizePrices(jobOpts.stylePrices || {}, productType);
       const finalPrices = { ...sheetPrices, ...defaultPrices, ...runStylePrices };
       const priceInfo = { currency: String(currency || '').toUpperCase(), token: currency, prices: finalPrices };
       const priceSrc = Object.keys(runStylePrices).length ? 'custom' : (shopPrices.hasData ? 'shop' : 'sheet');
       this._emit(jobId, { type: 'info', message: `Currency ${priceInfo.currency}; prices from ${priceSrc}; taxonomy ${defaults.taxonomy_id || 'unresolved'}` });
 
-      const dryRun = job.dry_run === 1;
       const targetState = job.target_state;
       const restockQuantity = config.bulk.restockQuantity;
 
@@ -2176,11 +2520,25 @@ class BulkJobManager {
             this._emit(jobId, { type: 'step', folder: item.product_folder, step: 'ai_cached' });
           } else {
             this._emit(jobId, { type: 'step', folder: item.product_folder, step: 'ai', images: product.images.length });
-            copy = await generateListingCopy(product, { shopName: job.shop_name, brandTags, attributeMenu, productType });
+            copy = await generateListingCopy(product, {
+              shopName: job.shop_name,
+              brandTags,
+              attributeMenu,
+              productType,
+              // Vision-grouped Band Style values all inherit this run's
+              // currency-aware standard price before they enter inventory.
+              stylePrices: priceInfo.prices,
+            });
             this._updateItem(jobId, item.product_folder, {
               status: 'ai_done', ai_json: JSON.stringify(copy), title: copy.title,
             });
             this._emit(jobId, { type: 'item', folder: item.product_folder, status: 'ai_done', title: copy.title });
+          }
+          // Cached previews from the former colour-label implementation must
+          // create the same deterministic numbered options as fresh analyses.
+          if (getProductType(productType).visionStyle === 'band_variant' && Array.isArray(copy.customStyles)) {
+            copy.customStyles = normaliseProductCustomStyles(copy.customStyles, productType);
+            copy.variationOrder = copy.customStyles.map((style) => style.label);
           }
 
           // 2) Create / resume on Etsy. Parse defensively (like every other
@@ -2332,6 +2690,4 @@ module.exports = {
   BulkJobManager,
   defaultBrandTag,
   applyImagePlan,
-  normalizePolicyAttestation,
-  POLICY_ATTESTATION_VERSION,
 };

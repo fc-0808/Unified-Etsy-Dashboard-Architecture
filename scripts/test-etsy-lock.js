@@ -27,7 +27,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // The lock is a self-contained method; exercise it on a bare object rather than
 // standing up a full BulkJobManager (which needs a SQLite handle).
-const { BulkJobManager, normalizePolicyAttestation, POLICY_ATTESTATION_VERSION } = require('../src/listings/bulk-runner')
+const { BulkJobManager } = require('../src/listings/bulk-runner')
+const { requirePositiveEtsyId } = require('../src/listings/etsy-create')
 const dashboardSource = fs.readFileSync(path.resolve(__dirname, '../public/index.html'), 'utf8')
 const makeLock = () => {
 	const host = { _etsyLocks: new Map() }
@@ -150,6 +151,74 @@ test('a missing shop name still serialises rather than running wild', async () =
 	assert.strictEqual(maxActive, 1)
 })
 
+group('Safe-preview network boundary')
+
+test('dry runs resolve local shop config without constructing an Etsy client', async () => {
+	let liveCalls = 0
+	const host = {
+		resolveShopConfig: () => ({ shop_id: 'local-shop', shop_name: 'Shop' }),
+		resolveShopClient: async () => {
+			liveCalls++
+			throw new Error('must not contact Etsy')
+		},
+	}
+	const context = await BulkJobManager.prototype._resolveRunShopContext.call(host, {
+		dry_run: 1,
+		shop_key: 'local-shop',
+		shop_name: 'Shop',
+	})
+	assert.strictEqual(liveCalls, 0)
+	assert.strictEqual(context.shopClient, null)
+	assert.strictEqual(context.numericShopId, 'local-shop')
+	assert.strictEqual(context.dryRun, true)
+})
+
+test('real listing jobs resolve the verified authenticated client', async () => {
+	let liveCalls = 0
+	const live = {
+		shopClient: { verified: true },
+		numericShopId: '123',
+		shopCfg: { shop_id: 'local-shop' },
+		scopes: ['listings_w'],
+	}
+	const host = {
+		resolveShopConfig: () => ({ shop_id: 'local-shop' }),
+		resolveShopClient: async () => { liveCalls++; return live },
+	}
+	const context = await BulkJobManager.prototype._resolveRunShopContext.call(host, {
+		dry_run: 0,
+		shop_name: 'Shop',
+	})
+	assert.strictEqual(liveCalls, 1)
+	assert.strictEqual(context.shopClient, live.shopClient)
+	assert.strictEqual(context.dryRun, false)
+})
+
+test('real jobs fail once before item writes when required listing settings are missing', () => {
+	const validate = BulkJobManager.prototype._validateRealListingDefaults
+	assert.throws(
+		() => validate.call({}, { taxonomy_id: 1, readiness_state_id: null }),
+		(err) => err && err.code === 'SHOP_LISTING_SETTINGS_INCOMPLETE' && err.status === 409,
+	)
+	assert.throws(
+		() => validate.call({}, { taxonomy_id: null, readiness_state_id: 2 }),
+		/Shop listing settings are incomplete/,
+	)
+	// Etsy's Jan 2026 draft update made shipping_profile_id optional for drafts.
+	assert.doesNotThrow(() => validate.call({}, { taxonomy_id: 1, readiness_state_id: 2 }))
+})
+
+test('malformed Etsy listing and image IDs fail closed', () => {
+	assert.strictEqual(requirePositiveEtsyId(123, 'listing_id'), 123)
+	assert.strictEqual(requirePositiveEtsyId('456', 'listing_image_id'), '456')
+	for (const invalid of [null, undefined, '', 0, '0', -1, 'abc', '1.2']) {
+		assert.throws(
+			() => requirePositiveEtsyId(invalid, 'listing_id'),
+			(err) => err && err.code === 'ETSY_INVALID_ID_RESPONSE',
+		)
+	}
+})
+
 group('Publish safety')
 
 test('publishing requires an explicit manual review stamp', () => {
@@ -158,28 +227,10 @@ test('publishing requires an explicit manual review stamp', () => {
 		() => guard.call({}, { reviewed_at: null }),
 		(err) => err && err.code === 'REVIEW_REQUIRED' && err.status === 409,
 	)
-	assert.throws(
-		() => guard.call({}, { reviewed_at: 1_700_000_000, policy_confirmed_at: null }),
-		(err) => err && err.code === 'POLICY_ATTESTATION_REQUIRED' && err.status === 409,
-	)
-	assert.doesNotThrow(() => guard.call({}, { reviewed_at: 1_700_000_000, policy_confirmed_at: 1_700_000_000 }))
+	assert.doesNotThrow(() => guard.call({}, { reviewed_at: 1_700_000_000 }))
 })
 
-test('policy attestation requires every marketplace-safety statement', () => {
-	assert.throws(
-		() => normalizePolicyAttestation({ original_or_authorized: true }),
-		(err) => err && err.code === 'POLICY_ATTESTATION_REQUIRED',
-	)
-	const attestation = normalizePolicyAttestation({
-		original_or_authorized: true,
-		creativity_standards: true,
-		production_partner_disclosed: true,
-		images_and_claims_accurate: true,
-	})
-	assert.strictEqual(attestation.version, POLICY_ATTESTATION_VERSION)
-})
-
-test('review sign-off persists an auditable policy stamp', () => {
+test('review sign-off stores the review timestamp', () => {
 	const updates = []
 	const events = []
 	const item = { product_folder: 'p1', seq: 1, preview_json: '{"title":"ready"}' }
@@ -191,24 +242,10 @@ test('review sign-off persists an auditable policy stamp', () => {
 		_emit: (...args) => events.push(args),
 	}
 	const sign = BulkJobManager.prototype.setItemReviewed
-	assert.throws(
-		() => sign.call(host, 'job-1', 1, true),
-		(err) => err && err.code === 'POLICY_ATTESTATION_REQUIRED',
-	)
-	const result = sign.call(host, 'job-1', 1, true, {
-		reviewedBy: 'owner',
-		attestation: {
-			original_or_authorized: true,
-			creativity_standards: true,
-			production_partner_disclosed: true,
-			images_and_claims_accurate: true,
-		},
-	})
+	const result = sign.call(host, 'job-1', 1, true)
 	assert.ok(result.reviewed_at)
-	assert.strictEqual(result.policy_confirmed_at, result.reviewed_at)
-	assert.strictEqual(result.policy_confirmed_by, 'owner')
-	assert.ok(updates[0][2].policy_attestation.includes('"version":1'))
-	assert.strictEqual(events[0][1].policy_confirmed_at, result.reviewed_at)
+	assert.strictEqual(updates[0][2].reviewed_at, result.reviewed_at)
+	assert.strictEqual(events[0][1].reviewed_at, result.reviewed_at)
 })
 
 test('new bulk jobs cannot bypass the local preview workflow', () => {
@@ -218,31 +255,26 @@ test('new bulk jobs cannot bypass the local preview workflow', () => {
 	)
 })
 
-test('legacy real jobs cannot resume without policy attestation', () => {
-	const guard = BulkJobManager.prototype._requirePolicyForRealJob
+test('real jobs cannot resume until listings are reviewed', () => {
+	const guard = BulkJobManager.prototype._requireReviewForRealJob
 	const host = {
-		getItems: () => [{ excluded: 0, reviewed_at: 123, policy_confirmed_at: null }],
+		getItems: () => [{ excluded: 0, reviewed_at: null }],
 	}
 	assert.throws(
 		() => guard.call(host, 'job-1', { dry_run: 0 }),
-		(err) => err && err.code === 'POLICY_ATTESTATION_REQUIRED' && err.status === 409,
+		(err) => err && err.code === 'REVIEW_REQUIRED' && err.status === 409,
 	)
 	assert.doesNotThrow(() => guard.call(host, 'job-1', { dry_run: 1 }))
-	host.getItems = () => [{ excluded: 0, reviewed_at: 123, policy_confirmed_at: 123 }]
+	host.getItems = () => [{ excluded: 0, reviewed_at: 123 }]
 	assert.doesNotThrow(() => guard.call(host, 'job-1', { dry_run: 0 }))
 })
 
-test('bulk UI reviews without a blocking popup and sends structured policy attestation', () => {
+test('bulk UI reviews without a blocking popup', () => {
 	assert.match(dashboardSource, /id="bulkDryRun" checked disabled/)
-	assert.match(dashboardSource, /function bulkPolicyAttestation\(\)/)
-	assert.doesNotMatch(dashboardSource, /Marketplace policy sign-off for/)
+	assert.doesNotMatch(dashboardSource, /function bulkPolicyAttestation\(\)/)
 	assert.doesNotMatch(dashboardSource, /const confirmed = confirm\(/)
-	assert.match(dashboardSource, /original_or_authorized:\s*true/)
-	assert.match(dashboardSource, /creativity_standards:\s*true/)
-	assert.match(dashboardSource, /production_partner_disclosed:\s*true/)
-	assert.match(dashboardSource, /images_and_claims_accurate:\s*true/)
-	assert.match(dashboardSource, /JSON\.stringify\(\{ seqs, reviewed, attestation \}\)/)
-	assert.match(dashboardSource, /JSON\.stringify\(\{ reviewed: next, attestation \}\)/)
+	assert.match(dashboardSource, /JSON\.stringify\(\{ seqs, reviewed \}\)/)
+	assert.match(dashboardSource, /JSON\.stringify\(\{ reviewed: next \}\)/)
 })
 
 test('publish-target runs always create recoverable drafts before activation', () => {

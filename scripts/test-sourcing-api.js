@@ -495,11 +495,15 @@ async function main() {
 		assert(afterEdit.cost_total === 10.25, `the unit cost sums the components that have a price (got ${afterEdit.cost_total})`)
 		const cleared = await api('/api/route/product-map', json('PUT', { ...edit, product_type: '' }))
 		assert(cleared.status === 200 && (await api('/api/sourcing/catalog')).body.products.find((p) => p.id === caseRow.id).product_type === 'iphone_case', 'clearing the override re-derives from the title')
-		const renameAttempt = await api(
-			'/api/route/product-map',
-			json('PUT', { ...edit, title: CASE_TITLE + ' renamed' }),
-		)
-		assert(renameAttempt.status === 409 && renameAttempt.body.code === 'IMMUTABLE', 'a product title cannot be renamed out from under historical orders')
+		const RENAMED_TITLE = CASE_TITLE + ' renamed'
+		const renamedProduct = await api('/api/route/product-map', json('PUT', { ...edit, title: RENAMED_TITLE }))
+		assert(renamedProduct.status === 200, `PUT can rename a catalog product (got ${renamedProduct.status}${renamedProduct.body && renamedProduct.body.error ? ': ' + renamedProduct.body.error : ''})`)
+		const afterRename = (await api('/api/sourcing/catalog')).body.products.find((p) => p.id === caseRow.id)
+		assert(afterRename && afterRename.title === RENAMED_TITLE, 'the sourcing catalog shows the new name')
+		assert(afterRename && afterRename.image_url === 'https://example.test/case.png', 'the listing photo still attaches through the previous title')
+		assert(afterRename && Array.isArray(afterRename.title_aliases) && afterRename.title_aliases.includes(CASE_TITLE), 'the previous listing title is retained as an alias')
+		const restoredName = await api('/api/route/product-map', json('PUT', { ...edit, title: CASE_TITLE }))
+		assert(restoredName.status === 200 && (await api('/api/sourcing/catalog')).body.products.find((p) => p.id === caseRow.id).title === CASE_TITLE, 'renaming back restores the original display title')
 
 		// ── CSV export ──────────────────────────────────────────────────────────
 		const csvRes = await fetch(`${BASE}/api/sourcing/catalog/export.csv`)

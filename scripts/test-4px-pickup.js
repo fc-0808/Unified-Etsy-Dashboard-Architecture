@@ -550,7 +550,7 @@ async function runLedgerTests() {
  */
 function seed(db) {
 	db.prepare('INSERT INTO groups (group_id, label) VALUES (?,?)').run('G1', 'Group 1')
-	db.prepare('INSERT INTO shops (shop_id, group_id, shop_name) VALUES (?,?,?)').run('SHOP_A', 'G1', 'Y2KASEshop')
+	db.prepare('INSERT INTO shops (shop_id, group_id, shop_name) VALUES (?,?,?)').run('SHOP_A', 'G1', 'Y2KiPhoneCases')
 
 	const ins = db.prepare(`
     INSERT INTO receipts

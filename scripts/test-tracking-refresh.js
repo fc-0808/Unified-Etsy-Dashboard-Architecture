@@ -370,7 +370,7 @@ function snapshot(status, extra = {}) {
 		assert.strictEqual(row.tracking_next_check_at, null)
 	})
 
-	await check('consignment-linked 4PX number wins when Etsy tracking diverges', async () => {
+	await check('buyer-visible 4PX number wins when Etsy tracking and the dashboard label diverge', async () => {
 		db.prepare(`
 			INSERT INTO receipts (
 				receipt_id, shop_id, group_id, name, etsy_created_at,
@@ -393,9 +393,9 @@ function snapshot(status, extra = {}) {
 			},
 		})
 		await launch.promise
-		assert.strictEqual(polled, '4PX6666666666CN')
+		assert.strictEqual(polled, '4PX5555555555CN')
 		const listed = getShipments(db, { q: 'Mismatch buyer', limit: 10 }).rows[0]
-		assert.strictEqual(listed.tracking_no, '4PX6666666666CN')
+		assert.strictEqual(listed.tracking_no, '4PX5555555555CN')
 	})
 
 	await check('manual tracking-number changes clear every cached snapshot field', () => {

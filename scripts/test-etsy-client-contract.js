@@ -6,6 +6,8 @@
  */
 const assert = require('node:assert/strict');
 const {
+  buildShopClient,
+  shopUserAgent,
   createDraftListingForm,
   createReceiptShipment,
   createShopReadinessStateDefinition,
@@ -16,6 +18,7 @@ const {
   normalizeEtsySortOrder,
   RateLimiter,
   QpdExhaustedError,
+  resolveShopId,
   uploadListingImage,
   uploadListingVideo,
   updateListing,
@@ -57,6 +60,31 @@ async function test(name, fn) {
 }
 
 (async () => {
+  await test('each shop gets a distinct stable User-Agent', async () => {
+    const shops = ['Y2KiPhoneCases', 'IPhoneCasesByTwily', 'CuteCasesMore', 'FutureShop'];
+    const agents = shops.map((id) => shopUserAgent(id));
+    assert.equal(new Set(agents).size, shops.length);
+    assert.equal(shopUserAgent('CuteCasesMore'), agents[2]);
+    assert.match(agents[0], /^Y2KiPhoneCases\/\d+\.\d+\.\d+ \(Etsy Open API; \+node\)$/);
+    assert.notEqual(shopUserAgent('A B'), shopUserAgent('A-B'));
+    assert.throws(() => shopUserAgent(''), /shop id is required/);
+    assert.throws(() => shopUserAgent(null), /shop id is required/);
+
+    const shopClient = buildShopClient(
+      { defaults: { baseURL: 'https://openapi.etsy.com/v3', timeout: 1000 }, _groupId: 'offline' },
+      'key',
+      'secret',
+      '1.token',
+      null,
+      { shopId: 'FutureShop' },
+    );
+    const headers = shopClient.defaults.headers;
+    const sent = typeof headers.get === 'function'
+      ? headers.get('User-Agent')
+      : (headers['User-Agent'] ?? headers.common?.['User-Agent']);
+    assert.equal(sent, shopUserAgent('FutureShop'));
+  });
+
   await test('background traffic stops at the 300-call fulfilment reserve', async () => {
     const limiter = new RateLimiter(302, 'offline-reserve', 1000);
     limiter.check('normal');
@@ -115,6 +143,19 @@ async function test(name, fn) {
     assert.equal(normalizeEtsySortOrder('desc'), 'down');
     assert.equal(normalizeEtsySortOrder('ascending'), 'up');
     assert.equal(normalizeEtsySortOrder('invalid'), 'down');
+  });
+
+  await test('shop-name resolution retries a transient route reset', async () => {
+    let gets = 0;
+    const c = client({
+      get: async () => {
+        gets += 1;
+        if (gets === 1) throw networkError();
+        return { data: { results: [{ shop_id: 987654321 }] } };
+      },
+    });
+    assert.equal(await resolveShopId(c, 'OfflineRetryShop'), '987654321');
+    assert.equal(gets, 2);
   });
 
   await test('receipt requests never send undocumented desc', async () => {
@@ -578,6 +619,35 @@ async function test(name, fn) {
       (err) => err && err.code === 'SHOP_SETTINGS_CACHE_REQUIRED' && err.status === 409,
     );
     assert.equal(networkCalls, 0);
+  });
+
+  await test('cached bulk shop settings overlay current iPhone 18 / AirPods 5 models', async () => {
+    const stale = {
+      defaults: { readiness_state_id: 11 },
+      product_type: 'iphone_case',
+      models: ['iPhone 17 Pro Max', 'iPhone 17 Pro', 'iPhone 17'],
+      currency_code: 'USD',
+    };
+    const db = {
+      prepare: () => ({
+        get: () => ({ data_json: JSON.stringify(stale), fetched_at: Date.now() }),
+      }),
+    };
+    const settings = await getShopListingSettings({
+      db,
+      shopClient: client({
+        get: async () => {
+          throw new Error('cached settings must not hit Etsy');
+        },
+      }),
+      shopId: 123,
+      shopKey: 'shop-a',
+      productType: 'iphone_case',
+    });
+    assert.equal(settings._cached, true);
+    assert.ok(settings.models.includes('iPhone 18 Pro Max'));
+    assert.ok(settings.models.includes('iPhone 18 Pro'));
+    assert.equal(settings.defaults.readiness_state_id, 11);
   });
 
   global.setTimeout = realSetTimeout;

@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Y2KASE iPhone styles</title>
+  <style>
+    @font-face { font-family: Fredoka; src: url("fonts/Fredoka-variable.ttf") format("truetype"); font-weight: 300 700; }
+    html, body { margin: 0; width: 2000px; height: 2000px; overflow: hidden; font-family: Fredoka, sans-serif; font-variant-ligatures: none; color: #4a1848; background: linear-gradient(180deg, #ffe6f8, #ead9ff 50%, #d4f3ff); -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    
+    .frame { box-sizing: border-box; width: 2000px; height: 2000px; padding: 32px 40px 36px; display: flex; flex-direction: column; }
+    .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .top img { height: 96px; width: auto; object-fit: contain; }
+    .meta { font-size: 16px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: #ff2f9f; }
+    h1 { font-size: 44px; font-weight: 700; color: #ff2f9f; margin: 0 0 6px; letter-spacing: -0.02em; }
+    .lede { font-size: 22px; font-weight: 500; margin: 0 0 16px; line-height: 1.35; color: #5a2458; }
+    .lede em { font-style: normal; font-weight: 700; color: #ff2f9f; }
+    .grid { display: grid; grid-template-columns: repeat(6, 1fr); grid-template-rows: repeat(6, 1fr); gap: 12px; flex: 1; min-height: 0; }
+    .tile { position: relative; background: #fff; border: 2px solid #ffc2e4; border-radius: 16px; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
+    .sku { position: absolute; top: 8px; left: 8px; z-index: 1; min-width: 40px; height: 28px; padding: 0 8px; border-radius: 8px; background: #ff2f9f; color: #fff; font-size: 16px; font-weight: 700; display: flex; align-items: center; justify-content: center; letter-spacing: 0.04em; }
+    .tile img { width: 100%; flex: 1; min-height: 0; object-fit: cover; background: #fff5fb; }
+    .tile.contain img { object-fit: contain; background: #fff5fb; }
+    .tile.magsafe { border-color: #ff2f9f; }
+    .ms-badge { position: absolute; top: 8px; right: 8px; z-index: 1; background: #4a1848; color: #fff; font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; padding: 4px 8px; border-radius: 7px; }
+    .tile b { display: block; padding: 8px 8px 10px; font-size: 17px; font-weight: 650; color: #4a1848; text-align: center; line-height: 1.15; }
+    .tile.cta { grid-column: span 3; background: #ff2f9f; border-color: #ff2f9f; align-items: center; justify-content: center; }
+    .tile.cta b { color: #fff; font-size: 30px; padding: 0; }
+  
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <div class="top"><img src="logo.jpg" alt="Y2KASE"><div class="meta">iPhone · 33 styles</div></div>
+    <h1>The iPhone collection</h1>
+    <p class="lede">Sample print shown. MagSafe is <em>No. 01</em> and <em>No. 02</em> only. Each PDF card lists color, feel, material, and print. Reply with your iPhone, the style number, and a color if the card lists one.</p>
+    <div class="grid">
+      <div class="tile magsafe"><span class="sku">01</span><span class="ms-badge">MagSafe</span><img src="samples/magsafe-clear.jpg" alt=""><b>MagSafe clear</b></div>
+      <div class="tile contain magsafe"><span class="sku">02</span><span class="ms-badge">MagSafe</span><img src="samples/magsafe-wrap.jpg" alt=""><b>MagSafe wrap</b></div>
+      <div class="tile"><span class="sku">03</span><img src="samples/full-wrap.jpg" alt=""><b>Full-wrap film</b></div>
+      <div class="tile"><span class="sku">04</span><img src="samples/soft-wrap.jpg" alt=""><b>Soft wrap</b></div>
+      <div class="tile"><span class="sku">05</span><img src="samples/dual-wrap.jpg" alt=""><b>Dual-layer wrap</b></div>
+      <div class="tile"><span class="sku">06</span><img src="samples/wave-wrap.jpg" alt=""><b>Wave wrap</b></div>
+      <div class="tile"><span class="sku">07</span><img src="samples/glass-back.jpg" alt=""><b>Glass back</b></div>
+      <div class="tile"><span class="sku">08</span><img src="samples/crystal-glaze.jpg" alt=""><b>Crystal glaze</b></div>
+      <div class="tile"><span class="sku">09</span><img src="samples/liquid-paint-glass.jpg" alt=""><b>Painted glass</b></div>
+      <div class="tile"><span class="sku">10</span><img src="samples/metallic-glass.jpg" alt=""><b>Metallic glass</b></div>
+      <div class="tile"><span class="sku">11</span><img src="samples/aurora-glass.jpg" alt=""><b>Aurora glass</b></div>
+      <div class="tile"><span class="sku">12</span><img src="samples/iridescent.jpg" alt=""><b>Iridescent silver</b></div>
+      <div class="tile"><span class="sku">13</span><img src="samples/large-cut-glass.jpg" alt=""><b>Large-cut glass</b></div>
+      <div class="tile"><span class="sku">14</span><img src="samples/frosted-glass.jpg" alt=""><b>Frosted glass</b></div>
+      <div class="tile"><span class="sku">15</span><img src="samples/clear-acrylic.jpg" alt=""><b>Clear acrylic</b></div>
+      <div class="tile"><span class="sku">16</span><img src="samples/acrylic-mirror.jpg" alt=""><b>Acrylic mirror</b></div>
+      <div class="tile"><span class="sku">17</span><img src="samples/frosted-acrylic.jpg" alt=""><b>Frosted acrylic</b></div>
+      <div class="tile"><span class="sku">18</span><img src="samples/large-frame-mirror.jpg" alt=""><b>Frame mirror</b></div>
+      <div class="tile"><span class="sku">19</span><img src="samples/black-frame-acrylic.jpg" alt=""><b>Black-frame acrylic</b></div>
+      <div class="tile"><span class="sku">20</span><img src="samples/grooved-acrylic.jpg" alt=""><b>Grooved acrylic</b></div>
+      <div class="tile"><span class="sku">21</span><img src="samples/lambskin.jpg" alt=""><b>Lambskin wrap</b></div>
+      <div class="tile"><span class="sku">22</span><img src="samples/clear-soft.jpg" alt=""><b>Clear soft</b></div>
+      <div class="tile"><span class="sku">23</span><img src="samples/space-clear.jpg" alt=""><b>Space clear</b></div>
+      <div class="tile"><span class="sku">24</span><img src="samples/cream.jpg" alt=""><b>Cream texture</b></div>
+      <div class="tile"><span class="sku">25</span><img src="samples/jelly.jpg" alt=""><b>Jelly</b></div>
+      <div class="tile"><span class="sku">26</span><img src="samples/dual-tone.jpg" alt=""><b>Dual-tone clear</b></div>
+      <div class="tile"><span class="sku">27</span><img src="samples/camera-ring.jpg" alt=""><b>Camera-ring soft</b></div>
+      <div class="tile"><span class="sku">28</span><img src="samples/square-edge.jpg" alt=""><b>Square-edge soft</b></div>
+      <div class="tile"><span class="sku">29</span><img src="samples/velvet-cube.jpg" alt=""><b>Velvet cube</b></div>
+      <div class="tile"><span class="sku">30</span><img src="samples/stepped.jpg" alt=""><b>Stepped camera</b></div>
+      <div class="tile"><span class="sku">31</span><img src="samples/corner-drop.jpg" alt=""><b>Corner-drop clear</b></div>
+      <div class="tile"><span class="sku">32</span><img src="samples/bumper-plated.jpg" alt=""><b>Bumper plated</b></div>
+      <div class="tile"><span class="sku">33</span><img src="samples/macaron.jpg" alt=""><b>Macaron silicone</b></div>
+      <div class="tile cta"><b>All 33 styles · PDF menu</b></div>
+    </div>
+  </div>
+</body>
+</html>

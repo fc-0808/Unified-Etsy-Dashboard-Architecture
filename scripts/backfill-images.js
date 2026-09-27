@@ -8,7 +8,7 @@
 const path = require('path');
 const Database = require('better-sqlite3');
 const { loadConfig, getAllShops, usesGroupProxy } = require('../src/config/schema');
-const { createGroupClient } = require('../src/proxy/factory');
+const { getVerifiedGroupClient } = require('../src/proxy/factory');
 const { buildShopClient, getListingImagesBatch } = require('../src/etsy/client');
 const { upsertListingImage } = require('../src/db/setup');
 const { TokenManager } = require('../src/auth/token-manager');
@@ -52,12 +52,16 @@ if (total === 0) { console.log('Nothing to do.'); process.exit(0); }
     console.log(`\n${label} Fetching ${listingIds.length} image(s)…`);
 
     try {
-      const proxyClient = createGroupClient(groupCfg, config.vpn_local_port);
+      const { client: proxyClient } = await getVerifiedGroupClient(
+        groupCfg,
+        config.network_transport
+      );
       const accessToken = await tokenManager.getAccessToken(
         shopCfg.shop_id, shopCfg.api_key, shopCfg.refresh_token ?? null, proxyClient
       );
       const shopClient = buildShopClient(proxyClient, shopCfg.api_key, shopCfg.shared_secret, accessToken, null, {
         requireProxy: usesGroupProxy(groupCfg), // fail closed for proxied groups
+        shopId: shopCfg.shop_id,
       });
       const imageMap   = await getListingImagesBatch(shopClient, listingIds);
 

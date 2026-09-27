@@ -10,6 +10,7 @@
 
 const assert = require('assert');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { PassThrough } = require('stream');
 
@@ -210,63 +211,80 @@ test('the manifest header stays stable for whoever reads the ZIP', () => {
   );
 });
 
-// ── Live DB integration (when config + DB available) ────────────────────────
+// ── Isolated DB integration (never reads live config/order data) ─────────────
 
-async function runLiveTests() {
-  const configPath = path.resolve(__dirname, '../config.json');
-  if (!fs.existsSync(configPath)) return;
+async function runIsolatedIntegrationTests() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ued-unmatched-images-'));
+  const dbPath = path.join(tmpDir, 'test.db');
+  const { initDb, upsertListingStyleImage } = require('../src/db/setup');
+  const db = initDb(dbPath);
 
-  const config = require(configPath);
-  const { initDb } = require('../src/db/setup');
-  const routeDashboard = require('../src/route/dashboard');
-
-  let db;
-  try {
-    db = initDb(config.db_path);
-  } catch {
-    return;
-  }
-
-  await testAsync('live: resolveRouteImageBytes for variation-image API url', async () => {
-    const rows = routeDashboard.buildRouteRows(db, config, { enrich_supplier: true });
-    const items = unmatched.collectUnmatchedImageItems(rows);
-    assert.ok(items.length > 0, 'expected at least one unmatched item with an image in the live DB');
-
-    const apiItems = items.filter((it) => String(it.url).startsWith('/api/'));
-    assert.ok(apiItems.length > 0, 'expected unmatched items to use /api/route/* urls');
-
-    const { buffer, ext } = await unmatched.resolveRouteImageBytes(db, apiItems[0].url);
-    assert.ok(buffer && buffer.length > 1000, 'expected non-trivial image bytes');
-    assert.ok(['jpg', 'png', 'webp', 'gif'].includes(ext), `unexpected ext: ${ext}`);
+  // Deterministic non-trivial PNG-like bytes. Resolution only needs a stored
+  // image; decoding is not part of this module's contract.
+  const image = Buffer.alloc(2048, 0x5a);
+  image[0] = 0x89;
+  image[1] = 0x50;
+  image[2] = 0x4e;
+  image[3] = 0x47;
+  const saved = upsertListingStyleImage(db, {
+    listing_id: 9,
+    style_value: '',
+    image_data: image,
+    image_mime: 'image/png',
+    note: 'isolated test fixture',
   });
+  const url = `/api/route/style-image/${saved.id}`;
+  const items = [{
+    url,
+    name: '9_Test product.jpg',
+    title: 'Test product',
+    model: 'Test model',
+    style: '',
+    reason_label: 'Not in catalog',
+    components: '',
+    recorded_shop: '',
+    recorded_stall: '',
+    orders: 1,
+    units: 1,
+    listing_id: 9,
+    product_listing_id: 9,
+  }];
 
-  await testAsync('live: streamUnmatchedImagesZip produces a non-empty archive', async () => {
-    const rows = routeDashboard.buildRouteRows(db, config, { enrich_supplier: true });
-    const items = unmatched.collectUnmatchedImageItems(rows).slice(0, 3);
-    assert.ok(items.length > 0, 'need items for zip test');
-
-    const out = new PassThrough();
-    const chunks = [];
-    out.on('data', (c) => chunks.push(c));
-
-    const done = new Promise((resolve, reject) => {
-      out.on('end', resolve);
-      out.on('error', reject);
+  try {
+    await testAsync('isolated: resolveRouteImageBytes reads same-origin image bytes', async () => {
+      const { buffer, ext } = await unmatched.resolveRouteImageBytes(db, url);
+      assert.ok(buffer && buffer.length === image.length, 'expected complete stored image bytes');
+      assert.strictEqual(ext, 'png');
     });
 
-    const { added, failed } = await unmatched.streamUnmatchedImagesZip(out, db, items);
-    await done;
+    await testAsync('isolated: streamUnmatchedImagesZip produces a non-empty archive', async () => {
+      const out = new PassThrough();
+      const chunks = [];
+      out.on('data', (chunk) => chunks.push(chunk));
 
-    const zip = Buffer.concat(chunks);
-    assert.ok(added > 0, `expected images in zip, got added=${added}, failed=${failed.join('; ')}`);
-    assert.ok(zip.length > 100, 'zip should be non-trivial');
-    assert.ok(zip[0] === 0x50 && zip[1] === 0x4b, 'output should be a ZIP (PK header)');
-  });
+      const done = new Promise((resolve, reject) => {
+        out.on('end', resolve);
+        out.on('error', reject);
+      });
+
+      const { added, failed } = await unmatched.streamUnmatchedImagesZip(out, db, items);
+      await done;
+
+      const zip = Buffer.concat(chunks);
+      assert.strictEqual(added, 1, `expected one image, failures=${failed.join('; ')}`);
+      assert.deepStrictEqual(failed, []);
+      assert.ok(zip.length > 100, 'zip should be non-trivial');
+      assert.ok(zip[0] === 0x50 && zip[1] === 0x4b, 'output should be a ZIP (PK header)');
+    });
+  } finally {
+    db.close();
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
 }
 
 (async () => {
   console.log('\nUnmatched images export tests\n');
-  await runLiveTests();
+  await runIsolatedIntegrationTests();
   console.log(`\n${passed}/${passed + failed} passed`);
   process.exit(failed ? 1 : 0);
 })();
